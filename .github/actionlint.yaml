@@ -1,0 +1,5 @@
+# Declare the self-hosted ARC runner scale set label so actionlint doesn't flag it
+# as unknown (it only knows GitHub-hosted labels otherwise).
+self-hosted-runner:
+  labels:
+    - arc-runner-set

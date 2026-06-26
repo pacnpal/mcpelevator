@@ -87,12 +87,23 @@ jobs:
 
       - name: Resolve version
         id: version
+        env:
+          # Pass the manual input via the environment (never interpolated into the
+          # script text) so a crafted tag can't inject shell on the self-hosted runner.
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="${{ github.event.inputs.tag }}"
+            VERSION="$INPUT_TAG"
           fi
+          # Reject anything outside a safe tag charset before it reaches later steps.
+          case "$VERSION" in
+            ''|*[!A-Za-z0-9_.-]*)
+              echo "Invalid image tag: $VERSION" >&2
+              exit 1
+              ;;
+          esac
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building version: ${VERSION}"
 
@@ -109,8 +120,8 @@ jobs:
             # latest for a stable release, beta for a prerelease
             type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
             type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease }}
-            # the chosen tag for a manual (workflow_dispatch) build
-            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            # the chosen tag for a manual (workflow_dispatch) build (validated output)
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
             # always a git short SHA tag
             type=sha,prefix=sha-,format=short
           labels: |

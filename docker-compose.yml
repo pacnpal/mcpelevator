@@ -22,7 +22,7 @@ services:
       # whole bridge range, which would also trust sibling containers on the network.
       # SAFE only while the port is published to 127.0.0.1 (the default); for an
       # off-host bind, drop this and use expose mode + auth instead.
-      - MCPE_TRUSTED_PROXIES=172.20.0.1/32
+      - MCPE_TRUSTED_PROXIES=${MCPE_GATEWAY:-172.20.0.1}/32
       # Absolute URL clients use to reach this instance (behind a tunnel/proxy):
       # - MCPE_PUBLIC_BASE_URL=https://mcp.example.com
     restart: unless-stopped
@@ -30,10 +30,12 @@ services:
 networks:
   mcpe:
     # Fixed subnet so the gateway (the only trusted proxy above) is a stable address.
+    # Override MCPE_SUBNET / MCPE_GATEWAY if 172.20.0.0/24 clashes with a host network
+    # or you run two stacks side by side (keep the gateway inside the subnet).
     ipam:
       config:
-        - subnet: 172.20.0.0/24
-          gateway: 172.20.0.1
+        - subnet: ${MCPE_SUBNET:-172.20.0.0/24}
+          gateway: ${MCPE_GATEWAY:-172.20.0.1}
 
 volumes:
   mcpe-data:
