@@ -45,7 +45,7 @@ Add a `scope` column to the `Token` model: `"proxy"` (default) or `"control"`. E
 
 There is no Alembic in this repo. `init_db()` runs `SQLModel.metadata.create_all`, which does not add columns to an existing table. So `init_db()` gets a small idempotent migration: check `PRAGMA table_info(token)`, and if `scope` is missing, run `ALTER TABLE token ADD COLUMN scope TEXT NOT NULL DEFAULT 'proxy'`.
 
-Control-plane access requires `scope == "control"`. Proxy enforcement is unchanged and still accepts any valid token regardless of scope, so a control token also works on the proxy. That is acceptable: an admin can do everything.
+Control-plane access requires `scope == "control"`. The data-plane bearer check (`BearerProvider`) is tightened to require `scope == "proxy"`, so the two scopes don't cross: a control token authenticates `/api` only and a proxy token authenticates `/s` only.
 
 ### Enforcement setting
 

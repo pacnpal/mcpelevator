@@ -25,9 +25,14 @@ class BearerProvider:
                 headers={"WWW-Authenticate": "Bearer"},
             )
         with Session(get_engine()) as session:
-            if repo.get_token_by_hash(session, hash_token(token)) is None:
-                raise HTTPException(
-                    status_code=401,
-                    detail="invalid token",
-                    headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
-                )
+            row = repo.get_token_by_hash(session, hash_token(token))
+        if row is None:
+            raise HTTPException(
+                status_code=401,
+                detail="invalid token",
+                headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+            )
+        if row.scope != "proxy":
+            # Scopes don't cross: a `control` token authenticates the /api control
+            # plane, not the data plane, so it can't be reused as a proxy credential.
+            raise HTTPException(status_code=403, detail="proxy scope required")

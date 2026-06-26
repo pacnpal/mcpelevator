@@ -255,3 +255,32 @@ def test_cannot_revoke_last_control_token_while_enforced():
             assert client.delete(f"/api/tokens/{cid}", headers=auth).status_code == 204
         finally:
             _reset()
+
+
+def test_bearer_provider_requires_proxy_scope():
+    """Scopes don't cross: the data-plane bearer check accepts only `proxy` tokens, so
+    a `control` (admin) token can't be reused on /s even though both live in one table."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import pytest
+    from fastapi import HTTPException
+
+    from app.auth.bearer import BearerProvider
+    from app.db.models import Server
+
+    init_db()
+    try:
+        proxy, control = _mint("proxy"), _mint("control")
+        provider = BearerProvider()
+        server = Server(id="x", slug="x", name="x", runner="npx", command="npx", args=[], env={})
+
+        def req(token: str):
+            return SimpleNamespace(headers={"authorization": f"Bearer {token}"})
+
+        asyncio.run(provider.authenticate(req(proxy), server))  # proxy token: accepted
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(provider.authenticate(req(control), server))  # control token: rejected
+        assert exc.value.status_code == 403
+    finally:
+        _reset()
