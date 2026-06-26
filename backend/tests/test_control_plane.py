@@ -41,6 +41,22 @@ def test_api_loopback_only_in_local_mode():
         assert client.get("/api/health", headers={"host": "localhost:8080"}).status_code == 200
 
 
+def test_summary_exposes_effective_auth():
+    """The card snippets need the effective auth, so the summary resolves
+    `inherit` to the global default and reports `none`/`bearer`."""
+    with TestClient(app) as client:
+        h = {"host": "127.0.0.1"}
+        r = client.post(
+            "/api/servers", json={"name": "b", "command": "echo", "auth_provider": "bearer"}, headers=h
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["auth"] == "bearer"
+        r2 = client.post(
+            "/api/servers", json={"name": "n", "command": "echo", "auth_provider": "none"}, headers=h
+        )
+        assert r2.json()["auth"] == "none"
+
+
 def test_create_server_rejects_unknown_auth_provider():
     """A malformed auth_provider (trailing space / wrong case / unknown) is rejected
     at the API boundary (422), not stored and later failed-closed at request time."""

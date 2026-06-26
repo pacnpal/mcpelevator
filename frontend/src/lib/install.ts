@@ -20,30 +20,45 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls'>): InstallOption[] {
+export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls' | 'auth'>): InstallOption[] {
 	const { mcp, rest } = server.urls;
 	const name = server.slug;
+	const bearer = server.auth === 'bearer';
 	const out: InstallOption[] = [];
 
 	if (mcp) {
 		const qName = shellQuote(name);
 		const qMcp = shellQuote(mcp);
+		// Bearer-protected servers reject unauthenticated clients, so each snippet
+		// carries the Authorization header with a placeholder for the user's token
+		// (tokens are shown once at creation and can't be read back here).
+		const claudeAuth = bearer ? ' --header "Authorization: Bearer <YOUR_TOKEN>"' : '';
+		const jsonEntry = bearer
+			? { type: 'http', url: mcp, headers: { Authorization: 'Bearer <YOUR_TOKEN>' } }
+			: { type: 'http', url: mcp };
+
 		out.push({ kind: 'url', label: 'MCP URL', value: mcp });
 		out.push({
 			kind: 'cmd',
 			label: 'Claude Code',
-			value: `claude mcp add --transport http ${qName} ${qMcp}`
+			value: `claude mcp add --transport http ${qName} ${qMcp}${claudeAuth}`
 		});
-		out.push({ kind: 'cmd', label: 'Codex', value: `codex mcp add ${qName} --url ${qMcp}` });
+		out.push({
+			kind: 'cmd',
+			label: 'Codex',
+			value: bearer
+				? `codex mcp add ${qName} --url ${qMcp} --bearer-token-env-var MCPE_TOKEN`
+				: `codex mcp add ${qName} --url ${qMcp}`
+		});
 		out.push({
 			kind: 'json',
 			label: 'mcpServers',
-			value: JSON.stringify({ mcpServers: { [name]: { type: 'http', url: mcp } } }, null, 2)
+			value: JSON.stringify({ mcpServers: { [name]: jsonEntry } }, null, 2)
 		});
 		out.push({
 			kind: 'json',
 			label: 'VS Code',
-			value: JSON.stringify({ servers: { [name]: { type: 'http', url: mcp } } }, null, 2)
+			value: JSON.stringify({ servers: { [name]: jsonEntry } }, null, 2)
 		});
 	}
 	if (rest) {

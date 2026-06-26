@@ -53,6 +53,22 @@ def test_settings_write_rejects_bad_enums(session):
     assert runtime_settings.write(session, {"nope": "x", "bind_mode": "expose"})["bind_mode"] == "expose"
 
 
+def test_settings_write_normalizes_and_rejects_allowed_hosts(session):
+    with pytest.raises(ValueError):  # malformed entry must not reach storage
+        runtime_settings.write(session, {"allowed_hosts": ["[bad]"]})
+    # a pasted URL / host:port is normalized down to its bare hostname
+    result = runtime_settings.write(session, {"allowed_hosts": ["https://mcp.example.com:8080"]})
+    assert result["allowed_hosts"] == ["mcp.example.com"]
+
+
+def test_host_allowed_survives_malformed_stored_entry():
+    # a malformed stored entry (legacy data) must be ignored, not crash the check
+    ok, _ = middleware.host_allowed("mcp.example.com", None, ["[bad]", "mcp.example.com"])
+    assert ok is True
+    ok2, _ = middleware.host_allowed("evil.com", None, ["[bad]"])
+    assert ok2 is False
+
+
 @pytest.mark.parametrize(
     "host,origin,allowed,ok",
     [

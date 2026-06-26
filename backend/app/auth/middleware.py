@@ -15,8 +15,6 @@ happen here, in one place, for every exposed request:
 
 from __future__ import annotations
 
-from urllib.parse import urlsplit
-
 from fastapi import HTTPException
 from sqlmodel import Session
 from starlette.requests import Request
@@ -26,6 +24,7 @@ from app.auth.none import NoneProvider
 from app.db import get_engine
 from app.db.models import Server
 from app.registry import settings as runtime_settings
+from app.util import host_only
 
 _PROVIDERS = {
     "none": NoneProvider(),
@@ -47,27 +46,16 @@ def resolve(server: Server, default: str):
     return provider
 
 
-def _host_only(value: str) -> str:
-    """Hostname from a Host header (``host[:port]`` / ``[ipv6][:port]``) or an
-    Origin (``scheme://host[:port]``). urlsplit handles ports and IPv6 brackets."""
-    value = (value or "").strip()
-    if not value:
-        return ""
-    if "://" in value:
-        return (urlsplit(value).hostname or "").lower()
-    return (urlsplit(f"//{value}").hostname or "").lower()
-
-
 def host_allowed(host_header: str, origin_header: str | None, allowed: list[str]) -> tuple[bool, str]:
     """Pure allowlist check (unit-tested). Returns (ok, reason-if-not)."""
-    allowset = _LOOPBACK | {h for h in (_host_only(x) for x in allowed) if h}
-    host = _host_only(host_header)
+    allowset = _LOOPBACK | {h for h in (host_only(x) for x in allowed) if h}
+    host = host_only(host_header)
     if not host:
         return False, "missing host header"  # fail closed: no Host must not pass
     if host not in allowset:
         return False, f"host {host!r} not in allowlist"
     if origin_header:
-        origin = _host_only(origin_header)
+        origin = host_only(origin_header)
         if origin and origin not in allowset:
             return False, f"origin {origin!r} not in allowlist"
     return True, ""

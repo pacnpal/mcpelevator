@@ -29,6 +29,7 @@ from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Server
 from app.registry import service
+from app.registry import settings as runtime_settings
 
 router = APIRouter()
 
@@ -46,6 +47,9 @@ def _live_state(server: Server, sup, session: Session):
 def _summary(server: Server, sup, session: Session) -> ServerSummary:
     state, last_error, pid, port, tools = _live_state(server, sup, session)
     base = get_settings().base_url
+    auth = server.auth_provider
+    if auth == "inherit":
+        auth = runtime_settings.default_auth_provider(session)
     return ServerSummary(
         id=server.id,
         slug=server.slug,
@@ -58,6 +62,7 @@ def _summary(server: Server, sup, session: Session) -> ServerSummary:
             mcp=f"{base}/s/{server.slug}/mcp" if server.mcp_http else None,
             rest=f"{base}/s/{server.slug}/rest" if server.rest_openapi else None,
         ),
+        auth=auth,
         last_error=last_error,
         pid=pid,
         port=port,

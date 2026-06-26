@@ -8,6 +8,7 @@ import re
 import secrets
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
 
 def new_id() -> str:
@@ -37,3 +38,17 @@ def new_token() -> str:
 
 def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def host_only(value: str) -> str:
+    """Hostname from a Host header (``host[:port]`` / ``[ipv6][:port]``) or an
+    Origin (``scheme://host[:port]``). Returns "" for empty or malformed input
+    (e.g. an unmatched IPv6 bracket) so callers fail closed instead of raising."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        target = value if "://" in value else f"//{value}"
+        return (urlsplit(target).hostname or "").lower()
+    except ValueError:
+        return ""

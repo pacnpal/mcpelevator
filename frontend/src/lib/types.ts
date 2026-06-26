@@ -31,6 +31,8 @@ export interface ServerSummary {
 	state: ServerState;
 	transports: ServerTransports;
 	urls: ServerUrls;
+	/** Effective auth (per-server `inherit` resolved to the global default). */
+	auth: AuthProvider;
 	last_error: string | null;
 	pid: number | null;
 	port: number | null;
