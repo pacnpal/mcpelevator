@@ -59,6 +59,13 @@ def test_settings_write_normalizes_and_rejects_allowed_hosts(session):
     # a pasted URL / host:port is normalized down to its bare hostname
     result = runtime_settings.write(session, {"allowed_hosts": ["https://mcp.example.com:8080"]})
     assert result["allowed_hosts"] == ["mcp.example.com"]
+    # IPv6 literals normalize to the bare address, from bracketed or bare input
+    assert runtime_settings.write(session, {"allowed_hosts": ["[2001:db8::1]"]})["allowed_hosts"] == [
+        "2001:db8::1"
+    ]
+    assert runtime_settings.write(session, {"allowed_hosts": ["2001:db8::1"]})["allowed_hosts"] == [
+        "2001:db8::1"
+    ]
 
 
 def test_settings_write_is_atomic_on_invalid_patch(session):
@@ -92,6 +99,23 @@ def test_request_allowlist_trusts_configured_public_host(session, monkeypatch):
     assert "mcp.example.com" in allowed
     ok, _ = middleware.host_allowed("mcp.example.com", None, allowed, client_is_loopback=False)
     assert ok is True
+
+
+def test_host_allowed_ipv6_literal():
+    # IPv6 entries (stored bare after normalization, or bracketed) must match a
+    # bracketed request Host — host_only brackets bare literals so they round-trip.
+    assert (
+        middleware.host_allowed("[2001:db8::1]:8080", None, ["2001:db8::1"], client_is_loopback=False)[0]
+        is True
+    )
+    assert (
+        middleware.host_allowed("[2001:db8::1]", None, ["[2001:db8::1]"], client_is_loopback=False)[0]
+        is True
+    )
+    assert (
+        middleware.host_allowed("[2001:db8::2]", None, ["2001:db8::1"], client_is_loopback=False)[0]
+        is False
+    )
 
 
 @pytest.mark.parametrize(

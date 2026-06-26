@@ -48,7 +48,12 @@ def host_only(value: str) -> str:
     if not value:
         return ""
     try:
-        target = value if "://" in value else f"//{value}"
-        return (urlsplit(target).hostname or "").lower()
+        if "://" in value:
+            return (urlsplit(value).hostname or "").lower()
+        # A bare IPv6 literal (>1 colon, unbracketed) must be bracketed for urlsplit
+        # to read it as a host instead of host:port; an ordinary host:port has one colon.
+        if value.count(":") > 1 and not value.startswith("["):
+            value = f"[{value}]"
+        return (urlsplit(f"//{value}").hostname or "").lower()
     except ValueError:
         return ""
