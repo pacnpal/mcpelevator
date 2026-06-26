@@ -95,7 +95,9 @@ def host_allowed(
         return False, f"host {host!r} not in allowlist"
     if origin_header:
         origin = host_only(origin_header)
-        if origin and origin not in allowset:
+        if not origin:
+            return False, "invalid origin header"  # present but unparseable -> fail closed
+        if origin not in allowset:
             return False, f"origin {origin!r} not in allowlist"
     return True, ""
 

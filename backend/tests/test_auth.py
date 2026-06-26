@@ -133,6 +133,7 @@ def test_host_allowed_ipv6_literal():
         ("evil.com", None, ["mcp.example.com"], False, False),
         ("mcp.example.com", "https://evil.com", ["mcp.example.com"], False, False),  # bad origin
         ("mcp.example.com", "https://mcp.example.com", ["mcp.example.com"], False, True),
+        ("mcp.example.com", "[bad", ["mcp.example.com"], False, False),  # malformed Origin fails closed
         ("", None, [], True, False),  # missing Host fails closed, even from loopback
         ("", None, ["mcp.example.com"], False, False),
         ("", "https://mcp.example.com", ["mcp.example.com"], False, False),  # good origin can't rescue a missing host
