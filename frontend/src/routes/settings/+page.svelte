@@ -16,6 +16,7 @@
 		TokenCreated,
 		TokenInfo
 	} from '$lib/types';
+	import { isLoopbackHost, normalizeHost } from '$lib/host';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 
@@ -171,6 +172,40 @@
 		}
 	}
 
+	// ---- Self-lockout guard rails ---------------------------------------------
+	// The control plane enforces a Host/Origin allowlist on EVERY request: loopback
+	// (localhost/127.0.0.1/::1) always passes; a non-loopback host passes only in
+	// `expose` mode while it's in `allowed_hosts`. So if this tab was reached via a
+	// non-loopback host, two actions would 403 our own /api calls and brick the UI:
+	// removing that host from the allowlist, or switching to `local` (which ignores
+	// the allowlist entirely). Loopback always recovers, so we confirm — not block.
+	// Browser-only SPA (ssr/prerender disabled), so `window` is defined in practice.
+	// The `typeof window` guards keep this module import-safe in a non-browser context
+	// too (a node test runner, or if SSR is ever turned on). When absent, browserHost
+	// is empty so `onLoopback` is false — the fail-safe direction (guards armed).
+	const browserHost =
+		typeof window !== 'undefined' ? normalizeHost(window.location.hostname) : '';
+	const onLoopback = isLoopbackHost(browserHost);
+	const loopbackUrl =
+		typeof window !== 'undefined'
+			? `${window.location.protocol}//localhost${window.location.port ? `:${window.location.port}` : ''}`
+			: '';
+
+	let confirmBindLocal = $state(false);
+	let confirmRemoveHost = $state<string | null>(null);
+
+	// The bind-mode radios are controlled by `settings.bind_mode`. When we intercept a
+	// selection to confirm (without patching), Svelte won't re-assert the radios'
+	// `checked` — the value it would write is unchanged — so the just-selected option
+	// stays visually checked. Snap them back to the real value imperatively (covers
+	// mouse and keyboard, both of which fire the change handler).
+	function resetBindRadios() {
+		if (!settings) return;
+		for (const el of document.querySelectorAll<HTMLInputElement>('input[name="bind-mode"]')) {
+			el.checked = el.value === settings.bind_mode;
+		}
+	}
+
 	function setDefaultAuth(value: AuthProvider) {
 		if (!settings || settings.default_auth_provider === value) return;
 		patchSettings({ default_auth_provider: value }, 'default_auth_provider');
@@ -178,7 +213,24 @@
 
 	function setBindMode(value: BindMode) {
 		if (!settings || settings.bind_mode === value) return;
+		// Switching to `local` from a non-loopback host locks this tab out (local
+		// allows loopback only). Hold the change behind an explicit confirm.
+		if (value === 'local' && !onLoopback) {
+			confirmBindLocal = true;
+			resetBindRadios(); // keep `expose` shown while the confirm is open
+			return;
+		}
 		patchSettings({ bind_mode: value }, 'bind_mode');
+	}
+
+	function confirmSwitchToLocal() {
+		confirmBindLocal = false;
+		patchSettings({ bind_mode: 'local' }, 'bind_mode');
+	}
+
+	function cancelSwitchToLocal() {
+		confirmBindLocal = false;
+		resetBindRadios();
 	}
 
 	// ---- Allowed hosts editor -------------------------------------------------
@@ -208,10 +260,27 @@
 		patchSettings({ allowed_hosts: next }, 'allowed_hosts');
 	}
 
-	function removeHost(host: string) {
+	function performRemoveHost(host: string) {
 		if (!settings) return;
 		const next = settings.allowed_hosts.filter((h) => h !== host);
 		patchSettings({ allowed_hosts: next }, 'allowed_hosts');
+	}
+
+	function removeHost(host: string) {
+		if (!settings) return;
+		// Removing the host this tab is reached through locks the UI out. Confirm
+		// first; any other host removes immediately.
+		if (!onLoopback && normalizeHost(host) === browserHost) {
+			confirmRemoveHost = host;
+			return;
+		}
+		performRemoveHost(host);
+	}
+
+	function confirmRemoveCurrentHost() {
+		const host = confirmRemoveHost;
+		confirmRemoveHost = null;
+		if (host !== null) performRemoveHost(host);
 	}
 </script>
 
@@ -510,6 +579,45 @@
 						</label>
 					{/each}
 				</div>
+				{#if confirmBindLocal}
+					<div
+						role="alert"
+						class="flex flex-col gap-2.5 rounded-lg border p-3"
+						style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+					>
+						<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+							This will lock this browser
+							(<code class="font-mono text-[var(--color-ink)]">{browserHost}</code>)
+							out of the control plane — <code class="font-mono">local</code> allows loopback
+							only. Open
+							<a
+								class="font-mono text-[var(--color-accent)] underline"
+								href={loopbackUrl}
+								target="_blank"
+								rel="noopener noreferrer">{loopbackUrl}</a
+							>
+							first, then switch.
+						</p>
+						<div class="flex items-center gap-1.5">
+							<button
+								type="button"
+								onclick={confirmSwitchToLocal}
+								disabled={savingField !== null}
+								class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+								style="background-color: var(--color-state-failed);"
+							>
+								Switch to local anyway
+							</button>
+							<button
+								type="button"
+								onclick={cancelSwitchToLocal}
+								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+							>
+								Cancel
+							</button>
+						</div>
+					</div>
+				{/if}
 				<p class="text-xs text-[var(--color-ink-dim)]">
 					Host/Origin is always checked (DNS-rebinding defense): loopback is always
 					allowed; <code class="font-mono">expose</code> also allows the hosts below.
@@ -590,6 +698,46 @@
 							</li>
 						{/each}
 					</ul>
+				{/if}
+
+				{#if confirmRemoveHost !== null}
+					<div
+						role="alert"
+						class="flex flex-col gap-2.5 rounded-lg border p-3"
+						style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+					>
+						<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+							Removing
+							<code class="font-mono text-[var(--color-ink)]">{confirmRemoveHost}</code>
+							will lock this browser out of the control plane — it's the host you're
+							connected through. Open
+							<a
+								class="font-mono text-[var(--color-accent)] underline"
+								href={loopbackUrl}
+								target="_blank"
+								rel="noopener noreferrer">{loopbackUrl}</a
+							>
+							first.
+						</p>
+						<div class="flex items-center gap-1.5">
+							<button
+								type="button"
+								onclick={confirmRemoveCurrentHost}
+								disabled={savingField !== null}
+								class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+								style="background-color: var(--color-state-failed);"
+							>
+								Remove anyway
+							</button>
+							<button
+								type="button"
+								onclick={() => (confirmRemoveHost = null)}
+								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+							>
+								Cancel
+							</button>
+						</div>
+					</div>
 				{/if}
 			</fieldset>
 		</div>
