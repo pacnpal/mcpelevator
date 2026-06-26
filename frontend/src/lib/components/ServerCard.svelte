@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { deleteServer, disableServer, enableServer } from '$lib/api';
 	import type { ServerSummary } from '$lib/types';
-	import CopyButton from './CopyButton.svelte';
+	import CopyMenu from './CopyMenu.svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
 	import StatePill from './StatePill.svelte';
 
@@ -265,10 +265,7 @@
 	<footer
 		class="mt-auto flex items-center justify-between gap-2 border-t border-[var(--color-line)] pt-4"
 	>
-		<div class="flex flex-wrap items-center gap-1.5">
-			<CopyButton value={server.urls.mcp} label="MCP" />
-			<CopyButton value={server.urls.rest} label="REST" />
-		</div>
+		<CopyMenu {server} />
 
 		<button
 			type="button"
