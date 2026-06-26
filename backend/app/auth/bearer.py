@@ -25,9 +25,19 @@ class BearerProvider:
                 headers={"WWW-Authenticate": "Bearer"},
             )
         with Session(get_engine()) as session:
-            if repo.get_token_by_hash(session, hash_token(token)) is None:
+            record = repo.get_token_by_hash(session, hash_token(token))
+            if record is None:
                 raise HTTPException(
                     status_code=401,
                     detail="invalid token",
                     headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
                 )
+            scope = record.scope  # read inside the session; the row detaches on exit
+        # A token scoped to a specific server authorizes only that server; "all"
+        # (the default) authorizes every bearer-protected server.
+        if scope != "all" and scope != server.id:
+            raise HTTPException(
+                status_code=403,
+                detail="token not authorized for this server",
+                headers={"WWW-Authenticate": 'Bearer error="insufficient_scope"'},
+            )

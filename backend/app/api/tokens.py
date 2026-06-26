@@ -17,24 +17,34 @@ router = APIRouter()
 @router.get("/tokens", response_model=list[TokenInfo])
 async def list_tokens(session: Session = Depends(get_session)):
     return [
-        TokenInfo(id=t.id, name=t.name, prefix=t.prefix, created_at=t.created_at)
+        TokenInfo(id=t.id, name=t.name, prefix=t.prefix, scope=t.scope, created_at=t.created_at)
         for t in repo.list_tokens(session)
     ]
 
 
 @router.post("/tokens", response_model=TokenCreated, status_code=201)
 async def create_token(payload: TokenCreate, session: Session = Depends(get_session)):
+    # scope is "all" (every server) or a specific server id. It's the access
+    # boundary, so reject a blank or dangling value rather than silently widening
+    # to "all" (a malformed/uninitialized scope) or minting a token that
+    # authorizes nothing. Omitting scope still defaults to "all" via the schema.
+    scope = payload.scope.strip()
+    if not scope:
+        raise HTTPException(status_code=400, detail="scope must be 'all' or a server id")
+    if scope != "all" and repo.get_server(session, scope) is None:
+        raise HTTPException(status_code=400, detail=f"unknown server scope {scope!r}")
     raw = new_token()
     token = Token(
         id=new_id(),
         name=payload.name.strip() or "token",
         token_hash=hash_token(raw),
         prefix=raw[:12],
+        scope=scope,
     )
     repo.create_token(session, token)
     return TokenCreated(
         id=token.id, name=token.name, prefix=token.prefix,
-        created_at=token.created_at, token=raw,
+        scope=token.scope, created_at=token.created_at, token=raw,
     )
 
 

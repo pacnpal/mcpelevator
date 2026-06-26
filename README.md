@@ -71,7 +71,7 @@ Then point any MCP client at `http://127.0.0.1:8080/s/memory/mcp`.
 ## Security
 
 - **Local-first by default**: compose publishes to `127.0.0.1` only. To reach it from your phone, front it with a tunnel (Tailscale / Cloudflare Tunnel) or expose the port deliberately — **after** enabling auth.
-- Auth is a **pluggable seam** (single enforcement chokepoint): v1 ships `none` + `bearer` (SHA-256-hashed tokens). The chokepoint also enforces a Host/Origin allowlist (DNS-rebinding defense) on every request — loopback (only from a genuine loopback peer), the host in `MCPE_PUBLIC_BASE_URL` if set, plus the hosts you allowlist for `expose`.
+- Auth is a **pluggable seam** (single enforcement chokepoint): v1 ships `none` + `bearer` (SHA-256-hashed tokens). A token authorizes every bearer-protected server by default, or you can scope it to a single server when you create it. The chokepoint also enforces a Host/Origin allowlist (DNS-rebinding defense) on every request — loopback (only from a genuine loopback peer), the host in `MCPE_PUBLIC_BASE_URL` if set, plus the hosts you allowlist for `expose`.
 - The **control plane** (`/api`) is **not** per-request authenticated in v1 — it's guarded only by the same Host/Origin allowlist. That allowlist stops browser DNS-rebinding, but it is **not** a substitute for auth against a direct attacker (who can set any `Host`). So keep the default `127.0.0.1` publish and front remote access with an authenticating tunnel/proxy (Tailscale / Cloudflare Tunnel) rather than binding `/api` off-host directly. Per-request control-plane auth is a tracked follow-up.
 - A loopback `Host` is trusted only when the request's **peer** connects from loopback, so an off-host bind can't spoof `Host: localhost`. Behind a local reverse proxy or Docker's bridge gateway (where the peer is the forwarder, not the real client), set `MCPE_TRUSTED_PROXIES` (CIDRs) to trust it — the default `docker-compose.yml` does this for the bridge range, which is safe only with a loopback-published port.
 - The `docker` runner (launch MCP servers that are Docker images) is **opt-in and root-equivalent** — milestone **M7**.
@@ -86,7 +86,7 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 ## Status / roadmap
 
-**Working today:** add a server (guided form, or paste an `mcpServers` config) → supervise it → use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / delete / start / stop. **Per-client copy** menu (Claude Code, Codex, `mcpServers` / VS Code JSON, raw URLs). Runners: `npx`, `uvx`, `command`. **Auth**: bearer tokens (global, opted in per server) + a Host/Origin allowlist (Settings) for safe exposure.
+**Working today:** add a server (guided form, or paste an `mcpServers` config) → supervise it → use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / delete / start / stop. **Per-client copy** menu (Claude Code, Codex, `mcpServers` / VS Code JSON, raw URLs). Runners: `npx`, `uvx`, `command`. **Auth**: bearer tokens (opt in per server, scope each token to all servers or one) + a Host/Origin allowlist (Settings) for safe exposure.
 
 **Planned:** REST/OpenAPI surface per server · `docker` runner · a server catalog · polish.
 

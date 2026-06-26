@@ -125,6 +125,8 @@ export interface TokenInfo {
 	id: string;
 	name: string;
 	prefix: string;
+	/** `'all'` authorizes every bearer-protected server; otherwise a server id. */
+	scope: string;
 	created_at: string;
 }
 
