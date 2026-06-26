@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 from sqlmodel import Session, select
 
-from app.db.models import Server, ServerRuntime, Setting, utcnow
+from app.db.models import Server, ServerRuntime, Setting, Token, utcnow
 
 # --------------------------------------------------------------------------- #
 # servers (desired state)
@@ -100,3 +100,32 @@ def setting_set(session: Session, key: str, value: Any) -> None:
         row.value = encoded
     session.add(row)
     session.commit()
+
+
+# --------------------------------------------------------------------------- #
+# tokens (bearer auth; hash-only storage)
+# --------------------------------------------------------------------------- #
+
+
+def create_token(session: Session, token: Token) -> Token:
+    session.add(token)
+    session.commit()
+    session.refresh(token)
+    return token
+
+
+def list_tokens(session: Session) -> list[Token]:
+    return list(session.exec(select(Token).order_by(Token.created_at)).all())
+
+
+def get_token_by_hash(session: Session, token_hash: str) -> Optional[Token]:
+    return session.exec(select(Token).where(Token.token_hash == token_hash)).first()
+
+
+def delete_token(session: Session, token_id: str) -> bool:
+    token = session.get(Token, token_id)
+    if token is None:
+        return False
+    session.delete(token)
+    session.commit()
+    return True

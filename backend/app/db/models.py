@@ -82,3 +82,16 @@ class Setting(SQLModel, table=True):
 
     key: str = Field(primary_key=True)
     value: str  # JSON-encoded
+
+
+class Token(SQLModel, table=True):
+    """A bearer token. Only the SHA-256 hash is stored; the plaintext is shown
+    to the user exactly once at creation. Revoking = hard delete (v1)."""
+
+    __tablename__ = "token"
+
+    id: str = Field(primary_key=True)
+    name: str
+    token_hash: str = Field(index=True)
+    prefix: str  # first chars of the plaintext, for UI identification only
+    created_at: datetime = Field(default_factory=utcnow)

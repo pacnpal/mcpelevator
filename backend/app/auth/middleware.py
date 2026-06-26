@@ -1,31 +1,79 @@
 """The single auth enforcement point.
 
-The reverse proxy calls ``enforce(request, server)`` before forwarding. Provider
-selection is data-driven (per-server ``auth_provider``, falling back to a default),
-so new providers register here without touching routing. Host/Origin allowlist
-(DNS-rebinding defense) and the ``bearer`` provider arrive in M5.
+The reverse proxy calls ``enforce(request, server)`` before forwarding. Two checks
+happen here, in one place, for every exposed request:
+
+1. **Host/Origin allowlist** (DNS-rebinding defense) — only when ``bind_mode`` is
+   ``expose``. Loopback is always allowed; otherwise the request's Host/Origin must
+   be in the configured allowlist.
+2. **Auth provider** — chosen per-server (``auth_provider``), falling back to the
+   ``default_auth_provider`` setting when the server is ``inherit``. New providers
+   register in ``_PROVIDERS`` without touching routing.
 """
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
+from fastapi import HTTPException
+from sqlmodel import Session
 from starlette.requests import Request
 
+from app.auth.bearer import BearerProvider
 from app.auth.none import NoneProvider
+from app.db import get_engine
 from app.db.models import Server
+from app.registry import settings as runtime_settings
 
-# registry of providers by name (bearer/oauth added in later milestones)
 _PROVIDERS = {
     "none": NoneProvider(),
+    "bearer": BearerProvider(),
 }
-_DEFAULT = "none"
+
+# Loopback hostnames are always permitted (local-first default).
+_LOOPBACK = {"localhost", "127.0.0.1", "::1", ""}
 
 
-def resolve(server: Server):
+def resolve(server: Server, default: str):
     name = server.auth_provider
     if name == "inherit":
-        name = _DEFAULT
+        name = default
     return _PROVIDERS.get(name, _PROVIDERS["none"])
 
 
+def _host_only(value: str) -> str:
+    """Hostname from a Host header (``host[:port]`` / ``[ipv6][:port]``) or an
+    Origin (``scheme://host[:port]``). urlsplit handles ports and IPv6 brackets."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if "://" in value:
+        return (urlsplit(value).hostname or "").lower()
+    return (urlsplit(f"//{value}").hostname or "").lower()
+
+
+def host_allowed(host_header: str, origin_header: str | None, allowed: list[str]) -> tuple[bool, str]:
+    """Pure allowlist check (unit-tested). Returns (ok, reason-if-not)."""
+    allowset = _LOOPBACK | {h.strip().lower() for h in allowed}
+    host = _host_only(host_header)
+    if host and host not in allowset:
+        return False, f"host {host!r} not in allowlist"
+    if origin_header:
+        origin = _host_only(origin_header)
+        if origin and origin not in allowset:
+            return False, f"origin {origin!r} not in allowlist"
+    return True, ""
+
+
 async def enforce(request: Request, server: Server) -> None:
-    await resolve(server).authenticate(request, server)
+    with Session(get_engine()) as session:
+        mode = runtime_settings.bind_mode(session)
+        allowed = runtime_settings.allowed_hosts(session) if mode == "expose" else []
+        default = runtime_settings.default_auth_provider(session)
+
+    if mode == "expose":
+        ok, reason = host_allowed(request.headers.get("host", ""), request.headers.get("origin"), allowed)
+        if not ok:
+            raise HTTPException(status_code=403, detail=reason)
+
+    await resolve(server, default).authenticate(request, server)

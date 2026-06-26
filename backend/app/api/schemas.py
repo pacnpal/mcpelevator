@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel
@@ -76,3 +77,30 @@ class ImportSkipped(BaseModel):
 class ImportResult(BaseModel):
     created: list[ServerSummary]
     skipped: list[ImportSkipped]
+
+
+class TokenCreate(BaseModel):
+    name: str
+
+
+class TokenInfo(BaseModel):
+    id: str
+    name: str
+    prefix: str
+    created_at: datetime
+
+
+class TokenCreated(TokenInfo):
+    token: str  # plaintext — returned exactly once, at creation
+
+
+class SettingsInfo(BaseModel):
+    bind_mode: str
+    allowed_hosts: list[str]
+    default_auth_provider: str
+
+
+class SettingsUpdate(BaseModel):
+    bind_mode: Optional[str] = None
+    allowed_hosts: Optional[list[str]] = None
+    default_auth_provider: Optional[str] = None

@@ -26,7 +26,8 @@ def compute_hash(server: Server) -> str:
             "cwd": server.cwd,
             "mcp_http": server.mcp_http,
             "rest_openapi": server.rest_openapi,
-            "auth_provider": server.auth_provider,
+            # auth_provider is intentionally excluded: it's enforced at the proxy
+            # per-request, so changing it must NOT restart the bridge process.
         }
     )
 

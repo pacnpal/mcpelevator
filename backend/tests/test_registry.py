@@ -56,3 +56,15 @@ def test_config_hash_is_order_independent(session):
 def test_unknown_runner_rejected(session):
     with pytest.raises(ValueError):
         service.create_server(session, name="x", runner="bogus", command="x")
+
+
+def test_auth_provider_change_does_not_restart(session):
+    """auth_provider is proxy-layer; changing it must NOT change config_hash
+    (otherwise the reconciler would needlessly bounce the bridge)."""
+    srv = _mk(session, args=["-y", "x"])
+    before = srv.config_hash
+    service.update_server(session, srv.id, {"auth_provider": "bearer"})
+    assert repo.get_server(session, srv.id).config_hash == before
+    # but a launch-affecting change still does
+    service.update_server(session, srv.id, {"args": ["-y", "z"]})
+    assert repo.get_server(session, srv.id).config_hash != before

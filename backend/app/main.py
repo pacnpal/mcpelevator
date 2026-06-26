@@ -19,6 +19,8 @@ from starlette.staticfiles import StaticFiles
 from app import __version__
 from app.api import health as health_api
 from app.api import servers as servers_api
+from app.api import settings as settings_api
+from app.api import tokens as tokens_api
 from app.config import get_settings
 from app.db import init_db
 from app.proxy.router import router as proxy_router
@@ -30,6 +32,7 @@ async def lifespan(app: FastAPI):
     init_db()
     app.state.http = httpx.AsyncClient(timeout=None)  # no timeout: long-lived SSE streams
     supervisor = Supervisor()
+    supervisor.boot_reset()  # observed runtime from a prior process is stale
     app.state.supervisor = supervisor
     reconciler = asyncio.create_task(supervisor.run_forever())
     try:
@@ -62,6 +65,8 @@ def create_app() -> FastAPI:
 
     app.include_router(health_api.router, prefix="/api")
     app.include_router(servers_api.router, prefix="/api")
+    app.include_router(tokens_api.router, prefix="/api")
+    app.include_router(settings_api.router, prefix="/api")
     app.include_router(proxy_router)  # /s/{slug}/...
 
     fe = settings.frontend_dir
