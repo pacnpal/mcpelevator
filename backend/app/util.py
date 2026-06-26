@@ -1,0 +1,29 @@
+"""Small pure helpers — deterministic by construction (no I/O, no globals)."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import uuid
+from typing import Any
+
+
+def new_id() -> str:
+    return uuid.uuid4().hex
+
+
+def slugify(name: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    return s or "server"
+
+
+def config_hash(payload: dict[str, Any]) -> str:
+    """Stable short hash of a server's launch+exposure config.
+
+    The idempotency anchor: the reconciler restarts a server only when this
+    changes. Uses canonical JSON (sorted keys) so the same logical config always
+    hashes identically.
+    """
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]

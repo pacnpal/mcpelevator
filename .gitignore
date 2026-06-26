@@ -1,0 +1,27 @@
+# python
+backend/.venv/
+**/__pycache__/
+*.py[cod]
+
+# node / sveltekit
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+
+# data / runtime
+data/
+backend/data/
+*.db
+*.db-journal
+
+# env / local
+.env
+.env.local
+.DS_Store
+*.icloud
+
+# logs
+*.log
+
+# harness / editor session state
+.claude/

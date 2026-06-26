@@ -1,0 +1,120 @@
+@import 'tailwindcss';
+
+/*
+  mcpelevator design tokens (Tailwind v4, CSS-first config).
+  Dark control-panel aesthetic: a near-black zinc base, a single emerald
+  accent reserved for "live / healthy" semantics, and a mono face for
+  technical identifiers (slugs, URLs). One accent, locked, no gradients.
+*/
+@theme {
+	--font-sans:
+		'Inter var', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+		Helvetica, Arial, sans-serif;
+	--font-mono:
+		ui-monospace, 'SF Mono', 'JetBrains Mono', 'Fira Code', Menlo, Consolas,
+		monospace;
+
+	/* Surfaces — layered greys, warm-neutral zinc family. */
+	--color-base: #09090b;
+	--color-surface: #101012;
+	--color-surface-2: #161619;
+	--color-elevated: #1c1c20;
+	--color-line: #26262b;
+	--color-line-strong: #34343a;
+
+	/* Text */
+	--color-ink: #f4f4f5;
+	--color-ink-muted: #a1a1aa;
+	--color-ink-dim: #71717a;
+
+	/* Single accent: emerald = healthy / live. */
+	--color-accent: #34d399;
+	--color-accent-strong: #10b981;
+	--color-accent-ink: #022c22;
+
+	/* State semantics for server lifecycle. */
+	--color-state-running: #34d399;
+	--color-state-starting: #fbbf24;
+	--color-state-unhealthy: #fb923c;
+	--color-state-failed: #f87171;
+	--color-state-stopped: #71717a;
+
+	--radius-card: 14px;
+
+	--ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+	html {
+		color-scheme: dark;
+		-webkit-text-size-adjust: 100%;
+	}
+
+	body {
+		margin: 0;
+		min-height: 100dvh;
+		background-color: var(--color-base);
+		color: var(--color-ink);
+		font-family: var(--font-sans);
+		font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+	}
+
+	/* Subtle ambient grid texture on the page background — quiet, not loud. */
+	body::before {
+		content: '';
+		position: fixed;
+		inset: 0;
+		z-index: -1;
+		pointer-events: none;
+		background:
+			radial-gradient(
+				120% 80% at 50% -10%,
+				color-mix(in oklab, var(--color-accent) 7%, transparent),
+				transparent 60%
+			);
+		opacity: 0.6;
+	}
+
+	::selection {
+		background-color: color-mix(in oklab, var(--color-accent) 30%, transparent);
+		color: var(--color-ink);
+	}
+
+	*:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
+		border-radius: 4px;
+	}
+}
+
+@layer utilities {
+	/* Amber pulse used by transient states (starting / stopping). */
+	@keyframes pulse-dot {
+		0%,
+		100% {
+			opacity: 1;
+		}
+		50% {
+			opacity: 0.35;
+		}
+	}
+	.animate-pulse-dot {
+		animation: pulse-dot 1.4s var(--ease-out-quint) infinite;
+	}
+
+	@keyframes rise-in {
+		from {
+			opacity: 0;
+			transform: translateY(8px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+	.animate-rise-in {
+		animation: rise-in 0.4s var(--ease-out-quint) both;
+	}
+}

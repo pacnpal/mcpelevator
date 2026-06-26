@@ -1,0 +1,23 @@
+services:
+  mcpelevator:
+    build: .
+    image: mcpelevator:latest
+    container_name: mcpelevator
+    # Secure default: publish to the host loopback only. To reach it from other
+    # devices (e.g. your phone), front it with a tunnel (Tailscale/Cloudflare
+    # Tunnel) or change to "8080:8080" — but enable auth first (milestone M5).
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - mcpe-data:/data
+      # Opt-in sibling Docker (runner=docker, M7). This is ROOT-EQUIVALENT on the
+      # host — enable only deliberately:
+      # - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - MCPE_HOST=0.0.0.0
+      # Absolute URL clients use to reach this instance (behind a tunnel/proxy):
+      # - MCPE_PUBLIC_BASE_URL=https://mcp.example.com
+    restart: unless-stopped
+
+volumes:
+  mcpe-data:

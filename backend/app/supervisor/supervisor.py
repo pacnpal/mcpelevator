@@ -1,0 +1,129 @@
+"""Supervisor — the single owner of runtime state.
+
+API handlers never spawn or kill processes. They write desired state (SQLite) and
+``nudge()`` this reconciler, which converges actual -> desired (Kubernetes-style).
+That indirection is what makes the system idempotent and deterministic: re-running
+``reconcile_once`` with unchanged desired state is a no-op, and ``config_hash`` is
+the anchor that decides when a restart is actually needed.
+
+M1 scope: start desired, stop undesired, restart on config change, persist observed
+state. Health probing + restart budgets land in M2.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Optional
+
+from sqlmodel import Session
+
+from app.config import get_settings
+from app.db import get_engine, repo
+from app.supervisor.ports import PortAllocator
+from app.supervisor.unit import ServerUnit
+
+
+class Supervisor:
+    def __init__(self) -> None:
+        settings = get_settings()
+        self.ports = PortAllocator(settings.port_range_start, settings.port_range_end)
+        self.max_running = settings.max_running
+        self.interval = settings.health_interval_s
+        self.units: dict[str, ServerUnit] = {}
+        self._nudge = asyncio.Event()
+        self._stopping = False
+
+    # --- lookups (used by the reverse proxy + API) ----------------------- #
+
+    def unit(self, server_id: str) -> Optional[ServerUnit]:
+        return self.units.get(server_id)
+
+    def unit_by_slug(self, slug: str) -> Optional[ServerUnit]:
+        return next((u for u in self.units.values() if u.slug == slug), None)
+
+    def endpoint(self, slug: str) -> Optional[tuple[str, int]]:
+        u = self.unit_by_slug(slug)
+        if u is not None and u.state == "running" and u.port is not None:
+            return (u.host, u.port)
+        return None
+
+    # --- start/stop a single unit ---------------------------------------- #
+
+    async def _start(self, server) -> None:
+        if len(self.units) >= self.max_running:
+            raise RuntimeError(f"max_running ({self.max_running}) reached")
+        port = self.ports.allocate()
+        unit = ServerUnit(server)
+        self.units[server.id] = unit
+        await unit.start(port)
+
+    async def _stop(self, server_id: str) -> None:
+        unit = self.units.pop(server_id, None)
+        if unit is not None:
+            port = unit.port
+            await unit.stop()
+            if port is not None:
+                self.ports.release(port)
+
+    async def stop(self, server_id: str) -> None:
+        """Public stop (e.g. API-driven delete). Steady state is still reconciled."""
+        await self._stop(server_id)
+
+    # --- reconcile ------------------------------------------------------- #
+
+    async def reconcile_once(self) -> None:
+        with Session(get_engine()) as session:
+            desired = {sv.id: sv for sv in repo.list_servers(session) if sv.enabled}
+
+            # stop anything running that is no longer desired
+            for server_id in list(self.units):
+                if server_id not in desired:
+                    await self._stop(server_id)
+                    repo.upsert_runtime(session, server_id, state="stopped", pid=None, port=None)
+
+            # start / restart desired
+            for server_id, server in desired.items():
+                unit = self.units.get(server_id)
+                if unit is None:
+                    await self._try_start(session, server)
+                elif unit.config_hash != server.config_hash:
+                    await self._stop(server_id)
+                    await self._try_start(session, server)
+
+                unit = self.units.get(server_id)
+                if unit is not None:
+                    repo.upsert_runtime(
+                        session, server_id,
+                        state=unit.state, pid=unit.pid, port=unit.port,
+                        last_error=unit.last_error, tools=unit.tools,
+                    )
+
+    async def _try_start(self, session: Session, server) -> None:
+        try:
+            await self._start(server)
+        except Exception as exc:  # port exhaustion, max_running, spawn failure
+            repo.upsert_runtime(session, server.id, state="failed", last_error=str(exc)[:300])
+
+    # --- loop ------------------------------------------------------------ #
+
+    async def run_forever(self) -> None:
+        while not self._stopping:
+            try:
+                await self.reconcile_once()
+            except Exception as exc:  # never let the loop die
+                print(f"[mcpelevator] reconcile error: {exc}")
+            try:
+                await asyncio.wait_for(self._nudge.wait(), timeout=self.interval)
+            except asyncio.TimeoutError:
+                pass
+            self._nudge.clear()
+
+    def nudge(self) -> None:
+        """Ask the reconciler to converge now (call from the event-loop thread)."""
+        self._nudge.set()
+
+    async def shutdown(self) -> None:
+        self._stopping = True
+        self.nudge()
+        for server_id in list(self.units):
+            await self._stop(server_id)
