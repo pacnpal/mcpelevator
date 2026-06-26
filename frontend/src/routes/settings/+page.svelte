@@ -4,12 +4,14 @@
 		deleteToken,
 		errorMessage,
 		getSettings,
+		listServers,
 		listTokens,
 		updateSettings
 	} from '$lib/api';
 	import type {
 		AuthProvider,
 		BindMode,
+		ServerSummary,
 		SettingsInfo,
 		TokenCreated,
 		TokenInfo
@@ -34,14 +36,16 @@
 
 	let settings = $state<SettingsInfo | null>(null);
 	let tokens = $state<TokenInfo[]>([]);
+	let servers = $state<ServerSummary[]>([]);
 
 	async function load() {
 		loadState = 'loading';
 		loadError = null;
 		try {
-			const [s, t] = await Promise.all([getSettings(), listTokens()]);
+			const [s, t, srv] = await Promise.all([getSettings(), listTokens(), listServers()]);
 			settings = s;
 			tokens = t;
+			servers = srv;
 			loadState = 'ready';
 		} catch (err) {
 			loadState = 'error';
@@ -56,8 +60,9 @@
 
 	// ---- Access tokens --------------------------------------------------------
 
-	// New-token flow: name entry → POST → one-time plaintext reveal.
+	// New-token flow: name entry → scope choice → POST → one-time plaintext reveal.
 	let newTokenName = $state('');
+	let newTokenScope = $state('all');
 	let creating = $state(false);
 	let createdToken = $state<TokenCreated | null>(null);
 
@@ -68,18 +73,35 @@
 		if (creating || !newNameValid) return;
 		creating = true;
 		try {
-			const created = await createToken(newTokenName.trim());
+			const created = await createToken(newTokenName.trim(), newTokenScope);
 			createdToken = created;
 			// List it (by prefix) immediately; the reveal box holds the plaintext.
 			const { token: _token, ...info } = created;
 			void _token;
 			tokens = [info, ...tokens];
 			newTokenName = '';
+			newTokenScope = 'all';
 		} catch (err) {
 			flashToast(errorMessage(err));
 		} finally {
 			creating = false;
 		}
+	}
+
+	/** A server's display label. Names aren't unique (the backend only makes slugs
+	 * unique), so append the slug to disambiguate when another server shares the
+	 * name — otherwise a scope choice could point at the wrong server. */
+	function serverLabel(server: ServerSummary): string {
+		const collides = servers.some((s) => s.id !== server.id && s.name === server.name);
+		return collides ? `${server.name} (${server.slug})` : server.name;
+	}
+
+	/** Human label for a token's scope: 'All servers', the server's label, or a
+	 * fallback when the scoped server no longer exists. */
+	function scopeLabel(scope: string): string {
+		if (scope === 'all') return 'All servers';
+		const server = servers.find((s) => s.id === scope);
+		return server ? serverLabel(server) : 'Unknown server';
 	}
 
 	function dismissReveal() {
@@ -291,8 +313,8 @@
 			{/if}
 
 			<!-- New token -->
-			<form onsubmit={handleCreateToken} class="flex items-end gap-2">
-				<div class="flex min-w-0 flex-1 flex-col gap-1.5">
+			<form onsubmit={handleCreateToken} class="flex flex-wrap items-end gap-2">
+				<div class="flex min-w-0 flex-1 basis-48 flex-col gap-1.5">
 					<label for="token-name" class="text-xs font-medium text-[var(--color-ink-muted)]">
 						New token
 					</label>
@@ -305,6 +327,21 @@
 						placeholder="e.g. claude-desktop"
 						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 					/>
+				</div>
+				<div class="flex min-w-0 flex-col gap-1.5">
+					<label for="token-scope" class="text-xs font-medium text-[var(--color-ink-muted)]">
+						Scope
+					</label>
+					<select
+						id="token-scope"
+						bind:value={newTokenScope}
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+					>
+						<option value="all">All servers</option>
+						{#each servers as server (server.id)}
+							<option value={server.id}>{serverLabel(server)}</option>
+						{/each}
+					</select>
 				</div>
 				<button
 					type="submit"
@@ -333,9 +370,22 @@
 				<ul class="flex flex-col divide-y divide-[var(--color-line)]">
 					{#each tokens as token (token.id)}
 						<li class="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
-							<div class="flex min-w-0 flex-col gap-0.5">
-								<span class="truncate text-sm font-medium text-[var(--color-ink)]">
-									{token.name}
+							<div class="flex min-w-0 flex-col gap-1">
+								<span class="flex min-w-0 items-center gap-2">
+									<span class="truncate text-sm font-medium text-[var(--color-ink)]">
+										{token.name}
+									</span>
+									<span
+										class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
+										title={token.scope === 'all'
+											? 'Authorizes every bearer-protected server'
+											: 'Authorizes only this server'}
+										style={token.scope === 'all'
+											? 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'
+											: 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'}
+									>
+										{scopeLabel(token.scope)}
+									</span>
 								</span>
 								<span class="font-mono text-xs text-[var(--color-ink-dim)]">
 									{token.prefix}…

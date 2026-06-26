@@ -131,3 +131,56 @@ def test_api_trusts_docker_gateway_when_configured(monkeypatch):
         assert gateway.get("/api/health", headers={"host": "localhost"}).status_code == 200
     with TestClient(app, client=("172.20.0.5", 5000)) as sibling:  # a sibling container
         assert sibling.get("/api/health", headers={"host": "localhost"}).status_code == 403
+
+
+def test_create_token_rejects_unknown_scope():
+    """A token scope must be 'all' or an existing server id; a dangling id is a 400."""
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/tokens",
+            json={"name": "t", "scope": "no-such-server"},
+            headers={"host": "127.0.0.1"},
+        )
+        assert r.status_code == 400, r.text
+
+
+def test_create_token_rejects_explicitly_blank_scope():
+    """An explicitly blank/whitespace scope is rejected, not silently widened to
+    'all' — scope is the access boundary. (Omitting it still defaults to 'all'.)"""
+    with TestClient(app) as client:
+        for blank in ("", "   "):
+            r = client.post(
+                "/api/tokens",
+                json={"name": "t", "scope": blank},
+                headers={"host": "127.0.0.1"},
+            )
+            assert r.status_code == 400, (repr(blank), r.status_code, r.text)
+
+
+def test_create_token_scope_defaults_to_all_and_echoes_server_scope():
+    """Omitted scope defaults to 'all'; a valid server id round-trips through both
+    the create response and the list endpoint."""
+    with TestClient(app) as client:
+        host = {"host": "127.0.0.1"}
+
+        unscoped = client.post("/api/tokens", json={"name": "global"}, headers=host)
+        assert unscoped.status_code == 201, unscoped.text
+        assert unscoped.json().get("scope") == "all"
+
+        server = client.post(
+            "/api/servers", json={"name": "scoped-target", "command": "echo"}, headers=host
+        ).json()
+        scoped = client.post(
+            "/api/tokens", json={"name": "scoped", "scope": server["id"]}, headers=host
+        )
+        assert scoped.status_code == 201, scoped.text
+        assert scoped.json().get("scope") == server["id"]
+
+        listed = {t["id"]: t for t in client.get("/api/tokens", headers=host).json()}
+        assert listed[unscoped.json()["id"]]["scope"] == "all"
+        assert listed[scoped.json()["id"]]["scope"] == server["id"]
+
+        # cleanup so the shared test DB doesn't accumulate rows across tests
+        client.delete(f"/api/tokens/{unscoped.json()['id']}", headers=host)
+        client.delete(f"/api/tokens/{scoped.json()['id']}", headers=host)
+        client.delete(f"/api/servers/{server['id']}", headers=host)

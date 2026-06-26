@@ -94,4 +94,7 @@ class Token(SQLModel, table=True):
     name: str
     token_hash: str = Field(index=True)
     prefix: str  # first chars of the plaintext, for UI identification only
+    # "all" authorizes every bearer-protected server; a server.id restricts the
+    # token to that one server (enforced in app/auth/bearer.py).
+    scope: str = "all"
     created_at: datetime = Field(default_factory=utcnow)

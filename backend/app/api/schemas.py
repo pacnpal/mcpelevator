@@ -87,12 +87,17 @@ class ImportResult(BaseModel):
 
 class TokenCreate(BaseModel):
     name: str
+    # "all" (default) authorizes every bearer-protected server; otherwise a
+    # server id restricts the token to that one server. Validated against the
+    # existing servers in the endpoint (a dangling id is a 400).
+    scope: str = "all"
 
 
 class TokenInfo(BaseModel):
     id: str
     name: str
     prefix: str
+    scope: str
     created_at: datetime
 
 
