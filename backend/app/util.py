@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
 
 def new_id() -> str:
@@ -27,3 +29,31 @@ def config_hash(payload: dict[str, Any]) -> str:
     """
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def new_token() -> str:
+    """A fresh bearer token. The ``mcpe_`` prefix makes it identifiable."""
+    return "mcpe_" + secrets.token_urlsafe(32)
+
+
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def host_only(value: str) -> str:
+    """Hostname from a Host header (``host[:port]`` / ``[ipv6][:port]``) or an
+    Origin (``scheme://host[:port]``). Returns "" for empty or malformed input
+    (e.g. an unmatched IPv6 bracket) so callers fail closed instead of raising."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        if "://" in value:
+            return (urlsplit(value).hostname or "").lower()
+        # A bare IPv6 literal (>1 colon, unbracketed) must be bracketed for urlsplit
+        # to read it as a host instead of host:port; an ordinary host:port has one colon.
+        if value.count(":") > 1 and not value.startswith("["):
+            value = f"[{value}]"
+        return (urlsplit(f"//{value}").hostname or "").lower()
+    except ValueError:
+        return ""

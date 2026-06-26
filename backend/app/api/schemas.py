@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from datetime import datetime
+from typing import Literal, Optional
 
 from pydantic import BaseModel
+
+# The auth providers a server may select. Constrained here so a malformed value
+# (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
+# than silently stored and then failed-closed at request time.
+AuthProvider = Literal["inherit", "none", "bearer"]
 
 
 class Transports(BaseModel):
@@ -26,6 +32,7 @@ class ServerSummary(BaseModel):
     state: str
     transports: Transports
     urls: Urls
+    auth: Literal["none", "bearer"] = "none"  # effective auth (per-server `inherit` resolved)
     last_error: Optional[str] = None
     pid: Optional[int] = None
     port: Optional[int] = None
@@ -52,7 +59,7 @@ class ServerCreate(BaseModel):
     cwd: Optional[str] = None
     mcp_http: bool = True
     rest_openapi: bool = False
-    auth_provider: str = "inherit"
+    auth_provider: AuthProvider = "inherit"
     enabled: bool = False
 
 
@@ -65,7 +72,7 @@ class ServerUpdate(BaseModel):
     cwd: Optional[str] = None
     mcp_http: Optional[bool] = None
     rest_openapi: Optional[bool] = None
-    auth_provider: Optional[str] = None
+    auth_provider: Optional[AuthProvider] = None
 
 
 class ImportSkipped(BaseModel):
@@ -76,3 +83,30 @@ class ImportSkipped(BaseModel):
 class ImportResult(BaseModel):
     created: list[ServerSummary]
     skipped: list[ImportSkipped]
+
+
+class TokenCreate(BaseModel):
+    name: str
+
+
+class TokenInfo(BaseModel):
+    id: str
+    name: str
+    prefix: str
+    created_at: datetime
+
+
+class TokenCreated(TokenInfo):
+    token: str  # plaintext — returned exactly once, at creation
+
+
+class SettingsInfo(BaseModel):
+    bind_mode: str
+    allowed_hosts: list[str]
+    default_auth_provider: str
+
+
+class SettingsUpdate(BaseModel):
+    bind_mode: Optional[str] = None
+    allowed_hosts: Optional[list[str]] = None
+    default_auth_provider: Optional[str] = None

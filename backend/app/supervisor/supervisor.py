@@ -79,7 +79,10 @@ class Supervisor:
             for server_id in list(self.units):
                 if server_id not in desired:
                     await self._stop(server_id)
-                    repo.upsert_runtime(session, server_id, state="stopped", pid=None, port=None)
+                    repo.upsert_runtime(
+                        session, server_id, state="stopped", pid=None, port=None,
+                        last_error=None, tools=[],
+                    )
 
             # start / restart desired
             for server_id, server in desired.items():
@@ -105,6 +108,12 @@ class Supervisor:
             repo.upsert_runtime(session, server.id, state="failed", last_error=str(exc)[:300])
 
     # --- loop ------------------------------------------------------------ #
+
+    def boot_reset(self) -> None:
+        """Observed runtime from a previous process is stale on startup. Reset it
+        to stopped so the API reflects reality; reconcile brings servers back."""
+        with Session(get_engine()) as session:
+            repo.reset_all_runtime(session)
 
     async def run_forever(self) -> None:
         while not self._stopping:

@@ -13,23 +13,33 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from sqlmodel import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import Request
 from starlette.staticfiles import StaticFiles
 
 from app import __version__
 from app.api import health as health_api
 from app.api import servers as servers_api
+from app.api import settings as settings_api
+from app.api import tokens as tokens_api
+from app.auth.middleware import host_allowed, is_loopback_client, request_allowlist
 from app.config import get_settings
-from app.db import init_db
+from app.db import get_engine, init_db
 from app.proxy.router import router as proxy_router
+from app.registry import service
 from app.supervisor.supervisor import Supervisor
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    with Session(get_engine()) as session:
+        service.normalize_auth_providers(session)  # canonicalize legacy auth_provider values
+        service.backfill_config_hashes(session)  # rehash upgraded rows -> no spurious restarts
     app.state.http = httpx.AsyncClient(timeout=None)  # no timeout: long-lived SSE streams
     supervisor = Supervisor()
+    supervisor.boot_reset()  # observed runtime from a prior process is stale
     app.state.supervisor = supervisor
     reconciler = asyncio.create_task(supervisor.run_forever())
     try:
@@ -60,8 +70,32 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="mcpelevator", version=__version__, lifespan=lifespan)
 
+    @app.middleware("http")
+    async def _control_plane_allowlist(request: Request, call_next):
+        # Guard the control plane (/api) with the same Host/Origin allowlist as the
+        # proxy (DNS-rebinding defense), in every mode: a loopback Host passes only
+        # when the peer connects from loopback, and expose adds the configured hosts.
+        # bind_mode controls only the network bind, so a DNS-rebound page could
+        # otherwise hit loopback and mint tokens / change settings. Per-request
+        # bearer auth on /api is a deferred v1 item (it would also have to gate the
+        # SPA itself).
+        if request.url.path == "/api" or request.url.path.startswith("/api/"):
+            with Session(get_engine()) as session:
+                allowed = request_allowlist(session)
+            ok, reason = host_allowed(
+                request.headers.get("host", ""),
+                request.headers.get("origin"),
+                allowed,
+                client_is_loopback=is_loopback_client(request),
+            )
+            if not ok:
+                return JSONResponse({"detail": reason}, status_code=403)
+        return await call_next(request)
+
     app.include_router(health_api.router, prefix="/api")
     app.include_router(servers_api.router, prefix="/api")
+    app.include_router(tokens_api.router, prefix="/api")
+    app.include_router(settings_api.router, prefix="/api")
     app.include_router(proxy_router)  # /s/{slug}/...
 
     fe = settings.frontend_dir

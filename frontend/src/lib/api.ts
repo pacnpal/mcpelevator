@@ -13,7 +13,10 @@ import type {
 	ServerCreate,
 	ServerDetail,
 	ServerSummary,
-	ServerUpdate
+	ServerUpdate,
+	SettingsInfo,
+	TokenCreated,
+	TokenInfo
 } from './types';
 
 const BASE = '/api';
@@ -149,4 +152,43 @@ export function disableServer(id: string): Promise<ServerSummary> {
 /** URL for a server's live log SSE stream (consumed via `EventSource`). */
 export function logStreamUrl(id: string): string {
 	return `${BASE}/servers/${encodeURIComponent(id)}/logs`;
+}
+
+// ---- Auth & settings (M5) ---------------------------------------------------
+
+/** Current security settings: bind mode, allowed hosts, default auth provider. */
+export function getSettings(): Promise<SettingsInfo> {
+	return request<SettingsInfo>('/settings');
+}
+
+/**
+ * Patch any subset of the security settings. The backend returns the full,
+ * updated settings object; a 400 (invalid bind_mode / default_auth_provider)
+ * surfaces via `ApiError`.
+ */
+export function updateSettings(
+	patch: Partial<SettingsInfo>
+): Promise<SettingsInfo> {
+	return jsonRequest<SettingsInfo>('/settings', 'PATCH', patch);
+}
+
+/** List access tokens. Each is identified by prefix only (no plaintext). */
+export function listTokens(): Promise<TokenInfo[]> {
+	return request<TokenInfo[]>('/tokens');
+}
+
+/**
+ * Mint a new bearer token. The response carries the full plaintext `token`
+ * exactly once — it is never retrievable again, so the caller must surface it
+ * immediately.
+ */
+export function createToken(name: string): Promise<TokenCreated> {
+	return jsonRequest<TokenCreated>('/tokens', 'POST', { name });
+}
+
+/** Revoke a token by id. */
+export function deleteToken(id: string): Promise<void> {
+	return request<void>(`/tokens/${encodeURIComponent(id)}`, {
+		method: 'DELETE'
+	});
 }

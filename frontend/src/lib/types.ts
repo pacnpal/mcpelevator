@@ -31,6 +31,8 @@ export interface ServerSummary {
 	state: ServerState;
 	transports: ServerTransports;
 	urls: ServerUrls;
+	/** Effective auth (per-server `inherit` resolved to the global default). */
+	auth: AuthProvider;
 	last_error: string | null;
 	pid: number | null;
 	port: number | null;
@@ -49,7 +51,7 @@ export interface ServerDetail extends ServerSummary {
 	args: string[];
 	env: Record<string, string>;
 	cwd: string | null;
-	auth_provider: string;
+	auth_provider: ServerAuthProvider;
 	config_hash: string;
 	source: string;
 	tools: ServerTool[];
@@ -66,7 +68,7 @@ export interface ServerCreate {
 	cwd?: string | null;
 	mcp_http?: boolean;
 	rest_openapi?: boolean;
-	auth_provider?: string;
+	auth_provider?: ServerAuthProvider;
 	enabled?: boolean;
 }
 
@@ -99,3 +101,35 @@ export interface HealthResponse {
 	status: string;
 	version: string;
 }
+
+// ---- Auth & settings (M5) ---------------------------------------------------
+
+/** How the server socket is bound. `expose` enforces the Host/Origin allowlist. */
+export type BindMode = 'local' | 'expose';
+
+/** Auth provider for the *global default* and per-server `inherit` resolution. */
+export type AuthProvider = 'none' | 'bearer';
+
+/** Per-server auth selector: `inherit` resolves to the global default. */
+export type ServerAuthProvider = 'inherit' | 'none' | 'bearer';
+
+/** Shape of GET/PATCH /api/settings. */
+export interface SettingsInfo {
+	bind_mode: BindMode;
+	allowed_hosts: string[];
+	default_auth_provider: AuthProvider;
+}
+
+/** A bearer access token, listed by prefix only (the plaintext is never re-shown). */
+export interface TokenInfo {
+	id: string;
+	name: string;
+	prefix: string;
+	created_at: string;
+}
+
+/**
+ * Response of POST /api/tokens. Identical to `TokenInfo` but additionally
+ * carries the full plaintext `token` — returned exactly once, on creation.
+ */
+export type TokenCreated = TokenInfo & { token: string };

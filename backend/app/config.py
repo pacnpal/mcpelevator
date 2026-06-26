@@ -13,6 +13,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.util import host_only
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MCPE_", env_file=".env", extra="ignore")
@@ -23,6 +25,10 @@ class Settings(BaseSettings):
     # Absolute base URL clients use to reach this instance. If unset, derived from
     # host:port. Set MCPE_PUBLIC_BASE_URL to e.g. https://mcp.example.com behind a tunnel.
     public_base_url: str | None = None
+    # Comma-separated CIDRs whose peer IPs are treated as loopback for the Host/Origin
+    # guard — e.g. a reverse proxy or the Docker bridge gateway forwarding a
+    # loopback-published port. Empty by default; a bare bind trusts only real loopback.
+    trusted_proxies: str = ""
 
     # --- data / persistence ---
     data_dir: Path = Path("./data")
@@ -48,7 +54,20 @@ class Settings(BaseSettings):
     def base_url(self) -> str:
         if self.public_base_url:
             return self.public_base_url.rstrip("/")
-        return f"http://{self.host}:{self.port}"
+        # 0.0.0.0 / :: are bind addresses, not reachable hosts — a client following
+        # such a URL would send Host: 0.0.0.0 and fail the allowlist. Advertise
+        # loopback instead; set MCPE_PUBLIC_BASE_URL for a real off-host URL.
+        host = "127.0.0.1" if self.host in ("0.0.0.0", "::", "") else self.host
+        if ":" in host:  # bracket an IPv6 literal so the URL is well-formed
+            host = f"[{host}]"
+        return f"http://{host}:{self.port}"
+
+    @property
+    def public_host(self) -> str | None:
+        """Hostname of MCPE_PUBLIC_BASE_URL, if set — an operator-declared trusted
+        host that the Host/Origin guard always allows (so the advertised public URL
+        doesn't 403 itself before the operator can add it to the allowlist)."""
+        return host_only(self.public_base_url) if self.public_base_url else None
 
     @property
     def backend_root(self) -> Path:

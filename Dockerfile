@@ -7,6 +7,10 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build   # -> /fe/build (adapter-static, SPA fallback)
 
+# uv + uvx binaries come from the official image — declared as a named stage so the
+# COPY --from below references an alias (Hadolint DL3022) rather than an external ref.
+FROM ghcr.io/astral-sh/uv:latest AS uv
+
 # Stage 2: runtime — Python control plane + Node/npx + uv/uvx so npx/uvx MCP
 # servers run with zero local setup (batteries-included).
 FROM python:3.13-slim-bookworm AS runtime
@@ -18,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # uv + uvx (Python MCP servers) from the official image
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /app/backend
 # Dependency layer (cached): lockfile-driven for determinism.
@@ -28,6 +32,10 @@ RUN uv sync --no-dev --frozen 2>/dev/null || uv sync --no-dev
 # App code + built SPA
 COPY backend/ ./
 COPY --from=frontend /fe/build /app/frontend/build
+
+# Stamp the release version (passed by CI as APP_VERSION) into the package metadata.
+ARG APP_VERSION=0.1.0
+RUN sed -i "s/^__version__ = .*/__version__ = \"${APP_VERSION}\"/" app/__init__.py
 
 ENV PATH="/app/backend/.venv/bin:${PATH}" \
     MCPE_HOST=0.0.0.0 \

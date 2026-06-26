@@ -1,11 +1,19 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
-	import type { Runner, ServerCreate } from '$lib/types';
+	import type { Runner, ServerAuthProvider, ServerCreate } from '$lib/types';
 
 	type Mode = 'create' | 'edit';
 
 	type EnvRow = { id: number; key: string; value: string };
+
+	// Per-server auth options. `inherit` defers to the global default set on
+	// the Settings page.
+	const AUTH_OPTIONS: { value: ServerAuthProvider; label: string }[] = [
+		{ value: 'inherit', label: 'inherit' },
+		{ value: 'none', label: 'none' },
+		{ value: 'bearer', label: 'bearer' }
+	];
 
 	let {
 		mode = 'create',
@@ -101,6 +109,7 @@
 	let cwd = $state(seed.cwd);
 	let mcpHttp = $state(seed.mcpHttp);
 	let restOpenapi = $state(seed.restOpenapi);
+	let authProvider = $state<ServerAuthProvider>(seed.authProvider);
 	let startAfter = $state(seed.startAfter);
 	let advancedOpen = $state(false);
 
@@ -183,7 +192,7 @@
 			cwd: cwd.trim() ? cwd.trim() : null,
 			mcp_http: mcpHttp,
 			rest_openapi: restOpenapi,
-			auth_provider: seed.authProvider
+			auth_provider: authProvider
 		};
 		if (mode === 'create') payload.enabled = startAfter;
 		onsubmit(payload);
@@ -559,6 +568,42 @@
 				></span>
 			</span>
 		</label>
+	</fieldset>
+
+	<!-- Auth -->
+	<fieldset class="flex flex-col gap-2 border-0 p-0">
+		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Auth</legend>
+		<div
+			class="grid grid-cols-3 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1"
+		>
+			{#each AUTH_OPTIONS as opt (opt.value)}
+				<label
+					class="flex cursor-pointer items-center justify-center rounded-md px-3 py-1.5 font-mono text-xs font-semibold transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+					style={authProvider === opt.value
+						? 'background-color: color-mix(in oklab, var(--color-accent) 14%, transparent); color: var(--color-accent);'
+						: 'color: var(--color-ink-muted);'}
+				>
+					<input
+						type="radio"
+						name="auth-provider"
+						value={opt.value}
+						checked={authProvider === opt.value}
+						onchange={() => (authProvider = opt.value)}
+						class="sr-only"
+					/>
+					{opt.label}
+				</label>
+			{/each}
+		</div>
+		<p class="text-xs text-[var(--color-ink-dim)]">
+			<code class="font-mono">inherit</code> = use the global default. Set it on the
+			<a
+				href="/settings"
+				class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
+			>
+				Settings
+			</a> page.
+		</p>
 	</fieldset>
 
 	<!-- Start after creating (create only) -->

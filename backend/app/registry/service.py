@@ -26,9 +26,46 @@ def compute_hash(server: Server) -> str:
             "cwd": server.cwd,
             "mcp_http": server.mcp_http,
             "rest_openapi": server.rest_openapi,
-            "auth_provider": server.auth_provider,
+            # auth_provider is intentionally excluded: it's enforced at the proxy
+            # per-request, so changing it must NOT restart the bridge process.
         }
     )
+
+
+def backfill_config_hashes(session: Session) -> int:
+    """Recompute ``config_hash`` for stored servers so rows written by an older
+    version (with a different hash-input shape — e.g. ``auth_provider`` was once
+    included) are rehashed to the current shape. Without this, the first
+    non-hash-affecting PATCH on an upgraded server would change the stored hash and
+    trigger a spurious bridge restart. Idempotent — only writes rows whose hash
+    actually changed. Returns how many were updated."""
+    changed = 0
+    for server in repo.list_servers(session):
+        new_hash = compute_hash(server)
+        if new_hash != server.config_hash:
+            repo.set_config_hash(session, server.id, new_hash)
+            changed += 1
+    return changed
+
+
+_AUTH_PROVIDERS = {"inherit", "none", "bearer"}
+
+
+def normalize_auth_providers(session: Session) -> int:
+    """Canonicalize stored ``auth_provider`` values from older versions (the old API
+    schema accepted any ``str``): ``"Bearer"`` / ``"bearer "`` -> ``"bearer"``, and an
+    unresolvable value -> ``"inherit"`` (the admin-controlled default). Without this,
+    the dashboard/copy snippets advertise a usable endpoint while ``resolve()`` 403s
+    the raw value on every ``/s/...`` request. Idempotent. Returns the count changed."""
+    changed = 0
+    for server in repo.list_servers(session):
+        norm = (server.auth_provider or "").strip().lower()
+        if norm not in _AUTH_PROVIDERS:
+            norm = "inherit"
+        if norm != server.auth_provider:
+            repo.set_auth_provider(session, server.id, norm)
+            changed += 1
+    return changed
 
 
 def _unique_slug(session: Session, name: str) -> str:
