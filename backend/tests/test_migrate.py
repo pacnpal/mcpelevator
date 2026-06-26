@@ -48,3 +48,20 @@ def test_add_missing_columns_is_idempotent():
     SQLModel.metadata.create_all(eng)  # full current schema -> nothing missing
     _add_missing_columns(eng)
     _add_missing_columns(eng)  # running again is a no-op, not an error
+
+
+def test_backfill_config_hashes_rehashes_stale_rows():
+    from sqlmodel import Session
+
+    from app.db import repo
+    from app.registry import service
+
+    eng = create_engine("sqlite://")
+    SQLModel.metadata.create_all(eng)
+    with Session(eng) as s:
+        srv = service.create_server(s, name="x", runner="npx", command="npx")
+        current = srv.config_hash
+        repo.set_config_hash(s, srv.id, "OLD-SHAPE")  # simulate an older hash-input shape
+        assert service.backfill_config_hashes(s) == 1
+        assert repo.get_server(s, srv.id).config_hash == current  # rehashed to current shape
+        assert service.backfill_config_hashes(s) == 0  # idempotent — no further writes

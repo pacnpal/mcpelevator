@@ -32,6 +32,22 @@ def compute_hash(server: Server) -> str:
     )
 
 
+def backfill_config_hashes(session: Session) -> int:
+    """Recompute ``config_hash`` for stored servers so rows written by an older
+    version (with a different hash-input shape — e.g. ``auth_provider`` was once
+    included) are rehashed to the current shape. Without this, the first
+    non-hash-affecting PATCH on an upgraded server would change the stored hash and
+    trigger a spurious bridge restart. Idempotent — only writes rows whose hash
+    actually changed. Returns how many were updated."""
+    changed = 0
+    for server in repo.list_servers(session):
+        new_hash = compute_hash(server)
+        if new_hash != server.config_hash:
+            repo.set_config_hash(session, server.id, new_hash)
+            changed += 1
+    return changed
+
+
 def _unique_slug(session: Session, name: str) -> str:
     base = slugify(name)
     slug = base

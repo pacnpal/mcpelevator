@@ -46,6 +46,17 @@ def save_server(session: Session, server: Server) -> Server:
     return server
 
 
+def set_config_hash(session: Session, server_id: str, config_hash: str) -> None:
+    """Update only the stored config_hash (no updated_at bump) — used by the boot
+    backfill so an upgraded row's hash matches the current input shape without
+    looking like a user edit."""
+    server = session.get(Server, server_id)
+    if server is not None:
+        server.config_hash = config_hash
+        session.add(server)
+        session.commit()
+
+
 def delete_server(session: Session, server_id: str) -> bool:
     server = session.get(Server, server_id)
     if server is None:

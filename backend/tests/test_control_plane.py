@@ -76,6 +76,28 @@ def test_summary_exposes_effective_auth():
                 client.delete(f"/api/servers/{sid}", headers=h)
 
 
+def test_summary_normalizes_legacy_auth_provider():
+    """A legacy row with a non-canonical auth_provider (the old schema accepted any
+    str) must not 500 GET /api/servers — the effective auth is coerced to the Literal."""
+    from sqlalchemy import text
+
+    with TestClient(app) as client:
+        h = {"host": "127.0.0.1"}
+        sid = client.post(
+            "/api/servers", json={"name": "lg", "command": "echo", "auth_provider": "bearer"}, headers=h
+        ).json()["id"]
+        try:
+            with Session(get_engine()) as s:  # simulate a legacy value the old str schema allowed
+                s.execute(text("UPDATE server SET auth_provider='Bearer' WHERE id=:i"), {"i": sid})
+                s.commit()
+            listing = client.get("/api/servers", headers=h)
+            assert listing.status_code == 200, listing.text
+            row = next(x for x in listing.json() if x["id"] == sid)
+            assert row["auth"] == "bearer"  # "Bearer" coerced, no response-validation 500
+        finally:
+            client.delete(f"/api/servers/{sid}", headers=h)
+
+
 def test_create_server_rejects_unknown_auth_provider():
     """A malformed auth_provider (trailing space / wrong case / unknown) is rejected
     at the API boundary (422), not stored and later failed-closed at request time."""

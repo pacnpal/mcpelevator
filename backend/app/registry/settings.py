@@ -41,7 +41,8 @@ def _normalize_hosts(hosts: Any) -> list[str]:
         host = host_only(h) if isinstance(h, str) else ""
         if not host:
             raise ValueError(f"invalid allowed host: {h!r}")
-        out.append(host)
+        if host not in out:  # dedupe post-normalization (e.g. host vs host:port); keep order
+            out.append(host)
     return out
 
 

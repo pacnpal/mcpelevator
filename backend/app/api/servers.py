@@ -50,6 +50,11 @@ def _summary(server: Server, sup, session: Session) -> ServerSummary:
     auth = server.auth_provider
     if auth == "inherit":
         auth = runtime_settings.default_auth_provider(session)
+    # Legacy DBs (the old schema accepted any string) may hold e.g. "Bearer"; coerce
+    # to the response model's Literal so a single bad row can't 500 the whole dashboard.
+    auth = (auth or "").strip().lower()
+    if auth not in ("none", "bearer"):
+        auth = "none"
     return ServerSummary(
         id=server.id,
         slug=server.slug,

@@ -27,12 +27,15 @@ from app.auth.middleware import host_allowed, is_loopback_client, request_allowl
 from app.config import get_settings
 from app.db import get_engine, init_db
 from app.proxy.router import router as proxy_router
+from app.registry import service
 from app.supervisor.supervisor import Supervisor
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    with Session(get_engine()) as session:
+        service.backfill_config_hashes(session)  # rehash upgraded rows -> no spurious restarts
     app.state.http = httpx.AsyncClient(timeout=None)  # no timeout: long-lived SSE streams
     supervisor = Supervisor()
     supervisor.boot_reset()  # observed runtime from a prior process is stale

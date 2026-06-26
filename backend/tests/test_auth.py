@@ -66,6 +66,10 @@ def test_settings_write_normalizes_and_rejects_allowed_hosts(session):
     assert runtime_settings.write(session, {"allowed_hosts": ["2001:db8::1"]})["allowed_hosts"] == [
         "2001:db8::1"
     ]
+    # duplicates after normalization (host vs host:port vs case) collapse, order kept
+    assert runtime_settings.write(
+        session, {"allowed_hosts": ["mcp.example.com", "mcp.example.com:8080", "MCP.example.com"]}
+    )["allowed_hosts"] == ["mcp.example.com"]
 
 
 def test_settings_write_is_atomic_on_invalid_patch(session):
