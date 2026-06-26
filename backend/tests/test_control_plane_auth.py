@@ -257,6 +257,19 @@ def test_cannot_revoke_last_control_token_while_enforced():
             _reset()
 
 
+def test_revoke_last_control_token_allowed_when_not_enforced():
+    """In local mode (not enforced) the last control token can be revoked: there's
+    nothing to lock out of, so the guard predicate is False and the delete succeeds."""
+    with TestClient(app) as client:
+        try:
+            _mint("control")
+            with Session(get_engine()) as s:
+                cid = next(t.id for t in repo.list_tokens(s) if t.scope == "control")
+            assert client.delete(f"/api/tokens/{cid}", headers=LOOPBACK).status_code == 204
+        finally:
+            _reset()
+
+
 def test_bearer_provider_requires_proxy_scope():
     """Scopes don't cross: the data-plane bearer check accepts only `proxy` tokens, so
     a `control` (admin) token can't be reused on /s even though both live in one table."""

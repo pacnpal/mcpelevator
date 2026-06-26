@@ -43,12 +43,14 @@ async def create_token(payload: TokenCreate, session: Session = Depends(get_sess
 
 @router.delete("/tokens/{token_id}", status_code=204)
 async def delete_token(token_id: str, session: Session = Depends(get_session)):
-    # When enforcement is on (and no MCPE_ADMIN_TOKEN break-glass), refuse to remove
-    # the last control token: it would gate /api, including minting a replacement, and
-    # lock the operator out. The check and delete are atomic in the repo so concurrent
-    # deletes can't both slip through.
-    keep_last_control = enforcement_enabled(session) and not get_settings().admin_token
-    result = repo.delete_token(session, token_id, keep_last_control=keep_last_control)
+    # Refuse to remove the last control token if it would leave /api enforced with no
+    # credential. The predicate is re-evaluated inside the delete transaction (after the
+    # write lock is taken) so a concurrent settings change that just enabled enforcement
+    # is seen, closing the delete/enable race. MCPE_ADMIN_TOKEN, if set, lifts the guard.
+    def protect(s: Session) -> bool:
+        return enforcement_enabled(s) and not get_settings().admin_token
+
+    result = repo.delete_token(session, token_id, protect_last_control=protect)
     if result == "not_found":
         raise HTTPException(status_code=404, detail="token not found")
     if result == "last_control":

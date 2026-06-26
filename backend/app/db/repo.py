@@ -7,6 +7,7 @@ and the reconciler read freely, but mutate only via these functions.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any, Optional
 
 from sqlalchemy import update
@@ -170,18 +171,30 @@ def get_token_by_hash(session: Session, token_hash: str) -> Optional[Token]:
     return session.exec(select(Token).where(Token.token_hash == token_hash)).first()
 
 
-def delete_token(session: Session, token_id: str, *, keep_last_control: bool = False) -> str:
-    """Delete a token; returns 'deleted', 'not_found', or 'last_control'. When
-    ``keep_last_control`` is set, atomically refuse to remove the last control token:
-    the delete and the post-delete recount run in one transaction (flush before
-    commit), so two concurrent deletes can't both pass the check and orphan auth."""
+def delete_token(
+    session: Session,
+    token_id: str,
+    *,
+    protect_last_control: Callable[[Session], bool] | None = None,
+) -> str:
+    """Delete a token; returns 'deleted', 'not_found', or 'last_control'.
+
+    When ``protect_last_control`` is given, the row is removed and the write lock taken
+    (``flush``) *before* the predicate runs, so a concurrent settings change that just
+    turned enforcement on is already visible (SQLite serializes writers). If the
+    predicate then returns True and no control token would remain, the transaction is
+    rolled back and 'last_control' is returned. This keeps the last admin token from
+    being deleted out from under enforcement, both for two concurrent deletes and for a
+    delete racing a settings change that enables enforcement."""
     token = session.get(Token, token_id)
     if token is None:
         return "not_found"
     session.delete(token)
-    if keep_last_control and token.scope == "control":
-        session.flush()
-        if session.exec(select(Token).where(Token.scope == "control")).first() is None:
+    if token.scope == "control" and protect_last_control is not None:
+        session.flush()  # take the write lock before re-reading enforcement state
+        if protect_last_control(session) and (
+            session.exec(select(Token).where(Token.scope == "control")).first() is None
+        ):
             session.rollback()
             return "last_control"
     session.commit()
