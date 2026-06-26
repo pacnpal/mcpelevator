@@ -1,7 +1,8 @@
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import tailwindcss from '@tailwindcss/vite';
 import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig, type ProxyOptions } from 'vite';
+import type { ProxyOptions } from 'vite';
+import { defineConfig } from 'vitest/config';
 
 // Dev server proxies API + streaming traffic to the FastAPI backend so the
 // SPA can call same-origin paths (/api, /s) in development exactly as it will
@@ -32,6 +33,13 @@ const devProxy: ProxyOptions['configure'] = (proxy) => {
 
 export default defineConfig({
 	plugins: [tailwindcss(), sveltekit()],
+	test: {
+		environment: 'jsdom',
+		environmentOptions: { jsdom: { url: 'http://localhost:5173/' } },
+		setupFiles: ['./src/test-setup.ts'],
+		globals: true,
+		include: ['src/**/*.{test,spec}.ts']
+	},
 	server: {
 		// Bind all interfaces (IPv4 + IPv6) so `localhost` resolves whether it
 		// maps to 127.0.0.1 or ::1, and so the dev UI is reachable from a phone

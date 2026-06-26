@@ -10,10 +10,12 @@
 	import type {
 		AuthProvider,
 		BindMode,
+		ControlPlaneAuth,
 		SettingsInfo,
 		TokenCreated,
 		TokenInfo
 	} from '$lib/types';
+	import { setToken } from '$lib/auth';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 
@@ -86,6 +88,26 @@
 		createdToken = null;
 	}
 
+	// Mint a control-scope admin token, reveal it once, and log in immediately so
+	// the operator stays signed in after turning enforcement on.
+	let generatingAdmin = $state(false);
+	async function handleGenerateAdmin() {
+		if (generatingAdmin) return;
+		generatingAdmin = true;
+		try {
+			const created = await createToken('admin', 'control');
+			createdToken = created;
+			const { token: _token, ...info } = created;
+			void _token;
+			tokens = [info, ...tokens];
+			setToken(created.token);
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			generatingAdmin = false;
+		}
+	}
+
 	// Revoke flow: a per-row confirm gate, then DELETE.
 	let confirmRevokeId = $state<string | null>(null);
 	let revokingId = $state<string | null>(null);
@@ -127,6 +149,15 @@
 		{ value: 'local', label: 'local', hint: 'Loopback only' },
 		{ value: 'expose', label: 'expose', hint: 'Reachable off-host' }
 	];
+	const CONTROL_AUTH_CHOICES: { value: ControlPlaneAuth; label: string; hint: string }[] = [
+		{ value: 'auto', label: 'auto', hint: 'Required when exposed' },
+		{ value: 'always', label: 'always', hint: 'Required even on loopback' }
+	];
+
+	// Turning on enforcement (expose, or always) needs an admin token to exist first,
+	// or the next /api call would lock the operator out. Derived from the token list,
+	// which reflects the backend (the source of truth for what tokens exist).
+	const hasControlToken = $derived(tokens.some((t) => t.scope === 'control'));
 
 	// Persist a settings patch (save-on-change), optimistically applying it and
 	// rolling back on failure so the controls never drift from the backend.
@@ -156,7 +187,20 @@
 
 	function setBindMode(value: BindMode) {
 		if (!settings || settings.bind_mode === value) return;
+		if (value === 'expose' && !hasControlToken) {
+			flashToast('Generate an admin token before exposing the control plane.');
+			return;
+		}
 		patchSettings({ bind_mode: value }, 'bind_mode');
+	}
+
+	function setControlPlaneAuth(value: ControlPlaneAuth) {
+		if (!settings || settings.control_plane_auth === value) return;
+		if (value === 'always' && !hasControlToken) {
+			flashToast('Generate an admin token before requiring control-plane auth.');
+			return;
+		}
+		patchSettings({ control_plane_auth: value }, 'control_plane_auth');
 	}
 
 	// ---- Allowed hosts editor -------------------------------------------------
@@ -322,6 +366,25 @@
 				</button>
 			</form>
 
+			<!-- Admin (control-plane) token: the credential the SPA logs in with. -->
+			<div
+				class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed border-[var(--color-line)] px-3 py-2.5"
+			>
+				<p class="min-w-0 text-xs text-[var(--color-ink-muted)]">
+					<span class="font-medium text-[var(--color-ink)]">Admin token.</span> The credential
+					you log in with when the control plane enforces auth.
+				</p>
+				<button
+					type="button"
+					onclick={handleGenerateAdmin}
+					disabled={generatingAdmin}
+					aria-busy={generatingAdmin}
+					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink)] transition hover:border-[var(--color-line-strong)] disabled:opacity-50"
+				>
+					Generate admin token
+				</button>
+			</div>
+
 			<!-- Token list -->
 			{#if tokens.length === 0}
 				<p
@@ -336,6 +399,14 @@
 							<div class="flex min-w-0 flex-col gap-0.5">
 								<span class="truncate text-sm font-medium text-[var(--color-ink)]">
 									{token.name}
+									{#if token.scope === 'control'}
+										<span
+											class="ml-1 rounded px-1.5 py-0.5 align-middle text-[10px] font-semibold"
+											style="background-color: color-mix(in oklab, var(--color-accent) 16%, transparent); color: var(--color-accent);"
+										>
+											control
+										</span>
+									{/if}
 								</span>
 								<span class="font-mono text-xs text-[var(--color-ink-dim)]">
 									{token.prefix}…
@@ -429,8 +500,11 @@
 				<legend class="text-sm font-medium text-[var(--color-ink)]">Bind mode</legend>
 				<div class="grid grid-cols-2 gap-2">
 					{#each BIND_CHOICES as choice (choice.value)}
+						{@const locked = choice.value === 'expose' && !hasControlToken}
 						<label
 							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+							class:cursor-not-allowed={locked}
+							class:opacity-60={locked}
 							style={settings.bind_mode === choice.value
 								? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
 								: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
@@ -463,6 +537,57 @@
 				<p class="text-xs text-[var(--color-ink-dim)]">
 					Host/Origin is always checked (DNS-rebinding defense): loopback is always
 					allowed; <code class="font-mono">expose</code> also allows the hosts below.
+				</p>
+			</fieldset>
+
+			<!-- Control-plane auth -->
+			<fieldset class="flex flex-col gap-2 border-0 p-0">
+				<legend class="text-sm font-medium text-[var(--color-ink)]">Control-plane auth</legend>
+				<div class="grid grid-cols-2 gap-2">
+					{#each CONTROL_AUTH_CHOICES as choice (choice.value)}
+						{@const locked = choice.value === 'always' && !hasControlToken}
+						<label
+							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+							class:cursor-not-allowed={locked}
+							class:opacity-60={locked}
+							style={settings.control_plane_auth === choice.value
+								? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+								: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+						>
+							<span class="flex items-center gap-2">
+								<input
+									type="radio"
+									name="control-plane-auth"
+									value={choice.value}
+									checked={settings.control_plane_auth === choice.value}
+									onchange={() => setControlPlaneAuth(choice.value)}
+									disabled={savingField === 'control_plane_auth'}
+									class="sr-only"
+								/>
+								<span
+									class="font-mono text-sm font-semibold"
+									style={settings.control_plane_auth === choice.value
+										? 'color: var(--color-accent);'
+										: 'color: var(--color-ink);'}
+								>
+									{choice.label}
+								</span>
+							</span>
+							<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+								{choice.hint}
+							</span>
+						</label>
+					{/each}
+				</div>
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					When required, <code class="font-mono">/api</code> needs an admin (control-scope)
+					token; the SPA logs in with it.
+					{#if !hasControlToken}
+						<span class="text-[var(--color-accent)]">
+							Generate an admin token above to enable
+							<code class="font-mono">expose</code> / <code class="font-mono">always</code>.
+						</span>
+					{/if}
 				</p>
 			</fieldset>
 

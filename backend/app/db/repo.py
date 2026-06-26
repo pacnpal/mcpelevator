@@ -177,3 +177,7 @@ def delete_token(session: Session, token_id: str) -> bool:
     session.delete(token)
     session.commit()
     return True
+
+
+def control_token_exists(session: Session) -> bool:
+    return session.exec(select(Token).where(Token.scope == "control")).first() is not None

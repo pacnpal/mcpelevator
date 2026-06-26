@@ -94,4 +94,5 @@ class Token(SQLModel, table=True):
     name: str
     token_hash: str = Field(index=True)
     prefix: str  # first chars of the plaintext, for UI identification only
+    scope: str = "proxy"  # 'proxy' (per-server data plane) | 'control' (the /api control plane)
     created_at: datetime = Field(default_factory=utcnow)

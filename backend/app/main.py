@@ -11,7 +11,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from sqlmodel import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -19,10 +19,12 @@ from starlette.requests import Request
 from starlette.staticfiles import StaticFiles
 
 from app import __version__
+from app.api import auth as auth_api
 from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
 from app.api import tokens as tokens_api
+from app.auth.control_plane import ensure_control_token, enforcement_enabled, require_control_plane
 from app.auth.middleware import host_allowed, is_loopback_client, request_allowlist
 from app.config import get_settings
 from app.db import get_engine, init_db
@@ -31,12 +33,36 @@ from app.registry import service
 from app.supervisor.supervisor import Supervisor
 
 
+def _bootstrap_control_plane_auth() -> None:
+    """On boot, if control-plane auth is enforced and no admin credential exists,
+    mint one control token and print it once so a headless/compose deployment is
+    not locked out. Idempotent across restarts (mints only when none exists); when
+    MCPE_ADMIN_TOKEN is set it is the credential and nothing is minted."""
+    with Session(get_engine()) as session:
+        if not enforcement_enabled(session):
+            return
+        if get_settings().admin_token:
+            print("[mcpelevator] control-plane auth is ON, using MCPE_ADMIN_TOKEN", flush=True)
+            return
+        token = ensure_control_token(session)
+    if not token:
+        return
+    bar = "=" * 72
+    print(
+        f"\n{bar}\n  mcpelevator control-plane auth is ON."
+        f"\n  Admin token (shown once, store it now):  {token}"
+        f"\n  Log in at:  {get_settings().base_url}/login\n{bar}\n",
+        flush=True,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     with Session(get_engine()) as session:
         service.normalize_auth_providers(session)  # canonicalize legacy auth_provider values
         service.backfill_config_hashes(session)  # rehash upgraded rows -> no spurious restarts
+    _bootstrap_control_plane_auth()
     app.state.http = httpx.AsyncClient(timeout=None)  # no timeout: long-lived SSE streams
     supervisor = Supervisor()
     supervisor.boot_reset()  # observed runtime from a prior process is stale
@@ -76,9 +102,9 @@ def create_app() -> FastAPI:
         # proxy (DNS-rebinding defense), in every mode: a loopback Host passes only
         # when the peer connects from loopback, and expose adds the configured hosts.
         # bind_mode controls only the network bind, so a DNS-rebound page could
-        # otherwise hit loopback and mint tokens / change settings. Per-request
-        # bearer auth on /api is a deferred v1 item (it would also have to gate the
-        # SPA itself).
+        # otherwise hit loopback and mint tokens / change settings. This is the
+        # first of two layers; require_control_plane (on the sensitive routers)
+        # adds per-request bearer auth when enforcement is on.
         if request.url.path == "/api" or request.url.path.startswith("/api/"):
             with Session(get_engine()) as session:
                 allowed = request_allowlist(session)
@@ -92,10 +118,14 @@ def create_app() -> FastAPI:
                 return JSONResponse({"detail": reason}, status_code=403)
         return await call_next(request)
 
+    # health and auth-status stay public; the sensitive routers require a control
+    # token when enforcement is on (require_control_plane is a no-op otherwise).
     app.include_router(health_api.router, prefix="/api")
-    app.include_router(servers_api.router, prefix="/api")
-    app.include_router(tokens_api.router, prefix="/api")
-    app.include_router(settings_api.router, prefix="/api")
+    app.include_router(auth_api.router, prefix="/api")
+    gated = [Depends(require_control_plane)]
+    app.include_router(servers_api.router, prefix="/api", dependencies=gated)
+    app.include_router(tokens_api.router, prefix="/api", dependencies=gated)
+    app.include_router(settings_api.router, prefix="/api", dependencies=gated)
     app.include_router(proxy_router)  # /s/{slug}/...
 
     fe = settings.frontend_dir

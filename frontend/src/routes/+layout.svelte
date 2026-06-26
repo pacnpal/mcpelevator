@@ -1,6 +1,9 @@
 <script lang="ts">
 	import '../app.css';
+	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
+	import { getAuthStatus } from '$lib/api';
+	import { clearToken } from '$lib/auth';
 	import favicon from '$lib/assets/favicon.svg';
 	import HealthDot from '$lib/components/HealthDot.svelte';
 	import Logo from '$lib/components/Logo.svelte';
@@ -8,6 +11,28 @@
 	let { children } = $props();
 
 	const onSettings = $derived(page.url.pathname.startsWith('/settings'));
+
+	// Auth guard: when the control plane enforces auth and this client isn't
+	// authenticated, bounce to /login. Re-runs on navigation (page.url is reactive);
+	// /api/auth/status is public, so this never loops.
+	let loggedIn = $state(false);
+	$effect(() => {
+		if (page.url.pathname === '/login') return;
+		getAuthStatus()
+			.then((status) => {
+				loggedIn = status.authenticated;
+				if (status.enforced && !status.authenticated) goto('/login');
+			})
+			.catch(() => {
+				// status is public and best-effort; a transient failure shouldn't trap the user.
+			});
+	});
+
+	function logout() {
+		clearToken();
+		loggedIn = false;
+		goto('/login');
+	}
 </script>
 
 <svelte:head>
@@ -55,7 +80,30 @@
 						/>
 					</svg>
 				</a>
-				<HealthDot />
+{#if loggedIn}
+						<button
+							type="button"
+							onclick={logout}
+							aria-label="Log out"
+							class="inline-flex size-9 items-center justify-center rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] text-[var(--color-ink-muted)] transition active:translate-y-px hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+						>
+							<svg
+								class="size-4"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								aria-hidden="true"
+							>
+								<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+								<polyline points="16 17 21 12 16 7" />
+								<line x1="21" x2="9" y1="12" y2="12" />
+							</svg>
+						</button>
+					{/if}
+					<HealthDot />
 			</div>
 		</div>
 	</header>

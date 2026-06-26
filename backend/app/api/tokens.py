@@ -17,7 +17,7 @@ router = APIRouter()
 @router.get("/tokens", response_model=list[TokenInfo])
 async def list_tokens(session: Session = Depends(get_session)):
     return [
-        TokenInfo(id=t.id, name=t.name, prefix=t.prefix, created_at=t.created_at)
+        TokenInfo(id=t.id, name=t.name, prefix=t.prefix, scope=t.scope, created_at=t.created_at)
         for t in repo.list_tokens(session)
     ]
 
@@ -30,11 +30,12 @@ async def create_token(payload: TokenCreate, session: Session = Depends(get_sess
         name=payload.name.strip() or "token",
         token_hash=hash_token(raw),
         prefix=raw[:12],
+        scope=payload.scope,
     )
     repo.create_token(session, token)
     return TokenCreated(
         id=token.id, name=token.name, prefix=token.prefix,
-        created_at=token.created_at, token=raw,
+        scope=token.scope, created_at=token.created_at, token=raw,
     )
 
 

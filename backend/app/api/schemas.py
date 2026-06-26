@@ -85,14 +85,19 @@ class ImportResult(BaseModel):
     skipped: list[ImportSkipped]
 
 
+TokenScope = Literal["proxy", "control"]
+
+
 class TokenCreate(BaseModel):
     name: str
+    scope: TokenScope = "proxy"
 
 
 class TokenInfo(BaseModel):
     id: str
     name: str
     prefix: str
+    scope: str = "proxy"
     created_at: datetime
 
 
@@ -104,9 +109,16 @@ class SettingsInfo(BaseModel):
     bind_mode: str
     allowed_hosts: list[str]
     default_auth_provider: str
+    control_plane_auth: str = "auto"
 
 
 class SettingsUpdate(BaseModel):
     bind_mode: Optional[str] = None
     allowed_hosts: Optional[list[str]] = None
     default_auth_provider: Optional[str] = None
+    control_plane_auth: Optional[str] = None
+
+
+class AuthStatus(BaseModel):
+    enforced: bool  # is a control token required right now?
+    authenticated: bool  # did this request carry a valid control token?
