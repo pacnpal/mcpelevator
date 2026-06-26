@@ -23,11 +23,10 @@ from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
 from app.api import tokens as tokens_api
-from app.auth.middleware import host_allowed
+from app.auth.middleware import host_allowed, request_allowlist
 from app.config import get_settings
 from app.db import get_engine, init_db
 from app.proxy.router import router as proxy_router
-from app.registry import settings as runtime_settings
 from app.supervisor.supervisor import Supervisor
 
 
@@ -77,8 +76,7 @@ def create_app() -> FastAPI:
         # also have to gate the SPA itself).
         if request.url.path.startswith("/api"):
             with Session(get_engine()) as session:
-                mode = runtime_settings.bind_mode(session)
-                allowed = runtime_settings.allowed_hosts(session) if mode == "expose" else []
+                allowed = request_allowlist(session)
             ok, reason = host_allowed(
                 request.headers.get("host", ""), request.headers.get("origin"), allowed
             )

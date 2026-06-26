@@ -21,6 +21,7 @@ from starlette.requests import Request
 
 from app.auth.bearer import BearerProvider
 from app.auth.none import NoneProvider
+from app.config import get_settings
 from app.db import get_engine
 from app.db.models import Server
 from app.registry import settings as runtime_settings
@@ -61,14 +62,27 @@ def host_allowed(host_header: str, origin_header: str | None, allowed: list[str]
     return True, ""
 
 
+def request_allowlist(session: Session) -> list[str]:
+    """Hosts allowed beyond loopback for the Host/Origin guard: the runtime allowlist
+    (only when ``bind_mode`` is ``expose``) plus the operator-configured public host.
+    ``MCPE_PUBLIC_BASE_URL`` is an explicit "this is my URL" declaration, so its host
+    is always trusted — otherwise the advertised public URL would 403 itself before
+    the operator could add it to the allowlist."""
+    mode = runtime_settings.bind_mode(session)
+    allowed = list(runtime_settings.allowed_hosts(session)) if mode == "expose" else []
+    public = get_settings().public_host
+    if public:
+        allowed.append(public)
+    return allowed
+
+
 async def enforce(request: Request, server: Server) -> None:
     with Session(get_engine()) as session:
-        mode = runtime_settings.bind_mode(session)
-        allowed = runtime_settings.allowed_hosts(session) if mode == "expose" else []
+        allowed = request_allowlist(session)
         default = runtime_settings.default_auth_provider(session)
 
-    # Always validate Host/Origin (DNS-rebinding defense). In local mode the
-    # allowlist is empty, so only loopback passes; expose adds the configured hosts.
+    # Always validate Host/Origin (DNS-rebinding defense). In local mode only loopback
+    # and the configured public host pass; expose adds the runtime allowlist too.
     ok, reason = host_allowed(request.headers.get("host", ""), request.headers.get("origin"), allowed)
     if not ok:
         raise HTTPException(status_code=403, detail=reason)

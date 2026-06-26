@@ -20,3 +20,8 @@ def test_base_url_keeps_real_host_and_prefers_public_url():
 def test_base_url_brackets_ipv6_literal_host():
     assert Settings(host="::1", port=8080, public_base_url=None).base_url == "http://[::1]:8080"
     assert Settings(host="fe80::1", port=8080, public_base_url=None).base_url == "http://[fe80::1]:8080"
+
+
+def test_public_host_extracts_configured_url():
+    assert Settings(public_base_url="https://mcp.example.com:8443/").public_host == "mcp.example.com"
+    assert Settings(public_base_url=None).public_host is None

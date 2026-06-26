@@ -13,6 +13,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.util import host_only
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MCPE_", env_file=".env", extra="ignore")
@@ -55,6 +57,13 @@ class Settings(BaseSettings):
         if ":" in host:  # bracket an IPv6 literal so the URL is well-formed
             host = f"[{host}]"
         return f"http://{host}:{self.port}"
+
+    @property
+    def public_host(self) -> str | None:
+        """Hostname of MCPE_PUBLIC_BASE_URL, if set — an operator-declared trusted
+        host that the Host/Origin guard always allows (so the advertised public URL
+        doesn't 403 itself before the operator can add it to the allowlist)."""
+        return host_only(self.public_base_url) if self.public_base_url else None
 
     @property
     def backend_root(self) -> Path:

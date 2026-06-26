@@ -78,6 +78,20 @@ def test_host_allowed_survives_malformed_stored_entry():
     assert ok2 is False
 
 
+def test_request_allowlist_trusts_configured_public_host(session, monkeypatch):
+    from types import SimpleNamespace
+
+    # local mode + a configured public host -> the public host is allowed, so the
+    # advertised public URL doesn't 403 itself before it can be allowlisted.
+    monkeypatch.setattr(
+        middleware, "get_settings", lambda: SimpleNamespace(public_host="mcp.example.com")
+    )
+    allowed = middleware.request_allowlist(session)
+    assert "mcp.example.com" in allowed
+    ok, _ = middleware.host_allowed("mcp.example.com", None, allowed)
+    assert ok is True
+
+
 @pytest.mark.parametrize(
     "host,origin,allowed,ok",
     [
