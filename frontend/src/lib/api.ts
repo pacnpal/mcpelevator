@@ -145,3 +145,8 @@ export function disableServer(id: string): Promise<ServerSummary> {
 		method: 'POST'
 	});
 }
+
+/** URL for a server's live log SSE stream (consumed via `EventSource`). */
+export function logStreamUrl(id: string): string {
+	return `${BASE}/servers/${encodeURIComponent(id)}/logs`;
+}

@@ -30,7 +30,8 @@ export default defineConfig({
 			'/api': {
 				target: BACKEND,
 				changeOrigin: true,
-				ws: true
+				ws: true,
+				configure: unbufferStream
 			},
 			// /s carries SSE / streaming responses. Disable buffering so events
 			// flush to the client as they arrive instead of being held back.

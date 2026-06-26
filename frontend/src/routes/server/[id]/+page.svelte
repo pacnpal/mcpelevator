@@ -10,6 +10,7 @@
 	} from '$lib/api';
 	import type { ServerDetail } from '$lib/types';
 	import CopyButton from '$lib/components/CopyButton.svelte';
+	import LogViewer from '$lib/components/LogViewer.svelte';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
 	import StatePill from '$lib/components/StatePill.svelte';
 	import Toast from '$lib/components/Toast.svelte';
@@ -350,6 +351,9 @@
 				</ul>
 			{/if}
 		</div>
+
+		<!-- Logs -->
+		<LogViewer serverId={server.id} serverState={server.state} />
 
 		<!-- Danger zone -->
 		<div

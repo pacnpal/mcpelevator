@@ -8,9 +8,12 @@ runtime row, then ``stopped``.
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlmodel import Session
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 from app.api.schemas import (
     ImportResult,
@@ -173,3 +176,51 @@ async def import_servers(
         created=[_summary(s, sup, session) for s in created],
         skipped=[ImportSkipped(**s) for s in skipped],
     )
+
+
+def _sse(obj: dict) -> str:
+    return f"data: {json.dumps(obj)}\n\n"
+
+
+@router.get("/servers/{server_id}/logs")
+async def stream_logs(server_id: str, request: Request, session: Session = Depends(get_session)):
+    """SSE stream of a server's live bridge logs.
+
+    Replays the in-memory backlog, then tails new lines until the client
+    disconnects or the server stops (a server's LogBuffer lives only while its
+    unit is running). 404 if the server row doesn't exist.
+    """
+    if repo.get_server(session, server_id) is None:
+        raise HTTPException(status_code=404, detail="server not found")
+
+    sup = request.app.state.supervisor
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",  # don't let any intermediary buffer the stream
+    }
+
+    async def events():
+        unit = sup.unit(server_id)
+        if unit is None:
+            yield _sse({"type": "info", "message": "server not running"})
+            return
+        # Subscribe BEFORE snapshotting, with no await between: append() runs on
+        # this same event loop, so no line can slip in to be missed or duplicated.
+        queue = unit.logs.subscribe()
+        backlog = unit.logs.snapshot()
+        try:
+            for line in backlog:
+                yield _sse({"line": line})
+            while True:
+                if await request.is_disconnected() or sup.unit(server_id) is not unit:
+                    break
+                try:
+                    line = await asyncio.wait_for(queue.get(), timeout=15)
+                    yield _sse({"line": line})
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"  # heartbeat keeps the connection alive
+        finally:
+            unit.logs.unsubscribe(queue)
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers=headers)
