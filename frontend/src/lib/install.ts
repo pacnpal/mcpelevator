@@ -13,19 +13,28 @@ export interface InstallOption {
 	kind: InstallKind;
 }
 
+// POSIX shell-quote an argument for the pasteable `claude`/`codex` commands, so a
+// URL/name with spaces, &, quotes, or $() can't break or alter what the shell runs.
+function shellQuote(value: string): string {
+	if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value;
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls'>): InstallOption[] {
 	const { mcp, rest } = server.urls;
 	const name = server.slug;
 	const out: InstallOption[] = [];
 
 	if (mcp) {
+		const qName = shellQuote(name);
+		const qMcp = shellQuote(mcp);
 		out.push({ kind: 'url', label: 'MCP URL', value: mcp });
 		out.push({
 			kind: 'cmd',
 			label: 'Claude Code',
-			value: `claude mcp add --transport http ${name} ${mcp}`
+			value: `claude mcp add --transport http ${qName} ${qMcp}`
 		});
-		out.push({ kind: 'cmd', label: 'Codex', value: `codex mcp add ${name} --url ${mcp}` });
+		out.push({ kind: 'cmd', label: 'Codex', value: `codex mcp add ${qName} --url ${qMcp}` });
 		out.push({
 			kind: 'json',
 			label: 'mcpServers',

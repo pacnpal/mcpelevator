@@ -79,7 +79,10 @@ class Supervisor:
             for server_id in list(self.units):
                 if server_id not in desired:
                     await self._stop(server_id)
-                    repo.upsert_runtime(session, server_id, state="stopped", pid=None, port=None)
+                    repo.upsert_runtime(
+                        session, server_id, state="stopped", pid=None, port=None,
+                        last_error=None, tools=[],
+                    )
 
             # start / restart desired
             for server_id, server in desired.items():

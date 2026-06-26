@@ -31,14 +31,18 @@ _PROVIDERS = {
 }
 
 # Loopback hostnames are always permitted (local-first default).
-_LOOPBACK = {"localhost", "127.0.0.1", "::1", ""}
+_LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 
 
 def resolve(server: Server, default: str):
     name = server.auth_provider
     if name == "inherit":
         name = default
-    return _PROVIDERS.get(name, _PROVIDERS["none"])
+    provider = _PROVIDERS.get(name)
+    if provider is None:
+        # Fail closed: an unknown/corrupted provider must NOT silently disable auth.
+        raise HTTPException(status_code=403, detail=f"unknown auth provider {name!r}")
+    return provider
 
 
 def _host_only(value: str) -> str:
@@ -54,9 +58,11 @@ def _host_only(value: str) -> str:
 
 def host_allowed(host_header: str, origin_header: str | None, allowed: list[str]) -> tuple[bool, str]:
     """Pure allowlist check (unit-tested). Returns (ok, reason-if-not)."""
-    allowset = _LOOPBACK | {h.strip().lower() for h in allowed}
+    allowset = _LOOPBACK | {h for h in (_host_only(x) for x in allowed) if h}
     host = _host_only(host_header)
-    if host and host not in allowset:
+    if not host:
+        return False, "missing host header"  # fail closed: no Host must not pass
+    if host not in allowset:
         return False, f"host {host!r} not in allowlist"
     if origin_header:
         origin = _host_only(origin_header)

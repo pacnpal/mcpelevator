@@ -26,10 +26,12 @@
 			ta.style.position = 'fixed';
 			ta.style.opacity = '0';
 			document.body.appendChild(ta);
-			ta.select();
-			const ok = document.execCommand('copy');
-			document.body.removeChild(ta);
-			return ok;
+			try {
+				ta.select();
+				return document.execCommand('copy');
+			} finally {
+				document.body.removeChild(ta); // always unmount, even if copy throws
+			}
 		} catch {
 			return false;
 		}
@@ -69,7 +71,7 @@
 		type="button"
 		onclick={() => (open = !open)}
 		disabled={options.length === 0}
-		aria-haspopup="menu"
+		aria-haspopup="true"
 		aria-expanded={open}
 		aria-label="Copy install snippet"
 		class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2.5 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition active:translate-y-px enabled:hover:border-[var(--color-line-strong)] enabled:hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-40"
@@ -106,7 +108,6 @@
 	{#if open}
 		<!-- Opens upward (the card footer sits at the bottom of the card). -->
 		<div
-			role="menu"
 			class="absolute bottom-full left-0 z-30 mb-1.5 w-60 overflow-hidden rounded-lg border border-[var(--color-line-strong)] bg-[var(--color-elevated)] py-1 shadow-2xl"
 		>
 			<p
@@ -117,7 +118,6 @@
 			{#each options as opt (opt.label)}
 				<button
 					type="button"
-					role="menuitem"
 					onclick={() => copy(opt)}
 					class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm text-[var(--color-ink-muted)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
 				>

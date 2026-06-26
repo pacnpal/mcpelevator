@@ -13,7 +13,9 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from sqlmodel import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import Request
 from starlette.staticfiles import StaticFiles
 
 from app import __version__
@@ -21,9 +23,11 @@ from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
 from app.api import tokens as tokens_api
+from app.auth.middleware import host_allowed
 from app.config import get_settings
-from app.db import init_db
+from app.db import get_engine, init_db
 from app.proxy.router import router as proxy_router
+from app.registry import settings as runtime_settings
 from app.supervisor.supervisor import Supervisor
 
 
@@ -62,6 +66,23 @@ class SPAStaticFiles(StaticFiles):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="mcpelevator", version=__version__, lifespan=lifespan)
+
+    @app.middleware("http")
+    async def _control_plane_allowlist(request: Request, call_next):
+        # In expose mode, guard the control plane (/api) with the same Host/Origin
+        # allowlist as the proxy (DNS-rebinding defense). Per-request bearer auth on
+        # /api is a deferred v1 item — it would also have to gate the SPA itself.
+        if request.url.path.startswith("/api"):
+            with Session(get_engine()) as session:
+                if runtime_settings.bind_mode(session) == "expose":
+                    ok, reason = host_allowed(
+                        request.headers.get("host", ""),
+                        request.headers.get("origin"),
+                        runtime_settings.allowed_hosts(session),
+                    )
+                    if not ok:
+                        return JSONResponse({"detail": reason}, status_code=403)
+        return await call_next(request)
 
     app.include_router(health_api.router, prefix="/api")
     app.include_router(servers_api.router, prefix="/api")

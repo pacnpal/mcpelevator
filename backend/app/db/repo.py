@@ -85,7 +85,9 @@ def reset_all_runtime(session: Session) -> None:
     where runtime from a prior process is stale). Servers with no runtime row are
     already 'stopped' to the API, so updating existing rows is sufficient."""
     session.execute(
-        update(ServerRuntime).values(state="stopped", pid=None, port=None, updated_at=utcnow())
+        update(ServerRuntime).values(
+            state="stopped", pid=None, port=None, last_error=None, tools=[], updated_at=utcnow()
+        )
     )
     session.commit()
 

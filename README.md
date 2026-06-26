@@ -84,7 +84,7 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 ## Status / roadmap
 
-**Working today:** add a server (guided form, or paste an `mcpServers` config) → supervise it → use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / delete / start / stop. **Per-client copy** menu (Claude Code, Codex, `mcpServers` / VS Code JSON, raw URLs). Runners: `npx`, `uvx`, `command`. **Auth**: per-server bearer tokens + a Host/Origin allowlist (Settings) for safe exposure.
+**Working today:** add a server (guided form, or paste an `mcpServers` config) → supervise it → use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / delete / start / stop. **Per-client copy** menu (Claude Code, Codex, `mcpServers` / VS Code JSON, raw URLs). Runners: `npx`, `uvx`, `command`. **Auth**: bearer tokens (global, opted in per server) + a Host/Origin allowlist (Settings) for safe exposure.
 
 **Planned:** REST/OpenAPI surface per server · `docker` runner · a server catalog · polish.
 

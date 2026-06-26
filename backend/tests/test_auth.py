@@ -44,6 +44,15 @@ def test_settings_defaults_and_write(session):
     assert runtime_settings.default_auth_provider(session) == "bearer"
 
 
+def test_settings_write_rejects_bad_enums(session):
+    with pytest.raises(ValueError):
+        runtime_settings.write(session, {"bind_mode": "bogus"})
+    with pytest.raises(ValueError):
+        runtime_settings.write(session, {"default_auth_provider": "bogus"})
+    # unknown keys are ignored; valid values still persist
+    assert runtime_settings.write(session, {"nope": "x", "bind_mode": "expose"})["bind_mode"] == "expose"
+
+
 @pytest.mark.parametrize(
     "host,origin,allowed,ok",
     [
@@ -55,6 +64,9 @@ def test_settings_defaults_and_write(session):
         ("evil.com", None, ["mcp.example.com"], False),
         ("mcp.example.com", "https://evil.com", ["mcp.example.com"], False),  # bad origin
         ("mcp.example.com", "https://mcp.example.com", ["mcp.example.com"], True),
+        ("", None, [], False),  # missing Host header must fail closed
+        ("", None, ["mcp.example.com"], False),
+        ("", "https://mcp.example.com", ["mcp.example.com"], False),  # good origin can't rescue a missing host
     ],
 )
 def test_host_allowed(host, origin, allowed, ok):
@@ -74,3 +86,12 @@ def test_resolve_provider():
     assert middleware.resolve(_server("bearer"), "none").name == "bearer"
     assert middleware.resolve(_server("inherit"), "bearer").name == "bearer"  # inherit -> default
     assert middleware.resolve(_server("inherit"), "none").name == "none"
+
+
+def test_resolve_unknown_provider_fails_closed():
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException):  # unknown provider must not silently disable auth
+        middleware.resolve(_server("bogus"), "none")
+    with pytest.raises(HTTPException):  # inherit -> unknown default
+        middleware.resolve(_server("inherit"), "bogus")

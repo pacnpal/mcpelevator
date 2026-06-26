@@ -133,7 +133,9 @@
 	let savingField = $state<keyof SettingsInfo | null>(null);
 
 	async function patchSettings(patch: Partial<SettingsInfo>, field: keyof SettingsInfo) {
-		if (!settings) return;
+		// Serialize saves: PATCH returns the full settings object, so an overlapping
+		// save could clobber a newer field. Allow one in-flight save at a time.
+		if (!settings || savingField) return;
 		const previous = settings;
 		settings = { ...settings, ...patch };
 		savingField = field;
