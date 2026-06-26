@@ -7,6 +7,8 @@ from sqlmodel import Session
 from starlette.responses import Response
 
 from app.api.schemas import TokenCreate, TokenCreated, TokenInfo
+from app.auth.control_plane import enforcement_enabled
+from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Token
 from app.util import hash_token, new_id, new_token
@@ -41,6 +43,21 @@ async def create_token(payload: TokenCreate, session: Session = Depends(get_sess
 
 @router.delete("/tokens/{token_id}", status_code=204)
 async def delete_token(token_id: str, session: Session = Depends(get_session)):
-    if not repo.delete_token(session, token_id):
+    token = session.get(Token, token_id)
+    if token is None:
         raise HTTPException(status_code=404, detail="token not found")
+    # Don't let the operator revoke the last control token while enforcement is on:
+    # it would gate /api (including minting a replacement) and lock them out. The
+    # MCPE_ADMIN_TOKEN break-glass, if set, makes revoking it safe.
+    if (
+        token.scope == "control"
+        and enforcement_enabled(session)
+        and not get_settings().admin_token
+        and repo.count_control_tokens(session) <= 1
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="cannot revoke the last admin token while control-plane auth is enforced",
+        )
+    repo.delete_token(session, token_id)
     return Response(status_code=204)

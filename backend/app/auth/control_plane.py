@@ -11,7 +11,7 @@ always-accepted break-glass credential.
 from __future__ import annotations
 
 import secrets
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import Depends, HTTPException
 from sqlmodel import Session
@@ -24,13 +24,37 @@ from app.registry import settings as runtime_settings
 from app.util import hash_token, new_id, new_token
 
 
-def enforcement_enabled(session: Session) -> bool:
-    """Is a control token required right now? Always under ``always``; under
-    ``auto`` only when exposed, so loopback-only deployments stay zero-config."""
-    mode = runtime_settings.control_plane_auth(session)
+def _enforced(mode: str, bind_mode: str, has_public_host: bool) -> bool:
+    """The enforcement decision, factored out so the request gate and the settings
+    lock-out guard agree. ``always`` always enforces; ``auto`` enforces once the
+    instance is reachable off-host: ``bind_mode='expose'`` OR a public base URL is
+    configured. ``request_allowlist`` already trusts that public host, so the token
+    gate must too, or a tunnel deployment would expose /api unauthenticated."""
     if mode == "always":
         return True
-    return mode == "auto" and runtime_settings.bind_mode(session) == "expose"
+    return mode == "auto" and (bind_mode == "expose" or has_public_host)
+
+
+def enforcement_enabled(session: Session) -> bool:
+    """Is a control token required right now? A loopback-only install with no public
+    URL stays zero-config; expose or a configured public URL turns the gate on."""
+    return _enforced(
+        runtime_settings.control_plane_auth(session),
+        runtime_settings.bind_mode(session),
+        get_settings().public_host is not None,
+    )
+
+
+def would_lock_out(session: Session, changes: dict[str, Any]) -> bool:
+    """True if applying ``changes`` would turn enforcement on while no admin
+    credential (a control token or ``MCPE_ADMIN_TOKEN``) exists. The next request,
+    including ``POST /api/tokens``, would then be gated with no way to mint the first
+    token, so the settings writer rejects such a change instead of locking out."""
+    if get_settings().admin_token or repo.control_token_exists(session):
+        return False
+    mode = changes.get("control_plane_auth", runtime_settings.control_plane_auth(session))
+    bind = changes.get("bind_mode", runtime_settings.bind_mode(session))
+    return _enforced(mode, bind, get_settings().public_host is not None)
 
 
 def _bearer(request: Request) -> str:

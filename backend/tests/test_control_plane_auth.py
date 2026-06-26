@@ -118,7 +118,9 @@ def test_break_glass_admin_token(monkeypatch):
     monkeypatch.setattr(
         control_plane,
         "get_settings",
-        lambda: SimpleNamespace(admin_token="mcpe_break_glass", base_url="http://127.0.0.1:8080"),
+        lambda: SimpleNamespace(
+            admin_token="mcpe_break_glass", base_url="http://127.0.0.1:8080", public_host=None
+        ),
     )
     with TestClient(app) as client:
         try:
@@ -187,3 +189,65 @@ def test_ensure_control_token_is_idempotent():
             assert len(controls) == 1
     finally:
         _reset()
+
+
+def test_public_base_url_enforces_under_auto(monkeypatch):
+    """A configured public URL is reachable off-host, so `auto` must enforce even
+    while bind_mode stays `local` (request_allowlist already trusts that host)."""
+    from types import SimpleNamespace
+
+    from app.auth import control_plane
+
+    init_db()
+    try:
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"bind_mode": "local", "control_plane_auth": "auto"})
+            monkeypatch.setattr(
+                control_plane, "get_settings",
+                lambda: SimpleNamespace(public_host=None, admin_token=None),
+            )
+            assert control_plane.enforcement_enabled(s) is False  # local + no public URL -> zero-config
+            monkeypatch.setattr(
+                control_plane, "get_settings",
+                lambda: SimpleNamespace(public_host="mcp.example.com", admin_token=None),
+            )
+            assert control_plane.enforcement_enabled(s) is True  # public URL -> enforced
+    finally:
+        _reset()
+
+
+def test_settings_patch_rejects_enabling_auth_without_a_token():
+    """Enabling enforcement with no admin token would gate the next request, including
+    POST /tokens, so the writer rejects it (the server-side backstop to the UI gate)."""
+    with TestClient(app) as client:
+        try:
+            assert client.patch(
+                "/api/settings", json={"control_plane_auth": "always"}, headers=LOOPBACK
+            ).status_code == 400
+            assert client.patch(
+                "/api/settings", json={"bind_mode": "expose"}, headers=LOOPBACK
+            ).status_code == 400
+            assert client.get("/api/auth/status", headers=LOOPBACK).json()["enforced"] is False  # nothing applied
+            _mint("control")  # once a control token exists, the same change is allowed
+            assert client.patch(
+                "/api/settings", json={"control_plane_auth": "always"}, headers=LOOPBACK
+            ).status_code == 200
+        finally:
+            _reset()
+
+
+def test_cannot_revoke_last_control_token_while_enforced():
+    """Revoking the only control token while enforcement is on would lock the operator
+    out of /api (including minting a replacement), so it is refused with 409."""
+    with TestClient(app) as client:
+        try:
+            control = _mint("control")
+            with Session(get_engine()) as s:
+                runtime_settings.write(s, {"control_plane_auth": "always"})
+                cid = next(t.id for t in repo.list_tokens(s) if t.scope == "control")
+            auth = _bearer(control)
+            assert client.delete(f"/api/tokens/{cid}", headers=auth).status_code == 409  # last one, refused
+            _mint("control")  # a second control token makes revoking the first safe
+            assert client.delete(f"/api/tokens/{cid}", headers=auth).status_code == 204
+        finally:
+            _reset()

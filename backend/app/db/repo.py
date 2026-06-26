@@ -181,3 +181,7 @@ def delete_token(session: Session, token_id: str) -> bool:
 
 def control_token_exists(session: Session) -> bool:
     return session.exec(select(Token).where(Token.scope == "control")).first() is not None
+
+
+def count_control_tokens(session: Session) -> int:
+    return len(session.exec(select(Token).where(Token.scope == "control")).all())
