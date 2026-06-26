@@ -137,9 +137,17 @@ def setting_set(session: Session, key: str, value: Any) -> None:
     session.commit()
 
 
-def setting_set_many(session: Session, items: dict[str, Any]) -> None:
-    """Set several settings atomically (one commit), so a multi-field settings
-    patch never partially applies. The caller validates before calling."""
+def setting_set_many(
+    session: Session,
+    items: dict[str, Any],
+    *,
+    guard: Callable[[Session], None] | None = None,
+) -> None:
+    """Set several settings atomically (one commit), so a multi-field patch never
+    partially applies. If ``guard`` is given it runs after the rows are staged and the
+    write lock is taken (``flush``), before commit, and may raise to abort (the
+    transaction is rolled back). Holding the lock means a concurrent writer, such as a
+    token delete, can't change the guard's view between the check and the commit."""
     for key, value in items.items():
         row = session.get(Setting, key)
         encoded = json.dumps(value)
@@ -148,6 +156,13 @@ def setting_set_many(session: Session, items: dict[str, Any]) -> None:
         else:
             row.value = encoded
         session.add(row)
+    if guard is not None:
+        session.flush()  # take the write lock before the guard re-reads state
+        try:
+            guard(session)
+        except Exception:
+            session.rollback()
+            raise
     session.commit()
 
 

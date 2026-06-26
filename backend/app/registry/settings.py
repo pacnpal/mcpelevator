@@ -7,6 +7,7 @@ and the default auth provider for servers set to ``inherit``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from sqlmodel import Session
@@ -48,7 +49,9 @@ def _normalize_hosts(hosts: Any) -> list[str]:
     return out
 
 
-def write(session: Session, changes: dict[str, Any]) -> dict[str, Any]:
+def write(
+    session: Session, changes: dict[str, Any], *, guard: Callable[[Session], None] | None = None
+) -> dict[str, Any]:
     """Persist setting changes. Validates + normalizes the WHOLE patch first, then
     commits it in one step (the SSOT write path), so a bad value can never reach
     storage and a multi-field patch never *partially* applies — a partial write
@@ -66,7 +69,7 @@ def write(session: Session, changes: dict[str, Any]) -> dict[str, Any]:
         if key == "allowed_hosts":
             value = _normalize_hosts(value)
         pending[key] = value
-    repo.setting_set_many(session, pending)
+    repo.setting_set_many(session, pending, guard=guard)
     return read_all(session)
 
 

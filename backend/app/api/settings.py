@@ -24,17 +24,21 @@ async def update_settings(
     payload: SettingsUpdate, request: Request, session: Session = Depends(get_session)
 ):
     changes = {k: v for k, v in payload.model_dump().items() if v is not None}
-    # Refuse to switch control-plane auth on unless THIS request already authenticates
-    # as control: otherwise the next request (including POST /tokens) would be gated and
-    # lock the operator out. The UI guards this too; this is the server-side backstop.
-    if would_lock_out(request, session, changes):
-        raise HTTPException(
-            status_code=400,
-            detail="authenticate with an admin token before enabling control-plane auth",
-        )
+
+    def guard(s: Session) -> None:
+        # Re-checked inside the settings write transaction (under the write lock), so a
+        # token delete racing this enable can't remove the last control credential
+        # between the check and the commit. Refuse to switch enforcement on unless THIS
+        # request still authenticates as control; the UI guards this too.
+        if would_lock_out(request, s, changes):
+            raise HTTPException(
+                status_code=400,
+                detail="authenticate with an admin token before enabling control-plane auth",
+            )
+
     try:
-        # All invariants (enum settings + the host allowlist) are enforced in the
-        # SSOT writer; surface its ValueError as a 400.
-        return SettingsInfo(**runtime_settings.write(session, changes))
+        # Invariants (enum settings + the host allowlist) are enforced in the SSOT
+        # writer; the guard runs under its write lock. Surface ValueError as a 400.
+        return SettingsInfo(**runtime_settings.write(session, changes, guard=guard))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
