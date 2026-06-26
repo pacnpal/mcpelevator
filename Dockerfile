@@ -29,6 +29,10 @@ RUN uv sync --no-dev --frozen 2>/dev/null || uv sync --no-dev
 COPY backend/ ./
 COPY --from=frontend /fe/build /app/frontend/build
 
+# Stamp the release version (passed by CI as APP_VERSION) into the package metadata.
+ARG APP_VERSION=0.1.0
+RUN sed -i "s/^__version__ = .*/__version__ = \"${APP_VERSION}\"/" app/__init__.py
+
 ENV PATH="/app/backend/.venv/bin:${PATH}" \
     MCPE_HOST=0.0.0.0 \
     MCPE_PORT=8080 \

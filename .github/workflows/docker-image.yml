@@ -1,0 +1,206 @@
+name: Build and Push Docker Image
+
+# Builds the multi-arch image and pushes it to GHCR (ghcr.io/pacnpal/mcpelevator).
+#
+# Runs on the self-hosted ARC runner. The `runs-on:` value below MUST match your
+# runner scale set's name — change `arc-runner` everywhere if yours differs.
+# The runner needs Docker available (DinD or a mounted socket) for buildx.
+#
+# Triggers: a published GitHub release (versioned tags), or a manual run from the
+# Actions tab (workflow_dispatch) which publishes a `dev`/input-named tag.
+#
+# No secrets required: GHCR auth uses the automatic GITHUB_TOKEN.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish for a manual build (e.g. dev, 0.1.0-rc1)"
+        required: false
+        default: dev
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  lint:
+    name: Lint Dockerfile
+    runs-on: arc-runner
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+          ignore: DL3008,DL3013
+
+  build:
+    name: Build and Push
+    runs-on: arc-runner
+    needs: lint
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
+        with:
+          platforms: ${{ env.PLATFORMS }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ github.event.inputs.tag }}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${VERSION}"
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ${{ env.GHCR_IMAGE }}
+          tags: |
+            # Versioned tags from a release tag (vX.Y.Z)
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+            # latest for a stable release, beta for a prerelease
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease }}
+            # the chosen tag for a manual (workflow_dispatch) build
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            # always a git short SHA tag
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=mcpelevator
+            org.opencontainers.image.description=Elevate stdio MCP servers into authenticated HTTP endpoints
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: APP_VERSION=${{ steps.version.outputs.version }}
+          # gha cache is fast (capped/evicted ~7 days); the GHCR :buildcache tag is
+          # durable so a build after eviction still skips the slow QEMU arm64 layers.
+          cache-from: |
+            type=gha
+            type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache
+          cache-to: |
+            type=gha,mode=max
+            type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+          provenance: true
+          sbom: true
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  scan:
+    name: Security Scan
+    runs-on: arc-runner
+    needs: build
+    continue-on-error: true
+    permissions:
+      security-events: write
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.GHCR_IMAGE }}@${{ needs.build.outputs.image-digest }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Upload Trivy results to the Security tab
+        uses: github/codeql-action/upload-sarif@ab28d5ce09b08e4700b2296d39d684a7ac71d1e7 # v4
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        with:
+          sarif_file: trivy-results.sarif
+
+  summary:
+    name: Build Summary
+    runs-on: arc-runner
+    needs: [build, scan]
+    if: always()
+    permissions: {}
+
+    steps:
+      - name: Generate summary
+        run: |
+          {
+            echo "## mcpelevator image"
+            echo ""
+            echo "- **Version:** \`${{ needs.build.outputs.version }}\`"
+            echo "- **Image:** \`${{ env.GHCR_IMAGE }}\`"
+            echo "- **Digest:** \`${{ needs.build.outputs.image-digest }}\`"
+            echo "- **Platforms:** \`${{ env.PLATFORMS }}\`"
+            echo ""
+            echo "Pull: \`docker pull ${{ env.GHCR_IMAGE }}:${{ needs.build.outputs.version }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
