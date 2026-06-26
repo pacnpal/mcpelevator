@@ -6,9 +6,10 @@
 		disableServer,
 		enableServer,
 		errorMessage,
-		getServer
+		getServer,
+		getSettings
 	} from '$lib/api';
-	import type { ServerDetail } from '$lib/types';
+	import type { AuthProvider, ServerDetail } from '$lib/types';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
@@ -22,6 +23,10 @@
 	let server = $state<ServerDetail | null>(null);
 	let loadState = $state<LoadState>('loading');
 	let loadError = $state<string | null>(null);
+
+	// Global default auth, used to resolve a server set to `inherit` so the
+	// endpoint hint reflects the *effective* auth. Best-effort; ignore failures.
+	let defaultAuth = $state<AuthProvider | null>(null);
 
 	let busy = $state(false); // enable/disable in flight
 	let deleting = $state(false);
@@ -84,6 +89,11 @@
 		// Re-run when the route id changes.
 		void id;
 		load();
+		// Resolve the global default once so `inherit` servers show their
+		// effective auth. Best-effort — endpoint hint just hides on failure.
+		getSettings()
+			.then((s) => (defaultAuth = s.default_auth_provider))
+			.catch(() => {});
 		const poll = setInterval(() => {
 			if (loadState === 'ready' && !busy && !deleting) load(true);
 		}, 4000);
@@ -94,6 +104,13 @@
 	});
 
 	const envEntries = $derived(Object.entries(server?.env ?? {}));
+
+	// Effective auth for the endpoint hint: `inherit` resolves to the global
+	// default. `null` while the default is still unknown for an inherit server.
+	const effectiveBearer = $derived(
+		server?.auth_provider === 'bearer' ||
+			(server?.auth_provider === 'inherit' && defaultAuth === 'bearer')
+	);
 
 	// Render the stored command + args as a single shell-ish line, quoting any
 	// token that contains whitespace so the spacing reads correctly.
@@ -256,10 +273,39 @@
 								{server.urls.rest ?? '— not exposed —'}
 							</p>
 						</div>
-						<CopyButton value={server.urls.rest} label="Copy" />
+					<CopyButton value={server.urls.rest} label="Copy" />
 					</div>
 				{/if}
 			</div>
+			{#if effectiveBearer}
+				<p
+					class="flex items-center gap-1.5 border-t border-[var(--color-line)] pt-2.5 text-xs text-[var(--color-ink-dim)]"
+				>
+					<svg
+						class="size-3.5 shrink-0 text-[var(--color-accent)]"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<rect x="5" y="11" width="14" height="10" rx="2" />
+						<path d="M8 11V7a4 4 0 0 1 8 0v4" />
+					</svg>
+					<span>
+						Requests need <code class="font-mono text-[var(--color-ink-muted)]">Authorization: Bearer &lt;token&gt;</code>.
+						Manage tokens in
+						<a
+							href="/settings"
+							class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
+						>
+							Settings
+						</a>.
+					</span>
+				</p>
+			{/if}
 		</div>
 
 		<!-- Configuration -->
