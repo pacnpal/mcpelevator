@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
+from starlette.requests import Request
 
 from app.api.schemas import SettingsInfo, SettingsUpdate
+from app.auth.control_plane import would_lock_out
 from app.db import get_session
 from app.registry import settings as runtime_settings
 
@@ -18,11 +20,25 @@ async def get_settings(session: Session = Depends(get_session)):
 
 
 @router.patch("/settings", response_model=SettingsInfo)
-async def update_settings(payload: SettingsUpdate, session: Session = Depends(get_session)):
+async def update_settings(
+    payload: SettingsUpdate, request: Request, session: Session = Depends(get_session)
+):
     changes = {k: v for k, v in payload.model_dump().items() if v is not None}
+
+    def guard(s: Session) -> None:
+        # Re-checked inside the settings write transaction (under the write lock), so a
+        # token delete racing this enable can't remove the last control credential
+        # between the check and the commit. Refuse to switch enforcement on unless THIS
+        # request still authenticates as control; the UI guards this too.
+        if would_lock_out(request, s, changes):
+            raise HTTPException(
+                status_code=400,
+                detail="authenticate with an admin token before enabling control-plane auth",
+            )
+
     try:
-        # All invariants (enum settings + the host allowlist) are enforced in the
-        # SSOT writer; surface its ValueError as a 400.
-        return SettingsInfo(**runtime_settings.write(session, changes))
+        # Invariants (enum settings + the host allowlist) are enforced in the SSOT
+        # writer; the guard runs under its write lock. Surface ValueError as a 400.
+        return SettingsInfo(**runtime_settings.write(session, changes, guard=guard))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

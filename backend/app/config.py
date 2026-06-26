@@ -10,7 +10,6 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.util import host_only
@@ -29,6 +28,9 @@ class Settings(BaseSettings):
     # guard — e.g. a reverse proxy or the Docker bridge gateway forwarding a
     # loopback-published port. Empty by default; a bare bind trusts only real loopback.
     trusted_proxies: str = ""
+    # Break-glass control-plane admin token: if set, it's always accepted on /api
+    # (constant-time compared). Recovers a lost minted token; handy for CI/automation.
+    admin_token: str | None = None
 
     # --- data / persistence ---
     data_dir: Path = Path("./data")

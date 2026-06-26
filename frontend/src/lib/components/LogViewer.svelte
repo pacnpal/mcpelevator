@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { logStreamUrl } from '$lib/api';
+	import { ApiError, streamLogs } from '$lib/api';
 	import type { ServerState } from '$lib/types';
 
 	let { serverId, serverState }: { serverId: string; serverState: ServerState } = $props();
@@ -33,6 +33,9 @@
 	}
 
 	// Stream lifecycle — reopens when serverId or the should-connect gate changes.
+	// Fetch + ReadableStream (not EventSource) so the Authorization header is sent.
+	// Reconnect is manual: a dropped stream retries after a short backoff until the
+	// effect is torn down (serverId change / unmount).
 	$effect(() => {
 		if (!shouldConnect) {
 			conn = 'idle';
@@ -40,30 +43,49 @@
 		}
 		notRunning = false;
 		conn = 'connecting';
-		const es = new EventSource(logStreamUrl(serverId));
-		es.onopen = () => (conn = 'live');
-		es.onmessage = (e) => {
-			let ev: { type?: string; line?: string };
-			try {
-				ev = JSON.parse(e.data);
-			} catch {
-				return;
+		const ctrl = new AbortController();
+		let stopped = false;
+
+		void (async () => {
+			while (!stopped && !ctrl.signal.aborted) {
+				try {
+					await streamLogs(
+						serverId,
+						{
+							onOpen: () => (conn = 'live'),
+							onLine: (line) => {
+								lines.push(line.replace(ANSI, ''));
+								if (lines.length > MAX_LINES) lines.splice(0, lines.length - MAX_LINES);
+							},
+							onInfo: () => {
+								// Server isn't running — stop instead of reconnect-looping.
+								notRunning = true;
+								conn = 'idle';
+								stopped = true;
+							}
+						},
+						ctrl.signal
+					);
+				} catch (err) {
+					if (stopped || ctrl.signal.aborted) return;
+					// A persistent client error (401/403/404) won't fix itself on retry, so
+					// stop instead of looping every second and spamming the server.
+					if (err instanceof ApiError && [401, 403, 404].includes(err.status)) {
+						conn = 'idle';
+						stopped = true;
+						return;
+					}
+					conn = 'reconnecting';
+				}
+				if (stopped || ctrl.signal.aborted) return;
+				await new Promise((r) => setTimeout(r, 1000)); // backoff before re-opening
 			}
-			if (ev.type === 'info') {
-				// Server isn't running — close so EventSource doesn't reconnect-loop.
-				notRunning = true;
-				conn = 'idle';
-				es.close();
-				return;
-			}
-			if (typeof ev.line === 'string') {
-				lines.push(ev.line.replace(ANSI, ''));
-				if (lines.length > MAX_LINES) lines.splice(0, lines.length - MAX_LINES);
-			}
+		})();
+
+		return () => {
+			stopped = true;
+			ctrl.abort();
 		};
-		// Transient drops: let the browser auto-retry (don't close).
-		es.onerror = () => (conn = 'reconnecting');
-		return () => es.close();
 	});
 
 	// Auto-scroll to the newest line unless the user has scrolled up.

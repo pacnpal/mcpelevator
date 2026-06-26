@@ -39,6 +39,7 @@ def test_settings_defaults_and_write(session):
         "bind_mode": "local",
         "allowed_hosts": [],
         "default_auth_provider": "none",
+        "control_plane_auth": "auto",
     }
     runtime_settings.write(
         session,

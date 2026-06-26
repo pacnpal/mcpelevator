@@ -85,11 +85,14 @@ class ImportResult(BaseModel):
     skipped: list[ImportSkipped]
 
 
+ControlPlaneAuthMode = Literal["auto", "always"]
+
+
 class TokenCreate(BaseModel):
     name: str
-    # "all" (default) authorizes every bearer-protected server; otherwise a
-    # server id restricts the token to that one server. Validated against the
-    # existing servers in the endpoint (a dangling id is a 400).
+    # "all" (default) authorizes every bearer-protected server; a server id restricts
+    # the token to that one server; "control" mints a control-plane admin token.
+    # Validated in the endpoint (a dangling server id is a 400).
     scope: str = "all"
 
 
@@ -109,9 +112,16 @@ class SettingsInfo(BaseModel):
     bind_mode: str
     allowed_hosts: list[str]
     default_auth_provider: str
+    control_plane_auth: ControlPlaneAuthMode = "auto"
 
 
 class SettingsUpdate(BaseModel):
     bind_mode: Optional[str] = None
     allowed_hosts: Optional[list[str]] = None
     default_auth_provider: Optional[str] = None
+    control_plane_auth: Optional[ControlPlaneAuthMode] = None
+
+
+class AuthStatus(BaseModel):
+    enforced: bool  # is a control token required right now?
+    authenticated: bool  # did this request carry a valid control token?

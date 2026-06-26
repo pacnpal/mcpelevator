@@ -7,7 +7,11 @@
 // Every helper throws `ApiError` on a non-2xx response, carrying the status
 // and the response body text so callers can surface a useful message.
 
+import { goto } from '$app/navigation';
+
+import { clearToken, getToken } from './auth';
 import type {
+	AuthStatus,
 	HealthResponse,
 	ImportResult,
 	ServerCreate,
@@ -67,12 +71,25 @@ export function errorMessage(err: unknown): string {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const url = `${BASE}${path}`;
+	const token = getToken();
 	const res = await fetch(url, {
-		headers: { accept: 'application/json', ...init?.headers },
-		...init
+		...init,
+		headers: {
+			accept: 'application/json',
+			...(token ? { authorization: `Bearer ${token}` } : {}),
+			...init?.headers
+		}
 	});
 
 	if (!res.ok) {
+		// A 401 means the token is missing or stale: drop it and bounce to /login
+		// (unless already there) so the SPA doesn't sit on a dead session.
+		if (res.status === 401) {
+			clearToken();
+			if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+				void goto('/login');
+			}
+		}
 		let body = '';
 		try {
 			body = await res.text();
@@ -149,12 +166,83 @@ export function disableServer(id: string): Promise<ServerSummary> {
 	});
 }
 
-/** URL for a server's live log SSE stream (consumed via `EventSource`). */
-export function logStreamUrl(id: string): string {
-	return `${BASE}/servers/${encodeURIComponent(id)}/logs`;
+export interface LogStreamHandlers {
+	onOpen?: () => void;
+	onLine: (line: string) => void;
+	onInfo: () => void; // the server isn't running — the stream is done
+}
+
+/**
+ * Stream a server's live logs over fetch + ReadableStream so the `Authorization`
+ * header is sent (`EventSource` can't set headers). Parses SSE `data:` frames into
+ * the same `{ type, line }` objects the backend emits. Resolves when the stream
+ * ends; rejects on transport/abort errors. Pass an `AbortSignal` to stop it.
+ */
+export async function streamLogs(
+	id: string,
+	handlers: LogStreamHandlers,
+	signal: AbortSignal
+): Promise<void> {
+	const url = `${BASE}/servers/${encodeURIComponent(id)}/logs`;
+	const token = getToken();
+	const res = await fetch(url, {
+		headers: {
+			accept: 'text/event-stream',
+			...(token ? { authorization: `Bearer ${token}` } : {})
+		},
+		signal
+	});
+	if (res.status === 401) {
+		clearToken();
+		if (typeof window !== 'undefined' && window.location.pathname !== '/login') void goto('/login');
+		throw new ApiError(401, '', url);
+	}
+	if (!res.ok || !res.body) throw new ApiError(res.status, '', url);
+	handlers.onOpen?.();
+
+	const reader = res.body.getReader();
+	const decoder = new TextDecoder();
+	let buffer = '';
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) return;
+		buffer += decoder.decode(value, { stream: true });
+		// SSE frames are separated by a blank line. Accept LF and CRLF endings
+		// (FastAPI / sse-starlette and some proxies emit CRLF); otherwise the parser
+		// would never find a boundary and the buffer would grow without bound.
+		for (;;) {
+			const boundary = /\r\n\r\n|\n\n/.exec(buffer);
+			if (!boundary) break;
+			const frame = buffer.slice(0, boundary.index);
+			buffer = buffer.slice(boundary.index + boundary[0].length);
+			const data = frame
+				.split(/\r\n|\n/)
+				.filter((l) => l.startsWith('data:'))
+				.map((l) => l.slice(5).trim())
+				.join('\n');
+			if (!data) continue;
+			let ev: { type?: string; line?: string };
+			try {
+				ev = JSON.parse(data);
+			} catch {
+				continue;
+			}
+			if (ev.type === 'info') {
+				handlers.onInfo();
+				return;
+			}
+			if (typeof ev.line === 'string') handlers.onLine(ev.line);
+		}
+	}
 }
 
 // ---- Auth & settings (M5) ---------------------------------------------------
+
+/** Whether control-plane auth is enforced, and whether this client is authenticated.
+ * Public endpoint — the layout calls it to decide whether to redirect to /login. */
+export function getAuthStatus(): Promise<AuthStatus> {
+	return request<AuthStatus>('/auth/status');
+}
 
 /** Current security settings: bind mode, allowed hosts, default auth provider. */
 export function getSettings(): Promise<SettingsInfo> {

@@ -113,11 +113,22 @@ export type AuthProvider = 'none' | 'bearer';
 /** Per-server auth selector: `inherit` resolves to the global default. */
 export type ServerAuthProvider = 'inherit' | 'none' | 'bearer';
 
+/** Control-plane auth enforcement: `auto` requires a token only when exposed,
+ * `always` requires one even on loopback. */
+export type ControlPlaneAuth = 'auto' | 'always';
+
 /** Shape of GET/PATCH /api/settings. */
 export interface SettingsInfo {
 	bind_mode: BindMode;
 	allowed_hosts: string[];
 	default_auth_provider: AuthProvider;
+	control_plane_auth: ControlPlaneAuth;
+}
+
+/** Shape of GET /api/auth/status — the SPA polls this to decide whether to show login. */
+export interface AuthStatus {
+	enforced: boolean;
+	authenticated: boolean;
 }
 
 /** A bearer access token, listed by prefix only (the plaintext is never re-shown). */
@@ -125,7 +136,7 @@ export interface TokenInfo {
 	id: string;
 	name: string;
 	prefix: string;
-	/** `'all'` authorizes every bearer-protected server; otherwise a server id. */
+	/** `'all'` = every bearer-protected server; a server id = that one server; `'control'` = a control-plane admin token. */
 	scope: string;
 	created_at: string;
 }

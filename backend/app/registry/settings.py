@@ -7,6 +7,7 @@ and the default auth provider for servers set to ``inherit``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from sqlmodel import Session
@@ -18,6 +19,7 @@ DEFAULTS: dict[str, Any] = {
     "bind_mode": "local",  # 'local' | 'expose'
     "allowed_hosts": [],  # Host/Origin allowlist when exposed (DNS-rebinding defense)
     "default_auth_provider": "none",  # 'none' | 'bearer' — used when a server is 'inherit'
+    "control_plane_auth": "auto",  # 'auto' (require iff expose) | 'always' — gates /api bearer auth
 }
 
 
@@ -27,6 +29,7 @@ def read_all(session: Session) -> dict[str, Any]:
 
 _MODES = {"local", "expose"}
 _PROVIDERS = {"none", "bearer"}
+_CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
 
 
 def _normalize_hosts(hosts: Any) -> list[str]:
@@ -46,7 +49,9 @@ def _normalize_hosts(hosts: Any) -> list[str]:
     return out
 
 
-def write(session: Session, changes: dict[str, Any]) -> dict[str, Any]:
+def write(
+    session: Session, changes: dict[str, Any], *, guard: Callable[[Session], None] | None = None
+) -> dict[str, Any]:
     """Persist setting changes. Validates + normalizes the WHOLE patch first, then
     commits it in one step (the SSOT write path), so a bad value can never reach
     storage and a multi-field patch never *partially* applies — a partial write
@@ -59,10 +64,12 @@ def write(session: Session, changes: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"invalid bind_mode: {value!r}")
         if key == "default_auth_provider" and value not in _PROVIDERS:
             raise ValueError(f"invalid default_auth_provider: {value!r}")
+        if key == "control_plane_auth" and value not in _CONTROL_PLANE_AUTH_MODES:
+            raise ValueError(f"invalid control_plane_auth: {value!r}")
         if key == "allowed_hosts":
             value = _normalize_hosts(value)
         pending[key] = value
-    repo.setting_set_many(session, pending)
+    repo.setting_set_many(session, pending, guard=guard)
     return read_all(session)
 
 
@@ -76,3 +83,7 @@ def allowed_hosts(session: Session) -> list[str]:
 
 def default_auth_provider(session: Session) -> str:
     return repo.setting_get(session, "default_auth_provider", DEFAULTS["default_auth_provider"])
+
+
+def control_plane_auth(session: Session) -> str:
+    return repo.setting_get(session, "control_plane_auth", DEFAULTS["control_plane_auth"])

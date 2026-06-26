@@ -3,6 +3,7 @@
 		createToken,
 		deleteToken,
 		errorMessage,
+		getAuthStatus,
 		getSettings,
 		listServers,
 		listTokens,
@@ -11,11 +12,13 @@
 	import type {
 		AuthProvider,
 		BindMode,
+		ControlPlaneAuth,
 		ServerSummary,
 		SettingsInfo,
 		TokenCreated,
 		TokenInfo
 	} from '$lib/types';
+	import { clearToken, setToken } from '$lib/auth';
 	import { isLoopbackHost, normalizeHost } from '$lib/host';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import Toast from '$lib/components/Toast.svelte';
@@ -38,15 +41,24 @@
 	let settings = $state<SettingsInfo | null>(null);
 	let tokens = $state<TokenInfo[]>([]);
 	let servers = $state<ServerSummary[]>([]);
+	// Whether THIS browser holds a working control token (not just whether one exists
+	// in the backend). That's what decides if enabling enforcement would lock us out.
+	let hasUsableAdminCredential = $state(false);
 
 	async function load() {
 		loadState = 'loading';
 		loadError = null;
 		try {
-			const [s, t, srv] = await Promise.all([getSettings(), listTokens(), listServers()]);
+			const [s, t, srv, auth] = await Promise.all([
+				getSettings(),
+				listTokens(),
+				listServers(),
+				getAuthStatus()
+			]);
 			settings = s;
 			tokens = t;
 			servers = srv;
+			hasUsableAdminCredential = auth.authenticated;
 			loadState = 'ready';
 		} catch (err) {
 			loadState = 'error';
@@ -109,6 +121,27 @@
 		createdToken = null;
 	}
 
+	// Mint a control-scope admin token, reveal it once, and log in immediately so
+	// the operator stays signed in after turning enforcement on.
+	let generatingAdmin = $state(false);
+	async function handleGenerateAdmin() {
+		if (generatingAdmin) return;
+		generatingAdmin = true;
+		try {
+			const created = await createToken('admin', 'control');
+			createdToken = created;
+			const { token: _token, ...info } = created;
+			void _token;
+			tokens = [info, ...tokens];
+			setToken(created.token);
+			hasUsableAdminCredential = true; // we now hold a working control token
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			generatingAdmin = false;
+		}
+	}
+
 	// Revoke flow: a per-row confirm gate, then DELETE.
 	let confirmRevokeId = $state<string | null>(null);
 	let revokingId = $state<string | null>(null);
@@ -121,6 +154,11 @@
 			tokens = tokens.filter((t) => t.id !== id);
 			// If the revealed token was the one revoked, drop the reveal too.
 			if (createdToken?.id === id) createdToken = null;
+			// Revoking may have invalidated this browser's stored admin token, so re-check
+			// rather than leaving expose/always enabled on a now-dead credential.
+			const auth = await getAuthStatus();
+			hasUsableAdminCredential = auth.authenticated;
+			if (!auth.authenticated) clearToken();
 			flashToast('Token revoked', 'info');
 		} catch (err) {
 			flashToast(errorMessage(err));
@@ -149,6 +187,10 @@
 	const BIND_CHOICES: { value: BindMode; label: string; hint: string }[] = [
 		{ value: 'local', label: 'local', hint: 'Loopback only' },
 		{ value: 'expose', label: 'expose', hint: 'Reachable off-host' }
+	];
+	const CONTROL_AUTH_CHOICES: { value: ControlPlaneAuth; label: string; hint: string }[] = [
+		{ value: 'auto', label: 'auto', hint: 'Required when exposed' },
+		{ value: 'always', label: 'always', hint: 'Required even on loopback' }
 	];
 
 	// Persist a settings patch (save-on-change), optimistically applying it and
@@ -213,6 +255,11 @@
 
 	function setBindMode(value: BindMode) {
 		if (!settings || settings.bind_mode === value) return;
+		if (value === 'expose' && !hasUsableAdminCredential) {
+			flashToast('Generate an admin token before exposing the control plane.');
+			resetBindRadios();
+			return;
+		}
 		// Switching to `local` from a non-loopback host locks this tab out (local
 		// allows loopback only). Hold the change behind an explicit confirm.
 		if (value === 'local' && !onLoopback) {
@@ -221,6 +268,15 @@
 			return;
 		}
 		patchSettings({ bind_mode: value }, 'bind_mode');
+	}
+
+	function setControlPlaneAuth(value: ControlPlaneAuth) {
+		if (!settings || settings.control_plane_auth === value) return;
+		if (value === 'always' && !hasUsableAdminCredential) {
+			flashToast('Generate an admin token before requiring control-plane auth.');
+			return;
+		}
+		patchSettings({ control_plane_auth: value }, 'control_plane_auth');
 	}
 
 	function confirmSwitchToLocal() {
@@ -428,6 +484,25 @@
 				</button>
 			</form>
 
+			<!-- Admin (control-plane) token: the credential the SPA logs in with. -->
+			<div
+				class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed border-[var(--color-line)] px-3 py-2.5"
+			>
+				<p class="min-w-0 text-xs text-[var(--color-ink-muted)]">
+					<span class="font-medium text-[var(--color-ink)]">Admin token.</span> The credential
+					you log in with when the control plane enforces auth.
+				</p>
+				<button
+					type="button"
+					onclick={handleGenerateAdmin}
+					disabled={generatingAdmin}
+					aria-busy={generatingAdmin}
+					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink)] transition hover:border-[var(--color-line-strong)] disabled:opacity-50"
+				>
+					Generate admin token
+				</button>
+			</div>
+
 			<!-- Token list -->
 			{#if tokens.length === 0}
 				<p
@@ -444,17 +519,27 @@
 									<span class="truncate text-sm font-medium text-[var(--color-ink)]">
 										{token.name}
 									</span>
-									<span
-										class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
-										title={token.scope === 'all'
-											? 'Authorizes every bearer-protected server'
-											: 'Authorizes only this server'}
-										style={token.scope === 'all'
-											? 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'
-											: 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'}
-									>
-										{scopeLabel(token.scope)}
-									</span>
+									{#if token.scope === 'control'}
+										<span
+											class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
+											title="Control-plane admin token, authenticates /api"
+											style="border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);"
+										>
+											control
+										</span>
+									{:else}
+										<span
+											class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
+											title={token.scope === 'all'
+												? 'Authorizes every bearer-protected server'
+												: 'Authorizes only this server'}
+											style={token.scope === 'all'
+												? 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'
+												: 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'}
+										>
+											{scopeLabel(token.scope)}
+										</span>
+									{/if}
 								</span>
 								<span class="font-mono text-xs text-[var(--color-ink-dim)]">
 									{token.prefix}…
@@ -548,8 +633,11 @@
 				<legend class="text-sm font-medium text-[var(--color-ink)]">Bind mode</legend>
 				<div class="grid grid-cols-2 gap-2">
 					{#each BIND_CHOICES as choice (choice.value)}
+						{@const locked = choice.value === 'expose' && !hasUsableAdminCredential}
 						<label
 							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+							class:cursor-not-allowed={locked}
+							class:opacity-60={locked}
 							style={settings.bind_mode === choice.value
 								? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
 								: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
@@ -621,6 +709,57 @@
 				<p class="text-xs text-[var(--color-ink-dim)]">
 					Host/Origin is always checked (DNS-rebinding defense): loopback is always
 					allowed; <code class="font-mono">expose</code> also allows the hosts below.
+				</p>
+			</fieldset>
+
+			<!-- Control-plane auth -->
+			<fieldset class="flex flex-col gap-2 border-0 p-0">
+				<legend class="text-sm font-medium text-[var(--color-ink)]">Control-plane auth</legend>
+				<div class="grid grid-cols-2 gap-2">
+					{#each CONTROL_AUTH_CHOICES as choice (choice.value)}
+						{@const locked = choice.value === 'always' && !hasUsableAdminCredential}
+						<label
+							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+							class:cursor-not-allowed={locked}
+							class:opacity-60={locked}
+							style={settings.control_plane_auth === choice.value
+								? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+								: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+						>
+							<span class="flex items-center gap-2">
+								<input
+									type="radio"
+									name="control-plane-auth"
+									value={choice.value}
+									checked={settings.control_plane_auth === choice.value}
+									onchange={() => setControlPlaneAuth(choice.value)}
+									disabled={savingField === 'control_plane_auth'}
+									class="sr-only"
+								/>
+								<span
+									class="font-mono text-sm font-semibold"
+									style={settings.control_plane_auth === choice.value
+										? 'color: var(--color-accent);'
+										: 'color: var(--color-ink);'}
+								>
+									{choice.label}
+								</span>
+							</span>
+							<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+								{choice.hint}
+							</span>
+						</label>
+					{/each}
+				</div>
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					When required, <code class="font-mono">/api</code> needs an admin (control-scope)
+					token; the SPA logs in with it.
+					{#if !hasUsableAdminCredential}
+						<span class="text-[var(--color-accent)]">
+							Generate an admin token above to enable
+							<code class="font-mono">expose</code> / <code class="font-mono">always</code>.
+						</span>
+					{/if}
 				</p>
 			</fieldset>
 

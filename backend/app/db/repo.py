@@ -7,6 +7,7 @@ and the reconciler read freely, but mutate only via these functions.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any, Optional
 
 from sqlalchemy import update
@@ -136,9 +137,17 @@ def setting_set(session: Session, key: str, value: Any) -> None:
     session.commit()
 
 
-def setting_set_many(session: Session, items: dict[str, Any]) -> None:
-    """Set several settings atomically (one commit), so a multi-field settings
-    patch never partially applies. The caller validates before calling."""
+def setting_set_many(
+    session: Session,
+    items: dict[str, Any],
+    *,
+    guard: Callable[[Session], None] | None = None,
+) -> None:
+    """Set several settings atomically (one commit), so a multi-field patch never
+    partially applies. If ``guard`` is given it runs after the rows are staged and the
+    write lock is taken (``flush``), before commit, and may raise to abort (the
+    transaction is rolled back). Holding the lock means a concurrent writer, such as a
+    token delete, can't change the guard's view between the check and the commit."""
     for key, value in items.items():
         row = session.get(Setting, key)
         encoded = json.dumps(value)
@@ -147,6 +156,13 @@ def setting_set_many(session: Session, items: dict[str, Any]) -> None:
         else:
             row.value = encoded
         session.add(row)
+    if guard is not None:
+        session.flush()  # take the write lock before the guard re-reads state
+        try:
+            guard(session)
+        except Exception:
+            session.rollback()
+            raise
     session.commit()
 
 
@@ -170,10 +186,35 @@ def get_token_by_hash(session: Session, token_hash: str) -> Optional[Token]:
     return session.exec(select(Token).where(Token.token_hash == token_hash)).first()
 
 
-def delete_token(session: Session, token_id: str) -> bool:
+def delete_token(
+    session: Session,
+    token_id: str,
+    *,
+    protect_last_control: Callable[[Session], bool] | None = None,
+) -> str:
+    """Delete a token; returns 'deleted', 'not_found', or 'last_control'.
+
+    When ``protect_last_control`` is given, the row is removed and the write lock taken
+    (``flush``) *before* the predicate runs, so a concurrent settings change that just
+    turned enforcement on is already visible (SQLite serializes writers). If the
+    predicate then returns True and no control token would remain, the transaction is
+    rolled back and 'last_control' is returned. This keeps the last admin token from
+    being deleted out from under enforcement, both for two concurrent deletes and for a
+    delete racing a settings change that enables enforcement."""
     token = session.get(Token, token_id)
     if token is None:
-        return False
+        return "not_found"
     session.delete(token)
+    if token.scope == "control" and protect_last_control is not None:
+        session.flush()  # take the write lock before re-reading enforcement state
+        if protect_last_control(session) and (
+            session.exec(select(Token).where(Token.scope == "control")).first() is None
+        ):
+            session.rollback()
+            return "last_control"
     session.commit()
-    return True
+    return "deleted"
+
+
+def control_token_exists(session: Session) -> bool:
+    return session.exec(select(Token).where(Token.scope == "control")).first() is not None
