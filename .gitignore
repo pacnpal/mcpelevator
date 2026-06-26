@@ -2,6 +2,7 @@
 backend/.venv/
 **/__pycache__/
 *.py[cod]
+.pytest_cache/
 
 # node / sveltekit
 frontend/node_modules/
