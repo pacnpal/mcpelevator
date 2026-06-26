@@ -1,4 +1,4 @@
-import type { IncomingMessage } from 'node:http';
+import type { ClientRequest, IncomingMessage } from 'node:http';
 import tailwindcss from '@tailwindcss/vite';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig, type ProxyOptions } from 'vite';
@@ -8,10 +8,20 @@ import { defineConfig, type ProxyOptions } from 'vite';
 // in production, where the backend serves the built static files.
 const BACKEND = 'http://127.0.0.1:8080';
 
-// Strip buffering hints from streamed (SSE) responses so the proxy flushes
-// events to the client as they arrive. Typed via ProxyOptions so it stays
-// correct regardless of the bundled http-proxy types.
-const unbufferStream: ProxyOptions['configure'] = (proxy) => {
+// Dev proxy configuration:
+//
+// 1. Rewrite the request Origin to the backend (loopback). When the dev UI is
+//    opened from a LAN IP (mobile testing), `changeOrigin` rewrites Host to the
+//    backend but the browser Origin stays `http://<lan-ip>:5173`, which the
+//    backend's Host/Origin guard rejects. Rewriting Origin to loopback lets dev
+//    requests through — it's the developer's own machine, and prod (the built SPA
+//    served by FastAPI) is same-origin, so it is unaffected.
+// 2. Strip buffering hints from streamed (SSE) responses so the proxy flushes
+//    events to the client as they arrive.
+const devProxy: ProxyOptions['configure'] = (proxy) => {
+	proxy.on('proxyReq', (proxyReq: ClientRequest) => {
+		proxyReq.setHeader('origin', BACKEND);
+	});
 	proxy.on('proxyRes', (proxyRes: IncomingMessage) => {
 		proxyRes.headers['cache-control'] = 'no-cache, no-transform';
 		proxyRes.headers['x-accel-buffering'] = 'no';
@@ -31,7 +41,7 @@ export default defineConfig({
 				target: BACKEND,
 				changeOrigin: true,
 				ws: true,
-				configure: unbufferStream
+				configure: devProxy
 			},
 			// /s carries SSE / streaming responses. Disable buffering so events
 			// flush to the client as they arrive instead of being held back.
@@ -39,7 +49,7 @@ export default defineConfig({
 				target: BACKEND,
 				changeOrigin: true,
 				ws: true,
-				configure: unbufferStream
+				configure: devProxy
 			}
 		}
 	}
