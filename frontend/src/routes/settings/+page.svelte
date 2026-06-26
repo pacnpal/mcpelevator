@@ -157,12 +157,17 @@
 	// non-loopback host, two actions would 403 our own /api calls and brick the UI:
 	// removing that host from the allowlist, or switching to `local` (which ignores
 	// the allowlist entirely). Loopback always recovers, so we confirm — not block.
-	// Browser-only SPA (ssr/prerender disabled), so `window` is always defined here.
-	const browserHost = normalizeHost(window.location.hostname);
+	// Browser-only SPA (ssr/prerender disabled), so `window` is defined in practice.
+	// The `typeof window` guards keep this module import-safe in a non-browser context
+	// too (a node test runner, or if SSR is ever turned on). When absent, browserHost
+	// is empty so `onLoopback` is false — the fail-safe direction (guards armed).
+	const browserHost =
+		typeof window !== 'undefined' ? normalizeHost(window.location.hostname) : '';
 	const onLoopback = isLoopbackHost(browserHost);
-	const loopbackUrl = `${window.location.protocol}//localhost${
-		window.location.port ? `:${window.location.port}` : ''
-	}`;
+	const loopbackUrl =
+		typeof window !== 'undefined'
+			? `${window.location.protocol}//localhost${window.location.port ? `:${window.location.port}` : ''}`
+			: '';
 
 	let confirmBindLocal = $state(false);
 	let confirmRemoveHost = $state<string | null>(null);
@@ -547,7 +552,7 @@
 							<button
 								type="button"
 								onclick={confirmSwitchToLocal}
-								disabled={savingField === 'bind_mode'}
+								disabled={savingField !== null}
 								class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
 								style="background-color: var(--color-state-failed);"
 							>
@@ -668,7 +673,7 @@
 							<button
 								type="button"
 								onclick={confirmRemoveCurrentHost}
-								disabled={savingField === 'allowed_hosts'}
+								disabled={savingField !== null}
 								class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
 								style="background-color: var(--color-state-failed);"
 							>
