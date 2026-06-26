@@ -208,16 +208,19 @@ export async function streamLogs(
 		const { done, value } = await reader.read();
 		if (done) return;
 		buffer += decoder.decode(value, { stream: true });
-		let sep: number;
-		// SSE frames are separated by a blank line; a frame may carry several `data:` lines.
-		while ((sep = buffer.indexOf('\n\n')) !== -1) {
-			const data = buffer
-				.slice(0, sep)
-				.split('\n')
+		// SSE frames are separated by a blank line. Accept LF and CRLF endings
+		// (FastAPI / sse-starlette and some proxies emit CRLF); otherwise the parser
+		// would never find a boundary and the buffer would grow without bound.
+		for (;;) {
+			const boundary = /\r\n\r\n|\n\n/.exec(buffer);
+			if (!boundary) break;
+			const frame = buffer.slice(0, boundary.index);
+			buffer = buffer.slice(boundary.index + boundary[0].length);
+			const data = frame
+				.split(/\r\n|\n/)
 				.filter((l) => l.startsWith('data:'))
 				.map((l) => l.slice(5).trim())
 				.join('\n');
-			buffer = buffer.slice(sep + 2);
 			if (!data) continue;
 			let ev: { type?: string; line?: string };
 			try {

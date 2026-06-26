@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { goto } from '$app/navigation';
 
-import { ApiError, getHealth } from './api';
+import { ApiError, getHealth, streamLogs } from './api';
 import { getToken, setToken } from './auth';
 
 // api.ts imports goto at module load; mock the SvelteKit module so the 401 path
@@ -49,5 +49,24 @@ describe('api request()', () => {
 		await expect(getHealth()).rejects.toBeInstanceOf(ApiError);
 		expect(getToken()).toBeNull();
 		expect(goto).toHaveBeenCalledWith('/login');
+	});
+
+	it('parses both CRLF- and LF-framed SSE log frames', async () => {
+		const enc = new TextEncoder();
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(enc.encode('data: {"line":"a"}\r\n\r\n')); // CRLF
+				controller.enqueue(enc.encode('data: {"line":"b"}\n\n')); // LF
+				controller.close();
+			}
+		});
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, body }));
+		const lines: string[] = [];
+		await streamLogs(
+			'srv',
+			{ onLine: (l) => lines.push(l), onInfo: () => {} },
+			new AbortController().signal
+		);
+		expect(lines).toEqual(['a', 'b']);
 	});
 });

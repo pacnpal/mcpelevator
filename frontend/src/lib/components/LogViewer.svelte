@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { streamLogs } from '$lib/api';
+	import { ApiError, streamLogs } from '$lib/api';
 	import type { ServerState } from '$lib/types';
 
 	let { serverId, serverState }: { serverId: string; serverState: ServerState } = $props();
@@ -66,8 +66,15 @@
 						},
 						ctrl.signal
 					);
-				} catch {
+				} catch (err) {
 					if (stopped || ctrl.signal.aborted) return;
+					// A persistent client error (401/403/404) won't fix itself on retry, so
+					// stop instead of looping every second and spamming the server.
+					if (err instanceof ApiError && [401, 403, 404].includes(err.status)) {
+						conn = 'idle';
+						stopped = true;
+						return;
+					}
 					conn = 'reconnecting';
 				}
 				if (stopped || ctrl.signal.aborted) return;

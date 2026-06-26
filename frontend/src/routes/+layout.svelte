@@ -17,7 +17,10 @@
 	// /api/auth/status is public, so this never loops.
 	let loggedIn = $state(false);
 	$effect(() => {
-		if (page.url.pathname === '/login') return;
+		if (page.url.pathname === '/login') {
+			loggedIn = false; // on the login page there's no session yet — hide "Log out"
+			return;
+		}
 		getAuthStatus()
 			.then((status) => {
 				loggedIn = status.authenticated;
