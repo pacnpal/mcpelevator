@@ -87,3 +87,23 @@ def test_create_server_rejects_unknown_auth_provider():
                 headers={"host": "127.0.0.1"},
             )
             assert r.status_code == 422, (bad, r.status_code, r.text)
+
+
+def test_api_trusts_docker_gateway_when_configured(monkeypatch):
+    """With MCPE_TRUSTED_PROXIES set (the compose default), a request forwarded by the
+    Docker bridge gateway (a non-loopback peer) may use Host: localhost — modelling a
+    fresh `docker compose up` reaching the loopback-published port, which 403'd before."""
+    from types import SimpleNamespace
+
+    from app.auth import middleware
+
+    public = middleware.get_settings().public_host
+    monkeypatch.setattr(
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(trusted_proxies="172.16.0.0/12", public_host=public),
+    )
+    with TestClient(app, client=("172.17.0.1", 5000)) as client:  # bridge gateway peer
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"bind_mode": "local", "allowed_hosts": []})
+        assert client.get("/api/health", headers={"host": "localhost"}).status_code == 200

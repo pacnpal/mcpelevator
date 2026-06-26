@@ -15,6 +15,12 @@ services:
       # - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - MCPE_HOST=0.0.0.0
+      # The container binds 0.0.0.0, so a host-loopback request arrives from the
+      # Docker bridge gateway (not 127.0.0.1). Trust that gateway range so the UI
+      # works over the loopback-published port above. SAFE only while the port is
+      # published to 127.0.0.1 (the default); if you publish off-host (e.g.
+      # "8080:8080"), drop this and use expose mode + auth instead.
+      - MCPE_TRUSTED_PROXIES=172.16.0.0/12
       # Absolute URL clients use to reach this instance (behind a tunnel/proxy):
       # - MCPE_PUBLIC_BASE_URL=https://mcp.example.com
     restart: unless-stopped

@@ -16,6 +16,7 @@ happen here, in one place, for every exposed request:
 
 from __future__ import annotations
 
+import functools
 import ipaddress
 
 from fastapi import HTTPException
@@ -51,24 +52,44 @@ def resolve(server: Server, default: str):
     return provider
 
 
-def is_loopback_client(request: Request) -> bool:
-    """True when the request's peer address is loopback.
+@functools.lru_cache(maxsize=4)
+def _trusted_networks(raw: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """Parse MCPE_TRUSTED_PROXIES (comma-separated CIDRs), skipping malformed entries.
+    Cached by the raw string (the env is fixed for the process lifetime)."""
+    nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for cidr in raw.split(","):
+        cidr = cidr.strip()
+        if not cidr:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            pass
+    return tuple(nets)
 
-    A ``Host: localhost`` / ``127.0.0.1`` header must not be trusted from an
-    off-host client (e.g. a Docker ``0.0.0.0`` bind reachable from the LAN), so the
-    implicit loopback allowance in ``host_allowed`` is granted only to real loopback
-    peers.
+
+def is_loopback_client(request: Request) -> bool:
+    """True when the request's peer is loopback (or a configured trusted proxy).
+
+    A ``Host: localhost`` / ``127.0.0.1`` header must not be trusted from an off-host
+    client (e.g. a Docker ``0.0.0.0`` bind reachable from the LAN), so the implicit
+    loopback allowance in ``host_allowed`` is granted only to real loopback peers — or
+    to a peer inside ``MCPE_TRUSTED_PROXIES`` (e.g. the Docker bridge gateway that
+    forwards a loopback-published port, where the real source is already loopback).
     """
     client = request.client
     if client is None:
         return False
     try:
-        return ipaddress.ip_address(client.host).is_loopback
+        ip = ipaddress.ip_address(client.host)
     except ValueError:
         # Non-IP peer host. Starlette's TestClient reports "testclient", and a bare
         # "localhost" can appear in some setups; neither can be forged as a TCP
         # source address by a remote client, so treat them as loopback.
         return client.host in {"localhost", "testclient"}
+    if ip.is_loopback:
+        return True
+    return any(ip in net for net in _trusted_networks(get_settings().trusted_proxies))
 
 
 def host_allowed(

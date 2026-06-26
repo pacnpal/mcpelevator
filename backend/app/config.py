@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     # Absolute base URL clients use to reach this instance. If unset, derived from
     # host:port. Set MCPE_PUBLIC_BASE_URL to e.g. https://mcp.example.com behind a tunnel.
     public_base_url: str | None = None
+    # Comma-separated CIDRs whose peer IPs are treated as loopback for the Host/Origin
+    # guard — e.g. a reverse proxy or the Docker bridge gateway forwarding a
+    # loopback-published port. Empty by default; a bare bind trusts only real loopback.
+    trusted_proxies: str = ""
 
     # --- data / persistence ---
     data_dir: Path = Path("./data")

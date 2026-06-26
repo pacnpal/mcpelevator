@@ -159,6 +159,22 @@ def test_is_loopback_client():
     assert middleware.is_loopback_client(req(None)) is False  # no client info
 
 
+def test_is_loopback_client_trusts_configured_proxy(monkeypatch):
+    from types import SimpleNamespace
+
+    def req(peer):
+        return SimpleNamespace(client=SimpleNamespace(host=peer))
+
+    # Without a trusted-proxy config, a Docker bridge gateway peer is NOT loopback.
+    assert middleware.is_loopback_client(req("172.17.0.1")) is False
+    # With MCPE_TRUSTED_PROXIES set (the compose default), that gateway is trusted.
+    monkeypatch.setattr(
+        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="172.16.0.0/12")
+    )
+    assert middleware.is_loopback_client(req("172.17.0.1")) is True
+    assert middleware.is_loopback_client(req("10.0.0.5")) is False  # outside the trusted range
+
+
 def _server(provider: str) -> Server:
     return Server(
         id="x", slug="x", name="x", runner="npx", command="npx", args=[], env={},
