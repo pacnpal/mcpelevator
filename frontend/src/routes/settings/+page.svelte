@@ -16,7 +16,7 @@
 		TokenCreated,
 		TokenInfo
 	} from '$lib/types';
-	import { setToken } from '$lib/auth';
+	import { clearToken, setToken } from '$lib/auth';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 
@@ -126,6 +126,11 @@
 			tokens = tokens.filter((t) => t.id !== id);
 			// If the revealed token was the one revoked, drop the reveal too.
 			if (createdToken?.id === id) createdToken = null;
+			// Revoking may have invalidated this browser's stored admin token, so re-check
+			// rather than leaving expose/always enabled on a now-dead credential.
+			const auth = await getAuthStatus();
+			hasUsableAdminCredential = auth.authenticated;
+			if (!auth.authenticated) clearToken();
 			flashToast('Token revoked', 'info');
 		} catch (err) {
 			flashToast(errorMessage(err));
