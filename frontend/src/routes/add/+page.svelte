@@ -1,9 +1,171 @@
 <script lang="ts">
-	// Stub target for the dashboard "Add server" CTA. The real add-server flow
-	// (runner config, transports, env) lands in a later milestone.
+	import { goto } from '$app/navigation';
+	import { createServer, errorMessage, importServers } from '$lib/api';
+	import type {
+		ImportResult,
+		McpServerEntry,
+		ServerCreate
+	} from '$lib/types';
+	import ServerForm from '$lib/components/ServerForm.svelte';
+	import Toast from '$lib/components/Toast.svelte';
+
+	type Tab = 'manual' | 'import';
+	let tab = $state<Tab>('manual');
+
+	// ---- Toast ----------------------------------------------------------------
+	let toast = $state<{ message: string; tone: 'error' | 'info' } | null>(null);
+	let toastTimer: ReturnType<typeof setTimeout> | undefined;
+	function flashToast(message: string, tone: 'error' | 'info' = 'error') {
+		toast = { message, tone };
+		clearTimeout(toastTimer);
+		toastTimer = setTimeout(() => (toast = null), 6000);
+	}
+
+	// ---- Manual create --------------------------------------------------------
+	let creating = $state(false);
+	let createError = $state<string | null>(null);
+
+	async function handleCreate(payload: ServerCreate) {
+		if (creating) return;
+		creating = true;
+		createError = null;
+		try {
+			const created = await createServer(payload);
+			await goto(`/server/${created.id}`);
+		} catch (err) {
+			createError = errorMessage(err);
+			creating = false;
+		}
+	}
+
+	// ---- Import ---------------------------------------------------------------
+	const EXAMPLE = `{
+  "mcpServers": {
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    }
+  }
+}`;
+
+	let importText = $state('');
+	let importing = $state(false);
+
+	type PreviewEntry = {
+		name: string;
+		command: string;
+		args: string[];
+		skip: boolean;
+		reason?: string;
+	};
+
+	type Parsed =
+		| { ok: true; entries: PreviewEntry[]; payload: unknown }
+		| { ok: false; error: string }
+		| { empty: true };
+
+	// Normalize both `{ mcpServers: {...} }` and a bare `{ name: {...} }` map.
+	function extractMap(raw: unknown): Record<string, McpServerEntry> | null {
+		if (!raw || typeof raw !== 'object') return null;
+		const obj = raw as Record<string, unknown>;
+		const inner =
+			'mcpServers' in obj && obj.mcpServers && typeof obj.mcpServers === 'object'
+				? (obj.mcpServers as Record<string, unknown>)
+				: obj;
+		// Validate every value is an object (entry-shaped).
+		const out: Record<string, McpServerEntry> = {};
+		for (const [k, v] of Object.entries(inner)) {
+			if (!v || typeof v !== 'object') return null;
+			out[k] = v as McpServerEntry;
+		}
+		return out;
+	}
+
+	const parsed = $derived<Parsed>(parseImport(importText));
+
+	function parseImport(text: string): Parsed {
+		const trimmed = text.trim();
+		if (!trimmed) return { empty: true };
+		let raw: unknown;
+		try {
+			raw = JSON.parse(trimmed);
+		} catch (err) {
+			return {
+				ok: false,
+				error: err instanceof Error ? err.message : 'Invalid JSON'
+			};
+		}
+		const map = extractMap(raw);
+		if (!map) {
+			return {
+				ok: false,
+				error:
+					'Expected a `mcpServers` object (or a bare name → config map).'
+			};
+		}
+		const names = Object.keys(map);
+		if (names.length === 0) {
+			return { ok: false, error: 'No servers found in the JSON.' };
+		}
+		const entries: PreviewEntry[] = names.map((name) => {
+			const e = map[name];
+			// Remote-style entries (url / type) are skipped server-side.
+			const remote = typeof e.url === 'string' || typeof e.type === 'string';
+			return {
+				name,
+				command: e.command ?? '',
+				args: Array.isArray(e.args) ? e.args : [],
+				skip: remote || !e.command,
+				reason: remote
+					? 'Remote entry (url/type) — not a local runner'
+					: !e.command
+						? 'No command specified'
+						: undefined
+			};
+		});
+		return { ok: true, entries, payload: raw };
+	}
+
+	const creatableCount = $derived(
+		parsed && 'ok' in parsed && parsed.ok
+			? parsed.entries.filter((e) => !e.skip).length
+			: 0
+	);
+
+	async function handleImport() {
+		if (importing) return;
+		if (!('ok' in parsed) || !parsed.ok) return;
+		importing = true;
+		try {
+			const result: ImportResult = await importServers(parsed.payload);
+			summarizeImport(result);
+			await goto('/');
+		} catch (err) {
+			flashToast(errorMessage(err), 'error');
+			importing = false;
+		}
+	}
+
+	function summarizeImport(result: ImportResult) {
+		const c = result.created.length;
+		const s = result.skipped.length;
+		let msg = c === 1 ? 'Imported 1 server' : `Imported ${c} servers`;
+		if (s > 0) {
+			const reasons = result.skipped
+				.map((sk) => `${sk.name} (${sk.reason})`)
+				.join(', ');
+			msg += ` · skipped ${s}: ${reasons}`;
+		}
+		flashToast(msg, c > 0 ? 'info' : 'error');
+	}
+
+	function loadExample() {
+		importText = EXAMPLE;
+	}
 </script>
 
-<section class="mx-auto flex max-w-xl flex-col items-center gap-6 py-16 text-center">
+<section class="mx-auto flex w-full max-w-2xl flex-col gap-7">
+	<!-- Back -->
 	<a
 		href="/"
 		class="inline-flex items-center gap-1.5 self-start text-sm text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
@@ -23,31 +185,199 @@
 		Back to servers
 	</a>
 
-	<div
-		class="flex size-16 items-center justify-center rounded-2xl border border-[var(--color-line-strong)] bg-[var(--color-surface-2)]"
-	>
-		<svg
-			class="size-8 text-[var(--color-accent)]"
-			viewBox="0 0 24 24"
-			fill="none"
-			stroke="currentColor"
-			stroke-width="2"
-			stroke-linecap="round"
-			stroke-linejoin="round"
-			aria-hidden="true"
-		>
-			<path d="M12 5v14M5 12h14" />
-		</svg>
-	</div>
-
-	<div class="space-y-2">
-		<h1 class="text-xl font-semibold tracking-tight text-[var(--color-ink)]">
-			Add server — coming soon
+	<!-- Heading -->
+	<div>
+		<h1 class="text-2xl font-semibold tracking-tight text-[var(--color-ink)]">
+			Add a server
 		</h1>
-		<p class="text-sm text-[var(--color-ink-muted)]">
-			The flow to register a new MCP server is on its way. You'll point
-			mcpelevator at an npx, uvx, command, or docker runner and it handles the
-			rest.
+		<p class="mt-1 text-sm text-[var(--color-ink-muted)]">
+			Point mcpelevator at a runner, or import an existing
+			<code class="font-mono text-xs">mcpServers</code> config.
 		</p>
 	</div>
+
+	<!-- Tabs -->
+	<div
+		class="inline-flex w-full gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] p-1 sm:w-auto sm:self-start"
+		role="tablist"
+		aria-label="Add server method"
+	>
+		<button
+			type="button"
+			role="tab"
+			aria-selected={tab === 'manual'}
+			onclick={() => (tab = 'manual')}
+			class="flex-1 rounded-md px-4 py-1.5 text-sm font-medium transition sm:flex-none"
+			style={tab === 'manual'
+				? 'background-color: var(--color-elevated); color: var(--color-ink);'
+				: 'color: var(--color-ink-muted);'}
+		>
+			Manual
+		</button>
+		<button
+			type="button"
+			role="tab"
+			aria-selected={tab === 'import'}
+			onclick={() => (tab = 'import')}
+			class="flex-1 rounded-md px-4 py-1.5 text-sm font-medium transition sm:flex-none"
+			style={tab === 'import'
+				? 'background-color: var(--color-elevated); color: var(--color-ink);'
+				: 'color: var(--color-ink-muted);'}
+		>
+			Import JSON
+		</button>
+	</div>
+
+	{#if tab === 'manual'}
+		<ServerForm
+			mode="create"
+			busy={creating}
+			error={createError}
+			onsubmit={handleCreate}
+			oncancel={() => goto('/')}
+		/>
+	{:else}
+		<!-- Import tab -->
+		<div class="flex flex-col gap-4">
+			<div class="flex items-center justify-between gap-3">
+				<label
+					for="import-json"
+					class="text-sm font-medium text-[var(--color-ink)]"
+				>
+					Paste <code class="font-mono text-xs">mcpServers</code> JSON
+				</label>
+				<button
+					type="button"
+					onclick={loadExample}
+					class="text-xs font-medium text-[var(--color-accent)] transition hover:text-[var(--color-accent-strong)]"
+				>
+					Insert example
+				</button>
+			</div>
+
+			<textarea
+				id="import-json"
+				bind:value={importText}
+				rows="10"
+				spellcheck="false"
+				placeholder={EXAMPLE}
+				class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5 font-mono text-xs leading-relaxed text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+			></textarea>
+
+			<!-- Parse feedback / preview -->
+			{#if 'error' in parsed}
+				<p
+					role="alert"
+					class="rounded-lg border px-3.5 py-3 font-mono text-xs leading-relaxed"
+					style="border-color: color-mix(in oklab, var(--color-state-failed) 35%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 10%, transparent); color: var(--color-state-failed);"
+				>
+					{parsed.error}
+				</p>
+			{:else if 'ok' in parsed && parsed.ok}
+				<div class="flex flex-col gap-2">
+					<p class="text-xs text-[var(--color-ink-muted)]">
+						{creatableCount} of {parsed.entries.length} will be created
+					</p>
+					<ul class="flex flex-col gap-2">
+						{#each parsed.entries as entry (entry.name)}
+							<li
+								class="flex flex-col gap-1 rounded-lg border px-3.5 py-2.5"
+								style={entry.skip
+									? 'border-color: var(--color-line); background-color: var(--color-surface); opacity: 0.7;'
+									: 'border-color: color-mix(in oklab, var(--color-accent) 28%, transparent); background-color: color-mix(in oklab, var(--color-accent) 6%, transparent);'}
+							>
+								<div class="flex items-center justify-between gap-2">
+									<span
+										class="truncate text-sm font-medium text-[var(--color-ink)]"
+									>
+										{entry.name}
+									</span>
+									{#if entry.skip}
+										<span
+											class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide text-[var(--color-ink-dim)]"
+											style="border-color: var(--color-line-strong);"
+										>
+											SKIPPED
+										</span>
+									{:else}
+										<svg
+											class="size-4 shrink-0 text-[var(--color-accent)]"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2.5"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											aria-hidden="true"
+										>
+											<path d="M20 6 9 17l-5-5" />
+										</svg>
+									{/if}
+								</div>
+								{#if entry.skip}
+									<p class="text-[11px] text-[var(--color-ink-dim)]">
+										{entry.reason}
+									</p>
+								{:else}
+									<code
+										class="truncate font-mono text-[11px] text-[var(--color-ink-muted)]"
+									>
+										{entry.command}
+										{entry.args.join(' ')}
+									</code>
+								{/if}
+							</li>
+						{/each}
+					</ul>
+				</div>
+			{:else}
+				<p
+					class="rounded-lg border border-dashed border-[var(--color-line)] px-3.5 py-3 text-xs text-[var(--color-ink-dim)]"
+				>
+					Paste a config to preview what will be imported. Entries with a
+					<code class="font-mono">url</code> or <code class="font-mono">type</code>
+					(remote servers) are skipped automatically.
+				</p>
+			{/if}
+
+			<!-- Actions -->
+			<div class="flex items-center justify-end gap-2 pt-1">
+				<button
+					type="button"
+					onclick={() => goto('/')}
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					onclick={handleImport}
+					disabled={importing || !('ok' in parsed && parsed.ok) || creatableCount === 0}
+					aria-busy={importing}
+					class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-5 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+				>
+					{#if importing}
+						<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+							<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
+							<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+						</svg>
+						Importing
+					{:else}
+						Import {creatableCount > 0 ? `${creatableCount} server${creatableCount === 1 ? '' : 's'}` : ''}
+					{/if}
+				</button>
+			</div>
+		</div>
+	{/if}
 </section>
+
+<!-- Toast -->
+{#if toast}
+	<div
+		class="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex justify-center px-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:justify-end sm:px-6"
+	>
+		<div class="w-full max-w-sm">
+			<Toast message={toast.message} tone={toast.tone} onclose={() => (toast = null)} />
+		</div>
+	</div>
+{/if}

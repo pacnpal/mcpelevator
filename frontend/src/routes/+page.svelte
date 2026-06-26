@@ -38,6 +38,13 @@
 		servers = servers.map((s) => (s.id === next.id ? next : s));
 	}
 
+	// Drop a server from the list after it's deleted from a card's menu.
+	function removeServer(id: string) {
+		const removed = servers.find((s) => s.id === id);
+		servers = servers.filter((s) => s.id !== id);
+		flashToast(removed ? `Deleted ${removed.name}` : 'Server deleted');
+	}
+
 	$effect(() => {
 		load();
 		return () => clearTimeout(toastTimer);
@@ -210,7 +217,12 @@
 		<!-- Server grid -->
 		<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
 			{#each servers as server (server.id)}
-				<ServerCard {server} onchange={applyUpdate} onerror={flashToast} />
+				<ServerCard
+					{server}
+					onchange={applyUpdate}
+					ondelete={removeServer}
+					onerror={flashToast}
+				/>
 			{/each}
 		</div>
 	{/if}

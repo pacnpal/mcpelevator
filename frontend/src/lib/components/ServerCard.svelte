@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { disableServer, enableServer } from '$lib/api';
+	import { deleteServer, disableServer, enableServer } from '$lib/api';
 	import type { ServerSummary } from '$lib/types';
 	import CopyButton from './CopyButton.svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
@@ -8,16 +8,23 @@
 	let {
 		server,
 		onchange,
+		ondelete,
 		onerror
 	}: {
 		server: ServerSummary;
 		/** Called with the updated summary after a successful toggle. */
 		onchange?: (next: ServerSummary) => void;
-		/** Called with a human-readable message if the toggle fails. */
+		/** Called with the deleted server's id after a successful delete. */
+		ondelete?: (id: string) => void;
+		/** Called with a human-readable message if an action fails. */
 		onerror?: (message: string) => void;
 	} = $props();
 
 	let busy = $state(false);
+	let menuOpen = $state(false);
+	let confirmDelete = $state(false);
+	let deleting = $state(false);
+	let cardEl = $state<HTMLElement>();
 
 	// The action available depends on desired-state (`enabled`), not live state:
 	// an enabled-but-stopped server should still offer "Stop" to clear intent.
@@ -25,6 +32,8 @@
 	const transient = $derived(
 		server.state === 'starting' || server.state === 'stopping'
 	);
+
+	const detailHref = $derived(`/server/${server.id}`);
 
 	async function toggle() {
 		if (busy) return;
@@ -42,22 +51,181 @@
 			busy = false;
 		}
 	}
+
+	function closeMenu() {
+		menuOpen = false;
+		confirmDelete = false;
+	}
+
+	// Close the kebab menu on an outside pointer/escape. We attach native
+	// listeners imperatively (not via svelte:window) so Svelte's event
+	// delegation can't reorder them against the toggle click, and we listen on
+	// `pointerdown` so selecting a menu item still fires its own click first.
+	$effect(() => {
+		if (!menuOpen) return;
+		const onPointer = (e: PointerEvent) => {
+			if (e.target instanceof Node && !cardEl?.contains(e.target)) closeMenu();
+		};
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === 'Escape') closeMenu();
+		};
+		// Defer attaching until after the opening click has fully settled.
+		const id = setTimeout(() => {
+			document.addEventListener('pointerdown', onPointer);
+			document.addEventListener('keydown', onKey);
+		}, 0);
+		return () => {
+			clearTimeout(id);
+			document.removeEventListener('pointerdown', onPointer);
+			document.removeEventListener('keydown', onKey);
+		};
+	});
+
+	async function doDelete() {
+		if (deleting) return;
+		deleting = true;
+		try {
+			await deleteServer(server.id);
+			ondelete?.(server.id);
+		} catch (err) {
+			const message =
+				err instanceof Error ? err.message : 'Failed to delete server';
+			onerror?.(message);
+			deleting = false;
+			closeMenu();
+		}
+	}
 </script>
 
+{#snippet spinner(size: string)}
+	<svg class="{size} animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+		<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
+		<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+	</svg>
+{/snippet}
+
 <article
-	class="group flex flex-col gap-4 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5 transition-colors hover:border-[var(--color-line-strong)]"
+	bind:this={cardEl}
+	class="group relative flex flex-col gap-4 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5 transition-colors hover:border-[var(--color-line-strong)]"
 >
-	<!-- Header: identity + state -->
+	<!-- Header: identity (link to detail) + state + menu -->
 	<header class="flex items-start justify-between gap-3">
-		<div class="min-w-0">
+		<a
+			href={detailHref}
+			class="min-w-0 rounded-md outline-offset-4 transition-opacity hover:opacity-80"
+		>
 			<h3 class="truncate text-[15px] font-semibold text-[var(--color-ink)]">
 				{server.name}
 			</h3>
 			<p class="mt-0.5 truncate font-mono text-xs text-[var(--color-ink-dim)]">
 				{server.slug}
 			</p>
+		</a>
+		<div class="flex shrink-0 items-center gap-1.5">
+			<StatePill state={server.state} />
+			<div class="relative">
+				<button
+					type="button"
+					onclick={() => {
+						menuOpen = !menuOpen;
+						confirmDelete = false;
+					}}
+					aria-haspopup="menu"
+					aria-expanded={menuOpen}
+					aria-label="Server actions"
+					class="rounded-md p-1 text-[var(--color-ink-dim)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
+				>
+					<svg class="size-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+						<circle cx="12" cy="5" r="1.6" />
+						<circle cx="12" cy="12" r="1.6" />
+						<circle cx="12" cy="19" r="1.6" />
+					</svg>
+				</button>
+
+				{#if menuOpen}
+					<div
+						role="menu"
+						class="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-lg border border-[var(--color-line-strong)] bg-[var(--color-elevated)] py-1 shadow-2xl"
+					>
+						{#if !confirmDelete}
+							<a
+								href={detailHref}
+								role="menuitem"
+								class="flex items-center gap-2 px-3 py-2 text-sm text-[var(--color-ink-muted)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
+							>
+								<svg
+									class="size-4"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									aria-hidden="true"
+								>
+									<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+									<circle cx="12" cy="12" r="3" />
+								</svg>
+								View details
+							</a>
+							<button
+								type="button"
+								role="menuitem"
+								onclick={() => (confirmDelete = true)}
+								class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition hover:bg-[color-mix(in_oklab,var(--color-state-failed)_12%,transparent)]"
+								style="color: var(--color-state-failed);"
+							>
+								<svg
+									class="size-4"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									aria-hidden="true"
+								>
+									<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+								</svg>
+								Delete
+							</button>
+						{:else}
+							<div class="flex flex-col gap-2 px-3 py-2.5">
+								<p class="text-xs leading-snug text-[var(--color-ink)]">
+									Delete <span class="font-semibold">{server.name}</span>? This stops
+									and removes it.
+								</p>
+								<div class="flex items-center gap-1.5">
+									<button
+										type="button"
+										onclick={doDelete}
+										disabled={deleting}
+										aria-busy={deleting}
+										class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-semibold text-white transition disabled:cursor-wait disabled:opacity-70"
+										style="background-color: var(--color-state-failed);"
+									>
+										{#if deleting}
+											{@render spinner('size-3.5')}
+											Deleting
+										{:else}
+											Delete
+										{/if}
+									</button>
+									<button
+										type="button"
+										onclick={() => (confirmDelete = false)}
+										disabled={deleting}
+										class="rounded-md border border-[var(--color-line)] px-2 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
+									>
+										Cancel
+									</button>
+								</div>
+							</div>
+						{/if}
+					</div>
+				{/if}
+			</div>
 		</div>
-		<StatePill state={server.state} />
 	</header>
 
 	<!-- Meta row: runner + transports -->
@@ -114,45 +282,15 @@
 				: 'color: var(--color-accent-ink); background-color: var(--color-accent);'}
 		>
 			{#if busy}
-				<svg
-					class="size-3.5 animate-spin"
-					viewBox="0 0 24 24"
-					fill="none"
-					aria-hidden="true"
-				>
-					<circle
-						cx="12"
-						cy="12"
-						r="9"
-						stroke="currentColor"
-						stroke-width="2.5"
-						stroke-opacity="0.25"
-					/>
-					<path
-						d="M21 12a9 9 0 0 0-9-9"
-						stroke="currentColor"
-						stroke-width="2.5"
-						stroke-linecap="round"
-					/>
-				</svg>
+				{@render spinner('size-3.5')}
 				{transient ? '…' : wantsRun ? 'Stopping' : 'Starting'}
 			{:else if wantsRun}
-				<svg
-					class="size-3.5"
-					viewBox="0 0 24 24"
-					fill="currentColor"
-					aria-hidden="true"
-				>
+				<svg class="size-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 					<rect x="7" y="7" width="10" height="10" rx="1.5" />
 				</svg>
 				Stop
 			{:else}
-				<svg
-					class="size-3.5"
-					viewBox="0 0 24 24"
-					fill="currentColor"
-					aria-hidden="true"
-				>
+				<svg class="size-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 					<path d="M8 5v14l11-7z" />
 				</svg>
 				Start

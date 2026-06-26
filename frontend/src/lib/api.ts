@@ -9,8 +9,11 @@
 
 import type {
 	HealthResponse,
+	ImportResult,
+	ServerCreate,
 	ServerDetail,
-	ServerSummary
+	ServerSummary,
+	ServerUpdate
 } from './types';
 
 const BASE = '/api';
@@ -25,6 +28,38 @@ export class ApiError extends Error {
 		this.status = status;
 		this.body = body;
 	}
+}
+
+/**
+ * Extract a human-friendly message from an unknown error. For ApiError this
+ * unwraps FastAPI's `{ "detail": ... }` envelope when present, so form errors
+ * read cleanly instead of dumping raw JSON.
+ */
+export function errorMessage(err: unknown): string {
+	if (err instanceof ApiError) {
+		const text = err.body?.trim();
+		if (text) {
+			try {
+				const parsed = JSON.parse(text);
+				const detail = parsed?.detail;
+				if (typeof detail === 'string') return detail;
+				if (Array.isArray(detail)) {
+					// FastAPI validation errors: [{ loc, msg, ... }, ...]
+					const msgs = detail
+						.map((d) => (typeof d?.msg === 'string' ? d.msg : null))
+						.filter(Boolean);
+					if (msgs.length) return msgs.join('; ');
+				}
+				if (typeof parsed?.message === 'string') return parsed.message;
+			} catch {
+				// Not JSON — fall through and use the raw text.
+			}
+			return text;
+		}
+		return `Request failed (${err.status})`;
+	}
+	if (err instanceof Error) return err.message;
+	return 'Unexpected error';
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -49,6 +84,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	return (await res.json()) as T;
 }
 
+/** JSON-bodied request helper (sets content-type + serializes the body). */
+function jsonRequest<T>(
+	path: string,
+	method: string,
+	body: unknown
+): Promise<T> {
+	return request<T>(path, {
+		method,
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+}
+
 export function getHealth(): Promise<HealthResponse> {
 	return request<HealthResponse>('/health');
 }
@@ -59,6 +107,31 @@ export function listServers(): Promise<ServerSummary[]> {
 
 export function getServer(id: string): Promise<ServerDetail> {
 	return request<ServerDetail>(`/servers/${encodeURIComponent(id)}`);
+}
+
+export function createServer(body: ServerCreate): Promise<ServerSummary> {
+	return jsonRequest<ServerSummary>('/servers', 'POST', body);
+}
+
+export function importServers(payload: unknown): Promise<ImportResult> {
+	return jsonRequest<ImportResult>('/servers/import', 'POST', payload);
+}
+
+export function updateServer(
+	id: string,
+	body: ServerUpdate
+): Promise<ServerSummary> {
+	return jsonRequest<ServerSummary>(
+		`/servers/${encodeURIComponent(id)}`,
+		'PATCH',
+		body
+	);
+}
+
+export function deleteServer(id: string): Promise<void> {
+	return request<void>(`/servers/${encodeURIComponent(id)}`, {
+		method: 'DELETE'
+	});
 }
 
 export function enableServer(id: string): Promise<ServerSummary> {
