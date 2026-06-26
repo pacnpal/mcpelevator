@@ -3,6 +3,7 @@
 		createToken,
 		deleteToken,
 		errorMessage,
+		getAuthStatus,
 		getSettings,
 		listTokens,
 		updateSettings
@@ -36,14 +37,18 @@
 
 	let settings = $state<SettingsInfo | null>(null);
 	let tokens = $state<TokenInfo[]>([]);
+	// Whether THIS browser holds a working control token (not just whether one exists
+	// in the backend). That's what decides if enabling enforcement would lock us out.
+	let hasUsableAdminCredential = $state(false);
 
 	async function load() {
 		loadState = 'loading';
 		loadError = null;
 		try {
-			const [s, t] = await Promise.all([getSettings(), listTokens()]);
+			const [s, t, auth] = await Promise.all([getSettings(), listTokens(), getAuthStatus()]);
 			settings = s;
 			tokens = t;
+			hasUsableAdminCredential = auth.authenticated;
 			loadState = 'ready';
 		} catch (err) {
 			loadState = 'error';
@@ -101,6 +106,7 @@
 			void _token;
 			tokens = [info, ...tokens];
 			setToken(created.token);
+			hasUsableAdminCredential = true; // we now hold a working control token
 		} catch (err) {
 			flashToast(errorMessage(err));
 		} finally {
@@ -154,11 +160,6 @@
 		{ value: 'always', label: 'always', hint: 'Required even on loopback' }
 	];
 
-	// Turning on enforcement (expose, or always) needs an admin token to exist first,
-	// or the next /api call would lock the operator out. Derived from the token list,
-	// which reflects the backend (the source of truth for what tokens exist).
-	const hasControlToken = $derived(tokens.some((t) => t.scope === 'control'));
-
 	// Persist a settings patch (save-on-change), optimistically applying it and
 	// rolling back on failure so the controls never drift from the backend.
 	let savingField = $state<keyof SettingsInfo | null>(null);
@@ -187,7 +188,7 @@
 
 	function setBindMode(value: BindMode) {
 		if (!settings || settings.bind_mode === value) return;
-		if (value === 'expose' && !hasControlToken) {
+		if (value === 'expose' && !hasUsableAdminCredential) {
 			flashToast('Generate an admin token before exposing the control plane.');
 			return;
 		}
@@ -196,7 +197,7 @@
 
 	function setControlPlaneAuth(value: ControlPlaneAuth) {
 		if (!settings || settings.control_plane_auth === value) return;
-		if (value === 'always' && !hasControlToken) {
+		if (value === 'always' && !hasUsableAdminCredential) {
 			flashToast('Generate an admin token before requiring control-plane auth.');
 			return;
 		}
@@ -500,7 +501,7 @@
 				<legend class="text-sm font-medium text-[var(--color-ink)]">Bind mode</legend>
 				<div class="grid grid-cols-2 gap-2">
 					{#each BIND_CHOICES as choice (choice.value)}
-						{@const locked = choice.value === 'expose' && !hasControlToken}
+						{@const locked = choice.value === 'expose' && !hasUsableAdminCredential}
 						<label
 							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
 							class:cursor-not-allowed={locked}
@@ -545,7 +546,7 @@
 				<legend class="text-sm font-medium text-[var(--color-ink)]">Control-plane auth</legend>
 				<div class="grid grid-cols-2 gap-2">
 					{#each CONTROL_AUTH_CHOICES as choice (choice.value)}
-						{@const locked = choice.value === 'always' && !hasControlToken}
+						{@const locked = choice.value === 'always' && !hasUsableAdminCredential}
 						<label
 							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
 							class:cursor-not-allowed={locked}
@@ -582,7 +583,7 @@
 				<p class="text-xs text-[var(--color-ink-dim)]">
 					When required, <code class="font-mono">/api</code> needs an admin (control-scope)
 					token; the SPA logs in with it.
-					{#if !hasControlToken}
+					{#if !hasUsableAdminCredential}
 						<span class="text-[var(--color-accent)]">
 							Generate an admin token above to enable
 							<code class="font-mono">expose</code> / <code class="font-mono">always</code>.

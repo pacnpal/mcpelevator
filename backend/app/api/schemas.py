@@ -86,6 +86,7 @@ class ImportResult(BaseModel):
 
 
 TokenScope = Literal["proxy", "control"]
+ControlPlaneAuthMode = Literal["auto", "always"]
 
 
 class TokenCreate(BaseModel):
@@ -97,7 +98,7 @@ class TokenInfo(BaseModel):
     id: str
     name: str
     prefix: str
-    scope: str = "proxy"
+    scope: TokenScope = "proxy"
     created_at: datetime
 
 
@@ -109,14 +110,14 @@ class SettingsInfo(BaseModel):
     bind_mode: str
     allowed_hosts: list[str]
     default_auth_provider: str
-    control_plane_auth: str = "auto"
+    control_plane_auth: ControlPlaneAuthMode = "auto"
 
 
 class SettingsUpdate(BaseModel):
     bind_mode: Optional[str] = None
     allowed_hosts: Optional[list[str]] = None
     default_auth_provider: Optional[str] = None
-    control_plane_auth: Optional[str] = None
+    control_plane_auth: Optional[ControlPlaneAuthMode] = None
 
 
 class AuthStatus(BaseModel):

@@ -79,7 +79,7 @@ Two independent layers guard the system, and a request must pass both.
 **Per-request bearer auth**, on both planes:
 
 - The **proxy data plane** (`/s`) uses a pluggable per-server auth provider. v1 ships `none` and `bearer` (SHA-256-hashed tokens); a server set to `bearer` needs a token in `Authorization: Bearer <token>`.
-- The **control plane** (`/api`) requires an admin token with the `control` scope. Enforcement follows the `control_plane_auth` setting: `auto` (the default) requires it only when `bind_mode=expose`, so a fresh local install stays zero-config; `always` requires it even on loopback. `/api/health` and `/api/auth/status` stay public.
+- The **control plane** (`/api`) requires an admin token with the `control` scope. Enforcement follows the `control_plane_auth` setting: `auto` (the default) requires it when `bind_mode=expose` or `MCPE_PUBLIC_BASE_URL` is set (either way the instance is reachable off-host), so a plain local install stays zero-config; `always` requires it even on loopback. `/api/health` and `/api/auth/status` stay public.
 
 When control-plane auth is enforced, the SPA shows a login screen. The admin token is printed once to the container logs on first boot (look for "control-plane auth is ON"), and the Settings page can generate one (which logs you in immediately). To switch to `expose` or `always` from the UI you have to generate an admin token first, so you can't lock yourself out.
 

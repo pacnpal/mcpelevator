@@ -170,18 +170,23 @@ def get_token_by_hash(session: Session, token_hash: str) -> Optional[Token]:
     return session.exec(select(Token).where(Token.token_hash == token_hash)).first()
 
 
-def delete_token(session: Session, token_id: str) -> bool:
+def delete_token(session: Session, token_id: str, *, keep_last_control: bool = False) -> str:
+    """Delete a token; returns 'deleted', 'not_found', or 'last_control'. When
+    ``keep_last_control`` is set, atomically refuse to remove the last control token:
+    the delete and the post-delete recount run in one transaction (flush before
+    commit), so two concurrent deletes can't both pass the check and orphan auth."""
     token = session.get(Token, token_id)
     if token is None:
-        return False
+        return "not_found"
     session.delete(token)
+    if keep_last_control and token.scope == "control":
+        session.flush()
+        if session.exec(select(Token).where(Token.scope == "control")).first() is None:
+            session.rollback()
+            return "last_control"
     session.commit()
-    return True
+    return "deleted"
 
 
 def control_token_exists(session: Session) -> bool:
     return session.exec(select(Token).where(Token.scope == "control")).first() is not None
-
-
-def count_control_tokens(session: Session) -> int:
-    return len(session.exec(select(Token).where(Token.scope == "control")).all())

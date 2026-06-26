@@ -24,7 +24,7 @@ The token lives in browser `localStorage`. That is fine for this threat model. T
 These four were chosen during brainstorming:
 
 1. Reuse the existing `BearerProvider` / `Token` seam with a new `control` scope. No session cookies.
-2. A runtime setting `control_plane_auth` with values `auto` and `always`, default `auto`. `auto` enforces only when `bind_mode == "expose"`, so a fresh local install stays zero-config.
+2. A runtime setting `control_plane_auth` with values `auto` and `always`, default `auto`. `auto` enforces when `bind_mode == "expose"` or a public URL (`MCPE_PUBLIC_BASE_URL`) is configured, so a plain local install stays zero-config.
 3. The SSE log stream switches from `EventSource` to a fetch + `ReadableStream` reader so it sends the `Authorization` header like every other call. No token in any URL.
 4. Frontend tests use Vitest, unit-testing the auth and api lib modules. Full browser E2E is out of scope.
 
@@ -52,7 +52,7 @@ Control-plane access requires `scope == "control"`. Proxy enforcement is unchang
 `registry/settings.py` `DEFAULTS` gains:
 
 ```python
-"control_plane_auth": "auto",  # 'auto' (required iff bind_mode=='expose') | 'always'
+"control_plane_auth": "auto",  # 'auto' (required when exposed or a public URL is set) | 'always'
 ```
 
 `write()` validates the value against `{"auto", "always"}`. Add a `control_plane_auth(session) -> str` accessor next to the existing ones. Surface it in `GET`/`PATCH /api/settings`.
@@ -65,8 +65,10 @@ New module `backend/app/auth/control_plane.py`.
 
 ```
 cpa = control_plane_auth(session)
-return cpa == "always" or (cpa == "auto" and bind_mode(session) == "expose")
+return cpa == "always" or (cpa == "auto" and (bind_mode(session) == "expose" or public_host_is_set()))
 ```
+
+A configured public URL counts as exposed because `request_allowlist` already trusts that host, so the token gate must too, or a tunnel deployment would leave `/api` open. The decision lives in a shared `_enforced` helper, reused by the settings lock-out guard below.
 
 `require_control_plane` is a FastAPI dependency. Logic:
 
@@ -87,14 +89,13 @@ When the env token is set, startup does not mint a DB token, since enforcement c
 
 ### Bootstrap and no lockout
 
-`ensure_control_token(session) -> str | None` mints a `control`-scoped token if none exists and no env admin token is configured, and returns the plaintext once. If a control token already exists or the env token is set, it returns `None`.
+No-lockout is deterministic, with no per-request minting. `ensure_control_token(session) -> str | None` mints a `control`-scoped token if none exists and no env admin token is configured, returning the plaintext once (else `None`). It is called only at startup, in `lifespan` after `init_db()`: if enforcement is on and it mints one, the token is logged once with the login URL; if `MCPE_ADMIN_TOKEN` is set, that is logged as in effect instead.
 
-Two call sites:
+The runtime paths reject rather than mint:
 
-- Startup, in `lifespan` after `init_db()`. If `enforcement_enabled(session)` and `ensure_control_token` mints one, log it prominently: the token shown once, plus the login URL. If the env admin token is set, log that it is in effect instead.
-- `PATCH /api/settings` when the change turns enforcement on (`bind_mode` to `expose`, or `control_plane_auth` to `always`) and no control token exists. Mint one, log it, and return its plaintext as a one-time `admin_token` field in the response. The SPA captures it and stays logged in, so flipping to expose does not lock out the person doing it.
-
-In local `auto` mode the PATCH path runs with enforcement off, so the call that turns on expose is itself unauthenticated and works. The next request needs the token, which the SPA now has.
+- `PATCH /api/settings` calls `would_lock_out(session, changes)` and returns 400 if the change would turn enforcement on while no admin credential (a control token or `MCPE_ADMIN_TOKEN`) exists, so a direct API call can't strand the operator.
+- `DELETE /api/tokens/{id}` refuses (409) to remove the last control token while enforcement is on (atomically, so concurrent deletes can't both slip through), so revoking can't lock you out either.
+- The Settings UI disables `expose` / `always` until this browser holds a usable control token (`GET /api/auth/status` -> `authenticated`), and a "Generate admin token" button mints one (`POST /tokens` with `scope=control`) and stores it, so the operator is signed in before enabling enforcement.
 
 ### Auth status endpoint
 
@@ -116,14 +117,14 @@ New `GET /api/auth/status`, public (allowlist only, no token dependency). Return
 - `auth/control_plane.py`: new. `enforcement_enabled`, `require_control_plane`, `ensure_control_token`.
 - `api/auth.py`: new. `GET /api/auth/status`.
 - `api/tokens.py`: `POST /tokens` takes an optional `scope` (default `proxy`); `TokenInfo` and `TokenCreated` include `scope`.
-- `api/settings.py`: `SettingsInfo` includes `control_plane_auth`; `PATCH` returns a one-time `admin_token` when one was minted.
+- `api/settings.py`: `SettingsInfo` includes `control_plane_auth`; `PATCH` rejects (400) a change that would enable enforcement while no admin credential exists.
 - `main.py`: attach `require_control_plane` to the three routers, include the auth router, run the startup bootstrap in `lifespan`.
 
 ## Frontend design
 
 ### Token store
 
-New `lib/auth.ts`: `getToken`, `setToken`, `clearToken` over `localStorage['mcpe_admin_token']`, plus a Svelte store so the layout reacts to login and logout.
+New `lib/auth.ts`: plain `getToken`, `setToken`, `clearToken` over `localStorage['mcpe_admin_token']` (the single source of truth; the layout re-reads on navigation).
 
 ### API wrapper
 
@@ -137,7 +138,7 @@ New `lib/auth.ts`: `getToken`, `setToken`, `clearToken` over `localStorage['mcpe
 
 - `routes/login/+page.svelte`: new. Paste the admin token from the logs, validate it against `/api/auth/status`, store it, redirect home. Short copy explaining where the token comes from.
 - `routes/+layout`: on load, call `/api/auth/status`. If `enforced && !authenticated`, redirect to `/login` unless already there. Add a log-out affordance.
-- `routes/settings/+page.svelte`: add the `control_plane_auth` selector (`auto` / `always`), a "Generate admin token" action that mints a control token and shows it once, and a scope selector on the create-token form (default `proxy`). When `PATCH /api/settings` returns `admin_token`, store it.
+- `routes/settings/+page.svelte`: add the `control_plane_auth` selector (`auto` / `always`) and a "Generate admin token" action that mints a control token, shows it once, and stores it. Disable `expose` / `always` until this browser holds a usable control token.
 - `routes/server/[id]/+page.svelte`: switch the live log view to the new fetch-stream reader.
 
 ### Types
@@ -157,7 +158,7 @@ New `backend/tests/test_control_plane_auth.py`:
 - `control_plane_auth = always` in local mode: 401 without a token, 200 with a control token.
 - `GET /api/health` returns 200 with no token even when enforced (loopback host).
 - `GET /api/auth/status` reports `enforced` and `authenticated` correctly.
-- `PATCH /api/settings` to expose with no control token returns a working `admin_token`.
+- `PATCH /api/settings` to enable enforcement with no control token is rejected (400); `DELETE` of the last control token under enforcement is rejected (409).
 - `MCPE_ADMIN_TOKEN` is accepted as a control token.
 - Allowlist still wins: a bad `Host` returns 403 even with a valid token, proving the two layers run in the right order.
 

@@ -18,17 +18,22 @@
 	let loggedIn = $state(false);
 	$effect(() => {
 		if (page.url.pathname === '/login') {
-			loggedIn = false; // on the login page there's no session yet — hide "Log out"
+			loggedIn = false; // on the login page there's no session yet, so hide "Log out"
 			return;
 		}
+		let cancelled = false;
 		getAuthStatus()
 			.then((status) => {
+				if (cancelled) return; // a newer navigation superseded this check
 				loggedIn = status.authenticated;
 				if (status.enforced && !status.authenticated) goto('/login');
 			})
 			.catch(() => {
 				// status is public and best-effort; a transient failure shouldn't trap the user.
 			});
+		return () => {
+			cancelled = true;
+		};
 	});
 
 	function logout() {
