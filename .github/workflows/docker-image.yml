@@ -3,7 +3,7 @@ name: Build and Push Docker Image
 # Builds the multi-arch image and pushes it to GHCR (ghcr.io/pacnpal/mcpelevator).
 #
 # Runs on the self-hosted ARC runner. The `runs-on:` value below MUST match your
-# runner scale set's name — change `arc-runner` everywhere if yours differs.
+# runner scale set's name — change `arc-runner-set` everywhere if yours differs.
 # The runner needs Docker available (DinD or a mounted socket) for buildx.
 #
 # Triggers: a published GitHub release (versioned tags), or a manual run from the
@@ -32,7 +32,7 @@ env:
 jobs:
   lint:
     name: Lint Dockerfile
-    runs-on: arc-runner
+    runs-on: arc-runner-set
     permissions:
       contents: read
     steps:
@@ -48,7 +48,7 @@ jobs:
 
   build:
     name: Build and Push
-    runs-on: arc-runner
+    runs-on: arc-runner-set
     needs: lint
     permissions:
       contents: read
@@ -150,7 +150,7 @@ jobs:
 
   scan:
     name: Security Scan
-    runs-on: arc-runner
+    runs-on: arc-runner-set
     needs: build
     continue-on-error: true
     permissions:
@@ -186,7 +186,7 @@ jobs:
 
   summary:
     name: Build Summary
-    runs-on: arc-runner
+    runs-on: arc-runner-set
     needs: [build, scan]
     if: always()
     permissions: {}
