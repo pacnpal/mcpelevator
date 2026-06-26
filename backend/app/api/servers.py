@@ -8,11 +8,13 @@ runtime row, then ``stopped``.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlmodel import Session
 from starlette.responses import Response
 
 from app.api.schemas import (
+    ImportResult,
+    ImportSkipped,
     ServerCreate,
     ServerDetail,
     ServerSummary,
@@ -152,3 +154,22 @@ async def disable_server(server_id: str, request: Request, session: Session = De
     sup = request.app.state.supervisor
     sup.nudge()
     return _summary(server, sup, session)
+
+
+@router.post("/servers/import", response_model=ImportResult, status_code=201)
+async def import_servers(
+    request: Request,
+    payload: dict = Body(...),
+    session: Session = Depends(get_session),
+):
+    """Bulk-create from a standard mcpServers JSON config. Imported servers are
+    disabled by default — the user reviews, then enables."""
+    try:
+        created, skipped = service.import_mcp_servers(session, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    sup = request.app.state.supervisor
+    return ImportResult(
+        created=[_summary(s, sup, session) for s in created],
+        skipped=[ImportSkipped(**s) for s in skipped],
+    )

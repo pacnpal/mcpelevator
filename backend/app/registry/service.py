@@ -112,3 +112,64 @@ def set_enabled(session: Session, server_id: str, enabled: bool) -> Server:
         raise KeyError(server_id)
     server.enabled = enabled
     return repo.save_server(session, server)
+
+
+# Node/Python launchers we recognize so the runner badge is meaningful. Anything
+# else is stored as a generic `command` (still launched verbatim).
+_NPX_LAUNCHERS = {"npx", "npx.cmd", "bunx", "pnpm", "node"}
+_UVX_LAUNCHERS = {"uvx", "uv"}
+
+
+def _infer_runner(command: str) -> str:
+    base = command.strip().lower()
+    if base in _NPX_LAUNCHERS:
+        return "npx"
+    if base in _UVX_LAUNCHERS:
+        return "uvx"
+    if base == "docker":
+        return "docker"
+    return "command"
+
+
+def import_mcp_servers(session: Session, data: dict) -> tuple[list[Server], list[dict]]:
+    """Create servers from the standard Claude-Desktop ``mcpServers`` JSON shape.
+
+    Accepts either ``{"mcpServers": {...}}`` or a bare ``{name: {...}}`` map.
+    Stdio entries (``command`` + ``args`` + ``env``) become servers, stored
+    verbatim and disabled (the user reviews, then enables). Already-remote
+    entries (``url`` / ``type: sse|streamable-http``) are skipped — they're
+    nothing to elevate.
+    """
+    servers_map = data.get("mcpServers") if isinstance(data, dict) and "mcpServers" in data else data
+    if not isinstance(servers_map, dict):
+        raise ValueError("expected an object with an 'mcpServers' map of servers")
+
+    created: list[Server] = []
+    skipped: list[dict] = []
+    for name, entry in servers_map.items():
+        if not isinstance(entry, dict):
+            skipped.append({"name": str(name), "reason": "entry is not an object"})
+            continue
+        if entry.get("url") or entry.get("type") in ("sse", "streamable-http", "http"):
+            skipped.append({"name": str(name), "reason": "already a remote HTTP server"})
+            continue
+        command = entry.get("command")
+        if not command:
+            skipped.append({"name": str(name), "reason": "no command to launch"})
+            continue
+        try:
+            created.append(
+                create_server(
+                    session,
+                    name=str(name),
+                    runner=_infer_runner(command),
+                    command=str(command),
+                    args=list(entry.get("args") or []),
+                    env=dict(entry.get("env") or {}),
+                    source="import",
+                    enabled=False,
+                )
+            )
+        except ValueError as exc:
+            skipped.append({"name": str(name), "reason": str(exc)})
+    return created, skipped

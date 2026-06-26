@@ -66,3 +66,13 @@ class ServerUpdate(BaseModel):
     mcp_http: Optional[bool] = None
     rest_openapi: Optional[bool] = None
     auth_provider: Optional[str] = None
+
+
+class ImportSkipped(BaseModel):
+    name: str
+    reason: str
+
+
+class ImportResult(BaseModel):
+    created: list[ServerSummary]
+    skipped: list[ImportSkipped]
