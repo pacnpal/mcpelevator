@@ -23,7 +23,7 @@ from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
 from app.api import tokens as tokens_api
-from app.auth.middleware import host_allowed, request_allowlist
+from app.auth.middleware import host_allowed, is_loopback_client, request_allowlist
 from app.config import get_settings
 from app.db import get_engine, init_db
 from app.proxy.router import router as proxy_router
@@ -69,16 +69,20 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def _control_plane_allowlist(request: Request, call_next):
         # Guard the control plane (/api) with the same Host/Origin allowlist as the
-        # proxy (DNS-rebinding defense), in every mode: loopback always passes and
-        # expose adds the configured hosts. bind_mode controls only the network bind,
-        # so a DNS-rebound page could otherwise hit loopback and mint tokens / change
-        # settings. Per-request bearer auth on /api is a deferred v1 item (it would
-        # also have to gate the SPA itself).
+        # proxy (DNS-rebinding defense), in every mode: a loopback Host passes only
+        # when the peer connects from loopback, and expose adds the configured hosts.
+        # bind_mode controls only the network bind, so a DNS-rebound page could
+        # otherwise hit loopback and mint tokens / change settings. Per-request
+        # bearer auth on /api is a deferred v1 item (it would also have to gate the
+        # SPA itself).
         if request.url.path.startswith("/api"):
             with Session(get_engine()) as session:
                 allowed = request_allowlist(session)
             ok, reason = host_allowed(
-                request.headers.get("host", ""), request.headers.get("origin"), allowed
+                request.headers.get("host", ""),
+                request.headers.get("origin"),
+                allowed,
+                client_is_loopback=is_loopback_client(request),
             )
             if not ok:
                 return JSONResponse({"detail": reason}, status_code=403)

@@ -41,6 +41,18 @@ def test_api_loopback_only_in_local_mode():
         assert client.get("/api/health", headers={"host": "localhost:8080"}).status_code == 200
 
 
+def test_api_rejects_spoofed_loopback_host_from_remote_client():
+    """P1 fix: an off-host client (e.g. a Docker 0.0.0.0 bind reachable from the
+    LAN) must not pass the guard by sending Host: localhost. Loopback Hosts are
+    trusted only when the peer actually connects from loopback."""
+    with TestClient(app, client=("203.0.113.5", 9999)) as client:  # non-loopback peer
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"bind_mode": "local", "allowed_hosts": []})
+        for spoof in ("localhost", "127.0.0.1", "[::1]:8080"):
+            r = client.get("/api/health", headers={"host": spoof})
+            assert r.status_code == 403, (spoof, r.status_code)
+
+
 def test_summary_exposes_effective_auth():
     """The card snippets need the effective auth, so the summary resolves
     `inherit` to the global default and reports `none`/`bearer`."""

@@ -3,17 +3,20 @@
 The reverse proxy calls ``enforce(request, server)`` before forwarding. Two checks
 happen here, in one place, for every exposed request:
 
-1. **Host/Origin allowlist** (DNS-rebinding defense) — enforced in *every* mode:
-   loopback is always allowed, and ``expose`` mode adds the configured allowlist.
-   A request whose Host/Origin is neither is rejected. (``bind_mode`` controls only
-   the network bind, not reachability — a DNS-rebound page can still target
-   loopback — so the Host check must not be gated on it.)
+1. **Host/Origin allowlist** (DNS-rebinding defense), enforced in every mode.
+   Loopback is allowed only when the client actually connects from loopback, and
+   ``expose`` mode adds the configured allowlist. A request whose Host/Origin is
+   neither is rejected. ``bind_mode`` controls only the network bind, not
+   reachability (a DNS-rebound page can still target loopback), so the Host check
+   is not gated on it.
 2. **Auth provider** — chosen per-server (``auth_provider``), falling back to the
    ``default_auth_provider`` setting when the server is ``inherit``. New providers
    register in ``_PROVIDERS`` without touching routing.
 """
 
 from __future__ import annotations
+
+import ipaddress
 
 from fastapi import HTTPException
 from sqlmodel import Session
@@ -32,7 +35,8 @@ _PROVIDERS = {
     "bearer": BearerProvider(),
 }
 
-# Loopback hostnames are always permitted (local-first default).
+# Loopback hostnames, trusted only when the peer itself connects from loopback
+# (see ``is_loopback_client``); otherwise an off-host client could spoof them.
 _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 
 
@@ -47,9 +51,43 @@ def resolve(server: Server, default: str):
     return provider
 
 
-def host_allowed(host_header: str, origin_header: str | None, allowed: list[str]) -> tuple[bool, str]:
-    """Pure allowlist check (unit-tested). Returns (ok, reason-if-not)."""
-    allowset = _LOOPBACK | {h for h in (host_only(x) for x in allowed) if h}
+def is_loopback_client(request: Request) -> bool:
+    """True when the request's peer address is loopback.
+
+    A ``Host: localhost`` / ``127.0.0.1`` header must not be trusted from an
+    off-host client (e.g. a Docker ``0.0.0.0`` bind reachable from the LAN), so the
+    implicit loopback allowance in ``host_allowed`` is granted only to real loopback
+    peers.
+    """
+    client = request.client
+    if client is None:
+        return False
+    try:
+        return ipaddress.ip_address(client.host).is_loopback
+    except ValueError:
+        # Non-IP peer host. Starlette's TestClient reports "testclient", and a bare
+        # "localhost" can appear in some setups; neither can be forged as a TCP
+        # source address by a remote client, so treat them as loopback.
+        return client.host in {"localhost", "testclient"}
+
+
+def host_allowed(
+    host_header: str,
+    origin_header: str | None,
+    allowed: list[str],
+    *,
+    client_is_loopback: bool,
+) -> tuple[bool, str]:
+    """Pure allowlist check (unit-tested). Returns (ok, reason-if-not).
+
+    Loopback hostnames are honoured only when ``client_is_loopback`` is true;
+    otherwise an off-host client could send ``Host: localhost`` and pass without
+    ever being in the allowlist. The flag is keyword-only and required so a caller
+    cannot silently drop it and re-open that bypass.
+    """
+    allowset = {h for h in (host_only(x) for x in allowed) if h}
+    if client_is_loopback:
+        allowset |= _LOOPBACK
     host = host_only(host_header)
     if not host:
         return False, "missing host header"  # fail closed: no Host must not pass
@@ -83,7 +121,12 @@ async def enforce(request: Request, server: Server) -> None:
 
     # Always validate Host/Origin (DNS-rebinding defense). In local mode only loopback
     # and the configured public host pass; expose adds the runtime allowlist too.
-    ok, reason = host_allowed(request.headers.get("host", ""), request.headers.get("origin"), allowed)
+    ok, reason = host_allowed(
+        request.headers.get("host", ""),
+        request.headers.get("origin"),
+        allowed,
+        client_is_loopback=is_loopback_client(request),
+    )
     if not ok:
         raise HTTPException(status_code=403, detail=reason)
 

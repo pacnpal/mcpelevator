@@ -72,9 +72,11 @@ def test_settings_write_is_atomic_on_invalid_patch(session):
 
 def test_host_allowed_survives_malformed_stored_entry():
     # a malformed stored entry (legacy data) must be ignored, not crash the check
-    ok, _ = middleware.host_allowed("mcp.example.com", None, ["[bad]", "mcp.example.com"])
+    ok, _ = middleware.host_allowed(
+        "mcp.example.com", None, ["[bad]", "mcp.example.com"], client_is_loopback=False
+    )
     assert ok is True
-    ok2, _ = middleware.host_allowed("evil.com", None, ["[bad]"])
+    ok2, _ = middleware.host_allowed("evil.com", None, ["[bad]"], client_is_loopback=False)
     assert ok2 is False
 
 
@@ -88,29 +90,48 @@ def test_request_allowlist_trusts_configured_public_host(session, monkeypatch):
     )
     allowed = middleware.request_allowlist(session)
     assert "mcp.example.com" in allowed
-    ok, _ = middleware.host_allowed("mcp.example.com", None, allowed)
+    ok, _ = middleware.host_allowed("mcp.example.com", None, allowed, client_is_loopback=False)
     assert ok is True
 
 
 @pytest.mark.parametrize(
-    "host,origin,allowed,ok",
+    "host,origin,allowed,client_loopback,ok",
     [
-        ("localhost:5173", None, [], True),  # loopback always allowed
-        ("127.0.0.1:8080", None, [], True),
-        ("[::1]:8080", None, [], True),  # ipv6 loopback
-        ("mcp.example.com", None, ["mcp.example.com"], True),
-        ("mcp.example.com:8080", None, ["mcp.example.com"], True),  # port stripped
-        ("evil.com", None, ["mcp.example.com"], False),
-        ("mcp.example.com", "https://evil.com", ["mcp.example.com"], False),  # bad origin
-        ("mcp.example.com", "https://mcp.example.com", ["mcp.example.com"], True),
-        ("", None, [], False),  # missing Host header must fail closed
-        ("", None, ["mcp.example.com"], False),
-        ("", "https://mcp.example.com", ["mcp.example.com"], False),  # good origin can't rescue a missing host
+        ("localhost:5173", None, [], True, True),  # loopback host from a loopback peer
+        ("127.0.0.1:8080", None, [], True, True),
+        ("[::1]:8080", None, [], True, True),  # ipv6 loopback
+        # P1 fix: a loopback Host from a NON-loopback peer must not pass (an off-host
+        # bind spoofing Host: localhost to skip the allowlist).
+        ("localhost:5173", None, [], False, False),
+        ("127.0.0.1:8080", None, [], False, False),
+        ("mcp.example.com", None, ["mcp.example.com"], False, True),
+        ("mcp.example.com:8080", None, ["mcp.example.com"], False, True),  # port stripped
+        ("evil.com", None, ["mcp.example.com"], False, False),
+        ("mcp.example.com", "https://evil.com", ["mcp.example.com"], False, False),  # bad origin
+        ("mcp.example.com", "https://mcp.example.com", ["mcp.example.com"], False, True),
+        ("", None, [], True, False),  # missing Host fails closed, even from loopback
+        ("", None, ["mcp.example.com"], False, False),
+        ("", "https://mcp.example.com", ["mcp.example.com"], False, False),  # good origin can't rescue a missing host
     ],
 )
-def test_host_allowed(host, origin, allowed, ok):
-    result, _ = middleware.host_allowed(host, origin, allowed)
+def test_host_allowed(host, origin, allowed, client_loopback, ok):
+    result, _ = middleware.host_allowed(host, origin, allowed, client_is_loopback=client_loopback)
     assert result is ok
+
+
+def test_is_loopback_client():
+    from types import SimpleNamespace
+
+    def req(peer):
+        client = SimpleNamespace(host=peer) if peer is not None else None
+        return SimpleNamespace(client=client)
+
+    assert middleware.is_loopback_client(req("127.0.0.1")) is True
+    assert middleware.is_loopback_client(req("::1")) is True
+    assert middleware.is_loopback_client(req("testclient")) is True  # starlette TestClient peer
+    assert middleware.is_loopback_client(req("10.0.0.5")) is False  # LAN
+    assert middleware.is_loopback_client(req("203.0.113.7")) is False  # public
+    assert middleware.is_loopback_client(req(None)) is False  # no client info
 
 
 def _server(provider: str) -> Server:
