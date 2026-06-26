@@ -8,6 +8,8 @@ services:
     # Tunnel) or change to "8080:8080" — but enable auth first (milestone M5).
     ports:
       - "127.0.0.1:8080:8080"
+    networks:
+      - mcpe
     volumes:
       - mcpe-data:/data
       # Opt-in sibling Docker (runner=docker, M7). This is ROOT-EQUIVALENT on the
@@ -15,15 +17,23 @@ services:
       # - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - MCPE_HOST=0.0.0.0
-      # The container binds 0.0.0.0, so a host-loopback request arrives from the
-      # Docker bridge gateway (not 127.0.0.1). Trust that gateway range so the UI
-      # works over the loopback-published port above. SAFE only while the port is
-      # published to 127.0.0.1 (the default); if you publish off-host (e.g.
-      # "8080:8080"), drop this and use expose mode + auth instead.
-      - MCPE_TRUSTED_PROXIES=172.16.0.0/12
+      # The container binds 0.0.0.0, so a host-loopback request reaches it from the
+      # compose network's GATEWAY (fixed below). Trust ONLY that one /32 — not the
+      # whole bridge range, which would also trust sibling containers on the network.
+      # SAFE only while the port is published to 127.0.0.1 (the default); for an
+      # off-host bind, drop this and use expose mode + auth instead.
+      - MCPE_TRUSTED_PROXIES=172.20.0.1/32
       # Absolute URL clients use to reach this instance (behind a tunnel/proxy):
       # - MCPE_PUBLIC_BASE_URL=https://mcp.example.com
     restart: unless-stopped
+
+networks:
+  mcpe:
+    # Fixed subnet so the gateway (the only trusted proxy above) is a stable address.
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+          gateway: 172.20.0.1
 
 volumes:
   mcpe-data:

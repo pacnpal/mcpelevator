@@ -90,9 +90,9 @@ def test_create_server_rejects_unknown_auth_provider():
 
 
 def test_api_trusts_docker_gateway_when_configured(monkeypatch):
-    """With MCPE_TRUSTED_PROXIES set (the compose default), a request forwarded by the
-    Docker bridge gateway (a non-loopback peer) may use Host: localhost — modelling a
-    fresh `docker compose up` reaching the loopback-published port, which 403'd before."""
+    """With MCPE_TRUSTED_PROXIES = the compose gateway /32, a request forwarded by
+    that gateway may use Host: localhost (a fresh `docker compose up` reaching the
+    loopback-published port), but a sibling container on the same network cannot."""
     from types import SimpleNamespace
 
     from app.auth import middleware
@@ -101,9 +101,11 @@ def test_api_trusts_docker_gateway_when_configured(monkeypatch):
     monkeypatch.setattr(
         middleware,
         "get_settings",
-        lambda: SimpleNamespace(trusted_proxies="172.16.0.0/12", public_host=public),
+        lambda: SimpleNamespace(trusted_proxies="172.20.0.1/32", public_host=public),
     )
-    with TestClient(app, client=("172.17.0.1", 5000)) as client:  # bridge gateway peer
+    with TestClient(app, client=("172.20.0.1", 5000)) as gateway:  # the gateway -> trusted
         with Session(get_engine()) as s:
             runtime_settings.write(s, {"bind_mode": "local", "allowed_hosts": []})
-        assert client.get("/api/health", headers={"host": "localhost"}).status_code == 200
+        assert gateway.get("/api/health", headers={"host": "localhost"}).status_code == 200
+    with TestClient(app, client=("172.20.0.5", 5000)) as sibling:  # a sibling container
+        assert sibling.get("/api/health", headers={"host": "localhost"}).status_code == 403

@@ -165,14 +165,15 @@ def test_is_loopback_client_trusts_configured_proxy(monkeypatch):
     def req(peer):
         return SimpleNamespace(client=SimpleNamespace(host=peer))
 
-    # Without a trusted-proxy config, a Docker bridge gateway peer is NOT loopback.
-    assert middleware.is_loopback_client(req("172.17.0.1")) is False
-    # With MCPE_TRUSTED_PROXIES set (the compose default), that gateway is trusted.
+    # Without a trusted-proxy config, the compose gateway peer is NOT loopback.
+    assert middleware.is_loopback_client(req("172.20.0.1")) is False
+    # With MCPE_TRUSTED_PROXIES = the gateway /32 (the compose default), only that
+    # exact address is trusted — a sibling container on the same network is not.
     monkeypatch.setattr(
-        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="172.16.0.0/12")
+        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="172.20.0.1/32")
     )
-    assert middleware.is_loopback_client(req("172.17.0.1")) is True
-    assert middleware.is_loopback_client(req("10.0.0.5")) is False  # outside the trusted range
+    assert middleware.is_loopback_client(req("172.20.0.1")) is True  # the gateway
+    assert middleware.is_loopback_client(req("172.20.0.5")) is False  # a sibling container
 
 
 def _server(provider: str) -> Server:
