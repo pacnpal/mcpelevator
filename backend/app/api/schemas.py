@@ -32,7 +32,7 @@ class ServerSummary(BaseModel):
     state: str
     transports: Transports
     urls: Urls
-    auth: str = "none"  # effective auth (per-server `inherit` resolved): "none" | "bearer"
+    auth: Literal["none", "bearer"] = "none"  # effective auth (per-server `inherit` resolved)
     last_error: Optional[str] = None
     pid: Optional[int] = None
     port: Optional[int] = None

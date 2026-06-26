@@ -15,3 +15,8 @@ def test_base_url_rewrites_wildcard_bind_to_loopback():
 def test_base_url_keeps_real_host_and_prefers_public_url():
     assert Settings(host="127.0.0.1", port=8080, public_base_url=None).base_url == "http://127.0.0.1:8080"
     assert Settings(public_base_url="https://mcp.example.com/").base_url == "https://mcp.example.com"
+
+
+def test_base_url_brackets_ipv6_literal_host():
+    assert Settings(host="::1", port=8080, public_base_url=None).base_url == "http://[::1]:8080"
+    assert Settings(host="fe80::1", port=8080, public_base_url=None).base_url == "http://[fe80::1]:8080"

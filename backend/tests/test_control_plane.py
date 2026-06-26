@@ -46,15 +46,22 @@ def test_summary_exposes_effective_auth():
     `inherit` to the global default and reports `none`/`bearer`."""
     with TestClient(app) as client:
         h = {"host": "127.0.0.1"}
-        r = client.post(
-            "/api/servers", json={"name": "b", "command": "echo", "auth_provider": "bearer"}, headers=h
-        )
-        assert r.status_code == 201, r.text
-        assert r.json()["auth"] == "bearer"
-        r2 = client.post(
-            "/api/servers", json={"name": "n", "command": "echo", "auth_provider": "none"}, headers=h
-        )
-        assert r2.json()["auth"] == "none"
+        created: list[str] = []
+        try:
+            r = client.post(
+                "/api/servers", json={"name": "b", "command": "echo", "auth_provider": "bearer"}, headers=h
+            )
+            assert r.status_code == 201, r.text
+            created.append(r.json()["id"])
+            assert r.json()["auth"] == "bearer"
+            r2 = client.post(
+                "/api/servers", json={"name": "n", "command": "echo", "auth_provider": "none"}, headers=h
+            )
+            created.append(r2.json()["id"])
+            assert r2.json()["auth"] == "none"
+        finally:
+            for sid in created:
+                client.delete(f"/api/servers/{sid}", headers=h)
 
 
 def test_create_server_rejects_unknown_auth_provider():

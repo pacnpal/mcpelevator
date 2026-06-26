@@ -41,7 +41,7 @@ export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls' | 'au
 		out.push({
 			kind: 'cmd',
 			label: 'Claude Code',
-			value: `claude mcp add --transport http ${qName} ${qMcp}${claudeAuth}`
+			value: `claude mcp add --transport http${claudeAuth} ${qName} ${qMcp}`
 		});
 		out.push({
 			kind: 'cmd',

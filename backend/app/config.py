@@ -52,6 +52,8 @@ class Settings(BaseSettings):
         # such a URL would send Host: 0.0.0.0 and fail the allowlist. Advertise
         # loopback instead; set MCPE_PUBLIC_BASE_URL for a real off-host URL.
         host = "127.0.0.1" if self.host in ("0.0.0.0", "::", "") else self.host
+        if ":" in host:  # bracket an IPv6 literal so the URL is well-formed
+            host = f"[{host}]"
         return f"http://{host}:{self.port}"
 
     @property

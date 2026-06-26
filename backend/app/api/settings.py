@@ -25,4 +25,4 @@ async def update_settings(payload: SettingsUpdate, session: Session = Depends(ge
         # SSOT writer; surface its ValueError as a 400.
         return SettingsInfo(**runtime_settings.write(session, changes))
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
