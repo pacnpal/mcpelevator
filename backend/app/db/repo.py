@@ -57,6 +57,16 @@ def set_config_hash(session: Session, server_id: str, config_hash: str) -> None:
         session.commit()
 
 
+def set_auth_provider(session: Session, server_id: str, auth_provider: str) -> None:
+    """Update only the stored auth_provider (no updated_at bump) — used by the boot
+    normalization of legacy free-text values into the canonical set."""
+    server = session.get(Server, server_id)
+    if server is not None:
+        server.auth_provider = auth_provider
+        session.add(server)
+        session.commit()
+
+
 def delete_server(session: Session, server_id: str) -> bool:
     server = session.get(Server, server_id)
     if server is None:

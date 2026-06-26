@@ -65,3 +65,25 @@ def test_backfill_config_hashes_rehashes_stale_rows():
         assert service.backfill_config_hashes(s) == 1
         assert repo.get_server(s, srv.id).config_hash == current  # rehashed to current shape
         assert service.backfill_config_hashes(s) == 0  # idempotent — no further writes
+
+
+def test_normalize_auth_providers_canonicalizes_legacy():
+    from sqlalchemy import text
+    from sqlmodel import Session
+
+    from app.db import repo
+    from app.registry import service
+
+    eng = create_engine("sqlite://")
+    SQLModel.metadata.create_all(eng)
+    with Session(eng) as s:
+        a = service.create_server(s, name="a", runner="npx", command="npx", auth_provider="bearer")
+        b = service.create_server(s, name="b", runner="npx", command="npx")
+        # legacy free-text values the old `str` schema would have allowed
+        s.execute(text("UPDATE server SET auth_provider='Bearer ' WHERE id=:i"), {"i": a.id})
+        s.execute(text("UPDATE server SET auth_provider='basic' WHERE id=:i"), {"i": b.id})
+        s.commit()
+        assert service.normalize_auth_providers(s) == 2
+        assert repo.get_server(s, a.id).auth_provider == "bearer"   # case/space canonicalized
+        assert repo.get_server(s, b.id).auth_provider == "inherit"  # unresolvable -> default
+        assert service.normalize_auth_providers(s) == 0  # idempotent

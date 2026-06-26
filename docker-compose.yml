@@ -4,8 +4,12 @@ services:
     image: mcpelevator:latest
     container_name: mcpelevator
     # Secure default: publish to the host loopback only. To reach it from other
-    # devices (e.g. your phone), front it with a tunnel (Tailscale/Cloudflare
-    # Tunnel) or change to "8080:8080" — but enable auth first (milestone M5).
+    # devices (e.g. your phone), front it with a tunnel (Tailscale / Cloudflare
+    # Tunnel) that terminates auth. Do NOT simply change this to "8080:8080": the
+    # MCPE_TRUSTED_PROXIES gateway-trust below treats Docker-forwarded clients as
+    # loopback, so a direct off-host request could reach the unauthenticated /api.
+    # If you must bind off-host, remove MCPE_TRUSTED_PROXIES and put an
+    # authenticating proxy in front of /api.
     ports:
       - "127.0.0.1:8080:8080"
     networks:

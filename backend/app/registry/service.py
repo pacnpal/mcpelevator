@@ -48,6 +48,26 @@ def backfill_config_hashes(session: Session) -> int:
     return changed
 
 
+_AUTH_PROVIDERS = {"inherit", "none", "bearer"}
+
+
+def normalize_auth_providers(session: Session) -> int:
+    """Canonicalize stored ``auth_provider`` values from older versions (the old API
+    schema accepted any ``str``): ``"Bearer"`` / ``"bearer "`` -> ``"bearer"``, and an
+    unresolvable value -> ``"inherit"`` (the admin-controlled default). Without this,
+    the dashboard/copy snippets advertise a usable endpoint while ``resolve()`` 403s
+    the raw value on every ``/s/...`` request. Idempotent. Returns the count changed."""
+    changed = 0
+    for server in repo.list_servers(session):
+        norm = (server.auth_provider or "").strip().lower()
+        if norm not in _AUTH_PROVIDERS:
+            norm = "inherit"
+        if norm != server.auth_provider:
+            repo.set_auth_provider(session, server.id, norm)
+            changed += 1
+    return changed
+
+
 def _unique_slug(session: Session, name: str) -> str:
     base = slugify(name)
     slug = base

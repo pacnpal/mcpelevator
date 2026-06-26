@@ -35,6 +35,7 @@ from app.supervisor.supervisor import Supervisor
 async def lifespan(app: FastAPI):
     init_db()
     with Session(get_engine()) as session:
+        service.normalize_auth_providers(session)  # canonicalize legacy auth_provider values
         service.backfill_config_hashes(session)  # rehash upgraded rows -> no spurious restarts
     app.state.http = httpx.AsyncClient(timeout=None)  # no timeout: long-lived SSE streams
     supervisor = Supervisor()
