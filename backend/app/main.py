@@ -79,7 +79,7 @@ def create_app() -> FastAPI:
         # otherwise hit loopback and mint tokens / change settings. Per-request
         # bearer auth on /api is a deferred v1 item (it would also have to gate the
         # SPA itself).
-        if request.url.path.startswith("/api"):
+        if request.url.path == "/api" or request.url.path.startswith("/api/"):
             with Session(get_engine()) as session:
                 allowed = request_allowlist(session)
             ok, reason = host_allowed(
