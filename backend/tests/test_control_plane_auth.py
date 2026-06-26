@@ -216,21 +216,25 @@ def test_public_base_url_enforces_under_auto(monkeypatch):
         _reset()
 
 
-def test_settings_patch_rejects_enabling_auth_without_a_token():
-    """Enabling enforcement with no admin token would gate the next request, including
-    POST /tokens, so the writer rejects it (the server-side backstop to the UI gate)."""
+def test_settings_patch_rejects_enabling_auth_without_a_credential():
+    """Enabling enforcement requires THIS request to authenticate as control, or the
+    next request (including POST /tokens) would be gated and lock the operator out.
+    A token row merely existing isn't enough: the caller must present it."""
     with TestClient(app) as client:
         try:
+            # no credential at all -> rejected
             assert client.patch(
                 "/api/settings", json={"control_plane_auth": "always"}, headers=LOOPBACK
             ).status_code == 400
+            # a control token row exists but isn't presented on this request -> still rejected
+            control = _mint("control")
             assert client.patch(
                 "/api/settings", json={"bind_mode": "expose"}, headers=LOOPBACK
             ).status_code == 400
             assert client.get("/api/auth/status", headers=LOOPBACK).json()["enforced"] is False  # nothing applied
-            _mint("control")  # once a control token exists, the same change is allowed
+            # presenting the control token authorizes the change
             assert client.patch(
-                "/api/settings", json={"control_plane_auth": "always"}, headers=LOOPBACK
+                "/api/settings", json={"control_plane_auth": "always"}, headers=_bearer(control)
             ).status_code == 200
         finally:
             _reset()

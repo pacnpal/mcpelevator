@@ -45,13 +45,14 @@ def enforcement_enabled(session: Session) -> bool:
     )
 
 
-def would_lock_out(session: Session, changes: dict[str, Any]) -> bool:
-    """True if applying ``changes`` would turn enforcement on while no admin
-    credential (a control token or ``MCPE_ADMIN_TOKEN``) exists. The next request,
-    including ``POST /api/tokens``, would then be gated with no way to mint the first
-    token, so the settings writer rejects such a change instead of locking out."""
-    if get_settings().admin_token or repo.control_token_exists(session):
-        return False
+def would_lock_out(request: Request, session: Session, changes: dict[str, Any]) -> bool:
+    """True if applying ``changes`` would turn enforcement on while THIS request can't
+    authenticate as control, locking the operator out the moment it takes effect.
+    Enabling enforcement requires a control credential on the request (a control token
+    or ``MCPE_ADMIN_TOKEN``); a token row merely existing in the DB is not enough, since
+    this browser may not hold its plaintext."""
+    if control_auth(request, session) == "ok":
+        return False  # the caller already holds a usable control credential
     mode = changes.get("control_plane_auth", runtime_settings.control_plane_auth(session))
     bind = changes.get("bind_mode", runtime_settings.bind_mode(session))
     return _enforced(mode, bind, get_settings().public_host is not None)
