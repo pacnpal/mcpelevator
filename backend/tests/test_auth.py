@@ -61,6 +61,15 @@ def test_settings_write_normalizes_and_rejects_allowed_hosts(session):
     assert result["allowed_hosts"] == ["mcp.example.com"]
 
 
+def test_settings_write_is_atomic_on_invalid_patch(session):
+    runtime_settings.write(session, {"bind_mode": "expose"})
+    # a patch that would flip bind_mode but has a later invalid field must commit
+    # nothing — otherwise a 400 response could still e.g. lock out the control plane.
+    with pytest.raises(ValueError):
+        runtime_settings.write(session, {"bind_mode": "local", "default_auth_provider": "bogus"})
+    assert runtime_settings.bind_mode(session) == "expose"  # unchanged — atomic
+
+
 def test_host_allowed_survives_malformed_stored_entry():
     # a malformed stored entry (legacy data) must be ignored, not crash the check
     ok, _ = middleware.host_allowed("mcp.example.com", None, ["[bad]", "mcp.example.com"])

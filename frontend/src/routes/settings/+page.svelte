@@ -202,7 +202,7 @@
 	<div>
 		<h1 class="text-2xl font-semibold tracking-tight text-[var(--color-ink)]">Settings</h1>
 		<p class="mt-1 text-sm text-[var(--color-ink-muted)]">
-			Access tokens and security for the control plane.
+			Access tokens and network security.
 		</p>
 	</div>
 
@@ -236,7 +236,7 @@
 			<div class="flex flex-col gap-1">
 				<h2 class="text-sm font-semibold text-[var(--color-ink)]">Access tokens</h2>
 				<p class="text-xs text-[var(--color-ink-dim)]">
-					Bearer tokens for servers (or the API) set to <code class="font-mono">bearer</code> auth.
+					Bearer tokens for servers set to <code class="font-mono">bearer</code> auth.
 					Sent as <code class="font-mono">Authorization: Bearer &lt;token&gt;</code>.
 				</p>
 			</div>

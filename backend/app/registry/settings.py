@@ -46,9 +46,11 @@ def _normalize_hosts(hosts: Any) -> list[str]:
 
 
 def write(session: Session, changes: dict[str, Any]) -> dict[str, Any]:
-    """Persist setting changes, validating enums + the allowlist here (the SSOT
-    write path) so a bad value can never reach storage and silently weaken — or
-    crash — the auth middleware."""
+    """Persist setting changes. Validates + normalizes the WHOLE patch first, then
+    commits it in one step (the SSOT write path), so a bad value can never reach
+    storage and a multi-field patch never *partially* applies — a partial write
+    could e.g. flip bind_mode and lock out the control plane while still erroring."""
+    pending: dict[str, Any] = {}
     for key, value in changes.items():
         if key not in DEFAULTS:
             continue
@@ -58,7 +60,8 @@ def write(session: Session, changes: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"invalid default_auth_provider: {value!r}")
         if key == "allowed_hosts":
             value = _normalize_hosts(value)
-        repo.setting_set(session, key, value)
+        pending[key] = value
+    repo.setting_set_many(session, pending)
     return read_all(session)
 
 

@@ -48,7 +48,11 @@ class Settings(BaseSettings):
     def base_url(self) -> str:
         if self.public_base_url:
             return self.public_base_url.rstrip("/")
-        return f"http://{self.host}:{self.port}"
+        # 0.0.0.0 / :: are bind addresses, not reachable hosts — a client following
+        # such a URL would send Host: 0.0.0.0 and fail the allowlist. Advertise
+        # loopback instead; set MCPE_PUBLIC_BASE_URL for a real off-host URL.
+        host = "127.0.0.1" if self.host in ("0.0.0.0", "::", "") else self.host
+        return f"http://{host}:{self.port}"
 
     @property
     def backend_root(self) -> Path:
