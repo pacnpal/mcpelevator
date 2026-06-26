@@ -19,9 +19,11 @@ const BACKEND = 'http://127.0.0.1:8080';
 // 2. Strip buffering hints from streamed (SSE) responses so the proxy flushes
 //    events to the client as they arrive.
 const devProxy: ProxyOptions['configure'] = (proxy) => {
-	proxy.on('proxyReq', (proxyReq: ClientRequest) => {
-		proxyReq.setHeader('origin', BACKEND);
-	});
+	// Rewrite Origin for both plain HTTP requests and WebSocket upgrades —
+	// `proxyReq` does not fire for upgrades, so `proxyReqWs` is needed too.
+	const rewriteOrigin = (proxyReq: ClientRequest) => proxyReq.setHeader('origin', BACKEND);
+	proxy.on('proxyReq', rewriteOrigin);
+	proxy.on('proxyReqWs', rewriteOrigin);
 	proxy.on('proxyRes', (proxyRes: IncomingMessage) => {
 		proxyRes.headers['cache-control'] = 'no-cache, no-transform';
 		proxyRes.headers['x-accel-buffering'] = 'no';
