@@ -71,7 +71,7 @@ Then point any MCP client at `http://127.0.0.1:8080/s/memory/mcp`.
 ## Security
 
 - **Local-first by default**: compose publishes to `127.0.0.1` only. To reach it from your phone, front it with a tunnel (Tailscale / Cloudflare Tunnel) or expose the port deliberately — **after** enabling auth.
-- Auth is a **pluggable seam** (single enforcement chokepoint). v1 ships `none`; a `bearer` token provider + Host/Origin allowlist (DNS-rebinding defense) land in milestone **M5**.
+- Auth is a **pluggable seam** (single enforcement chokepoint): v1 ships `none` + `bearer` (SHA-256-hashed tokens). The chokepoint also enforces a Host/Origin allowlist (DNS-rebinding defense) on every request — loopback always, plus the hosts you allowlist for `expose`.
 - The `docker` runner (launch MCP servers that are Docker images) is **opt-in and root-equivalent** — milestone **M7**.
 
 ## Project layout

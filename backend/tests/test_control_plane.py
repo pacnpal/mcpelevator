@@ -30,10 +30,25 @@ def test_api_allowlist_enforced_in_expose_mode():
                 runtime_settings.write(s, {"bind_mode": "local", "allowed_hosts": []})
 
 
-def test_api_open_in_local_mode():
-    """Default (local) mode does NOT enforce the allowlist on /api — any Host
-    passes, so the same-origin SPA keeps working."""
+def test_api_loopback_only_in_local_mode():
+    """Local mode still rejects a non-loopback Host (DNS-rebinding defense); only
+    loopback — the sole legitimate way to reach a local deployment — passes."""
     with TestClient(app) as client:
         with Session(get_engine()) as s:
             runtime_settings.write(s, {"bind_mode": "local", "allowed_hosts": []})
-        assert client.get("/api/health", headers={"host": "anything.example"}).status_code == 200
+        assert client.get("/api/health", headers={"host": "evil.example"}).status_code == 403
+        assert client.get("/api/health", headers={"host": "127.0.0.1"}).status_code == 200
+        assert client.get("/api/health", headers={"host": "localhost:8080"}).status_code == 200
+
+
+def test_create_server_rejects_unknown_auth_provider():
+    """A malformed auth_provider (trailing space / wrong case / unknown) is rejected
+    at the API boundary (422), not stored and later failed-closed at request time."""
+    with TestClient(app) as client:
+        for bad in ("bearer ", "Bearer", "basic"):
+            r = client.post(
+                "/api/servers",
+                json={"name": "x", "command": "echo", "auth_provider": bad},
+                headers={"host": "127.0.0.1"},
+            )
+            assert r.status_code == 422, (bad, r.status_code, r.text)

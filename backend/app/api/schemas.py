@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
+
+# The auth providers a server may select. Constrained here so a malformed value
+# (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
+# than silently stored and then failed-closed at request time.
+AuthProvider = Literal["inherit", "none", "bearer"]
 
 
 class Transports(BaseModel):
@@ -53,7 +58,7 @@ class ServerCreate(BaseModel):
     cwd: Optional[str] = None
     mcp_http: bool = True
     rest_openapi: bool = False
-    auth_provider: str = "inherit"
+    auth_provider: AuthProvider = "inherit"
     enabled: bool = False
 
 
@@ -66,7 +71,7 @@ class ServerUpdate(BaseModel):
     cwd: Optional[str] = None
     mcp_http: Optional[bool] = None
     rest_openapi: Optional[bool] = None
-    auth_provider: Optional[str] = None
+    auth_provider: Optional[AuthProvider] = None
 
 
 class ImportSkipped(BaseModel):

@@ -69,19 +69,21 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def _control_plane_allowlist(request: Request, call_next):
-        # In expose mode, guard the control plane (/api) with the same Host/Origin
-        # allowlist as the proxy (DNS-rebinding defense). Per-request bearer auth on
-        # /api is a deferred v1 item — it would also have to gate the SPA itself.
+        # Guard the control plane (/api) with the same Host/Origin allowlist as the
+        # proxy (DNS-rebinding defense), in every mode: loopback always passes and
+        # expose adds the configured hosts. bind_mode controls only the network bind,
+        # so a DNS-rebound page could otherwise hit loopback and mint tokens / change
+        # settings. Per-request bearer auth on /api is a deferred v1 item (it would
+        # also have to gate the SPA itself).
         if request.url.path.startswith("/api"):
             with Session(get_engine()) as session:
-                if runtime_settings.bind_mode(session) == "expose":
-                    ok, reason = host_allowed(
-                        request.headers.get("host", ""),
-                        request.headers.get("origin"),
-                        runtime_settings.allowed_hosts(session),
-                    )
-                    if not ok:
-                        return JSONResponse({"detail": reason}, status_code=403)
+                mode = runtime_settings.bind_mode(session)
+                allowed = runtime_settings.allowed_hosts(session) if mode == "expose" else []
+            ok, reason = host_allowed(
+                request.headers.get("host", ""), request.headers.get("origin"), allowed
+            )
+            if not ok:
+                return JSONResponse({"detail": reason}, status_code=403)
         return await call_next(request)
 
     app.include_router(health_api.router, prefix="/api")

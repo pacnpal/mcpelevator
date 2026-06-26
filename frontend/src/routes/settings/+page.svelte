@@ -461,8 +461,8 @@
 					{/each}
 				</div>
 				<p class="text-xs text-[var(--color-ink-dim)]">
-					<code class="font-mono">expose</code> enforces the Host/Origin allowlist below (loopback
-					always allowed).
+					Host/Origin is always checked (DNS-rebinding defense): loopback is always
+					allowed; <code class="font-mono">expose</code> also allows the hosts below.
 				</p>
 			</fieldset>
 

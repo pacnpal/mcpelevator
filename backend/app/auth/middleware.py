@@ -3,9 +3,11 @@
 The reverse proxy calls ``enforce(request, server)`` before forwarding. Two checks
 happen here, in one place, for every exposed request:
 
-1. **Host/Origin allowlist** (DNS-rebinding defense) — only when ``bind_mode`` is
-   ``expose``. Loopback is always allowed; otherwise the request's Host/Origin must
-   be in the configured allowlist.
+1. **Host/Origin allowlist** (DNS-rebinding defense) — enforced in *every* mode:
+   loopback is always allowed, and ``expose`` mode adds the configured allowlist.
+   A request whose Host/Origin is neither is rejected. (``bind_mode`` controls only
+   the network bind, not reachability — a DNS-rebound page can still target
+   loopback — so the Host check must not be gated on it.)
 2. **Auth provider** — chosen per-server (``auth_provider``), falling back to the
    ``default_auth_provider`` setting when the server is ``inherit``. New providers
    register in ``_PROVIDERS`` without touching routing.
@@ -77,9 +79,10 @@ async def enforce(request: Request, server: Server) -> None:
         allowed = runtime_settings.allowed_hosts(session) if mode == "expose" else []
         default = runtime_settings.default_auth_provider(session)
 
-    if mode == "expose":
-        ok, reason = host_allowed(request.headers.get("host", ""), request.headers.get("origin"), allowed)
-        if not ok:
-            raise HTTPException(status_code=403, detail=reason)
+    # Always validate Host/Origin (DNS-rebinding defense). In local mode the
+    # allowlist is empty, so only loopback passes; expose adds the configured hosts.
+    ok, reason = host_allowed(request.headers.get("host", ""), request.headers.get("origin"), allowed)
+    if not ok:
+        raise HTTPException(status_code=403, detail=reason)
 
     await resolve(server, default).authenticate(request, server)
