@@ -5,6 +5,7 @@
 		errorMessage,
 		getAuthStatus,
 		getSettings,
+		listServers,
 		listTokens,
 		updateSettings
 	} from '$lib/api';
@@ -12,11 +13,13 @@
 		AuthProvider,
 		BindMode,
 		ControlPlaneAuth,
+		ServerSummary,
 		SettingsInfo,
 		TokenCreated,
 		TokenInfo
 	} from '$lib/types';
 	import { clearToken, setToken } from '$lib/auth';
+	import { isLoopbackHost, normalizeHost } from '$lib/host';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 
@@ -37,6 +40,7 @@
 
 	let settings = $state<SettingsInfo | null>(null);
 	let tokens = $state<TokenInfo[]>([]);
+	let servers = $state<ServerSummary[]>([]);
 	// Whether THIS browser holds a working control token (not just whether one exists
 	// in the backend). That's what decides if enabling enforcement would lock us out.
 	let hasUsableAdminCredential = $state(false);
@@ -45,9 +49,15 @@
 		loadState = 'loading';
 		loadError = null;
 		try {
-			const [s, t, auth] = await Promise.all([getSettings(), listTokens(), getAuthStatus()]);
+			const [s, t, srv, auth] = await Promise.all([
+				getSettings(),
+				listTokens(),
+				listServers(),
+				getAuthStatus()
+			]);
 			settings = s;
 			tokens = t;
+			servers = srv;
 			hasUsableAdminCredential = auth.authenticated;
 			loadState = 'ready';
 		} catch (err) {
@@ -63,8 +73,9 @@
 
 	// ---- Access tokens --------------------------------------------------------
 
-	// New-token flow: name entry → POST → one-time plaintext reveal.
+	// New-token flow: name entry → scope choice → POST → one-time plaintext reveal.
 	let newTokenName = $state('');
+	let newTokenScope = $state('all');
 	let creating = $state(false);
 	let createdToken = $state<TokenCreated | null>(null);
 
@@ -75,18 +86,35 @@
 		if (creating || !newNameValid) return;
 		creating = true;
 		try {
-			const created = await createToken(newTokenName.trim());
+			const created = await createToken(newTokenName.trim(), newTokenScope);
 			createdToken = created;
 			// List it (by prefix) immediately; the reveal box holds the plaintext.
 			const { token: _token, ...info } = created;
 			void _token;
 			tokens = [info, ...tokens];
 			newTokenName = '';
+			newTokenScope = 'all';
 		} catch (err) {
 			flashToast(errorMessage(err));
 		} finally {
 			creating = false;
 		}
+	}
+
+	/** A server's display label. Names aren't unique (the backend only makes slugs
+	 * unique), so append the slug to disambiguate when another server shares the
+	 * name — otherwise a scope choice could point at the wrong server. */
+	function serverLabel(server: ServerSummary): string {
+		const collides = servers.some((s) => s.id !== server.id && s.name === server.name);
+		return collides ? `${server.name} (${server.slug})` : server.name;
+	}
+
+	/** Human label for a token's scope: 'All servers', the server's label, or a
+	 * fallback when the scoped server no longer exists. */
+	function scopeLabel(scope: string): string {
+		if (scope === 'all') return 'All servers';
+		const server = servers.find((s) => s.id === scope);
+		return server ? serverLabel(server) : 'Unknown server';
 	}
 
 	function dismissReveal() {
@@ -186,6 +214,40 @@
 		}
 	}
 
+	// ---- Self-lockout guard rails ---------------------------------------------
+	// The control plane enforces a Host/Origin allowlist on EVERY request: loopback
+	// (localhost/127.0.0.1/::1) always passes; a non-loopback host passes only in
+	// `expose` mode while it's in `allowed_hosts`. So if this tab was reached via a
+	// non-loopback host, two actions would 403 our own /api calls and brick the UI:
+	// removing that host from the allowlist, or switching to `local` (which ignores
+	// the allowlist entirely). Loopback always recovers, so we confirm — not block.
+	// Browser-only SPA (ssr/prerender disabled), so `window` is defined in practice.
+	// The `typeof window` guards keep this module import-safe in a non-browser context
+	// too (a node test runner, or if SSR is ever turned on). When absent, browserHost
+	// is empty so `onLoopback` is false — the fail-safe direction (guards armed).
+	const browserHost =
+		typeof window !== 'undefined' ? normalizeHost(window.location.hostname) : '';
+	const onLoopback = isLoopbackHost(browserHost);
+	const loopbackUrl =
+		typeof window !== 'undefined'
+			? `${window.location.protocol}//localhost${window.location.port ? `:${window.location.port}` : ''}`
+			: '';
+
+	let confirmBindLocal = $state(false);
+	let confirmRemoveHost = $state<string | null>(null);
+
+	// The bind-mode radios are controlled by `settings.bind_mode`. When we intercept a
+	// selection to confirm (without patching), Svelte won't re-assert the radios'
+	// `checked` — the value it would write is unchanged — so the just-selected option
+	// stays visually checked. Snap them back to the real value imperatively (covers
+	// mouse and keyboard, both of which fire the change handler).
+	function resetBindRadios() {
+		if (!settings) return;
+		for (const el of document.querySelectorAll<HTMLInputElement>('input[name="bind-mode"]')) {
+			el.checked = el.value === settings.bind_mode;
+		}
+	}
+
 	function setDefaultAuth(value: AuthProvider) {
 		if (!settings || settings.default_auth_provider === value) return;
 		patchSettings({ default_auth_provider: value }, 'default_auth_provider');
@@ -195,6 +257,14 @@
 		if (!settings || settings.bind_mode === value) return;
 		if (value === 'expose' && !hasUsableAdminCredential) {
 			flashToast('Generate an admin token before exposing the control plane.');
+			resetBindRadios();
+			return;
+		}
+		// Switching to `local` from a non-loopback host locks this tab out (local
+		// allows loopback only). Hold the change behind an explicit confirm.
+		if (value === 'local' && !onLoopback) {
+			confirmBindLocal = true;
+			resetBindRadios(); // keep `expose` shown while the confirm is open
 			return;
 		}
 		patchSettings({ bind_mode: value }, 'bind_mode');
@@ -207,6 +277,16 @@
 			return;
 		}
 		patchSettings({ control_plane_auth: value }, 'control_plane_auth');
+	}
+
+	function confirmSwitchToLocal() {
+		confirmBindLocal = false;
+		patchSettings({ bind_mode: 'local' }, 'bind_mode');
+	}
+
+	function cancelSwitchToLocal() {
+		confirmBindLocal = false;
+		resetBindRadios();
 	}
 
 	// ---- Allowed hosts editor -------------------------------------------------
@@ -236,10 +316,27 @@
 		patchSettings({ allowed_hosts: next }, 'allowed_hosts');
 	}
 
-	function removeHost(host: string) {
+	function performRemoveHost(host: string) {
 		if (!settings) return;
 		const next = settings.allowed_hosts.filter((h) => h !== host);
 		patchSettings({ allowed_hosts: next }, 'allowed_hosts');
+	}
+
+	function removeHost(host: string) {
+		if (!settings) return;
+		// Removing the host this tab is reached through locks the UI out. Confirm
+		// first; any other host removes immediately.
+		if (!onLoopback && normalizeHost(host) === browserHost) {
+			confirmRemoveHost = host;
+			return;
+		}
+		performRemoveHost(host);
+	}
+
+	function confirmRemoveCurrentHost() {
+		const host = confirmRemoveHost;
+		confirmRemoveHost = null;
+		if (host !== null) performRemoveHost(host);
 	}
 </script>
 
@@ -341,8 +438,8 @@
 			{/if}
 
 			<!-- New token -->
-			<form onsubmit={handleCreateToken} class="flex items-end gap-2">
-				<div class="flex min-w-0 flex-1 flex-col gap-1.5">
+			<form onsubmit={handleCreateToken} class="flex flex-wrap items-end gap-2">
+				<div class="flex min-w-0 flex-1 basis-48 flex-col gap-1.5">
 					<label for="token-name" class="text-xs font-medium text-[var(--color-ink-muted)]">
 						New token
 					</label>
@@ -355,6 +452,21 @@
 						placeholder="e.g. claude-desktop"
 						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 					/>
+				</div>
+				<div class="flex min-w-0 flex-col gap-1.5">
+					<label for="token-scope" class="text-xs font-medium text-[var(--color-ink-muted)]">
+						Scope
+					</label>
+					<select
+						id="token-scope"
+						bind:value={newTokenScope}
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+					>
+						<option value="all">All servers</option>
+						{#each servers as server (server.id)}
+							<option value={server.id}>{serverLabel(server)}</option>
+						{/each}
+					</select>
 				</div>
 				<button
 					type="submit"
@@ -402,15 +514,30 @@
 				<ul class="flex flex-col divide-y divide-[var(--color-line)]">
 					{#each tokens as token (token.id)}
 						<li class="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
-							<div class="flex min-w-0 flex-col gap-0.5">
-								<span class="truncate text-sm font-medium text-[var(--color-ink)]">
-									{token.name}
+							<div class="flex min-w-0 flex-col gap-1">
+								<span class="flex min-w-0 items-center gap-2">
+									<span class="truncate text-sm font-medium text-[var(--color-ink)]">
+										{token.name}
+									</span>
 									{#if token.scope === 'control'}
 										<span
-											class="ml-1 rounded px-1.5 py-0.5 align-middle text-[10px] font-semibold"
-											style="background-color: color-mix(in oklab, var(--color-accent) 16%, transparent); color: var(--color-accent);"
+											class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
+											title="Control-plane admin token, authenticates /api"
+											style="border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);"
 										>
 											control
+										</span>
+									{:else}
+										<span
+											class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
+											title={token.scope === 'all'
+												? 'Authorizes every bearer-protected server'
+												: 'Authorizes only this server'}
+											style={token.scope === 'all'
+												? 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'
+												: 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'}
+										>
+											{scopeLabel(token.scope)}
 										</span>
 									{/if}
 								</span>
@@ -540,6 +667,45 @@
 						</label>
 					{/each}
 				</div>
+				{#if confirmBindLocal}
+					<div
+						role="alert"
+						class="flex flex-col gap-2.5 rounded-lg border p-3"
+						style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+					>
+						<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+							This will lock this browser
+							(<code class="font-mono text-[var(--color-ink)]">{browserHost}</code>)
+							out of the control plane — <code class="font-mono">local</code> allows loopback
+							only. Open
+							<a
+								class="font-mono text-[var(--color-accent)] underline"
+								href={loopbackUrl}
+								target="_blank"
+								rel="noopener noreferrer">{loopbackUrl}</a
+							>
+							first, then switch.
+						</p>
+						<div class="flex items-center gap-1.5">
+							<button
+								type="button"
+								onclick={confirmSwitchToLocal}
+								disabled={savingField !== null}
+								class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+								style="background-color: var(--color-state-failed);"
+							>
+								Switch to local anyway
+							</button>
+							<button
+								type="button"
+								onclick={cancelSwitchToLocal}
+								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+							>
+								Cancel
+							</button>
+						</div>
+					</div>
+				{/if}
 				<p class="text-xs text-[var(--color-ink-dim)]">
 					Host/Origin is always checked (DNS-rebinding defense): loopback is always
 					allowed; <code class="font-mono">expose</code> also allows the hosts below.
@@ -671,6 +837,46 @@
 							</li>
 						{/each}
 					</ul>
+				{/if}
+
+				{#if confirmRemoveHost !== null}
+					<div
+						role="alert"
+						class="flex flex-col gap-2.5 rounded-lg border p-3"
+						style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+					>
+						<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+							Removing
+							<code class="font-mono text-[var(--color-ink)]">{confirmRemoveHost}</code>
+							will lock this browser out of the control plane — it's the host you're
+							connected through. Open
+							<a
+								class="font-mono text-[var(--color-accent)] underline"
+								href={loopbackUrl}
+								target="_blank"
+								rel="noopener noreferrer">{loopbackUrl}</a
+							>
+							first.
+						</p>
+						<div class="flex items-center gap-1.5">
+							<button
+								type="button"
+								onclick={confirmRemoveCurrentHost}
+								disabled={savingField !== null}
+								class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+								style="background-color: var(--color-state-failed);"
+							>
+								Remove anyway
+							</button>
+							<button
+								type="button"
+								onclick={() => (confirmRemoveHost = null)}
+								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+							>
+								Cancel
+							</button>
+						</div>
+					</div>
 				{/if}
 			</fieldset>
 		</div>

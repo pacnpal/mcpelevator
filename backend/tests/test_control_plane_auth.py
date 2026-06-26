@@ -56,11 +56,11 @@ def test_local_auto_no_token_allows_control_plane():
 def test_expose_auto_requires_control_token():
     with TestClient(app) as client:
         try:
-            control, proxy = _mint("control"), _mint("proxy")
+            control, data = _mint("control"), _mint("all")  # "all" = a data-plane token
             with Session(get_engine()) as s:
                 runtime_settings.write(s, {"bind_mode": "expose"})
             assert client.get("/api/servers", headers=LOOPBACK).status_code == 401  # no token
-            assert client.get("/api/servers", headers=_bearer(proxy)).status_code == 403  # wrong scope
+            assert client.get("/api/servers", headers=_bearer(data)).status_code == 403  # data-plane token rejected on /api
             assert client.get("/api/servers", headers=_bearer(control)).status_code == 200  # control token
         finally:
             _reset()
@@ -270,9 +270,10 @@ def test_revoke_last_control_token_allowed_when_not_enforced():
             _reset()
 
 
-def test_bearer_provider_requires_proxy_scope():
-    """Scopes don't cross: the data-plane bearer check accepts only `proxy` tokens, so
-    a `control` (admin) token can't be reused on /s even though both live in one table."""
+def test_bearer_provider_rejects_control_token_on_data_plane():
+    """Scopes don't cross: on /s the per-server bearer check accepts an `all` (or a
+    matching server-id) token, but a `control` admin token is rejected even though both
+    live in one table."""
     import asyncio
     from types import SimpleNamespace
 
@@ -284,14 +285,14 @@ def test_bearer_provider_requires_proxy_scope():
 
     init_db()
     try:
-        proxy, control = _mint("proxy"), _mint("control")
+        all_token, control = _mint("all"), _mint("control")
         provider = BearerProvider()
         server = Server(id="x", slug="x", name="x", runner="npx", command="npx", args=[], env={})
 
         def req(token: str):
             return SimpleNamespace(headers={"authorization": f"Bearer {token}"})
 
-        asyncio.run(provider.authenticate(req(proxy), server))  # proxy token: accepted
+        asyncio.run(provider.authenticate(req(all_token), server))  # "all" scope: accepted
         with pytest.raises(HTTPException) as exc:
             asyncio.run(provider.authenticate(req(control), server))  # control token: rejected
         assert exc.value.status_code == 403

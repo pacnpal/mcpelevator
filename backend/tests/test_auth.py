@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
+from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
+from starlette.requests import Request
 
 from app.auth import middleware
-from app.db.models import Server
+from app.auth.bearer import BearerProvider
+from app.db import repo
+from app.db.models import Server, Token
 from app.registry import settings as runtime_settings
-from app.util import hash_token, new_token
+from app.util import hash_token, new_id, new_token
 
 
 @pytest.fixture
@@ -202,3 +207,70 @@ def test_resolve_unknown_provider_fails_closed():
         middleware.resolve(_server("bogus"), "none")
     with pytest.raises(HTTPException):  # inherit -> unknown default
         middleware.resolve(_server("inherit"), "bogus")
+
+
+# --- per-server token scope --------------------------------------------------
+
+
+def _bearer_request(token: str | None) -> Request:
+    """Minimal ASGI request carrying ``Authorization: Bearer <token>``."""
+    headers = [(b"authorization", f"Bearer {token}".encode())] if token else []
+    return Request({"type": "http", "headers": headers})
+
+
+@pytest.fixture
+def bearer_engine(monkeypatch):
+    """In-memory DB that ``BearerProvider`` reads from (it opens its own session
+    via ``get_engine``). StaticPool keeps every connection on the one DB."""
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.auth.bearer.get_engine", lambda: engine)
+    return engine
+
+
+def _make_server(engine, server_id: str) -> Server:
+    server = Server(
+        id=server_id, slug=server_id, name=server_id, runner="npx",
+        command="npx", args=[], env={},
+    )
+    with Session(engine) as session:
+        return repo.create_server(session, server)
+
+
+def _mint_token(engine, scope: str) -> str:
+    raw = new_token()
+    with Session(engine) as session:
+        repo.create_token(
+            session,
+            Token(id=new_id(), name="t", token_hash=hash_token(raw), prefix=raw[:12], scope=scope),
+        )
+    return raw
+
+
+async def test_all_scope_token_authorizes_any_server(bearer_engine):
+    raw = _mint_token(bearer_engine, "all")
+    # No exception == authorized, for two distinct servers.
+    await BearerProvider().authenticate(_bearer_request(raw), _make_server(bearer_engine, "srv-a"))
+    await BearerProvider().authenticate(_bearer_request(raw), _make_server(bearer_engine, "srv-b"))
+
+
+async def test_scoped_token_authorizes_only_its_server(bearer_engine):
+    srv_a = _make_server(bearer_engine, "srv-a")
+    srv_b = _make_server(bearer_engine, "srv-b")
+    raw = _mint_token(bearer_engine, "srv-a")
+
+    await BearerProvider().authenticate(_bearer_request(raw), srv_a)  # its server: ok
+
+    with pytest.raises(HTTPException) as exc:  # another server: rejected
+        await BearerProvider().authenticate(_bearer_request(raw), srv_b)
+    assert exc.value.status_code == 403
+
+
+async def test_invalid_token_still_rejected_401(bearer_engine):
+    srv = _make_server(bearer_engine, "srv-a")
+    _mint_token(bearer_engine, "all")  # a valid token exists, but we send a bogus one
+    with pytest.raises(HTTPException) as exc:
+        await BearerProvider().authenticate(_bearer_request("not-a-real-token"), srv)
+    assert exc.value.status_code == 401

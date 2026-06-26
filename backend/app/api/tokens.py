@@ -26,13 +26,21 @@ async def list_tokens(session: Session = Depends(get_session)):
 
 @router.post("/tokens", response_model=TokenCreated, status_code=201)
 async def create_token(payload: TokenCreate, session: Session = Depends(get_session)):
+    # scope is the access boundary: "all" (every bearer-protected server), a specific
+    # server id, or "control" (a control-plane admin token). Reject a blank or dangling
+    # value rather than silently widening or minting a token that authorizes nothing.
+    scope = payload.scope.strip()
+    if not scope:
+        raise HTTPException(status_code=400, detail="scope must be 'all', 'control', or a server id")
+    if scope not in ("all", "control") and repo.get_server(session, scope) is None:
+        raise HTTPException(status_code=400, detail=f"unknown server scope {scope!r}")
     raw = new_token()
     token = Token(
         id=new_id(),
         name=payload.name.strip() or "token",
         token_hash=hash_token(raw),
         prefix=raw[:12],
-        scope=payload.scope,
+        scope=scope,
     )
     repo.create_token(session, token)
     return TokenCreated(

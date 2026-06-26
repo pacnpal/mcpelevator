@@ -20,8 +20,7 @@ import type {
 	ServerUpdate,
 	SettingsInfo,
 	TokenCreated,
-	TokenInfo,
-	TokenScope
+	TokenInfo
 } from './types';
 
 const BASE = '/api';
@@ -269,9 +268,10 @@ export function listTokens(): Promise<TokenInfo[]> {
 /**
  * Mint a new bearer token. The response carries the full plaintext `token`
  * exactly once — it is never retrievable again, so the caller must surface it
- * immediately.
+ * immediately. `scope` is `'all'` (every bearer-protected server) or a server id
+ * to restrict the token to that one server.
  */
-export function createToken(name: string, scope: TokenScope = 'proxy'): Promise<TokenCreated> {
+export function createToken(name: string, scope = 'all'): Promise<TokenCreated> {
 	return jsonRequest<TokenCreated>('/tokens', 'POST', { name, scope });
 }
 

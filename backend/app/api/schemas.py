@@ -85,20 +85,22 @@ class ImportResult(BaseModel):
     skipped: list[ImportSkipped]
 
 
-TokenScope = Literal["proxy", "control"]
 ControlPlaneAuthMode = Literal["auto", "always"]
 
 
 class TokenCreate(BaseModel):
     name: str
-    scope: TokenScope = "proxy"
+    # "all" (default) authorizes every bearer-protected server; a server id restricts
+    # the token to that one server; "control" mints a control-plane admin token.
+    # Validated in the endpoint (a dangling server id is a 400).
+    scope: str = "all"
 
 
 class TokenInfo(BaseModel):
     id: str
     name: str
     prefix: str
-    scope: TokenScope = "proxy"
+    scope: str
     created_at: datetime
 
 

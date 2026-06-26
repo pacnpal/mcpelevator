@@ -131,15 +131,13 @@ export interface AuthStatus {
 	authenticated: boolean;
 }
 
-/** A token's scope: `proxy` (per-server data plane) or `control` (the /api control plane). */
-export type TokenScope = 'proxy' | 'control';
-
 /** A bearer access token, listed by prefix only (the plaintext is never re-shown). */
 export interface TokenInfo {
 	id: string;
 	name: string;
 	prefix: string;
-	scope: TokenScope;
+	/** `'all'` = every bearer-protected server; a server id = that one server; `'control'` = a control-plane admin token. */
+	scope: string;
 	created_at: string;
 }
 
