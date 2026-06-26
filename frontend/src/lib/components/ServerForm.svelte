@@ -578,7 +578,7 @@
 		>
 			{#each AUTH_OPTIONS as opt (opt.value)}
 				<label
-					class="flex cursor-pointer items-center justify-center rounded-md px-3 py-1.5 font-mono text-xs font-semibold transition"
+					class="flex cursor-pointer items-center justify-center rounded-md px-3 py-1.5 font-mono text-xs font-semibold transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
 					style={authProvider === opt.value
 						? 'background-color: color-mix(in oklab, var(--color-accent) 14%, transparent); color: var(--color-accent);'
 						: 'color: var(--color-ink-muted);'}

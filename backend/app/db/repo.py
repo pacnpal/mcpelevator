@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from sqlalchemy import update
 from sqlmodel import Session, select
 
 from app.db.models import Server, ServerRuntime, Setting, Token, utcnow
@@ -77,6 +78,16 @@ def upsert_runtime(session: Session, server_id: str, **fields: Any) -> ServerRun
     session.commit()
     session.refresh(runtime)
     return runtime
+
+
+def reset_all_runtime(session: Session) -> None:
+    """Bulk-reset all observed runtime to stopped in one statement (used on boot,
+    where runtime from a prior process is stale). Servers with no runtime row are
+    already 'stopped' to the API, so updating existing rows is sufficient."""
+    session.execute(
+        update(ServerRuntime).values(state="stopped", pid=None, port=None, updated_at=utcnow())
+    )
+    session.commit()
 
 
 # --------------------------------------------------------------------------- #

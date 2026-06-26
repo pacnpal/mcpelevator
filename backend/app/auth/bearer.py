@@ -26,4 +26,8 @@ class BearerProvider:
             )
         with Session(get_engine()) as session:
             if repo.get_token_by_hash(session, hash_token(token)) is None:
-                raise HTTPException(status_code=401, detail="invalid token")
+                raise HTTPException(
+                    status_code=401,
+                    detail="invalid token",
+                    headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+                )

@@ -110,8 +110,7 @@ class Supervisor:
         """Observed runtime from a previous process is stale on startup. Reset it
         to stopped so the API reflects reality; reconcile brings servers back."""
         with Session(get_engine()) as session:
-            for server in repo.list_servers(session):
-                repo.upsert_runtime(session, server.id, state="stopped", pid=None, port=None)
+            repo.reset_all_runtime(session)
 
     async def run_forever(self) -> None:
         while not self._stopping:

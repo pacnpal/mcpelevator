@@ -163,8 +163,17 @@
 	function addHost(e: SubmitEvent) {
 		e.preventDefault();
 		if (!settings) return;
-		const host = newHost.trim();
+		let host = newHost.trim();
 		if (!host) return;
+		// If a full URL is pasted, keep just the hostname — the backend compares
+		// hostnames only, so a scheme/port would never match the allowlist.
+		if (host.includes('://')) {
+			try {
+				host = new URL(host).hostname;
+			} catch {
+				// not a parseable URL — fall through with the raw input
+			}
+		}
 		if (settings.allowed_hosts.includes(host)) {
 			newHost = '';
 			flashToast(`${host} is already allowed`, 'info');
@@ -388,7 +397,7 @@
 				>
 					{#each AUTH_CHOICES as choice (choice.value)}
 						<label
-							class="flex cursor-pointer items-center justify-center rounded-md px-3 py-1.5 font-mono text-xs font-semibold transition"
+							class="flex cursor-pointer items-center justify-center rounded-md px-3 py-1.5 font-mono text-xs font-semibold transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
 							style={settings.default_auth_provider === choice.value
 								? 'background-color: color-mix(in oklab, var(--color-accent) 14%, transparent); color: var(--color-accent);'
 								: 'color: var(--color-ink-muted);'}
@@ -419,7 +428,7 @@
 				<div class="grid grid-cols-2 gap-2">
 					{#each BIND_CHOICES as choice (choice.value)}
 						<label
-							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
 							style={settings.bind_mode === choice.value
 								? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
 								: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
