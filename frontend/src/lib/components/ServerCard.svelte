@@ -94,6 +94,9 @@
 			await goto(`/server/${copy.id}`);
 		} catch (err) {
 			onerror?.(errorMessage(err));
+		} finally {
+			// goto resolves `false` (no throw) when a navigation is aborted, so reset
+			// in finally — otherwise the Clone button could stay stuck disabled.
 			cloning = false;
 		}
 	}
