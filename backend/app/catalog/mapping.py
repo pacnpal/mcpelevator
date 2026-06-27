@@ -132,10 +132,11 @@ def environment(env_vars: list[Any], warnings: list[str]) -> dict[str, str]:
         value = var.get("value")
         if value is None:
             value = var.get("default")
-        required = bool(var.get("isRequired") or var.get("isSecret"))
+        # Only isRequired decides whether to prefill an unset var; isSecret is display
+        # metadata. An OPTIONAL secret left unset must be omitted, not scaffolded as
+        # NAME="" (that would override the package's own fallback/absence behavior).
+        required = bool(var.get("isRequired"))
         if value is None and not required:
-            # Optional and unset: omit it. Exporting name="" overrides the package's own
-            # default/absence behavior and can break startup; absence lets it fall back.
             continue
         env[str(name)] = "" if value is None else str(value)
         if value is None and required:

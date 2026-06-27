@@ -124,6 +124,23 @@ def test_templated_env_value_warns():
     assert any("TOKEN" in w and "placeholder" in w for w in draft["warnings"])
 
 
+def test_optional_secret_without_value_is_omitted():
+    # isSecret alone doesn't make a var required; an optional secret left unset is omitted
+    # rather than scaffolded as NAME="".
+    draft = mapping.package_draft(
+        0, _pkg(environmentVariables=[{"name": "OPTIONAL_TOKEN", "isSecret": True}])
+    )
+    assert draft["env"] == {}
+
+
+def test_required_secret_without_value_is_prefilled_and_warned():
+    draft = mapping.package_draft(
+        0, _pkg(environmentVariables=[{"name": "API_KEY", "isRequired": True, "isSecret": True}])
+    )
+    assert draft["env"] == {"API_KEY": ""}
+    assert any("API_KEY" in w and "secret" in w for w in draft["warnings"])
+
+
 def test_optional_env_var_without_value_is_omitted():
     draft = mapping.package_draft(
         0,
