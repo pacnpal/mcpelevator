@@ -92,6 +92,15 @@ def test_boolean_flag_kept_but_optional_value_option_omitted():
     assert draft["args"] == ["-y", "pkg@1.0.0", "--verbose"]
 
 
+def test_optional_secret_named_arg_omitted():
+    # A secret option like --password takes a value; unset + optional → omit it rather
+    # than emit a bare "--password" that breaks CLI parsing.
+    draft = mapping.package_draft(
+        0, _pkg(packageArguments=[{"type": "named", "name": "--password", "isSecret": True}])
+    )
+    assert draft["args"] == ["-y", "pkg@1.0.0"]
+
+
 def test_runtime_arguments_scaffold_but_not_auto_installable():
     draft = mapping.package_draft(
         0,

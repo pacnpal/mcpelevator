@@ -78,9 +78,16 @@ def argument_tokens(args: list[Any], warnings: list[str]) -> list[str]:
             warnings.append(
                 f"Argument value '{value}' contains a {{…}} placeholder — replace it with a real value."
             )
-        # A named arg "takes a value" if it advertises one (valueHint/format/choices);
-        # without any of those it's a boolean flag (e.g. --verbose).
-        takes_value = bool(arg.get("valueHint") or arg.get("format") or arg.get("choices"))
+        # A named arg "takes a value" if it advertises one in any way (valueHint /
+        # format / choices / placeholder, or it's a secret like --password); without
+        # any of those signals it's a boolean flag (e.g. --verbose).
+        takes_value = bool(
+            arg.get("valueHint")
+            or arg.get("format")
+            or arg.get("choices")
+            or arg.get("placeholder")
+            or arg.get("isSecret")
+        )
         if kind == "named":
             name = arg.get("name")
             if not name:
