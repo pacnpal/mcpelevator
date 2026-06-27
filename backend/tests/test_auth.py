@@ -386,11 +386,8 @@ def test_is_loopback_client_trusts_configured_proxy(monkeypatch):
     def req(peer):
         return SimpleNamespace(client=SimpleNamespace(host=peer))
 
-    # Neutralize the (now default-on) Docker-host detection so this test exercises only
-    # the MCPE_TRUSTED_PROXIES path regardless of the host's real default gateway.
-    monkeypatch.setattr(middleware, "_docker_host_ip", lambda: None)
-
-    # Without a trusted-proxy config, the compose gateway peer is NOT loopback.
+    # Without a trusted-proxy config, the compose gateway peer is NOT loopback
+    # (trust_docker_host is off by default, so the gateway isn't consulted).
     assert middleware.is_loopback_client(req("172.20.0.1")) is False
     # With MCPE_TRUSTED_PROXIES = the gateway /32 (the compose default), only that
     # exact address is trusted — a sibling container on the same network is not.

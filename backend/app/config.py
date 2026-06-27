@@ -39,11 +39,14 @@ class Settings(BaseSettings):
     trusted_proxies: str = ""
     # Treat the container's default gateway — the Docker host as seen from inside a
     # bridge-networked container — as a trusted proxy, without hardcoding the per-network
-    # gateway CIDR in MCPE_TRUSTED_PROXIES. Lets a loopback-published port (-p 8080:8080)
-    # reaching the container via the host's docker-proxy pass the Host/Origin guard. On by
-    # default; the gateway is only trusted for the loopback allowance (the bearer-token
-    # gate still applies) and never satisfies the LAN peer gate — set false to opt out.
-    trust_docker_host: bool = True
+    # gateway CIDR in MCPE_TRUSTED_PROXIES. Lets a *loopback*-published port
+    # (-p 127.0.0.1:8080:8080) reaching the container via the host's docker-proxy pass the
+    # Host/Origin guard. OPT-IN (default off): under userland-proxy a 0.0.0.0 publish
+    # (-p 8080:8080) also presents the gateway as the peer, so enabling this trusts LAN
+    # traffic as loopback — only turn it on when the port is published on loopback. The
+    # gateway is trusted for the loopback allowance only (the bearer-token gate still
+    # applies) and never satisfies the LAN peer gate.
+    trust_docker_host: bool = False
     # Comma-separated extra hostnames the Host/Origin guard always trusts, exactly like
     # the host of MCPE_PUBLIC_BASE_URL but for additional origins (a reverse proxy, a
     # tunnel, a second domain). Lets a headless box declare its allowed origins via env
