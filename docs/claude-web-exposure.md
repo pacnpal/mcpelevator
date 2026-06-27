@@ -222,8 +222,12 @@ Managed OAuth ([secure MCP servers with Access](https://developers.cloudflare.co
    clients (Claude registers via DCR), and a client whose redirect URI isn't
    allowed is rejected before the flow ever reaches mcpelevator. The value must be
    `https` and may end in `/*` to match sub-paths, so add `https://claude.ai/*` and
-   `https://claude.com/*` (leave **Allow localhost/loopback clients** off unless you
-   also test from a local client). Then **Save**.
+   `https://claude.com/*`. **If you also want a *local* client (Claude Code,
+   `mcp-remote`, locally-configured Desktop) to connect through this Access app's
+   OAuth**, turn on **Allow loopback clients** (and **Allow localhost clients**) too
+   — those clients use an `http://localhost:<port>/callback` redirect that DCR
+   otherwise rejects. If your local clients use Path B (bearer) instead, leave these
+   off. Then **Save**.
 
 Verify the gate is live — and verify it's **Access**, not mcpelevator, answering.
 This matters because mcpelevator's own `bearer` provider *also* returns
@@ -259,9 +263,14 @@ The forwarded request won't carry an mcpe bearer token, so pick one:
   the bare host. A host-only rule also overwrites `Authorization` on `/api/*`, and
   the control plane only accepts `control`-scoped tokens — so injecting a per-server
   proxy token there returns `wrong_scope`/403 and **locks you out of Settings via the
-  public URL**. ⚠️ Also note this only helps because Access already gated the
-  hostname; never put the injection on an ungated public hostname, or a direct hit
-  gets the token injected and bypasses OAuth.
+  public URL**. ⚠️ **Mind token scope across servers:** one host-wide `/s/` rule
+  injects the *same* token on every slug, so it must be an **all-servers** token —
+  a token scoped to a single server returns `insufficient_scope`/403 on the others.
+  For per-server tokens, create one rule per slug
+  (`... and starts_with(http.request.uri.path, "/s/<slug>/")`) with that server's
+  token. ⚠️ Also note this only helps because Access already gated the hostname;
+  never put the injection on an ungated public hostname, or a direct hit gets the
+  token injected and bypasses OAuth.
 
 ### Step 5 — Add the connector in Claude
 
@@ -339,9 +348,14 @@ Either tunnel gives you a public HTTPS URL mapped to `http://127.0.0.1:8080`:
   **bearer token remains your auth boundary**. To expose port 8080:
 
   ```bash
-  tailscale funnel 8080
+  tailscale funnel --bg 8080
   # serves https://<device>.<tailnet>.ts.net  → http://127.0.0.1:8080
   ```
+
+  Use `--bg` so the Funnel keeps running in the background — the plain
+  `tailscale funnel 8080` form runs in the **foreground** and the public URL
+  disappears the moment you close the terminal, which would drop a long-lived
+  connector.
 
   Use the printed `*.ts.net` host — the **full URL** `https://<device>.<tailnet>.ts.net`
   for `MCPE_PUBLIC_BASE_URL`, and the **bare hostname** `<device>.<tailnet>.ts.net`
@@ -403,8 +417,8 @@ curl -i -H "Authorization: Bearer <OTHER_SERVER_TOKEN>" https://mcp.example.com/
 |---|---|---|
 | Works in claude.ai **web browser** | ⚠️ (self-hosted-app recipe; verify — see #478) | ❌ (web can't send a bearer) |
 | Works in Claude **mobile app** | ⚠️ (same caveat as web) | ❌ (mobile can't send a bearer) |
-| Works in Claude **Code / Desktop (local config)** | ✅ | ✅ |
-| Works in Claude **Desktop remote connector** (account UI) | ✅ | ❌ (cloud-dialed, no header) |
+| Works in Claude **Code / Desktop (local config)** | ⚠️ (needs **Allow loopback clients** on the Access app — see Step 3) | ✅ |
+| Works in Claude **Desktop remote connector** (account UI) | ⚠️ (cloud-dialed like web; same #478 caveat) | ❌ (cloud-dialed, no header) |
 | Auth mechanism | OAuth 2.1 + PKCE at the Access edge | mcpelevator `bearer` token |
 | Setup effort | Higher (tunnel **+** Access app + Managed OAuth) | Lower (tunnel only) |
 | Maturity today | Depends on Anthropic's connector edge; **test first** — open reports for both self-hosted (#478) and the MCP *portal* (#410) | Stable, fully supported by mcpelevator v1 |
