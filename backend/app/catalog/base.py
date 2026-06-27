@@ -75,14 +75,16 @@ class TTLCache:
     """Tiny monotonic-clock TTL cache. Spares upstreams from repeated identical list
     queries (the browse view re-queries on every debounced keystroke)."""
 
-    def __init__(self, ttl: float = 300.0) -> None:
+    def __init__(self, ttl: float = 300.0, max_entries: int = 1000) -> None:
         """
-        Initialize the cache with a time-to-live.
-        
+        Initialize the cache with a time-to-live and a max-entries cap.
+
         Parameters:
         	ttl (float): Cache lifetime in seconds.
+        	max_entries (int): Size past which expired entries are pruned on insert.
         """
         self._ttl = ttl
+        self._max_entries = max_entries
         self._store: dict[str, tuple[float, Any]] = {}
 
     def get(self, key: str) -> Any | None:
@@ -107,11 +109,17 @@ class TTLCache:
     def put(self, key: str, value: Any) -> None:
         """
         Store a value in the cache with a fresh expiration time.
-        
+
         Parameters:
         	key (str): Cache key.
         	value (Any): Value to store.
         """
+        # `get` only evicts the keys it touches, so a stream of unique search queries
+        # would otherwise accumulate dead entries forever. When the store grows past the
+        # cap, drop everything already expired before inserting (bounded memory).
+        if len(self._store) >= self._max_entries:
+            now = time.monotonic()
+            self._store = {k: (exp, v) for k, (exp, v) in self._store.items() if exp > now}
         self._store[key] = (time.monotonic() + self._ttl, value)
 
     def clear(self) -> None:

@@ -18,6 +18,12 @@ from app.catalog import base, mapping
 BASE_URL = "https://glama.ai/api/mcp"
 
 
+def _repo_url(server: dict[str, Any]) -> str | None:
+    """Read repository.url, tolerating a non-dict ``repository`` from a bad upstream."""
+    repo = server.get("repository")
+    return repo.get("url") if isinstance(repo, dict) else None
+
+
 def _env_from_schema(schema: dict[str, Any], warnings: list[str]) -> dict[str, str]:
     """
     Build an environment variable scaffold from a Glama schema.
@@ -31,8 +37,11 @@ def _env_from_schema(schema: dict[str, Any], warnings: list[str]) -> dict[str, s
     """
     if not isinstance(schema, dict):
         return {}
-    props = schema.get("properties") or {}
-    required = set(schema.get("required") or [])
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        props = {}
+    req_list = schema.get("required")
+    required = set(req_list) if isinstance(req_list, (list, set, tuple)) else set()
     env: dict[str, str] = {}
     for key in props:
         env[str(key)] = ""
@@ -62,7 +71,7 @@ def _list_item(server: dict[str, Any]) -> dict[str, Any]:
         # Glama doesn't publish package types; nothing is auto-installable from it.
         "registry_types": [],
         "installable": False,
-        "repository_url": (server.get("repository") or {}).get("url"),
+        "repository_url": _repo_url(server),
         "web_url": server.get("url"),
     }
 
@@ -78,7 +87,7 @@ def to_detail(server: dict[str, Any]) -> dict[str, Any]:
     	dict[str, Any]: A detail payload containing the server metadata, a manual-install draft, notes, and no remotes.
     """
     name = str(server.get("name") or "")
-    repo_url = (server.get("repository") or {}).get("url")
+    repo_url = _repo_url(server)
     warnings: list[str] = []
     env = _env_from_schema(server.get("environmentVariablesJsonSchema") or {}, warnings)
 

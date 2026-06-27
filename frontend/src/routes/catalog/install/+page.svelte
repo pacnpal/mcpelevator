@@ -29,6 +29,9 @@
 			await goto(`/server/${created.id}`);
 		} catch (err) {
 			createError = errorMessage(err);
+		} finally {
+			// Always clear busy: on a successful nav the component unmounts (harmless);
+			// on a cancelled/aborted nav the form would otherwise stay disabled.
 			creating = false;
 		}
 	}

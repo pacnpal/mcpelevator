@@ -143,6 +143,9 @@
 			await goto('/catalog/install');
 		} catch (err) {
 			flashToast(errorMessage(err), 'error');
+		} finally {
+			// Always clear the spinner: on a successful nav the component unmounts
+			// (harmless); on a cancelled/aborted nav we'd otherwise stay stuck.
 			installing = null;
 		}
 	}

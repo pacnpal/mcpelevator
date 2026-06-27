@@ -136,6 +136,8 @@ async def create_server(
     raw_source = fields.pop("source", None)
     if isinstance(raw_source, str) and raw_source.startswith("catalog:"):
         fields["source"] = raw_source[:200]
+    else:
+        fields["source"] = "manual"
     try:
         server = service.create_server(session, **fields)
     except ValueError as exc:

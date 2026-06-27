@@ -74,6 +74,10 @@ async def list_catalog_servers(
         data = await src.list_servers(
             request.app.state.http, search=search, cursor=cursor, limit=limit
         )
+    except httpx.HTTPStatusError:
+        # A list endpoint shouldn't 404, but guard anyway so a bad upstream status
+        # surfaces as 502 rather than an uncaught 500 (mirrors get_catalog_server).
+        raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable")
     except CatalogUpstreamError as exc:
         raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable: {exc}")
     return CatalogList(source=source, servers=data["servers"], next_cursor=data["next_cursor"])
