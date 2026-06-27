@@ -87,6 +87,23 @@ def _docker_host_ip() -> str | None:
     return None
 
 
+def _is_trusted_proxy(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True when ``ip`` is a trusted forwarder: a configured ``MCPE_TRUSTED_PROXIES``
+    peer, or the auto-detected Docker host when ``MCPE_TRUST_DOCKER_HOST`` is on. Such a
+    peer is the forwarder, not the real client — so it is trusted for the loopback
+    allowance (``is_loopback_client``) but EXCLUDED from the LAN peer gate
+    (``is_private_client``), since behind SNAT it can't vouch for the real client.
+    Shared by both so the two checks can never disagree about who the forwarder is."""
+    settings = get_settings()
+    if any(ip in net for net in _trusted_networks(settings.trusted_proxies)):
+        return True
+    if settings.trust_docker_host:
+        gateway = _docker_host_ip()
+        if gateway is not None and ip == ipaddress.ip_address(gateway):
+            return True
+    return False
+
+
 def is_loopback_client(request: Request) -> bool:
     """True when the request's peer is loopback (or a configured trusted proxy).
 
@@ -109,14 +126,7 @@ def is_loopback_client(request: Request) -> bool:
         return client.host in {"localhost", "testclient"}
     if ip.is_loopback:
         return True
-    settings = get_settings()
-    if any(ip in net for net in _trusted_networks(settings.trusted_proxies)):
-        return True
-    if settings.trust_docker_host:
-        gateway = _docker_host_ip()
-        if gateway is not None and ip == ipaddress.ip_address(gateway):
-            return True
-    return False
+    return _is_trusted_proxy(ip)
 
 
 def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -172,14 +182,15 @@ def is_private_client(request: Request) -> bool:
     is what keeps that safe — only a request that actually originates on a private
     network may use a private-IP ``Host`` to pass the guard.
 
-    A configured ``MCPE_TRUSTED_PROXIES`` forwarder is EXCLUDED, even when its own
-    address is private (the Docker bridge gateway ``172.20.0.1``) or loopback (a same-host
-    reverse proxy at ``127.0.0.1``): behind NAT/SNAT the observed peer is the forwarder,
-    which can't vouch for the real client, so trusting it would let forwarded public
-    traffic satisfy this gate. The exclusion runs FIRST, before the loopback shortcut, so a
-    loopback proxy can't slip through. The trusted-proxy convenience stays scoped to the
-    loopback allowance; LAN access needs the real client IP visible (host networking) —
-    see docker-compose.
+    A trusted forwarder is EXCLUDED, even when its own address is private (the Docker
+    bridge gateway ``172.20.0.1``) or loopback (a same-host reverse proxy at ``127.0.0.1``):
+    behind NAT/SNAT the observed peer is the forwarder, which can't vouch for the real
+    client, so trusting it would let forwarded public traffic satisfy this gate. This
+    covers both ``MCPE_TRUSTED_PROXIES`` and the auto-detected Docker host
+    (``MCPE_TRUST_DOCKER_HOST``) via the shared ``_is_trusted_proxy``. The exclusion runs
+    FIRST, before the loopback shortcut, so a loopback proxy can't slip through. The
+    trusted-proxy convenience stays scoped to the loopback allowance; LAN access needs the
+    real client IP visible (host networking) — see docker-compose.
     """
     client = request.client
     if client is None:
@@ -190,9 +201,9 @@ def is_private_client(request: Request) -> bool:
         # "localhost" can appear in some setups — neither is forgeable as a TCP source
         # by a remote client, so treat them as loopback.
         return client.host in {"localhost", "testclient"}
-    # A configured forwarder can't vouch for the real client — reject it first, even if
+    # A trusted forwarder can't vouch for the real client — reject it first, even if
     # it's loopback (same-host reverse proxy) or a private gateway.
-    if any(ip in net for net in _trusted_networks(get_settings().trusted_proxies)):
+    if _is_trusted_proxy(ip):
         return False
     return ip.is_loopback or _is_private_lan_ip(ip)
 

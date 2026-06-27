@@ -127,7 +127,10 @@ def test_break_glass_admin_token(monkeypatch):
         control_plane,
         "get_settings",
         lambda: SimpleNamespace(
-            admin_token="mcpe_break_glass", base_url="http://127.0.0.1:8080", public_host=None
+            admin_token="mcpe_break_glass",
+            base_url="http://127.0.0.1:8080",
+            public_host=None,
+            extra_allowed_hosts=[],
         ),
     )
     with TestClient(app) as client:
@@ -204,7 +207,9 @@ def test_bootstrap_force_mints_a_fresh_token_when_env_set(monkeypatch, capsys):
             runtime_settings.write(s, {"control_plane_auth": "always"})
             before = len([t for t in repo.list_tokens(s) if t.scope == "control"])
         monkeypatch.setattr(
-            control_plane, "get_settings", lambda: SimpleNamespace(public_host=None, admin_token=None)
+            control_plane,
+            "get_settings",
+            lambda: SimpleNamespace(public_host=None, admin_token=None, extra_allowed_hosts=[]),
         )
         monkeypatch.setattr(
             main,
@@ -349,14 +354,25 @@ def test_public_base_url_enforces_under_auto(monkeypatch):
             runtime_settings.write(s, {"bind_mode": "local", "control_plane_auth": "auto"})
             monkeypatch.setattr(
                 control_plane, "get_settings",
-                lambda: SimpleNamespace(public_host=None, admin_token=None),
+                lambda: SimpleNamespace(public_host=None, admin_token=None, extra_allowed_hosts=[]),
             )
             assert control_plane.enforcement_enabled(s) is False  # local + no public URL -> zero-config
             monkeypatch.setattr(
                 control_plane, "get_settings",
-                lambda: SimpleNamespace(public_host="mcp.example.com", admin_token=None),
+                lambda: SimpleNamespace(
+                    public_host="mcp.example.com", admin_token=None, extra_allowed_hosts=[]
+                ),
             )
             assert control_plane.enforcement_enabled(s) is True  # public URL -> enforced
+            # MCPE_ALLOWED_HOSTS alone (no public URL) also makes the box reachable off-host
+            # via that hostname, so `auto` must enforce too — the P1 fix.
+            monkeypatch.setattr(
+                control_plane, "get_settings",
+                lambda: SimpleNamespace(
+                    public_host=None, admin_token=None, extra_allowed_hosts=["mcp.example.com"]
+                ),
+            )
+            assert control_plane.enforcement_enabled(s) is True  # env-allowed host -> enforced
     finally:
         _reset()
 
