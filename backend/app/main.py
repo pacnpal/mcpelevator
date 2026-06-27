@@ -20,6 +20,7 @@ from starlette.staticfiles import StaticFiles
 
 from app import __version__
 from app.api import auth as auth_api
+from app.api import catalog as catalog_api
 from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
@@ -148,6 +149,14 @@ class SPAStaticFiles(StaticFiles):
 
 
 def create_app() -> FastAPI:
+    """
+    Create the FastAPI application.
+    
+    Includes the public and control-plane API routers, the reverse-proxy routes, and either the built SPA or a JSON root response when the frontend is unavailable.
+    
+    Returns:
+    	app (FastAPI): The configured application instance.
+    """
     settings = get_settings()
     app = FastAPI(title="mcpelevator", version=__version__, lifespan=lifespan)
 
@@ -181,6 +190,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_api.router, prefix="/api")
     gated = [Depends(require_control_plane)]
     app.include_router(servers_api.router, prefix="/api", dependencies=gated)
+    app.include_router(catalog_api.router, prefix="/api", dependencies=gated)
     app.include_router(tokens_api.router, prefix="/api", dependencies=gated)
     app.include_router(settings_api.router, prefix="/api", dependencies=gated)
     app.include_router(proxy_router)  # /s/{slug}/...

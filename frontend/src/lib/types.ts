@@ -70,6 +70,8 @@ export interface ServerCreate {
 	rest_openapi?: boolean;
 	auth_provider?: ServerAuthProvider;
 	enabled?: boolean;
+	/** Provenance. Only a `catalog:<id>` value is honored server-side (a registry install). */
+	source?: string | null;
 }
 
 /**
@@ -106,6 +108,81 @@ export interface McpServerEntry {
 export interface HealthResponse {
 	status: string;
 	version: string;
+}
+
+// ---- Catalog (browse upstream MCP directories + install) --------------------
+
+/** An upstream directory we can browse. `auto` derives a runnable command;
+ * `manual` is discovery-only (the operator fills in the command). */
+export interface CatalogSource {
+	id: string;
+	label: string;
+	install_support: 'auto' | 'manual';
+}
+
+/** One browse-view row, normalized across sources (GET /api/catalog/servers). */
+export interface CatalogServer {
+	source: string;
+	/** Opaque per-source key used to fetch detail. */
+	id: string;
+	name: string;
+	title: string;
+	description: string;
+	version: string | null;
+	status: string;
+	registry_types: string[];
+	/** At least one stdio package maps to a supported runner (npm/pypi). */
+	installable: boolean;
+	repository_url: string | null;
+	web_url: string | null;
+}
+
+export interface CatalogList {
+	source: string;
+	servers: CatalogServer[];
+	next_cursor: string | null;
+}
+
+/** A reviewable, ServerCreate-shaped install draft for one package. */
+export interface CatalogDraft {
+	package_index: number;
+	registry_type: string;
+	identifier: string;
+	version: string | null;
+	runner: Runner | null;
+	command: string;
+	args: string[];
+	env: Record<string, string>;
+	installable: boolean;
+	/** Why this draft isn't auto-installable, if so. */
+	reason: string | null;
+	/** Required/secret values the operator must fill in before starting. */
+	warnings: string[];
+}
+
+export interface CatalogRemote {
+	type: string;
+	url: string;
+}
+
+export interface CatalogServerMeta {
+	name: string;
+	title: string;
+	description: string;
+	version: string | null;
+	status: string;
+	repository_url: string | null;
+	web_url: string | null;
+}
+
+export interface CatalogDetail {
+	source: string;
+	/** Source has no launch spec; the operator completes the form by hand. */
+	manual_install: boolean;
+	notes: string[];
+	server: CatalogServerMeta;
+	drafts: CatalogDraft[];
+	remotes: CatalogRemote[];
 }
 
 // ---- Auth & settings (M5) ---------------------------------------------------
