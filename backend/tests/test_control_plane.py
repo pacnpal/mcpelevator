@@ -216,6 +216,75 @@ def test_create_token_scope_defaults_to_all_and_echoes_server_scope():
         client.delete(f"/api/servers/{server['id']}", headers=host)
 
 
+def test_patch_renames_slug_and_repoints_urls():
+    """PATCH {slug} normalizes and re-points the server's public URLs; a conflicting
+    or reserved slug is a 400."""
+    with TestClient(app) as client:
+        h = {"host": "127.0.0.1"}
+        created: list[str] = []
+        try:
+            a = client.post("/api/servers", json={"name": "Memory", "command": "echo"}, headers=h).json()
+            created.append(a["id"])
+            assert a["slug"] == "memory"
+            assert a["urls"]["mcp"].endswith("/s/memory/mcp")
+
+            r = client.patch(f"/api/servers/{a['id']}", json={"slug": "My Brain!!"}, headers=h)
+            assert r.status_code == 200, r.text
+            assert r.json()["slug"] == "my-brain"
+            assert r.json()["urls"]["mcp"].endswith("/s/my-brain/mcp")
+
+            # a second server can't take a slug already in use
+            b = client.post("/api/servers", json={"name": "Other", "command": "echo"}, headers=h).json()
+            created.append(b["id"])
+            conflict = client.patch(f"/api/servers/{b['id']}", json={"slug": "my-brain"}, headers=h)
+            assert conflict.status_code == 400, conflict.text
+
+            # reserved slugs are rejected too
+            reserved = client.patch(f"/api/servers/{b['id']}", json={"slug": "summary"}, headers=h)
+            assert reserved.status_code == 400, reserved.text
+        finally:
+            for sid in created:
+                client.delete(f"/api/servers/{sid}", headers=h)
+
+
+def test_clone_endpoint_creates_disabled_copy():
+    """POST {id}/clone duplicates config into a new, disabled server with a fresh
+    id + unique slug; a custom name is honoured."""
+    with TestClient(app) as client:
+        h = {"host": "127.0.0.1"}
+        created: list[str] = []
+        try:
+            src = client.post(
+                "/api/servers",
+                json={"name": "Memory", "command": "echo", "args": ["-y", "pkg"], "auth_provider": "bearer"},
+                headers=h,
+            ).json()
+            created.append(src["id"])
+
+            r = client.post(f"/api/servers/{src['id']}/clone", headers=h)
+            assert r.status_code == 201, r.text
+            copy = r.json()
+            created.append(copy["id"])
+            assert copy["id"] != src["id"]
+            assert copy["slug"] != src["slug"]
+            assert copy["name"] == "Memory copy"
+            assert copy["enabled"] is False
+            assert copy["auth"] == "bearer"
+
+            named = client.post(
+                f"/api/servers/{src['id']}/clone", json={"name": "Memory staging"}, headers=h
+            )
+            assert named.status_code == 201, named.text
+            created.append(named.json()["id"])
+            assert named.json()["name"] == "Memory staging"
+            assert named.json()["slug"] == "memory-staging"
+
+            assert client.post("/api/servers/nope/clone", headers=h).status_code == 404
+        finally:
+            for sid in created:
+                client.delete(f"/api/servers/{sid}", headers=h)
+
+
 def test_base_url_prefers_request_host_for_copy_links(monkeypatch):
     """Copy-menu URLs use the host the client reached us on (so a LAN device gets LAN
     URLs), unless an operator-declared public URL is set, which always wins."""

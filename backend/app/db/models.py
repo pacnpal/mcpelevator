@@ -34,7 +34,7 @@ class Server(SQLModel, table=True):
     __tablename__ = "server"
 
     id: str = Field(primary_key=True)
-    slug: str = Field(index=True, unique=True)  # url-safe, immutable identity in /s/<slug>/
+    slug: str = Field(index=True, unique=True)  # url-safe routing key in /s/<slug>/ (operator-renameable)
     name: str
 
     # launch spec

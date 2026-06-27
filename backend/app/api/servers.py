@@ -18,6 +18,7 @@ from starlette.responses import Response, StreamingResponse
 from app.api.schemas import (
     ImportResult,
     ImportSkipped,
+    ServerClone,
     ServerCreate,
     ServerDetail,
     ServerSummary,
@@ -150,6 +151,10 @@ async def update_server(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
+    if "slug" in changes:
+        # Re-point a running unit's proxy routing without a restart (config_hash
+        # excludes slug, so the reconciler won't do it).
+        sup.rename_slug(server_id, server.slug)
     sup.nudge()  # config_hash may have changed -> reconciler restarts if needed
     return _summary(server, sup, session, _base_url(request))
 
@@ -161,6 +166,25 @@ async def delete_server(server_id: str, request: Request, session: Session = Dep
     if not repo.delete_server(session, server_id):
         raise HTTPException(status_code=404, detail="server not found")
     return Response(status_code=204)
+
+
+@router.post("/servers/{server_id}/clone", response_model=ServerSummary, status_code=201)
+async def clone_server(
+    server_id: str,
+    request: Request,
+    payload: ServerClone = Body(default_factory=ServerClone),
+    session: Session = Depends(get_session),
+):
+    """Duplicate a server's config into a new, disabled server (a fresh id + unique
+    slug). The operator reviews/edits the copy, then enables it."""
+    try:
+        server = service.clone_server(session, server_id, name=payload.name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="server not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # Clone is created disabled; nothing to reconcile until the user enables it.
+    return _summary(server, request.app.state.supervisor, session, _base_url(request))
 
 
 @router.post("/servers/{server_id}/enable", response_model=ServerSummary)

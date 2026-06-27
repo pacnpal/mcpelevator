@@ -25,14 +25,16 @@
 		oncancel
 	}: {
 		mode?: Mode;
-		/** Prefill values (edit) or partial defaults (create). */
-		initial?: Partial<ServerCreate> | null;
+		/** Prefill values (edit) or partial defaults (create). `slug` is only used
+		 * in edit mode, where it's surfaced as an editable identity field. */
+		initial?: (Partial<ServerCreate> & { slug?: string }) | null;
 		busy?: boolean;
 		/** API error text to surface inline, if any. */
 		error?: string | null;
 		submitLabel?: string;
-		/** Receives a fully-built ServerCreate-shaped payload. */
-		onsubmit: (payload: ServerCreate) => void;
+		/** Receives a fully-built ServerCreate-shaped payload. In edit mode it also
+		 * carries `slug` when the operator renamed it. */
+		onsubmit: (payload: ServerCreate & { slug?: string }) => void;
 		oncancel?: () => void;
 	} = $props();
 
@@ -79,6 +81,7 @@
 		}
 		return {
 			name: init.name ?? '',
+			slug: init.slug ?? '',
 			runner: runner0,
 			command: init.command ?? '',
 			argsText: args0.join('\n'),
@@ -94,6 +97,10 @@
 	});
 
 	let name = $state(seed.name);
+	// Slug is the public routing identity (/s/<slug>/). Editable only in edit mode;
+	// `originalSlug` lets us warn (and skip the PATCH field) only on an actual rename.
+	const originalSlug = seed.slug;
+	let slug = $state(seed.slug);
 	let runner = $state<Runner>(seed.runner);
 
 	// Raw command + args are what the backend stores. In friendly mode they are
@@ -169,6 +176,21 @@
 
 	const nameValid = $derived(name.trim().length > 0);
 	const commandValid = $derived(command.trim().length > 0);
+
+	// Mirror the backend's slugify so the operator sees the value that will actually
+	// be stored (lowercased, non-alphanumerics collapsed to single dashes).
+	function slugify(value: string): string {
+		return (
+			value
+				.trim()
+				.toLowerCase()
+				.replace(/[^a-z0-9]+/g, '-')
+				.replace(/^-+|-+$/g, '') || 'server'
+		);
+	}
+	const normalizedSlug = $derived(slugify(slug));
+	const slugChanged = $derived(mode === 'edit' && normalizedSlug !== originalSlug);
+
 	const canSubmit = $derived(nameValid && commandValid && !busy);
 
 	function buildEnv(): Record<string, string> {
@@ -183,7 +205,7 @@
 	function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
 		if (!canSubmit) return;
-		const payload: ServerCreate = {
+		const payload: ServerCreate & { slug?: string } = {
 			name: name.trim(),
 			runner,
 			command: command.trim(),
@@ -195,6 +217,9 @@
 			auth_provider: authProvider
 		};
 		if (mode === 'create') payload.enabled = startAfter;
+		// Only send a slug when it's actually a rename, so an unchanged edit doesn't
+		// touch identity.
+		if (slugChanged) payload.slug = normalizedSlug;
 		onsubmit(payload);
 	}
 
@@ -227,6 +252,55 @@
 			A human label. The slug is derived from it automatically.
 		</p>
 	</div>
+
+	<!-- Slug (edit only): the public routing identity -->
+	{#if mode === 'edit'}
+		<div class="flex flex-col gap-2">
+			<label for="srv-slug" class="text-sm font-medium text-[var(--color-ink)]">
+				Slug
+			</label>
+			<input
+				id="srv-slug"
+				type="text"
+				bind:value={slug}
+				autocomplete="off"
+				spellcheck="false"
+				placeholder="memory"
+				class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+			/>
+			<p class="text-xs text-[var(--color-ink-dim)]">
+				Identifies the server in its URLs:
+				<code class="font-mono text-[var(--color-ink-muted)]">/s/{normalizedSlug}/mcp</code>.
+			</p>
+			{#if slugChanged}
+				<p
+					class="flex items-start gap-2 rounded-lg border px-3 py-2.5 text-xs leading-relaxed"
+					style="border-color: color-mix(in oklab, var(--color-state-failed) 30%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 8%, transparent); color: var(--color-ink-muted);"
+				>
+					<svg
+						class="mt-0.5 size-4 shrink-0 text-[var(--color-state-failed)]"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+						<path d="M12 9v4M12 17h.01" />
+					</svg>
+					<span>
+						Changing the slug from
+						<code class="font-mono text-[var(--color-ink)]">{originalSlug}</code> to
+						<code class="font-mono text-[var(--color-ink)]">{normalizedSlug}</code>
+						changes this server's MCP/REST URLs. Any client already pointed at the
+						old address (Claude Desktop, etc.) will need to be re-pointed.
+					</span>
+				</p>
+			{/if}
+		</div>
+	{/if}
 
 	<!-- Runner -->
 	<fieldset class="flex flex-col gap-2 border-0 p-0">

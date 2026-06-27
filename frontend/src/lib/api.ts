@@ -154,6 +154,18 @@ export function deleteServer(id: string): Promise<void> {
 	});
 }
 
+/**
+ * Duplicate a server's config into a new, disabled server (fresh id + unique slug).
+ * Pass `name` to label the copy; the backend defaults to `"<source> copy"`.
+ */
+export function cloneServer(id: string, name?: string): Promise<ServerSummary> {
+	return jsonRequest<ServerSummary>(
+		`/servers/${encodeURIComponent(id)}/clone`,
+		'POST',
+		name ? { name } : {}
+	);
+}
+
 export function enableServer(id: string): Promise<ServerSummary> {
 	return request<ServerSummary>(`/servers/${encodeURIComponent(id)}/enable`, {
 		method: 'POST'

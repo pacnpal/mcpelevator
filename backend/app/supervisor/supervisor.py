@@ -47,6 +47,18 @@ class Supervisor:
             return (u.host, u.port)
         return None
 
+    def rename_slug(self, server_id: str, slug: str) -> None:
+        """Update a live unit's routing slug in place (no restart).
+
+        The slug is only a proxy routing key — the bridge subprocess doesn't use it
+        and ``config_hash`` excludes it, so the reconciler won't re-derive the unit on
+        a rename. Point the running unit at the new slug here so ``/s/<new>/`` resolves
+        immediately; if the server isn't running this is a no-op (a later start
+        snapshots the persisted slug)."""
+        unit = self.units.get(server_id)
+        if unit is not None:
+            unit.slug = slug
+
     # --- start/stop a single unit ---------------------------------------- #
 
     async def _start(self, server) -> None:

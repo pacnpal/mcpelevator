@@ -2,6 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import {
+		cloneServer,
 		deleteServer,
 		disableServer,
 		enableServer,
@@ -31,6 +32,7 @@
 	let busy = $state(false); // enable/disable in flight
 	let deleting = $state(false);
 	let confirmDelete = $state(false);
+	let cloning = $state(false);
 
 	let toast = $state<string | null>(null);
 	let toastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -67,6 +69,19 @@
 			flashToast(errorMessage(err));
 		} finally {
 			busy = false;
+		}
+	}
+
+	async function doClone() {
+		if (!server || cloning) return;
+		cloning = true;
+		try {
+			const copy = await cloneServer(server.id);
+			// Land on the copy so the operator can review/edit, then enable it.
+			await goto(`/server/${copy.id}`);
+		} catch (err) {
+			flashToast(errorMessage(err));
+			cloning = false;
 		}
 	}
 
@@ -215,6 +230,37 @@
 							<path d="M8 5v14l11-7z" />
 						</svg>
 						Start
+					{/if}
+				</button>
+
+				<button
+					type="button"
+					onclick={doClone}
+					disabled={cloning}
+					aria-busy={cloning}
+					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3.5 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
+				>
+					{#if cloning}
+						<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+							<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
+							<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+						</svg>
+						Cloning
+					{:else}
+						<svg
+							class="size-4"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<rect x="9" y="9" width="11" height="11" rx="2" />
+							<path d="M5 15V5a2 2 0 0 1 2-2h10" />
+						</svg>
+						Clone
 					{/if}
 				</button>
 

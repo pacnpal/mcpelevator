@@ -65,6 +65,10 @@ class ServerCreate(BaseModel):
 
 class ServerUpdate(BaseModel):
     name: Optional[str] = None
+    # Changing the slug re-points the server's public /s/<slug>/ URLs; clients that
+    # reference the old slug must be re-pointed. Normalized + uniqueness-checked
+    # server-side (a reserved word or a slug in use by another server is a 400).
+    slug: Optional[str] = None
     runner: Optional[str] = None
     command: Optional[str] = None
     args: Optional[list[str]] = None
@@ -73,6 +77,11 @@ class ServerUpdate(BaseModel):
     mcp_http: Optional[bool] = None
     rest_openapi: Optional[bool] = None
     auth_provider: Optional[AuthProvider] = None
+
+
+class ServerClone(BaseModel):
+    # Optional label for the copy; defaults server-side to "<source> copy".
+    name: Optional[str] = None
 
 
 class ImportSkipped(BaseModel):

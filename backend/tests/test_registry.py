@@ -69,6 +69,80 @@ def test_unknown_runner_rejected(session):
         service.create_server(session, name="x", runner="bogus", command="x")
 
 
+def test_slug_rename(session):
+    a = _mk(session, name="Memory")
+    assert a.slug == "memory"
+    service.update_server(session, a.id, {"slug": "brain"})
+    assert repo.get_server(session, a.id).slug == "brain"
+    # the freed slug can now be reused by another server
+    b = _mk(session, name="Memory")
+    assert b.slug == "memory"
+
+
+def test_slug_rename_is_normalized(session):
+    a = _mk(session, name="Memory")
+    service.update_server(session, a.id, {"slug": "My Cool Server!!"})
+    assert repo.get_server(session, a.id).slug == "my-cool-server"
+
+
+def test_slug_rename_rejects_collision(session):
+    a = _mk(session, name="Alpha", args=["-y", "a"])
+    _mk(session, name="Beta", args=["-y", "b"])
+    with pytest.raises(ValueError):
+        service.update_server(session, a.id, {"slug": "beta"})
+
+
+def test_slug_rename_to_self_is_allowed(session):
+    a = _mk(session, name="Memory")
+    service.update_server(session, a.id, {"slug": "memory"})
+    assert repo.get_server(session, a.id).slug == "memory"
+
+
+def test_slug_rename_rejects_reserved(session):
+    a = _mk(session, name="Memory")
+    with pytest.raises(ValueError):
+        service.update_server(session, a.id, {"slug": "summary"})
+
+
+def test_slug_rename_does_not_restart(session):
+    """Slug is routing/identity, not launch config — renaming it must not change
+    config_hash (which would needlessly bounce the bridge)."""
+    a = _mk(session, args=["-y", "x"])
+    before = a.config_hash
+    service.update_server(session, a.id, {"slug": "renamed"})
+    assert repo.get_server(session, a.id).config_hash == before
+
+
+def test_clone_server_copies_config(session):
+    src = _mk(session, name="Memory", env={"K": "v"}, args=["-y", "pkg"])
+    src = service.update_server(session, src.id, {"auth_provider": "bearer"})
+
+    copy = service.clone_server(session, src.id)
+    assert copy.id != src.id
+    assert copy.slug != src.slug  # unique slug derived from the new name
+    assert copy.name == "Memory copy"
+    assert copy.runner == src.runner
+    assert copy.command == src.command
+    assert copy.args == src.args
+    assert copy.env == src.env
+    assert copy.auth_provider == src.auth_provider
+    assert copy.enabled is False  # always created disabled
+    assert copy.source == "clone"
+    assert copy.config_hash == src.config_hash  # identical launch config -> same hash
+
+
+def test_clone_server_custom_name(session):
+    src = _mk(session, name="Memory")
+    copy = service.clone_server(session, src.id, name="Memory (staging)")
+    assert copy.name == "Memory (staging)"
+    assert copy.slug == "memory-staging"
+
+
+def test_clone_unknown_server(session):
+    with pytest.raises(KeyError):
+        service.clone_server(session, "nope")
+
+
 def test_auth_provider_change_does_not_restart(session):
     """auth_provider is proxy-layer; changing it must NOT change config_hash
     (otherwise the reconciler would needlessly bounce the bridge)."""
