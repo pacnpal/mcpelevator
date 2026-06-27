@@ -3,6 +3,7 @@
 	import {
 		errorMessage,
 		getCatalogServer,
+		getCatalogVersions,
 		listCatalog,
 		listCatalogSources
 	} from '$lib/api';
@@ -85,6 +86,33 @@
 		return `${s.source}:${s.id}@${s.version ?? ''}`;
 	}
 
+	// One key per server (not per version) for the version picker state.
+	function serverKey(s: CatalogServer): string {
+		return `${s.source}:${s.id}`;
+	}
+
+	// ---- Version picker -------------------------------------------------------
+	// The list is deduped to each server's latest version; the dropdown lazily loads
+	// the full version list (on focus) so the operator can pick an older one. Until
+	// then it shows just the latest, and Install defaults to it.
+	let versionsByKey = $state<Record<string, string[]>>({});
+	let chosenVersion = $state<Record<string, string>>({});
+	let versionsLoading = $state<Record<string, boolean>>({});
+
+	async function loadVersions(server: CatalogServer) {
+		const key = serverKey(server);
+		if (!server.version || versionsByKey[key] || versionsLoading[key]) return;
+		versionsLoading[key] = true;
+		try {
+			const res = await getCatalogVersions(server.id, server.source);
+			if (res.versions.length) versionsByKey[key] = res.versions;
+		} catch {
+			// Non-fatal: keep just the latest version in the dropdown.
+		} finally {
+			versionsLoading[key] = false;
+		}
+	}
+
 	function onSearchInput() {
 		// Invalidate any in-flight pagination immediately: bumping the token now means a
 		// Load-more click before the debounce fires can't append a stale page.
@@ -111,7 +139,11 @@
 				cursor: nextCursor
 			});
 			if (token !== queryToken) return;
-			servers = [...servers, ...res.servers];
+			// Drop any server already shown: the registry paginates by name:version, so a
+			// server's versions can straddle a page boundary even after server-side dedup.
+			const seen = new Set(servers.map((s) => `${s.source}:${s.id}`));
+			const fresh = res.servers.filter((s) => !seen.has(`${s.source}:${s.id}`));
+			servers = [...servers, ...fresh];
 			nextCursor = res.next_cursor;
 		} catch (err) {
 			flashToast(errorMessage(err), 'error');
@@ -127,9 +159,10 @@
 		if (installing) return;
 		installing = rowKey(server);
 		try {
-			// Resolve the exact version shown on the card, not "latest": a list can
-			// surface older/multiple versions, and Install must pin the one chosen.
-			const detail = await getCatalogServer(server.id, server.source, server.version ?? 'latest');
+			// Resolve the version the operator picked in the dropdown (defaults to the
+			// latest shown on the card), not a blanket "latest".
+			const version = chosenVersion[serverKey(server)] ?? server.version ?? 'latest';
+			const detail = await getCatalogServer(server.id, server.source, version);
 			if (detail.server.status === 'deleted') {
 				// Removed from the registry for moderation — don't hand over an install form.
 				flashToast('This server was removed from the registry and can’t be installed.', 'error');
@@ -302,7 +335,24 @@
 					<div class="flex items-center justify-between gap-2">
 						<div class="flex items-center gap-2 text-[11px]">
 							{#if server.version}
-								<span class="font-mono text-[var(--color-ink-dim)]">v{server.version}</span>
+								<!-- Version picker: lazily loads all versions on focus; defaults to latest. -->
+								<div class="relative inline-flex items-center">
+									<select
+										aria-label="Version for {server.name}"
+										value={chosenVersion[serverKey(server)] ?? server.version}
+										onfocus={() => loadVersions(server)}
+										onpointerdown={() => loadVersions(server)}
+										onchange={(e) => (chosenVersion[serverKey(server)] = e.currentTarget.value)}
+										class="cursor-pointer appearance-none rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] py-0.5 pl-2 pr-6 font-mono text-[11px] text-[var(--color-ink-muted)] outline-none transition hover:border-[var(--color-line-strong)] focus:border-[var(--color-line-strong)]"
+									>
+										{#each versionsByKey[serverKey(server)] ?? [server.version] as v (v)}
+											<option value={v}>v{v}</option>
+										{/each}
+									</select>
+									<svg class="pointer-events-none absolute right-1.5 size-3 text-[var(--color-ink-dim)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+										<path d="m6 9 6 6 6-6" />
+									</svg>
+								</div>
 							{/if}
 							{#if server.status && server.status !== 'active'}
 								<span style="color: {statusTone(server.status)}">{server.status}</span>

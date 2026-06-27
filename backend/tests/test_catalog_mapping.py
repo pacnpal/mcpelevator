@@ -242,6 +242,33 @@ def test_official_status_from_meta():
     assert detail["manual_install"] is False
 
 
+def test_official_dedupe_keeps_latest_version():
+    def entry(name, version, is_latest):
+        e = _official([_pkg()], name=name, version=version)
+        e["_meta"]["io.modelcontextprotocol.registry/official"]["isLatest"] = is_latest
+        return e
+
+    entries = [
+        entry("io.x/srv", "1.0.0", False),
+        entry("io.x/srv", "1.0.1", True),
+        entry("io.y/other", "2.0.0", True),
+    ]
+    deduped = official.dedupe_latest(entries)
+    # One row per server name, and the kept io.x/srv row is the isLatest version.
+    items = [official._list_item(e) for e in deduped]
+    by_name = {i["name"]: i for i in items}
+    assert set(by_name) == {"io.x/srv", "io.y/other"}
+    assert by_name["io.x/srv"]["version"] == "1.0.1"
+
+
+def test_official_dedupe_falls_back_to_first_seen_without_islatest():
+    # No isLatest flags at all → keep the first occurrence per name (no duplicates).
+    entries = [_official([_pkg()], name="io.x/srv", version="1.0.0"),
+               _official([_pkg()], name="io.x/srv", version="1.0.1")]
+    deduped = official.dedupe_latest(entries)
+    assert len(deduped) == 1
+
+
 def test_official_deleted_status_blocks_install():
     entry = _official([_pkg()], status="deleted")
     assert official._list_item(entry)["installable"] is False

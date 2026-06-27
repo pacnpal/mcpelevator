@@ -15,6 +15,7 @@ import type {
 	CatalogDetail,
 	CatalogList,
 	CatalogSource,
+	CatalogVersions,
 	HealthResponse,
 	ImportResult,
 	ServerCreate,
@@ -180,6 +181,12 @@ export function listCatalog(params: {
 	if (params.limit) q.set('limit', String(params.limit));
 	const qs = q.toString();
 	return request<CatalogList>(`/catalog/servers${qs ? `?${qs}` : ''}`);
+}
+
+/** List a catalog server's selectable versions (latest first; empty if unversioned). */
+export function getCatalogVersions(id: string, source = 'official'): Promise<CatalogVersions> {
+	const q = new URLSearchParams({ id, source });
+	return request<CatalogVersions>(`/catalog/server/versions?${q.toString()}`);
 }
 
 /**

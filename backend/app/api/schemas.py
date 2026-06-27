@@ -177,6 +177,11 @@ class CatalogList(BaseModel):
     next_cursor: Optional[str] = None  # opaque pagination cursor for the next page
 
 
+class CatalogVersions(BaseModel):
+    # A server's selectable versions, latest first. Empty for sources without versions.
+    versions: list[str] = []
+
+
 class CatalogDraft(BaseModel):
     """A reviewable, ServerCreate-shaped install draft for one package."""
 

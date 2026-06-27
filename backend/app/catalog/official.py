@@ -36,6 +36,30 @@ def _unwrap(entry: dict[str, Any]) -> tuple[dict[str, Any], str]:
     return entry, str(entry.get("status") or "active")
 
 
+def dedupe_latest(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse the per-version registry feed to one entry per server.
+
+    The unfiltered ``/v0.1/servers`` listing returns one row per *published version*,
+    so a server shows up multiple times. Keep the version the registry flags
+    ``isLatest`` (drop rows explicitly marked non-latest), then guard against any
+    residual same-name duplicates by keeping the first seen. Order is preserved.
+    """
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        meta = (entry.get("_meta") or {}).get(_META_KEY) or {}
+        if meta.get("isLatest") is False:
+            continue  # an older version superseded by a later one
+        server, _ = _unwrap(entry)
+        name = str(server.get("name") or "")
+        if name and name in seen:
+            continue
+        if name:
+            seen.add(name)
+        out.append(entry)
+    return out
+
+
 def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
     """
     Normalize a registry server entry for list responses.
@@ -172,8 +196,9 @@ class OfficialSource:
         if not isinstance(servers, list):
             raise base.CatalogUpstreamError("unexpected list response from the MCP Registry")
         metadata = data.get("metadata") or {}
+        entries = dedupe_latest([e for e in servers if isinstance(e, dict)])
         result = {
-            "servers": [_list_item(e) for e in servers if isinstance(e, dict)],
+            "servers": [_list_item(e) for e in entries],
             "next_cursor": metadata.get("nextCursor"),
         }
         self._cache.put(key, result)
@@ -196,3 +221,23 @@ class OfficialSource:
         if not isinstance(data, dict):
             raise base.CatalogUpstreamError("unexpected detail response from the MCP Registry")
         return to_detail(data)
+
+    async def list_versions(self, http: httpx.AsyncClient, *, id: str) -> list[str]:
+        """List a server's published versions, the registry's ``isLatest`` one first."""
+        url = f"{BASE_URL}/v0.1/servers/{quote(id, safe='')}/versions"
+        data = await base.get_json(http, url, {})
+        servers = data.get("servers") if isinstance(data, dict) else None
+        if not isinstance(servers, list):
+            return []
+        latest: list[str] = []
+        rest: list[str] = []
+        for entry in servers:
+            if not isinstance(entry, dict):
+                continue
+            server, _ = _unwrap(entry)
+            version = server.get("version")
+            if not version:
+                continue
+            meta = (entry.get("_meta") or {}).get(_META_KEY) or {}
+            (latest if meta.get("isLatest") else rest).append(str(version))
+        return latest + rest

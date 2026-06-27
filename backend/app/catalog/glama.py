@@ -201,3 +201,7 @@ class GlamaSource:
         if not isinstance(data, dict):
             raise base.CatalogUpstreamError("unexpected detail response from the Glama directory")
         return to_detail(data)
+
+    async def list_versions(self, http: httpx.AsyncClient, *, id: str) -> list[str]:
+        """Glama has no version concept — there's nothing to pick from."""
+        return []
