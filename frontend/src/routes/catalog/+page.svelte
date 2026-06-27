@@ -79,7 +79,16 @@
 		}
 	}
 
+	// A stable per-row key. The official list can carry several versions of one server
+	// (same name/id), so the name alone isn't unique — include the version.
+	function rowKey(s: CatalogServer): string {
+		return `${s.source}:${s.id}@${s.version ?? ''}`;
+	}
+
 	function onSearchInput() {
+		// Invalidate any in-flight pagination immediately: bumping the token now means a
+		// Load-more click before the debounce fires can't append a stale page.
+		queryToken++;
 		clearTimeout(searchTimer);
 		searchTimer = setTimeout(runSearch, 300);
 	}
@@ -112,33 +121,47 @@
 	}
 
 	// Resolve the chosen server's drafts, stash a PendingInstall, and route to the
-	// review form. Picks the first installable package; if none, hands off the first
-	// (manual) draft so discovery-only sources still scaffold the form.
+	// review form. Prefers the first auto-installable package; otherwise hands off a
+	// manual scaffold, carrying the reason / remote endpoints so the form isn't blank.
 	async function install(server: CatalogServer) {
 		if (installing) return;
-		installing = server.id;
+		installing = rowKey(server);
 		try {
 			// Resolve the exact version shown on the card, not "latest": a list can
 			// surface older/multiple versions, and Install must pin the one chosen.
 			const detail = await getCatalogServer(server.id, server.source, server.version ?? 'latest');
-			const drafts = detail.drafts;
-			const draft = drafts.find((d) => d.installable) ?? drafts[0] ?? null;
+			const draft = detail.drafts.find((d) => d.installable) ?? detail.drafts[0] ?? null;
 			const supportMeta = sources.find((s) => s.id === server.source);
 			const versionTag = detail.server.version ? `@${detail.server.version}` : '';
+			const autoInstallable = !!draft?.installable;
 
+			// Notes shown above the form: source notes, plus (when we couldn't derive a
+			// runnable command) why, and any remote endpoints — so a manual/empty form is
+			// always explained rather than mysteriously blank.
+			const notes = [...detail.notes];
+			if (!autoInstallable && draft?.reason) notes.push(draft.reason);
+			for (const r of detail.remotes) {
+				notes.push(`Remote ${r.type} endpoint (not a local runner): ${r.url}`);
+			}
+
+			const warnings = draft?.warnings ?? [];
 			setPendingInstall({
 				initial: {
 					name: detail.server.title || detail.server.name,
 					runner: (draft?.runner ?? 'npx') as Runner,
 					command: draft?.command ?? '',
 					args: draft?.args ?? [],
-					env: draft?.env ?? {}
+					env: draft?.env ?? {},
+					// Only auto-start a clean, fully-resolved install; anything with
+					// required/secret/placeholder values or no runnable command must be
+					// reviewed first, so don't boot a broken server.
+					enabled: autoInstallable && warnings.length === 0
 				},
 				source: `catalog:${detail.server.name}${versionTag}`,
 				sourceLabel: supportMeta?.label ?? server.source,
-				installSupport: detail.manual_install ? 'manual' : 'auto',
-				warnings: draft?.warnings ?? [],
-				notes: detail.notes,
+				installSupport: detail.manual_install || !autoInstallable ? 'manual' : 'auto',
+				warnings,
+				notes,
 				repositoryUrl: detail.server.repository_url,
 				webUrl: detail.server.web_url
 			});
@@ -245,7 +268,7 @@
 		</div>
 	{:else}
 		<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-			{#each servers as server (server.source + ':' + server.id)}
+			{#each servers as server (rowKey(server))}
 				<div class="flex flex-col gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-4">
 					<div class="flex items-start justify-between gap-2">
 						<div class="min-w-0">
@@ -283,11 +306,11 @@
 						<button
 							type="button"
 							onclick={() => install(server)}
-							disabled={installing === server.id}
+							disabled={installing === rowKey(server)}
 							class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition active:translate-y-px disabled:opacity-60"
 							style="background-color: var(--color-accent); color: var(--color-accent-ink);"
 						>
-							{#if installing === server.id}
+							{#if installing === rowKey(server)}
 								<svg class="size-3.5 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
 									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
 									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.4 0 0 5.4 0 12h4z" />

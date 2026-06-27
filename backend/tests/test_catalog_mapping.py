@@ -79,6 +79,44 @@ def test_package_arguments_positional_and_named():
     assert draft["args"] == ["-y", "pkg@1.0.0", "serve", "--port", "8080", "--verbose"]
 
 
+def test_boolean_flag_kept_but_optional_value_option_omitted():
+    draft = mapping.package_draft(
+        0,
+        _pkg(
+            packageArguments=[
+                {"type": "named", "name": "--verbose"},  # bare flag → kept
+                {"type": "named", "name": "--categories", "valueHint": "CATEGORY"},  # value-option, unset → omitted
+            ]
+        ),
+    )
+    assert draft["args"] == ["-y", "pkg@1.0.0", "--verbose"]
+
+
+def test_runtime_arguments_folded_before_package():
+    draft = mapping.package_draft(
+        0,
+        _pkg(
+            runtimeArguments=[{"type": "named", "name": "--package", "value": "@scope/real"}],
+            packageArguments=[{"type": "positional", "value": "serve"}],
+        ),
+    )
+    assert draft["args"] == ["-y", "--package", "@scope/real", "pkg@1.0.0", "serve"]
+    assert any("runtime arguments" in w for w in draft["warnings"])
+
+
+def test_optional_env_var_without_value_is_omitted():
+    draft = mapping.package_draft(
+        0,
+        _pkg(
+            environmentVariables=[
+                {"name": "OPTIONAL_TUNING"},  # no value/default, not required → omit
+                {"name": "LOG_LEVEL", "default": "info"},  # has default → keep
+            ]
+        ),
+    )
+    assert draft["env"] == {"LOG_LEVEL": "info"}
+
+
 def test_required_argument_without_value_warns():
     draft = mapping.package_draft(
         0,

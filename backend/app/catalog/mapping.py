@@ -68,6 +68,15 @@ def argument_tokens(args: list[Any], warnings: list[str]) -> list[str]:
         value = arg.get("value")
         if value is None:
             value = arg.get("default")
+        if value is not None and "{" in str(value) and "}" in str(value):
+            # The registry's variable-substitution syntax (e.g. "{path}") isn't expanded
+            # here; flag it so the operator replaces the placeholder in the review form.
+            warnings.append(
+                f"Argument value '{value}' contains a {{…}} placeholder — replace it with a real value."
+            )
+        # A named arg "takes a value" if it advertises one (valueHint/format/choices);
+        # without any of those it's a boolean flag (e.g. --verbose).
+        takes_value = bool(arg.get("valueHint") or arg.get("format") or arg.get("choices"))
         if kind == "named":
             name = arg.get("name")
             if not name:
@@ -81,6 +90,11 @@ def argument_tokens(args: list[Any], warnings: list[str]) -> list[str]:
                 hint = arg.get("valueHint") or "value"
                 tokens.extend([str(name), f"<{hint}>"])
                 warnings.append(f"Argument {name} needs a value — replace <{hint}> before starting.")
+            elif takes_value:
+                # Optional value-taking option left unset: omit it. Emitting a bare
+                # "--categories" would consume the next token (or fail CLI parsing); the
+                # operator can add it in the form's Advanced section if they want it.
+                continue
             else:
                 tokens.append(str(name))  # a bare flag (e.g. --verbose); no value to add
         else:  # positional
@@ -114,8 +128,13 @@ def environment(env_vars: list[Any], warnings: list[str]) -> dict[str, str]:
         value = var.get("value")
         if value is None:
             value = var.get("default")
+        required = bool(var.get("isRequired") or var.get("isSecret"))
+        if value is None and not required:
+            # Optional and unset: omit it. Exporting name="" overrides the package's own
+            # default/absence behavior and can break startup; absence lets it fall back.
+            continue
         env[str(name)] = "" if value is None else str(value)
-        if value is None and (var.get("isRequired") or var.get("isSecret")):
+        if value is None and required:
             kind = "secret" if var.get("isSecret") else "required"
             warnings.append(f"Environment variable {name} is {kind} — set its value before starting.")
     return env
@@ -187,21 +206,24 @@ def package_draft(index: int, pkg: dict[str, Any]) -> dict[str, Any]:
 
     warnings: list[str] = []
     pinned = pin_identifier(registry_type, identifier, version)
+    # runtimeArguments are flags for the runner itself (e.g. npx --package=…, uvx --from …)
+    # and belong BEFORE the package identifier; packageArguments go after it.
+    runtime_args = argument_tokens(pkg.get("runtimeArguments") or [], warnings)
     pkg_args = argument_tokens(pkg.get("packageArguments") or [], warnings)
     env = environment(pkg.get("environmentVariables") or [], warnings)
 
-    if pkg.get("runtimeArguments"):
+    if runtime_args:
         warnings.append(
-            "This package declares runtimeArguments, which aren't mapped automatically — "
-            "review the command in Advanced if it needs them."
+            "This package uses runtime arguments — they're placed before the package; "
+            "review the resolved command before starting."
         )
 
     if runner == "npx":
         draft["command"] = "npx"
-        draft["args"] = ["-y", pinned, *pkg_args]
+        draft["args"] = ["-y", *runtime_args, pinned, *pkg_args]
     else:  # uvx
         draft["command"] = "uvx"
-        draft["args"] = [pinned, *pkg_args]
+        draft["args"] = [*runtime_args, pinned, *pkg_args]
 
     draft["runner"] = runner
     draft["env"] = env

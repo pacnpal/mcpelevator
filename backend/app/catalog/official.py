@@ -74,7 +74,7 @@ def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
         "registry_types": registry_types,
         "installable": installable,
         "repository_url": (server.get("repository") or {}).get("url"),
-        "web_url": None,
+        "web_url": server.get("websiteUrl"),
     }
 
 
@@ -107,7 +107,7 @@ def to_detail(entry: dict[str, Any]) -> dict[str, Any]:
             "version": None if version in (None, "") else str(version),
             "status": status,
             "repository_url": (server.get("repository") or {}).get("url"),
-            "web_url": None,
+            "web_url": server.get("websiteUrl"),
         },
         "drafts": drafts,
         "remotes": [
