@@ -96,10 +96,11 @@ PKCE login Claude initiates, then forwards the authenticated request to mcpeleva
 `/s/<slug>/mcp`. **Important:** that forwarded request carries the *edge's* identity
 (e.g. Cloudflare's `Cf-Access-Jwt-Assertion`), **not** the `Authorization: Bearer
 <mcpe token>` that mcpelevator's `bearer` provider checks (`backend/app/auth/bearer.py`).
-So behind the edge you must give the origin auth the edge actually satisfies —
-preferably **inject the mcpe bearer at the edge**, and fall back to running the server
-with `none` **only if** the origin can't be reached except through the gated edge.
-See step 1; on a public tunnel origin, prefer bearer injection.
+So the **cardinal rule** is that the origin — and any token-injection hop in front of
+it — must be reachable **only through the authenticated edge**, never as a bare public
+URL. Given that, you can run the server with `none` (the edge is the sole gate) or
+keep `bearer` and inject the token as defense in depth. See step 1 for the trade-offs
+and the bypass to avoid.
 
 Typical building blocks:
 
@@ -115,19 +116,23 @@ Typical building blocks:
 Steps (high level):
 
 1. Do the **Shared baseline** above, then decide how the edge reaches the backend.
-   The edge forwards its own auth, not the mcpe token, so a bare `/s/<slug>/mcp`
-   origin would 401 (`bearer`) or be wide open (`none`). Pick:
-   - **(a) Inject the bearer — recommended for a public origin.** Keep the server on
-     `bearer` and add a Worker / transform / reverse-proxy step that sets
-     `Authorization: Bearer <mcpe token>` before the request reaches `/s/<slug>/mcp`.
-     Safe even if the origin URL leaks, because the token is still required.
-   - **(b) `none` — only if the origin is not independently reachable.** Acceptable
-     *only* when the gated edge is the sole ingress, i.e. the tunnel exposes no public
-     route straight to `/s/<slug>/mcp`. ⚠️ In Cloudflare's **MCP portal** model the
-     backend origin stays directly addressable, and [blocked users can bypass the
-     portal policy via the direct server URL](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/#add-an-mcp-server) —
-     so `none` there leaves the tools open to anyone who finds the origin. Use (a), or
-     also put an Access policy on the origin hostname/path itself.
+   The edge forwards its own auth, not the mcpe token. **Cardinal rule:** the mcpe
+   origin `/s/<slug>/mcp` — *and any token-injection hop in front of it* — must be
+   reachable **only through the authenticated OAuth/Access gate**, never as a bare
+   public URL. A direct hit to a leaked origin must not reach the tools. Within that:
+   - **`none` (simplest).** With the origin private — reachable only via the gated
+     edge (e.g. a `cloudflared` tunnel to `127.0.0.1`, not a public DNS name) — the
+     edge is the sole gate, so no token is needed. ⚠️ Do **not** use `none` if the
+     origin is independently addressable: Cloudflare's **MCP portal** keeps the
+     backend origin reachable and [blocked users can bypass the portal via the direct
+     server URL](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/#add-an-mcp-server),
+     which would leave `none` tools wide open.
+   - **`bearer` + injection (defense in depth).** Keep the server on `bearer` and add
+     a Worker / transform / reverse-proxy that sets `Authorization: Bearer <mcpe token>`.
+     ⚠️ This only helps if the injection runs **after** the gate. If the rule fires for
+     *every* request to a public hostname, a direct hit to the leaked origin gets the
+     token injected too and **bypasses OAuth** — so gate the injection route with
+     Access and keep the origin itself private (per the cardinal rule).
 2. Stand up the tunnel: `cloudflared tunnel ...` mapping `https://mcp.example.com`
    → `http://127.0.0.1:8080`. Set `MCPE_PUBLIC_BASE_URL` to the **full absolute URL
    including the scheme** (`https://mcp.example.com`, not the bare hostname — it's
