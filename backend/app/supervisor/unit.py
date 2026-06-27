@@ -61,6 +61,7 @@ class ServerUnit:
             "args": self.spec.args,
             "env": self.spec.env,
             "cwd": self.spec.cwd,
+            "transport": self.spec.transport,
             "name": self.name,
             **self.exposure,
         }

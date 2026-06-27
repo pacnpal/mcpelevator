@@ -77,6 +77,7 @@ def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
     name = str(server.get("name") or "")
     version = server.get("version")
     packages = server.get("packages") or []
+    remotes = server.get("remotes") or []
 
     registry_types: list[str] = []
     installable = False
@@ -89,6 +90,14 @@ def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
         transport_type = str((pkg.get("transport") or {}).get("type") or "stdio").lower()
         if transport_type == "stdio" and rtype in mapping.RUNNER_BY_TYPE and pkg.get("identifier"):
             installable = True
+
+    # A server exposing a remote (HTTP/SSE) endpoint is now installable: mcpelevator
+    # can proxy the upstream via the "remote" runner. Surface "remote" as a type so the
+    # browse facet can filter on it.
+    if any(isinstance(r, dict) and r.get("url") for r in remotes):
+        if "remote" not in registry_types:
+            registry_types.append("remote")
+        installable = True
 
     # A "deleted" server was removed from the registry (typically spam/malware/policy);
     # never offer it for install.

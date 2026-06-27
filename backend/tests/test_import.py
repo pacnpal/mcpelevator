@@ -18,28 +18,39 @@ def session():
         yield s
 
 
-def test_import_creates_stdio_and_skips_remote(session):
+def test_import_creates_stdio_and_remote(session):
     data = {
         "mcpServers": {
             "memory": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"]},
             "time": {"command": "uvx", "args": ["mcp-server-time"]},
-            "remote": {"type": "streamable-http", "url": "http://x/mcp"},
+            "remote": {
+                "type": "streamable-http",
+                "url": "https://x/mcp",
+                "headers": {"Authorization": "Bearer t"},
+            },
             "nocmd": {"foo": "bar"},
         }
     }
     created, skipped = service.import_mcp_servers(session, data)
 
     by_name = {c.name: c for c in created}
-    assert set(by_name) == {"memory", "time"}
+    assert set(by_name) == {"memory", "time", "remote"}
     assert by_name["memory"].runner == "npx"
     assert by_name["time"].runner == "uvx"
     assert all(c.enabled is False and c.source == "import" for c in created)
     # stored verbatim (mcpServers round-trip)
     assert by_name["memory"].command == "npx"
     assert by_name["memory"].args == ["-y", "@modelcontextprotocol/server-memory"]
+    # remote entry → a "remote" runner proxying the upstream URL, transport in args,
+    # headers in env.
+    rem = by_name["remote"]
+    assert rem.runner == "remote"
+    assert rem.command == "https://x/mcp"
+    assert rem.args == ["streamable-http"]
+    assert rem.env == {"Authorization": "Bearer t"}
 
     reasons = {s["name"]: s["reason"] for s in skipped}
-    assert set(reasons) == {"remote", "nocmd"}
+    assert set(reasons) == {"nocmd"}
 
 
 def test_import_accepts_bare_map(session):

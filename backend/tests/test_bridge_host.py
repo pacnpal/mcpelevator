@@ -93,3 +93,44 @@ def test_build_proxy_installs_custom_roots_handler():
     assert result is sentinel.proxy
     assert proxy_client_cls.call_args.kwargs["roots"] is host._forward_roots
     create_proxy_mock.assert_called_once_with(proxy_client_cls.return_value, name="t")
+
+
+def test_build_transport_stdio_is_default():
+    """No transport / "stdio" → a StdioTransport from command/args (unchanged path)."""
+    with patch.object(host, "StdioTransport", autospec=True) as stdio:
+        host._build_transport({"command": "npx", "args": ["-y", "pkg"], "env": {"K": "v"}})
+    kwargs = stdio.call_args.kwargs
+    assert kwargs["command"] == "npx"
+    assert kwargs["args"] == ["-y", "pkg"]
+    # server env is merged over the child's os.environ for a real process.
+    assert kwargs["env"]["K"] == "v"
+
+
+def test_build_transport_streamable_http_uses_url_and_headers():
+    """A remote streamable-http spec → StreamableHttpTransport(url, headers); the
+    headers (spec env) must NOT be polluted with os.environ — they're HTTP headers."""
+    spec = {
+        "command": "https://up.example/mcp",
+        "env": {"Authorization": "Bearer t"},
+        "transport": "streamable-http",
+    }
+    with (
+        patch.object(host, "StreamableHttpTransport", autospec=True) as shttp,
+        patch.object(host, "StdioTransport", side_effect=AssertionError("must not spawn stdio")),
+    ):
+        host._build_transport(spec)
+    kwargs = shttp.call_args.kwargs
+    assert kwargs["url"] == "https://up.example/mcp"
+    assert kwargs["headers"] == {"Authorization": "Bearer t"}  # exact, no os.environ
+
+
+def test_build_transport_sse_uses_url_and_headers():
+    spec = {"command": "https://up.example/sse", "env": {"X": "1"}, "transport": "sse"}
+    with (
+        patch.object(host, "SSETransport", autospec=True) as sse,
+        patch.object(host, "StdioTransport", side_effect=AssertionError("must not spawn stdio")),
+    ):
+        host._build_transport(spec)
+    kwargs = sse.call_args.kwargs
+    assert kwargs["url"] == "https://up.example/sse"
+    assert kwargs["headers"] == {"X": "1"}

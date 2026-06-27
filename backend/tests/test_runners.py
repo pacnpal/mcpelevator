@@ -41,3 +41,26 @@ def test_known_runners_build(runner):
 def test_docker_runner_is_gated():
     with pytest.raises(NotImplementedError):
         build_spec(_server(runner="docker", command="some/image"))
+
+
+def test_remote_runner_maps_url_transport_headers():
+    s = _server(
+        runner="remote",
+        command="https://up.example/mcp",
+        args=["sse"],
+        env={"Authorization": "Bearer t"},
+    )
+    spec = build_spec(s)
+    assert spec.command == "https://up.example/mcp"  # upstream URL
+    assert spec.transport == "sse"  # from args[0]
+    assert spec.env == {"Authorization": "Bearer t"}  # upstream headers
+
+
+def test_remote_runner_defaults_transport_when_args_empty():
+    spec = build_spec(_server(runner="remote", command="https://up.example/mcp", args=[]))
+    assert spec.transport == "streamable-http"
+
+
+def test_local_runner_transport_is_stdio():
+    # The discriminator defaults so existing runners are unchanged.
+    assert build_spec(_server(runner="npx", command="npx")).transport == "stdio"

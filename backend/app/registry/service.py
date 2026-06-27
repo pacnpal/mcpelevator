@@ -16,6 +16,40 @@ from app.db.models import RUNNERS, Server
 from app.util import config_hash, new_id, slugify
 
 
+# --- remote (HTTP/SSE upstream) normalization ----------------------------------
+# Canonical transports the bridge host can build, plus the aliases an mcpServers
+# config or the catalog may use. SSOT: the stored value is always canonical, so
+# config_hash (and therefore reconcile) is deterministic regardless of input spelling.
+_REMOTE_TRANSPORTS = ("streamable-http", "sse")
+_DEFAULT_REMOTE_TRANSPORT = "streamable-http"
+_REMOTE_TRANSPORT_ALIASES = {
+    "http": "streamable-http",
+    "streamable-http": "streamable-http",
+    "streamable_http": "streamable-http",
+    "streamablehttp": "streamable-http",
+    "sse": "sse",
+}
+
+
+def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list[str]]:
+    """Validate + canonicalize a remote server's (url, [transport]).
+
+    ``command`` must be an ``http(s)://`` URL; ``args[0]`` (if any) is the transport,
+    defaulting to ``streamable-http``. Returns the canonical pair so the row — and its
+    ``config_hash`` — is deterministic. Raises ``ValueError`` on a bad URL/transport.
+    """
+    url = (command or "").strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError("a remote server's command must be an http(s):// URL")
+    raw = str(args[0]).strip().lower() if args else _DEFAULT_REMOTE_TRANSPORT
+    transport = _REMOTE_TRANSPORT_ALIASES.get(raw)
+    if transport is None:
+        raise ValueError(
+            f"remote transport must be one of {list(_REMOTE_TRANSPORTS)} (got {raw!r})"
+        )
+    return url, [transport]
+
+
 def compute_hash(server: Server) -> str:
     return config_hash(
         {
@@ -122,6 +156,10 @@ def create_server(
         raise ValueError(f"unknown runner {runner!r}; must be one of {RUNNERS}")
     if not command.strip():
         raise ValueError("command is required")
+    # A remote server reuses command/args for the upstream URL + transport; canonicalize
+    # them up front so the persisted row (and config_hash) is deterministic.
+    if runner == "remote":
+        command, args = normalize_remote(command, args)
 
     server = Server(
         id=new_id(),
@@ -168,6 +206,8 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
             setattr(server, key, value)
     if server.runner not in RUNNERS:
         raise ValueError(f"unknown runner {server.runner!r}")
+    if server.runner == "remote":
+        server.command, server.args = normalize_remote(server.command, server.args)
     server.config_hash = compute_hash(server)  # recompute -> drives idempotent reconcile
     return repo.save_server(session, server)
 
@@ -231,10 +271,10 @@ def import_mcp_servers(session: Session, data: dict) -> tuple[list[Server], list
     """Create servers from the standard Claude-Desktop ``mcpServers`` JSON shape.
 
     Accepts either ``{"mcpServers": {...}}`` or a bare ``{name: {...}}`` map.
-    Stdio entries (``command`` + ``args`` + ``env``) become servers, stored
-    verbatim and disabled (the user reviews, then enables). Already-remote
-    entries (``url`` / ``type: sse|streamable-http``) are skipped — they're
-    nothing to elevate.
+    Stdio entries (``command`` + ``args`` + ``env``) become local servers; remote
+    entries (``url`` / ``type: sse|streamable-http|http``) become ``remote`` servers
+    that proxy the upstream URL. All are stored verbatim and disabled (the user
+    reviews, then enables).
     """
     servers_map = data.get("mcpServers") if isinstance(data, dict) and "mcpServers" in data else data
     if not isinstance(servers_map, dict):
@@ -246,8 +286,30 @@ def import_mcp_servers(session: Session, data: dict) -> tuple[list[Server], list
         if not isinstance(entry, dict):
             skipped.append({"name": str(name), "reason": "entry is not an object"})
             continue
-        if entry.get("url") or entry.get("type") in ("sse", "streamable-http", "http"):
-            skipped.append({"name": str(name), "reason": "already a remote HTTP server"})
+        url = entry.get("url")
+        etype = entry.get("type")
+        if url or etype in ("sse", "streamable-http", "http"):
+            # A remote (already-HTTP) MCP server: elevate it as a proxied remote runner.
+            if not url:
+                skipped.append({"name": str(name), "reason": "remote entry has no url"})
+                continue
+            try:
+                created.append(
+                    create_server(
+                        session,
+                        name=str(name),
+                        runner="remote",
+                        command=str(url),
+                        args=[str(etype)] if etype else [],
+                        # mcpServers remote entries carry auth as `headers`; fall back to
+                        # `env` for tools that (incorrectly) reuse it for header values.
+                        env=dict(entry.get("headers") or entry.get("env") or {}),
+                        source="import",
+                        enabled=False,
+                    )
+                )
+            except ValueError as exc:
+                skipped.append({"name": str(name), "reason": str(exc)})
             continue
         command = entry.get("command")
         if not command:

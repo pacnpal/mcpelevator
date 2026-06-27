@@ -35,6 +35,49 @@
 	let installing = $state<string | null>(null); // id currently being resolved
 	let error = $state<string | null>(null);
 
+	// ---- By-type facet filter -------------------------------------------------
+	// Narrow the browse list to one or more package/registry types (npm, pypi, oci,
+	// nuget, mcpb, remote). Empty selection = show all (default). The visible list is
+	// a pure $derived of (servers, selectedTypes) — deterministic, no refetch.
+	let selectedTypes = $state<string[]>([]);
+	const availableTypes = $derived(
+		[...new Set(servers.flatMap((s) => s.registry_types))].sort()
+	);
+	const filterActive = $derived(selectedTypes.length > 0);
+	const visibleServers = $derived(
+		filterActive
+			? servers.filter((s) => s.registry_types.some((t) => selectedTypes.includes(t)))
+			: servers
+	);
+
+	function toggleType(t: string) {
+		selectedTypes = selectedTypes.includes(t)
+			? selectedTypes.filter((x) => x !== t)
+			: [...selectedTypes, t];
+		autoLoads = 0; // a changed filter gets a fresh sparse-page budget
+	}
+
+	// Client-side filtering after cursor pagination can leave a page with few/zero
+	// visible cards while more pages remain. Pull more pages until the grid has a
+	// sensible minimum — bounded so it can never loop. Reset per query / filter change.
+	const MIN_VISIBLE = 6;
+	const MAX_AUTOLOADS = 5;
+	let autoLoads = 0; // plain (non-reactive) guard so bumping it doesn't retrigger
+
+	$effect(() => {
+		if (
+			filterActive &&
+			nextCursor &&
+			!loading &&
+			!loadingMore &&
+			visibleServers.length < MIN_VISIBLE &&
+			autoLoads < MAX_AUTOLOADS
+		) {
+			autoLoads += 1;
+			void loadMore();
+		}
+	});
+
 	// A monotonically increasing token guards against out-of-order responses: a
 	// stale in-flight query (slow network) can't clobber a newer one's results.
 	let queryToken = 0;
@@ -65,6 +108,7 @@
 		const token = ++queryToken;
 		loading = true;
 		error = null;
+		autoLoads = 0; // a fresh query gets a fresh sparse-page budget
 		try {
 			const res = await listCatalog({ source, search: search.trim() || undefined });
 			if (token !== queryToken) return; // a newer query superseded this one
@@ -134,6 +178,7 @@
 		if (id === source) return;
 		source = id;
 		nextCursor = null;
+		selectedTypes = []; // types differ per source; start unfiltered
 		runSearch();
 	}
 
@@ -177,9 +222,39 @@
 				flashToast('This server was removed from the registry and can’t be installed.', 'error');
 				return;
 			}
-			const draft = detail.drafts.find((d) => d.installable) ?? detail.drafts[0] ?? null;
+			const installableDraft = detail.drafts.find((d) => d.installable);
+			const draft = installableDraft ?? detail.drafts[0] ?? null;
 			const supportMeta = sources.find((s) => s.id === server.source);
 			const versionTag = detail.server.version ? `@${detail.server.version}` : '';
+
+			// Prefer a local package install; otherwise, if the server exposes a remote
+			// (HTTP/SSE) endpoint, install it as a proxied remote server. The bridge can
+			// front a remote upstream just like a stdio one.
+			const remote = detail.remotes[0];
+			if (!installableDraft && remote) {
+				setPendingInstall({
+					initial: {
+						name: detail.server.title || detail.server.name,
+						runner: 'remote',
+						command: remote.url,
+						args: [remote.type || 'streamable-http'],
+						env: {},
+						// Don't auto-start: the upstream may need auth headers the operator
+						// must add first. Review, then enable.
+						enabled: false
+					},
+					source: `catalog:${detail.server.name}${versionTag}`,
+					sourceLabel: supportMeta?.label ?? server.source,
+					installSupport: 'auto',
+					warnings: [],
+					notes: [...detail.notes, `Proxying remote ${remote.type} endpoint: ${remote.url}`],
+					repositoryUrl: detail.server.repository_url,
+					webUrl: detail.server.web_url
+				});
+				await goto('/catalog/install');
+				return;
+			}
+
 			const autoInstallable = !!draft?.installable;
 
 			// Notes shown above the form: source notes, plus (when we couldn't derive a
@@ -293,6 +368,35 @@
 				{activeSource.label} is a discovery directory — it has no launch command, so installs open the form pre-filled for you to complete manually.
 			</p>
 		{/if}
+		<!-- Type facet: filter by package/registry type (npm, pypi, remote, …). -->
+		{#if availableTypes.length > 1}
+			<div class="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter by type">
+				<span class="mr-0.5 text-xs text-[var(--color-ink-dim)]">Type</span>
+				{#each availableTypes as t (t)}
+					{@const on = selectedTypes.includes(t)}
+					<button
+						type="button"
+						onclick={() => toggleType(t)}
+						aria-pressed={on}
+						class="rounded-full border px-2.5 py-0.5 font-mono text-[11px] transition"
+						style={on
+							? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 12%, transparent); color: var(--color-accent);'
+							: 'border-color: var(--color-line); color: var(--color-ink-muted);'}
+					>
+						{t}
+					</button>
+				{/each}
+				{#if filterActive}
+					<button
+						type="button"
+						onclick={() => (selectedTypes = [])}
+						class="ml-1 text-[11px] text-[var(--color-ink-dim)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
+					>
+						Clear
+					</button>
+				{/if}
+			</div>
+		{/if}
 	</div>
 
 	<!-- Results -->
@@ -309,13 +413,27 @@
 				Retry
 			</button>
 		</div>
-	{:else if servers.length === 0}
-		<div class="rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-10 text-center">
-			<p class="text-sm text-[var(--color-ink-muted)]">No servers match your search.</p>
+	{:else if visibleServers.length === 0}
+		<div class="flex flex-col items-center gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-10 text-center">
+			{#if filterActive && servers.length > 0}
+				<p class="text-sm text-[var(--color-ink-muted)]">
+					No <span class="font-mono">{selectedTypes.join(', ')}</span> servers match — {servers.length}
+					result{servers.length === 1 ? '' : 's'} of other types are hidden.
+				</p>
+				<button
+					type="button"
+					onclick={() => (selectedTypes = [])}
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm font-medium text-[var(--color-ink)] transition hover:border-[var(--color-line-strong)]"
+				>
+					Clear filter
+				</button>
+			{:else}
+				<p class="text-sm text-[var(--color-ink-muted)]">No servers match your search.</p>
+			{/if}
 		</div>
 	{:else}
 		<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-			{#each servers as server (rowKey(server))}
+			{#each visibleServers as server (rowKey(server))}
 				<div class="flex flex-col gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-4">
 					<div class="flex items-start justify-between gap-2">
 						<div class="min-w-0">
@@ -332,6 +450,8 @@
 									<RunnerBadge runner="npx" />
 								{:else if rt === 'pypi'}
 									<RunnerBadge runner="uvx" />
+								{:else if rt === 'remote'}
+									<RunnerBadge runner="remote" />
 								{/if}
 							{/each}
 						</div>

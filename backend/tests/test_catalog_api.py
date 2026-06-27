@@ -100,6 +100,40 @@ def _stub(monkeypatch, routes: dict):
     return calls
 
 
+def test_official_list_item_surfaces_remote_type_and_installable():
+    from app.catalog import official
+
+    item = official._list_item(
+        {
+            "server": {
+                "name": "io.x/remote",
+                "title": "Remote",
+                "remotes": [{"type": "streamable-http", "url": "https://up/mcp"}],
+            },
+            "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+        }
+    )
+    # The proxy can run a remote upstream, so it's installable and carries a "remote" type
+    # for the browse facet.
+    assert item["installable"] is True
+    assert "remote" in item["registry_types"]
+
+
+def test_official_list_item_deleted_remote_is_not_installable():
+    from app.catalog import official
+
+    item = official._list_item(
+        {
+            "server": {
+                "name": "io.x/bad",
+                "remotes": [{"type": "sse", "url": "https://up/sse"}],
+            },
+            "_meta": {"io.modelcontextprotocol.registry/official": {"status": "deleted"}},
+        }
+    )
+    assert item["installable"] is False
+
+
 def test_sources_lists_official_and_glama():
     with TestClient(app) as c:
         r = c.get("/api/catalog/sources", headers=LOOPBACK)

@@ -38,13 +38,20 @@
 		oncancel?: () => void;
 	} = $props();
 
-	// Only npx / uvx / command are offered in the friendly UI. `docker` is a
+	// npx / uvx / command / remote are offered in the friendly UI. `docker` is a
 	// valid backend runner but out of scope for this form; an imported docker
 	// server can still be edited via the raw command/args fields.
 	const RUNNERS: { value: Runner; label: string; hint: string }[] = [
 		{ value: 'npx', label: 'npx', hint: 'Node package (npm)' },
 		{ value: 'uvx', label: 'uvx', hint: 'Python package (uv)' },
-		{ value: 'command', label: 'command', hint: 'Any local binary' }
+		{ value: 'command', label: 'command', hint: 'Any local binary' },
+		{ value: 'remote', label: 'remote', hint: 'Remote HTTP/SSE URL' }
+	];
+
+	// Transports the remote runner can proxy (mirrors backend `_REMOTE_TRANSPORTS`).
+	const REMOTE_TRANSPORTS: { value: string; label: string }[] = [
+		{ value: 'streamable-http', label: 'Streamable HTTP' },
+		{ value: 'sse', label: 'SSE' }
 	];
 
 	// ---- Form state -----------------------------------------------------------
@@ -79,6 +86,8 @@
 			pkg0 = args0[0] ?? '';
 			extra0 = args0.slice(1).join('\n');
 		}
+		// remote stores [transport] in args (command holds the upstream URL).
+		const transport0 = runner0 === 'remote' ? (args0[0] ?? 'streamable-http') : 'streamable-http';
 		return {
 			name: init.name ?? '',
 			slug: init.slug ?? '',
@@ -87,6 +96,7 @@
 			argsText: args0.join('\n'),
 			pkg: pkg0,
 			extraArgsText: extra0,
+			transport: transport0,
 			cwd: init.cwd ?? '',
 			mcpHttp: init.mcp_http ?? true,
 			restOpenapi: init.rest_openapi ?? false,
@@ -112,6 +122,9 @@
 	// Friendly inputs (npx/uvx): the package/tool name, plus any extra args.
 	let pkg = $state(seed.pkg);
 	let extraArgsText = $state(seed.extraArgsText);
+
+	// Remote runner: the upstream transport (command holds the URL; args = [transport]).
+	let transport = $state(seed.transport);
 
 	let cwd = $state(seed.cwd);
 	let mcpHttp = $state(seed.mcpHttp);
@@ -174,8 +187,12 @@
 			.join(' ')
 	);
 
+	const isRemote = $derived(runner === 'remote');
 	const nameValid = $derived(name.trim().length > 0);
 	const commandValid = $derived(command.trim().length > 0);
+	// A remote server's "command" is an upstream URL — require http(s) so the bridge
+	// can build a transport (mirrors the backend's validation, surfaced earlier here).
+	const remoteUrlValid = $derived(!isRemote || /^https?:\/\//i.test(command.trim()));
 
 	// Mirror the backend's slugify so the operator sees the value that will actually
 	// be stored (lowercased, non-alphanumerics collapsed to single dashes).
@@ -191,7 +208,7 @@
 	const normalizedSlug = $derived(slugify(slug));
 	const slugChanged = $derived(mode === 'edit' && normalizedSlug !== originalSlug);
 
-	const canSubmit = $derived(nameValid && commandValid && !busy);
+	const canSubmit = $derived(nameValid && commandValid && remoteUrlValid && !busy);
 
 	function buildEnv(): Record<string, string> {
 		const out: Record<string, string> = {};
@@ -209,9 +226,10 @@
 			name: name.trim(),
 			runner,
 			command: command.trim(),
-			args: resolvedArgs,
+			// remote stores [transport] in args; there's no local process, so no cwd.
+			args: isRemote ? [transport] : resolvedArgs,
 			env: buildEnv(),
-			cwd: cwd.trim() ? cwd.trim() : null,
+			cwd: isRemote ? null : cwd.trim() ? cwd.trim() : null,
 			mcp_http: mcpHttp,
 			rest_openapi: restOpenapi,
 			auth_provider: authProvider
@@ -305,7 +323,7 @@
 	<!-- Runner -->
 	<fieldset class="flex flex-col gap-2 border-0 p-0">
 		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Runner</legend>
-		<div class="grid grid-cols-3 gap-2">
+		<div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
 			{#each RUNNERS as r (r.value)}
 				<label
 					class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
@@ -377,6 +395,50 @@
 				class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 			></textarea>
 		</div>
+	{:else if isRemote}
+		<!-- runner === remote: an already-remote MCP URL we proxy. command = URL,
+		     args = [transport], env = upstream headers. No local process. -->
+		<div class="flex flex-col gap-2">
+			<label for="srv-url" class="text-sm font-medium text-[var(--color-ink)]">
+				Upstream URL
+			</label>
+			<input
+				id="srv-url"
+				type="url"
+				inputmode="url"
+				bind:value={command}
+				autocomplete="off"
+				spellcheck="false"
+				placeholder="https://example.com/mcp"
+				class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+			/>
+			{#if command.trim() && !remoteUrlValid}
+				<p class="text-xs text-[var(--color-state-failed)]">
+					Enter an http(s):// URL to the remote MCP endpoint.
+				</p>
+			{/if}
+			<label for="srv-transport" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
+				Transport
+			</label>
+			<div class="relative inline-flex items-center">
+				<select
+					id="srv-transport"
+					bind:value={transport}
+					class="w-full cursor-pointer appearance-none rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 pr-9 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+				>
+					{#each REMOTE_TRANSPORTS as t (t.value)}
+						<option value={t.value}>{t.label}</option>
+					{/each}
+				</select>
+				<svg class="pointer-events-none absolute right-3 size-4 text-[var(--color-ink-dim)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="m6 9 6 6 6-6" />
+				</svg>
+			</div>
+			<p class="text-xs text-[var(--color-ink-dim)]">
+				mcpelevator proxies this endpoint and fronts it with its own auth. Add any
+				upstream auth as <span class="font-medium">Headers</span> below.
+			</p>
+		</div>
 	{:else}
 		<!-- runner === command: command + args are the friendly fields -->
 		<div class="flex flex-col gap-2">
@@ -412,6 +474,21 @@
 		</div>
 	{/if}
 
+	{#if isRemote}
+		<!-- Remote endpoint preview (no local process to spawn) -->
+		<div class="flex flex-col gap-1.5">
+			<span class="text-xs font-medium text-[var(--color-ink-muted)]">Proxies</span>
+			<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
+				{#if command.trim()}
+					<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
+						{transport} → {command.trim()}
+					</code>
+				{:else}
+					<code class="font-mono text-xs text-[var(--color-ink-dim)]">(URL not set)</code>
+				{/if}
+			</div>
+		</div>
+	{:else}
 	<!-- Advanced disclosure: resolved raw command + args -->
 	<div
 		class="overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]"
@@ -505,12 +582,13 @@
 			{/if}
 		</div>
 	</div>
+	{/if}
 
-	<!-- Environment variables -->
+	<!-- Environment variables (upstream headers when remote) -->
 	<fieldset class="flex flex-col gap-2 border-0 p-0">
 		<div class="flex items-center justify-between">
 			<legend class="text-sm font-medium text-[var(--color-ink)]">
-				Environment
+				{isRemote ? 'Headers' : 'Environment'}
 			</legend>
 			<button
 				type="button"
@@ -535,7 +613,9 @@
 			<p
 				class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-3 text-xs text-[var(--color-ink-dim)]"
 			>
-				No environment variables. Add API keys or config the server needs.
+				{isRemote
+					? 'No headers. Add upstream auth (e.g. Authorization) the remote endpoint needs.'
+					: 'No environment variables. Add API keys or config the server needs.'}
 			</p>
 		{:else}
 			<div class="flex flex-col gap-2">
@@ -583,21 +663,23 @@
 		{/if}
 	</fieldset>
 
-	<!-- Working directory -->
-	<div class="flex flex-col gap-2">
-		<label for="srv-cwd" class="text-sm font-medium text-[var(--color-ink)]">
-			Working directory <span class="font-normal text-[var(--color-ink-dim)]">(optional)</span>
-		</label>
-		<input
-			id="srv-cwd"
-			type="text"
-			bind:value={cwd}
-			autocomplete="off"
-			spellcheck="false"
-			placeholder="/path/to/project"
-			class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-		/>
-	</div>
+	<!-- Working directory (not applicable to a remote upstream) -->
+	{#if !isRemote}
+		<div class="flex flex-col gap-2">
+			<label for="srv-cwd" class="text-sm font-medium text-[var(--color-ink)]">
+				Working directory <span class="font-normal text-[var(--color-ink-dim)]">(optional)</span>
+			</label>
+			<input
+				id="srv-cwd"
+				type="text"
+				bind:value={cwd}
+				autocomplete="off"
+				spellcheck="false"
+				placeholder="/path/to/project"
+				class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+			/>
+		</div>
+	{/if}
 
 	<!-- Exposure toggles -->
 	<fieldset class="flex flex-col gap-3 border-0 p-0">

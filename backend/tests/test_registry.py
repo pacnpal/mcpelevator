@@ -69,6 +69,53 @@ def test_unknown_runner_rejected(session):
         service.create_server(session, name="x", runner="bogus", command="x")
 
 
+def test_remote_server_canonicalizes_and_validates(session):
+    s = service.create_server(
+        session,
+        name="Remote",
+        runner="remote",
+        command="https://up.example/mcp",
+        args=["http"],  # alias → canonical streamable-http
+        env={"Authorization": "Bearer t"},
+    )
+    assert s.runner == "remote"
+    assert s.command == "https://up.example/mcp"
+    assert s.args == ["streamable-http"]  # canonicalized for deterministic storage
+    assert s.env == {"Authorization": "Bearer t"}
+
+
+def test_remote_server_defaults_transport(session):
+    s = service.create_server(session, name="R", runner="remote", command="https://x/mcp")
+    assert s.args == ["streamable-http"]
+
+
+def test_remote_server_rejects_non_url(session):
+    with pytest.raises(ValueError):
+        service.create_server(session, name="R", runner="remote", command="not-a-url")
+
+
+def test_remote_server_rejects_bad_transport(session):
+    with pytest.raises(ValueError):
+        service.create_server(
+            session, name="R", runner="remote", command="https://x/mcp", args=["websocket"]
+        )
+
+
+def test_remote_config_hash_is_deterministic(session):
+    """Same logical remote config (alias-normalized) → same hash; a transport change
+    re-hashes (drives one idempotent reconcile)."""
+    a = service.create_server(
+        session, name="A", runner="remote", command="https://x/mcp", args=["http"]
+    )
+    b = service.create_server(
+        session, name="B", runner="remote", command="https://x/mcp", args=["streamable-http"]
+    )
+    assert a.config_hash == b.config_hash  # "http" alias collapses to the same spec
+    before = a.config_hash
+    service.update_server(session, a.id, {"args": ["sse"]})
+    assert repo.get_server(session, a.id).config_hash != before
+
+
 def test_slug_rename(session):
     a = _mk(session, name="Memory")
     assert a.slug == "memory"

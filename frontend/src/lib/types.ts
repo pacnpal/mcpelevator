@@ -2,7 +2,7 @@
 // These mirror the FastAPI backend's response shapes exactly (verified against
 // the live backend's OpenAPI schema at /openapi.json).
 
-export type Runner = 'npx' | 'uvx' | 'command' | 'docker';
+export type Runner = 'npx' | 'uvx' | 'command' | 'docker' | 'remote';
 
 export type ServerState =
 	| 'stopped'

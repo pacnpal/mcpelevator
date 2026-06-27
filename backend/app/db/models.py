@@ -24,7 +24,7 @@ def utcnow() -> datetime:
 
 # --- enums kept as plain string constants for deterministic SQLite storage ---
 
-RUNNERS = ("npx", "uvx", "command", "docker")
+RUNNERS = ("npx", "uvx", "command", "docker", "remote")
 STATES = ("stopped", "starting", "running", "unhealthy", "failed", "stopping")
 
 
@@ -39,9 +39,13 @@ class Server(SQLModel, table=True):
 
     # launch spec
     runner: str = "npx"  # one of RUNNERS
-    command: str = ""  # package name / image ref / argv0
-    args: list = Field(sa_column=Column(JSON))  # JSON array; always set by service
-    env: dict = Field(sa_column=Column(JSON))  # JSON object; always set by service
+    command: str = ""  # package name / image ref / argv0 / upstream URL (remote)
+    # JSON array; always set by service. For runner="remote" this is [transport],
+    # e.g. ["streamable-http"] or ["sse"].
+    args: list = Field(sa_column=Column(JSON))
+    # JSON object; always set by service. For runner="remote" this is the upstream
+    # HTTP headers (e.g. {"Authorization": "Bearer …"}), not process env.
+    env: dict = Field(sa_column=Column(JSON))
     cwd: Optional[str] = None
 
     # exposure (folded 1:1)
