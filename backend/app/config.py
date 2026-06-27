@@ -10,6 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.util import host_only
@@ -17,6 +18,14 @@ from app.util import host_only
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MCPE_", env_file=".env", extra="ignore")
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _strip_env_whitespace(cls, v: object) -> object:
+        # Env values often carry stray surrounding whitespace — a trailing space on
+        # a compose/.env line, a newline from a mounted secret file. Pydantic's
+        # strict scalar parsers reject e.g. "true " as a bool, so trim before coercion.
+        return v.strip() if isinstance(v, str) else v
 
     # --- control plane / edge ---
     host: str = "127.0.0.1"  # socket bind for the control plane (in Docker: 0.0.0.0)
