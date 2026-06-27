@@ -70,6 +70,12 @@ async def _forward_roots(context) -> list[Root]:
 
 
 def build_proxy(spec: dict) -> FastMCP:
+    """Build the FastMCP proxy that fronts one stdio MCP server.
+
+    The upstream server is wrapped in a ``ProxyClient`` carrying our tolerant
+    roots handler (see :func:`_forward_roots`); all other advanced forwarding
+    and the fresh-session-per-request isolation keep FastMCP's proxy defaults.
+    """
     transport = StdioTransport(
         command=spec["command"],
         args=list(spec.get("args") or []),
@@ -87,6 +93,7 @@ def build_proxy(spec: dict) -> FastMCP:
 
 
 def main() -> None:
+    """Entry point: read the ProcessSpec + port from the environment and serve."""
     spec = json.loads(os.environ["MCPE_BRIDGE_SPEC"])
     host = os.environ.get("MCPE_BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ["MCPE_BRIDGE_PORT"])

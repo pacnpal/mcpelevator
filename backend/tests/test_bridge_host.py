@@ -10,10 +10,9 @@ to an empty list instead of surfacing that error.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, sentinel
 
 import pytest
-from fastmcp import FastMCP
 from mcp.server.session import ServerSession
 from mcp.types import Root
 
@@ -81,7 +80,16 @@ def test_session_exposes_check_client_capability():
 
 
 def test_build_proxy_installs_custom_roots_handler():
-    """build_proxy wires our tolerant handler onto the upstream ProxyClient
-    instead of FastMCP's default forwarder."""
-    proxy = host.build_proxy({"command": "echo", "args": ["hi"], "name": "t"})
-    assert isinstance(proxy, FastMCP)
+    """build_proxy must wire _forward_roots onto the upstream ProxyClient and
+    hand that client to create_proxy. Asserting the wiring (not just the return
+    type) catches regressions that drop the custom handler or revert to the
+    deprecated FastMCP.as_proxy path."""
+    with (
+        patch.object(host, "ProxyClient", autospec=True) as proxy_client_cls,
+        patch.object(host, "create_proxy", return_value=sentinel.proxy) as create_proxy_mock,
+    ):
+        result = host.build_proxy({"command": "echo", "args": ["hi"], "name": "t"})
+
+    assert result is sentinel.proxy
+    assert proxy_client_cls.call_args.kwargs["roots"] is host._forward_roots
+    create_proxy_mock.assert_called_once_with(proxy_client_cls.return_value, name="t")
