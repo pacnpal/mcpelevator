@@ -29,6 +29,29 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+// Whether a URL is not reachable from the public internet — plain http, or an
+// http(s) loopback / private host. Cloud connector UIs (claude.ai, ChatGPT)
+// dial the server from Anthropic/OpenAI infrastructure, so a local default like
+// `http://127.0.0.1:8080/...` can't be reached; mcp-remote also needs
+// `--allow-http` for non-https endpoints.
+function isLocalUrl(value: string): boolean {
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		return false;
+	}
+	if (url.protocol !== 'https:') return true; // http:// — insecure and (for ChatGPT) rejected
+	const host = url.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+	return (
+		host === 'localhost' ||
+		host === '127.0.0.1' ||
+		host === '::1' ||
+		host.endsWith('.local') ||
+		host.endsWith('.localhost')
+	);
+}
+
 export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls' | 'auth'>): InstallOption[] {
 	const { mcp, rest } = server.urls;
 	const name = server.slug;
@@ -47,20 +70,38 @@ export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls' | 'au
 		const httpEntry = bearer
 			? { type: 'http', url: mcp, headers: { Authorization: 'Bearer <YOUR_TOKEN>' } }
 			: { type: 'http', url: mcp };
+		const local = isLocalUrl(mcp);
 		// Claude Desktop's config validates stdio entries only — a bare `url` is
 		// dropped — so remote servers go through the `mcp-remote` stdio bridge.
-		const remoteArgs = bearer
-			? ['mcp-remote', mcp, '--header', 'Authorization: Bearer <YOUR_TOKEN>']
-			: ['mcp-remote', mcp];
-		const desktopEntry = { command: 'npx', args: remoteArgs };
+		// `--allow-http` is required for non-https endpoints (the default local
+		// install advertises an http loopback URL).
+		const remoteArgs = ['mcp-remote', mcp];
+		if (local) remoteArgs.push('--allow-http');
+		// For the bearer header we use mcp-remote's documented `${VAR}` form with an
+		// `env` value instead of an inline `--header "Authorization: Bearer …"`:
+		// Claude Desktop on Windows mangles spaces inside an arg, which would
+		// corrupt the header. The env form keeps the arg space-free and works on
+		// every platform. See github.com/geelen/mcp-remote (Custom Headers).
+		const desktopEntry = bearer
+			? {
+					command: 'npx',
+					args: [...remoteArgs, '--header', 'Authorization:${AUTH_HEADER}'],
+					env: { AUTH_HEADER: 'Bearer <YOUR_TOKEN>' }
+				}
+			: { command: 'npx', args: remoteArgs };
 		// Gemini CLI uses `httpUrl` (not `url`/`type`) for Streamable HTTP.
 		const geminiEntry = bearer
 			? { httpUrl: mcp, headers: { Authorization: 'Bearer <YOUR_TOKEN>' } }
 			: { httpUrl: mcp };
-		// URL-only connector UIs (claude.ai, ChatGPT) take just the endpoint and
-		// handle auth via their own OAuth / no-auth flow — a static token can't be
-		// attached, so warn that a bearer-protected server won't work there.
-		const connectorCaveat = bearer ? ' · bearer auth not supported here' : '';
+		// URL-only connector UIs (claude.ai, ChatGPT) dial the server from the
+		// vendor's cloud, so a local URL is unreachable there; and they handle auth
+		// via their own OAuth / no-auth flow, so a static bearer token can't be
+		// attached. Warn about whichever applies (reachability dominates).
+		const connectorCaveat = local
+			? ' · needs a public HTTPS URL'
+			: bearer
+				? ' · bearer auth not supported here'
+				: '';
 
 		// — Claude —
 		out.push({
