@@ -107,6 +107,14 @@ class Supervisor:
 
                 unit = self.units.get(server_id)
                 if unit is not None:
+                    # Converge the routing key from fresh desired state. slug is
+                    # excluded from config_hash (a rename must not bounce the bridge),
+                    # so the branches above never re-derive the unit on a rename. The
+                    # in-place ``rename_slug`` fast-path can also miss a rename that
+                    # races this loop (the unit didn't exist yet when it ran, then got
+                    # started here from a pre-rename snapshot). Re-reading the slug each
+                    # pass guarantees ``endpoint(<new>)`` resolves within one interval.
+                    unit.slug = server.slug
                     repo.upsert_runtime(
                         session, server_id,
                         state=unit.state, pid=unit.pid, port=unit.port,
