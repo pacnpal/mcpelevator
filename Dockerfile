@@ -9,11 +9,14 @@ RUN npm run build   # -> /fe/build (adapter-static, SPA fallback)
 
 # uv + uvx binaries come from the official image — declared as a named stage so the
 # COPY --from below references an alias (Hadolint DL3022) rather than an external ref.
-FROM ghcr.io/astral-sh/uv:latest AS uv
+FROM ghcr.io/astral-sh/uv:0.11.24 AS uv
 
 # Stage 2: runtime — Python control plane + Node/npx + uv/uvx so npx/uvx MCP
 # servers run with zero local setup (batteries-included).
 FROM python:3.13-slim-bookworm AS runtime
+
+# pipefail so a failure in the piped NodeSource setup below aborts the RUN (DL4006).
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates gnupg tini git \
