@@ -19,7 +19,7 @@
 		TokenInfo
 	} from '$lib/types';
 	import { clearToken, setToken } from '$lib/auth';
-	import { isLoopbackHost, normalizeHost } from '$lib/host';
+	import { isLoopbackHost, isPrivateIpHost, normalizeHost } from '$lib/host';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 
@@ -228,6 +228,9 @@
 	const browserHost =
 		typeof window !== 'undefined' ? normalizeHost(window.location.hostname) : '';
 	const onLoopback = isLoopbackHost(browserHost);
+	// Reached through a private-IP literal (e.g. 192.168.1.50) but not loopback: this
+	// tab relies on `allow_private_lan`, so turning it off would 403 our own /api.
+	const onPrivateLan = !onLoopback && isPrivateIpHost(browserHost);
 	const loopbackUrl =
 		typeof window !== 'undefined'
 			? `${window.location.protocol}//localhost${window.location.port ? `:${window.location.port}` : ''}`
@@ -235,6 +238,7 @@
 
 	let confirmBindLocal = $state(false);
 	let confirmRemoveHost = $state<string | null>(null);
+	let confirmDisableLan = $state(false);
 
 	// The bind-mode radios are controlled by `settings.bind_mode`. When we intercept a
 	// selection to confirm (without patching), Svelte won't re-assert the radios'
@@ -287,6 +291,28 @@
 	function cancelSwitchToLocal() {
 		confirmBindLocal = false;
 		resetBindRadios();
+	}
+
+	// allow_private_lan: opening to LAN devices makes the box reachable off-host, so
+	// (under `auto`) it turns control-plane auth on — hence the admin-token gate when
+	// enabling, mirroring `expose`. Turning it OFF while this tab is reached through a
+	// private IP would lock the tab out, so confirm that direction.
+	function setAllowPrivateLan(value: boolean) {
+		if (!settings || settings.allow_private_lan === value) return;
+		if (value && !hasUsableAdminCredential) {
+			flashToast('Generate an admin token before opening the control plane to the LAN.');
+			return;
+		}
+		if (!value && onPrivateLan) {
+			confirmDisableLan = true;
+			return;
+		}
+		patchSettings({ allow_private_lan: value }, 'allow_private_lan');
+	}
+
+	function confirmDisablePrivateLan() {
+		confirmDisableLan = false;
+		patchSettings({ allow_private_lan: false }, 'allow_private_lan');
 	}
 
 	// ---- Allowed hosts editor -------------------------------------------------
@@ -710,6 +736,77 @@
 					Host/Origin is always checked (DNS-rebinding defense): loopback is always
 					allowed; <code class="font-mono">expose</code> also allows the hosts below.
 				</p>
+			</fieldset>
+
+			<!-- Local network (LAN) access -->
+			<fieldset class="flex flex-col gap-2 border-0 p-0">
+				<legend class="text-sm font-medium text-[var(--color-ink)]">Local network access</legend>
+				<label
+					class="flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+					class:cursor-not-allowed={!settings.allow_private_lan && !hasUsableAdminCredential}
+					class:opacity-60={!settings.allow_private_lan && !hasUsableAdminCredential}
+					style={settings.allow_private_lan
+						? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+				>
+					<input
+						type="checkbox"
+						checked={settings.allow_private_lan}
+						onchange={(e) => setAllowPrivateLan(e.currentTarget.checked)}
+						disabled={savingField === 'allow_private_lan'}
+						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+					/>
+					<span class="flex flex-col gap-0.5">
+						<span class="text-sm font-medium text-[var(--color-ink)]">
+							Allow access from devices on your local network
+						</span>
+						<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+							Reach this box at its private IP (e.g.
+							<code class="font-mono">http://192.168.1.50:8080</code>) from other LAN devices —
+							no per-host allowlisting. Private-IP literals only, from a private-network peer,
+							so it stays DNS-rebinding-safe. Counts as exposed, so an admin token is required
+							for <code class="font-mono">/api</code>.
+						</span>
+					</span>
+				</label>
+				{#if confirmDisableLan}
+					<div
+						role="alert"
+						class="flex flex-col gap-2.5 rounded-lg border p-3"
+						style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+					>
+						<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+							This will lock this browser
+							(<code class="font-mono text-[var(--color-ink)]">{browserHost}</code>)
+							out of the control plane — you're connected through a private IP. Open
+							<a
+								class="font-mono text-[var(--color-accent)] underline"
+								href={loopbackUrl}
+								target="_blank"
+								rel="noopener noreferrer">{loopbackUrl}</a
+							>
+							first, then turn it off.
+						</p>
+						<div class="flex items-center gap-1.5">
+							<button
+								type="button"
+								onclick={confirmDisablePrivateLan}
+								disabled={savingField !== null}
+								class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+								style="background-color: var(--color-state-failed);"
+							>
+								Turn off anyway
+							</button>
+							<button
+								type="button"
+								onclick={() => (confirmDisableLan = false)}
+								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+							>
+								Cancel
+							</button>
+						</div>
+					</div>
+				{/if}
 			</fieldset>
 
 			<!-- Control-plane auth -->

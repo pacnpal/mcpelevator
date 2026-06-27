@@ -123,6 +123,9 @@ export interface SettingsInfo {
 	allowed_hosts: string[];
 	default_auth_provider: AuthProvider;
 	control_plane_auth: ControlPlaneAuth;
+	/** Allow private-IP-literal Hosts from a LAN peer (self-hosted box access).
+	 * Rebinding-safe; turns control-plane `auto` enforcement on while enabled. */
+	allow_private_lan: boolean;
 }
 
 /** Shape of GET /api/auth/status — the SPA polls this to decide whether to show login. */

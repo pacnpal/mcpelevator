@@ -24,24 +24,27 @@ from app.registry import settings as runtime_settings
 from app.util import hash_token, new_id, new_token
 
 
-def _enforced(mode: str, bind_mode: str, has_public_host: bool) -> bool:
+def _enforced(mode: str, bind_mode: str, has_public_host: bool, allow_private_lan: bool) -> bool:
     """The enforcement decision, factored out so the request gate and the settings
     lock-out guard agree. ``always`` always enforces; ``auto`` enforces once the
-    instance is reachable off-host: ``bind_mode='expose'`` OR a public base URL is
-    configured. ``request_allowlist`` already trusts that public host, so the token
-    gate must too, or a tunnel deployment would expose /api unauthenticated."""
+    instance is reachable off-host: ``bind_mode='expose'``, a public base URL is
+    configured, OR ``allow_private_lan`` opens it to LAN devices. ``request_allowlist``
+    already trusts the public host and the LAN allowance lets private-IP clients in, so
+    the token gate must match, or those deployments would expose /api unauthenticated."""
     if mode == "always":
         return True
-    return mode == "auto" and (bind_mode == "expose" or has_public_host)
+    return mode == "auto" and (bind_mode == "expose" or has_public_host or allow_private_lan)
 
 
 def enforcement_enabled(session: Session) -> bool:
     """Is a control token required right now? A loopback-only install with no public
-    URL stays zero-config; expose or a configured public URL turns the gate on."""
+    URL stays zero-config; expose, a configured public URL, or allow_private_lan turns
+    the gate on."""
     return _enforced(
         runtime_settings.control_plane_auth(session),
         runtime_settings.bind_mode(session),
         get_settings().public_host is not None,
+        runtime_settings.allow_private_lan(session),
     )
 
 
@@ -55,7 +58,8 @@ def would_lock_out(request: Request, session: Session, changes: dict[str, Any]) 
         return False  # the caller already holds a usable control credential
     mode = changes.get("control_plane_auth", runtime_settings.control_plane_auth(session))
     bind = changes.get("bind_mode", runtime_settings.bind_mode(session))
-    return _enforced(mode, bind, get_settings().public_host is not None)
+    lan = changes.get("allow_private_lan", runtime_settings.allow_private_lan(session))
+    return _enforced(mode, bind, get_settings().public_host is not None, lan)
 
 
 def _bearer(request: Request) -> str:

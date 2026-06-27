@@ -20,6 +20,12 @@ DEFAULTS: dict[str, Any] = {
     "allowed_hosts": [],  # Host/Origin allowlist when exposed (DNS-rebinding defense)
     "default_auth_provider": "none",  # 'none' | 'bearer' — used when a server is 'inherit'
     "control_plane_auth": "auto",  # 'auto' (require iff expose) | 'always' — gates /api bearer auth
+    # Allow private-IP-literal Hosts (e.g. http://192.168.1.50:8080) from a peer on a
+    # private network, so a self-hosted box (Unraid, NAS) is reachable from other LAN
+    # devices without per-host allowlisting. Rebinding-safe (a rebound attack sends a
+    # domain, not a private-IP literal). Counts as "reachable off-host" so 'auto'
+    # control-plane auth turns on when it's enabled — see app.auth.control_plane.
+    "allow_private_lan": False,
 }
 
 
@@ -66,6 +72,8 @@ def write(
             raise ValueError(f"invalid default_auth_provider: {value!r}")
         if key == "control_plane_auth" and value not in _CONTROL_PLANE_AUTH_MODES:
             raise ValueError(f"invalid control_plane_auth: {value!r}")
+        if key == "allow_private_lan" and not isinstance(value, bool):
+            raise ValueError(f"invalid allow_private_lan: {value!r}")
         if key == "allowed_hosts":
             value = _normalize_hosts(value)
         pending[key] = value
@@ -87,3 +95,7 @@ def default_auth_provider(session: Session) -> str:
 
 def control_plane_auth(session: Session) -> str:
     return repo.setting_get(session, "control_plane_auth", DEFAULTS["control_plane_auth"])
+
+
+def allow_private_lan(session: Session) -> bool:
+    return repo.setting_get(session, "allow_private_lan", DEFAULTS["allow_private_lan"])

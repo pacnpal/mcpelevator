@@ -61,6 +61,12 @@ control plane. If you must bind off-host, drop `MCPE_TRUSTED_PROXIES` and put an
 authenticating proxy in front of `/api`. The exposure recipes below keep the
 socket loopback-only and let a tunnel do the public-facing part instead.
 
+> **Just want it on your own LAN, not the public internet / Claude's cloud?** That's
+> a different goal from this guide. Use the `allow_private_lan` setting instead — see
+> [README → Security → Local network (LAN) access](../README.md#security). It lets
+> private-IP devices on your network reach the box directly (with an admin token on
+> `/api`), without a public tunnel.
+
 ## Shared baseline (do this for either path)
 
 Whichever path you choose, harden mcpelevator first. These are runtime settings on

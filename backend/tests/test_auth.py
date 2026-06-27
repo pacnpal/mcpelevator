@@ -40,6 +40,7 @@ def test_settings_defaults_and_write(session):
         "allowed_hosts": [],
         "default_auth_provider": "none",
         "control_plane_auth": "auto",
+        "allow_private_lan": False,
     }
     runtime_settings.write(
         session,
@@ -55,6 +56,8 @@ def test_settings_write_rejects_bad_enums(session):
         runtime_settings.write(session, {"bind_mode": "bogus"})
     with pytest.raises(ValueError):
         runtime_settings.write(session, {"default_auth_provider": "bogus"})
+    with pytest.raises(ValueError):  # allow_private_lan must be a bool, not a string
+        runtime_settings.write(session, {"allow_private_lan": "yes"})
     # unknown keys are ignored; valid values still persist
     assert runtime_settings.write(session, {"nope": "x", "bind_mode": "expose"})["bind_mode"] == "expose"
 
@@ -152,6 +155,73 @@ def test_host_allowed_ipv6_literal():
 def test_host_allowed(host, origin, allowed, client_loopback, ok):
     result, _ = middleware.host_allowed(host, origin, allowed, client_is_loopback=client_loopback)
     assert result is ok
+
+
+def test_host_allowed_private_lan_literal():
+    # allow_private=True lets a private-IP literal Host pass without an allowlist entry
+    # (the LAN-access path), but a HOSTNAME never does — that's what keeps it
+    # rebinding-safe (a rebound attack sends a domain, not a private-IP literal).
+    assert middleware.host_allowed(
+        "192.168.1.50:8080", None, [], client_is_loopback=False, allow_private=True
+    )[0] is True
+    assert middleware.host_allowed(
+        "10.0.0.5", None, [], client_is_loopback=False, allow_private=True
+    )[0] is True
+    assert middleware.host_allowed(
+        "[fd00::1]", None, [], client_is_loopback=False, allow_private=True
+    )[0] is True
+    # a public IP literal is NOT private -> rejected even with allow_private
+    assert middleware.host_allowed(
+        "8.8.8.8", None, [], client_is_loopback=False, allow_private=True
+    )[0] is False
+    # a hostname that might resolve to a private IP is rejected (rebinding defense)
+    assert middleware.host_allowed(
+        "nas.local", None, [], client_is_loopback=False, allow_private=True
+    )[0] is False
+    # Origin is held to the same rule: a private-IP Host with an off-allowlist domain
+    # Origin still fails closed
+    assert middleware.host_allowed(
+        "192.168.1.50", "https://evil.com", [], client_is_loopback=False, allow_private=True
+    )[0] is False
+    # without the flag, a private-IP literal is just another off-allowlist host
+    assert middleware.host_allowed(
+        "192.168.1.50", None, [], client_is_loopback=False, allow_private=False
+    )[0] is False
+
+
+def test_is_private_client():
+    from types import SimpleNamespace
+
+    def req(peer):
+        client = SimpleNamespace(host=peer) if peer is not None else None
+        return SimpleNamespace(client=client)
+
+    assert middleware.is_private_client(req("127.0.0.1")) is True  # loopback qualifies
+    assert middleware.is_private_client(req("192.168.1.50")) is True  # RFC 1918
+    assert middleware.is_private_client(req("10.0.0.5")) is True
+    assert middleware.is_private_client(req("172.16.4.4")) is True
+    assert middleware.is_private_client(req("fd00::1")) is True  # IPv6 ULA
+    assert middleware.is_private_client(req("8.8.8.8")) is False  # public
+    assert middleware.is_private_client(req(None)) is False
+
+
+def test_private_lan_allowed_requires_setting_and_private_peer(session, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="")
+    )
+
+    def req(peer):
+        return SimpleNamespace(client=SimpleNamespace(host=peer))
+
+    # setting off -> never allowed, even from a LAN peer
+    assert middleware.private_lan_allowed(req("192.168.1.50"), session) is False
+    runtime_settings.write(session, {"allow_private_lan": True})
+    # setting on + private peer -> allowed
+    assert middleware.private_lan_allowed(req("192.168.1.50"), session) is True
+    # setting on + public peer -> still not allowed (the peer gate)
+    assert middleware.private_lan_allowed(req("8.8.8.8"), session) is False
 
 
 def test_is_loopback_client():

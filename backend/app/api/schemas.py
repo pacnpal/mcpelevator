@@ -113,6 +113,7 @@ class SettingsInfo(BaseModel):
     allowed_hosts: list[str]
     default_auth_provider: str
     control_plane_auth: ControlPlaneAuthMode = "auto"
+    allow_private_lan: bool = False
 
 
 class SettingsUpdate(BaseModel):
@@ -120,6 +121,7 @@ class SettingsUpdate(BaseModel):
     allowed_hosts: Optional[list[str]] = None
     default_auth_provider: Optional[str] = None
     control_plane_auth: Optional[ControlPlaneAuthMode] = None
+    allow_private_lan: Optional[bool] = None
 
 
 class AuthStatus(BaseModel):

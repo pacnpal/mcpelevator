@@ -10,8 +10,25 @@ services:
     # loopback, so a direct off-host request could reach the unauthenticated /api.
     # If you must bind off-host, remove MCPE_TRUSTED_PROXIES and put an
     # authenticating proxy in front of /api.
+    #
+    # LAN access for a self-hosted box (Unraid / NAS): turn on the `allow_private_lan`
+    # setting (Settings → "Allow access from devices on your local network") so a
+    # private-IP-literal Host from a private-network peer passes the guard, and reach
+    # it at http://<box-lan-ip>:8080. For that peer check to see the REAL client IP,
+    # use HOST networking (see the network_mode block below) — with bridge + port
+    # publishing Docker masquerades every client to the gateway IP, so the peer gate
+    # can no longer tell a LAN client from a public one and you'd lean entirely on the
+    # control-plane admin token (which allow_private_lan requires anyway) and per-server
+    # bearer auth. Either way, generate an admin token first.
     ports:
       - "127.0.0.1:8080:8080"
+    # --- LAN access via HOST networking (recommended for Unraid/NAS) ---------------
+    # Uncomment `network_mode: host` AND comment out the `ports:` and `networks:`
+    # blocks (host networking ignores both). The container then shares the host's
+    # network stack, so it sees real client IPs and `allow_private_lan` gates LAN vs.
+    # public correctly. Drop MCPE_TRUSTED_PROXIES below (there's no bridge gateway to
+    # trust). Linux only — Docker Desktop on macOS/Windows doesn't support it.
+    # network_mode: host
     networks:
       - mcpe
     volumes:

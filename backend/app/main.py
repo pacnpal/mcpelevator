@@ -25,7 +25,12 @@ from app.api import servers as servers_api
 from app.api import settings as settings_api
 from app.api import tokens as tokens_api
 from app.auth.control_plane import ensure_control_token, enforcement_enabled, require_control_plane
-from app.auth.middleware import host_allowed, is_loopback_client, request_allowlist
+from app.auth.middleware import (
+    host_allowed,
+    is_loopback_client,
+    private_lan_allowed,
+    request_allowlist,
+)
 from app.config import get_settings
 from app.db import get_engine, init_db
 from app.proxy.router import router as proxy_router
@@ -108,11 +113,13 @@ def create_app() -> FastAPI:
         if request.url.path == "/api" or request.url.path.startswith("/api/"):
             with Session(get_engine()) as session:
                 allowed = request_allowlist(session)
+                allow_private = private_lan_allowed(request, session)
             ok, reason = host_allowed(
                 request.headers.get("host", ""),
                 request.headers.get("origin"),
                 allowed,
                 client_is_loopback=is_loopback_client(request),
+                allow_private=allow_private,
             )
             if not ok:
                 return JSONResponse({"detail": reason}, status_code=403)
