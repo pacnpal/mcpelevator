@@ -43,12 +43,20 @@
 	}
 
 	async function load(silent = false) {
+		// Capture the id this request is for. A clone navigates /server/[id] ->
+		// /server/[id] (same route, reused component), so an in-flight request from
+		// the source page (initial load or silent poll) can resolve *after* the
+		// copy's load — drop it instead of clobbering `server` with the source.
+		const requestedId = id;
 		if (!silent) loadState = 'loading';
 		try {
-			server = await getServer(id);
+			const result = await getServer(requestedId);
+			if (requestedId !== id) return; // route changed mid-flight; stale response
+			server = result;
 			loadState = 'ready';
 			loadError = null;
 		} catch (err) {
+			if (requestedId !== id) return;
 			if (!silent) {
 				loadState = 'error';
 				loadError = errorMessage(err);
@@ -61,30 +69,44 @@
 	async function toggle() {
 		if (!server || busy) return;
 		busy = true;
+		// Capture the id this action targets. Clone reuses this component (same-route
+		// nav), so if the route changes mid-flight the resolved summary belongs to the
+		// *previous* server — drop it instead of clobbering the copy with the source.
+		const requestedId = id;
 		try {
-			server = wantsRun
-				? { ...server, ...(await disableServer(server.id)) }
-				: { ...server, ...(await enableServer(server.id)) };
+			const updated = wantsRun
+				? await disableServer(requestedId)
+				: await enableServer(requestedId);
+			if (requestedId !== id || !server) return; // route changed mid-flight
+			server = { ...server, ...updated };
 		} catch (err) {
-			flashToast(errorMessage(err));
+			if (requestedId === id) flashToast(errorMessage(err));
 		} finally {
 			busy = false;
 		}
 	}
 
 	async function doClone() {
-		if (!server || cloning) return;
+		// Don't start a clone while an enable/disable or delete is still in flight —
+		// the toggle response is id-guarded above, but blocking here keeps the source
+		// page from kicking off conflicting actions right before it navigates away.
+		if (!server || cloning || busy || deleting) return;
+		// Capture the route + target id: if the user leaves this page before the
+		// clone resolves, don't navigate to the copy or toast on the wrong route.
+		const requestedId = id;
+		const sourceId = server.id;
 		cloning = true;
 		try {
-			const copy = await cloneServer(server.id);
+			const copy = await cloneServer(sourceId);
+			if (requestedId !== id) return; // navigated away mid-flight
 			// Land on the copy so the operator can review/edit, then enable it.
 			await goto(`/server/${copy.id}`);
-			// This is a same-route navigation (/server/[id] -> /server/[id]), so the
-			// component instance is reused — clear the in-flight flag or the copy's
-			// page would show the Clone button stuck disabled.
-			cloning = false;
 		} catch (err) {
-			flashToast(errorMessage(err));
+			if (requestedId === id) flashToast(errorMessage(err));
+		} finally {
+			// Same-route nav (/server/[id] -> /server/[id]) reuses this component, and
+			// an aborted goto resolves false without throwing — always clear the flag
+			// so the copy's page doesn't show the Clone button stuck disabled.
 			cloning = false;
 		}
 	}
@@ -240,7 +262,7 @@
 				<button
 					type="button"
 					onclick={doClone}
-					disabled={cloning}
+					disabled={cloning || busy || deleting}
 					aria-busy={cloning}
 					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3.5 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
 				>
