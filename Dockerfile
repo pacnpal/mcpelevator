@@ -13,7 +13,7 @@ FROM ghcr.io/astral-sh/uv:0.11.25 AS uv
 
 # Stage 2: runtime — Python control plane + Node/npx + uv/uvx so npx/uvx MCP
 # servers run with zero local setup (batteries-included).
-FROM python:3.13-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 
 # pipefail so a failure in the piped NodeSource setup below aborts the RUN (DL4006).
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
