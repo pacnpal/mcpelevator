@@ -14,6 +14,7 @@ from urllib.parse import quote
 import httpx
 
 from app.catalog import base, mapping
+from app.runners.remote import canonical_transport
 
 BASE_URL = "https://registry.modelcontextprotocol.io"
 _META_KEY = "io.modelcontextprotocol.registry/official"
@@ -91,10 +92,14 @@ def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
         if transport_type == "stdio" and rtype in mapping.RUNNER_BY_TYPE and pkg.get("identifier"):
             installable = True
 
-    # A server exposing a remote (HTTP/SSE) endpoint is now installable: mcpelevator
-    # can proxy the upstream via the "remote" runner. Surface "remote" as a type so the
-    # browse facet can filter on it.
-    if any(isinstance(r, dict) and r.get("url") for r in remotes):
+    # A server exposing a remote (HTTP/SSE) endpoint the remote runner can actually
+    # proxy is now installable. Filter by the shared transport vocabulary so an
+    # unsupported remote type (e.g. a future "websocket") isn't surfaced as installable
+    # and then fail in the install flow. Surface "remote" as a browse-facet type.
+    if any(
+        isinstance(r, dict) and r.get("url") and canonical_transport(r.get("type")) is not None
+        for r in remotes
+    ):
         if "remote" not in registry_types:
             registry_types.append("remote")
         installable = True
@@ -166,11 +171,30 @@ def to_detail(entry: dict[str, Any]) -> dict[str, Any]:
             "web_url": server.get("websiteUrl"),
         },
         "drafts": drafts,
-        "remotes": [
-            {"type": str(r.get("type") or ""), "url": str(r.get("url") or "")}
-            for r in remotes
-            if isinstance(r, dict)
-        ],
+        "remotes": [_remote_entry(r) for r in remotes if isinstance(r, dict)],
+    }
+
+
+def _remote_entry(r: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a registry ``remotes[]`` entry, scaffolding its declared ``headers``.
+
+    A remote can declare required auth headers (same shape as package env vars); carry
+    them into the install draft (prefilled where possible) and surface warnings for
+    required/secret/placeholder values — and for a templated URL — so the review form
+    isn't silently missing the upstream auth the endpoint needs.
+    """
+    url = str(r.get("url") or "")
+    warnings: list[str] = []
+    headers = mapping.environment(r.get("headers") or [], warnings, label="Header")
+    if "{" in url and "}" in url:
+        warnings.append(
+            "The remote URL contains a {…} placeholder — replace it with a real value before starting."
+        )
+    return {
+        "type": str(r.get("type") or ""),
+        "url": url,
+        "headers": headers,
+        "warnings": warnings,
     }
 
 

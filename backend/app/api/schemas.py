@@ -201,6 +201,8 @@ class CatalogDraft(BaseModel):
 class CatalogRemote(BaseModel):
     type: str
     url: str
+    headers: dict[str, str] = {}  # prefilled upstream auth headers (required ones scaffolded)
+    warnings: list[str] = []  # required/secret/placeholder headers or a templated URL
 
 
 class CatalogServerMeta(BaseModel):

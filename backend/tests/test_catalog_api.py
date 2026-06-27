@@ -119,6 +119,23 @@ def test_official_list_item_surfaces_remote_type_and_installable():
     assert "remote" in item["registry_types"]
 
 
+def test_official_list_item_unsupported_remote_is_not_installable():
+    from app.catalog import official
+
+    item = official._list_item(
+        {
+            "server": {
+                "name": "io.x/ws",
+                "remotes": [{"type": "websocket", "url": "wss://up/ws"}],
+            },
+            "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+        }
+    )
+    # The remote runner can't proxy websocket — don't surface it as installable/remote.
+    assert item["installable"] is False
+    assert "remote" not in item["registry_types"]
+
+
 def test_official_list_item_deleted_remote_is_not_installable():
     from app.catalog import official
 

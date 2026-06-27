@@ -8,45 +8,41 @@ Sits above the repo: generates identity (id/slug), computes the idempotency
 from __future__ import annotations
 
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from sqlmodel import Session
 
 from app.db import repo
 from app.db.models import RUNNERS, Server
+from app.runners import remote as remote_runner
+from app.runners.remote import canonical_transport
 from app.util import config_hash, new_id, slugify
 
 
 # --- remote (HTTP/SSE upstream) normalization ----------------------------------
-# Canonical transports the bridge host can build, plus the aliases an mcpServers
-# config or the catalog may use. SSOT: the stored value is always canonical, so
-# config_hash (and therefore reconcile) is deterministic regardless of input spelling.
-_REMOTE_TRANSPORTS = ("streamable-http", "sse")
-_DEFAULT_REMOTE_TRANSPORT = "streamable-http"
-_REMOTE_TRANSPORT_ALIASES = {
-    "http": "streamable-http",
-    "streamable-http": "streamable-http",
-    "streamable_http": "streamable-http",
-    "streamablehttp": "streamable-http",
-    "sse": "sse",
-}
-
-
+# The transport vocabulary lives in one place (app.runners.remote); we canonicalize
+# through it so the stored value is always canonical and config_hash (and therefore
+# reconcile) is deterministic regardless of input spelling.
 def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list[str]]:
     """Validate + canonicalize a remote server's (url, [transport]).
 
-    ``command`` must be an ``http(s)://`` URL; ``args[0]`` (if any) is the transport,
-    defaulting to ``streamable-http``. Returns the canonical pair so the row — and its
-    ``config_hash`` — is deterministic. Raises ``ValueError`` on a bad URL/transport.
+    ``command`` must be a well-formed ``http(s)://`` URL with a host; ``args[0]`` (if
+    any) is the transport, defaulting to ``streamable-http``. Returns the canonical
+    pair so the row — and its ``config_hash`` — is deterministic. Raises ``ValueError``
+    on a malformed URL or unsupported transport.
     """
     url = (command or "").strip()
-    # URL schemes are case-insensitive (RFC 3986) — accept HTTPS:// etc.
-    if not url.lower().startswith(("http://", "https://")):
-        raise ValueError("a remote server's command must be an http(s):// URL")
-    raw = str(args[0]).strip().lower() if args else _DEFAULT_REMOTE_TRANSPORT
-    transport = _REMOTE_TRANSPORT_ALIASES.get(raw)
+    # Parse rather than prefix-match: reject schemeless, hostless (https://), or
+    # whitespace-bearing values that would only fail later when the bridge connects.
+    # urlsplit lowercases the scheme, so an uppercase HTTPS:// is accepted.
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or any(c.isspace() for c in url):
+        raise ValueError("a remote server's command must be an http(s):// URL with a host")
+    transport = canonical_transport(args[0] if args else None)
     if transport is None:
         raise ValueError(
-            f"remote transport must be one of {list(_REMOTE_TRANSPORTS)} (got {raw!r})"
+            f"remote transport must be one of {list(remote_runner.TRANSPORTS)} "
+            f"(got {args[0]!r})"
         )
     return url, [transport]
 

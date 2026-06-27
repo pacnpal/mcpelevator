@@ -97,13 +97,20 @@ def test_build_proxy_installs_custom_roots_handler():
 
 def test_build_transport_stdio_is_default():
     """No transport / "stdio" → a StdioTransport from command/args (unchanged path)."""
-    with patch.object(host, "StdioTransport", autospec=True) as stdio:
+    with (
+        patch.dict(host.os.environ, {"PATH": "/bin", "HOME": "/tmp"}, clear=True),
+        patch.object(host, "StdioTransport", autospec=True) as stdio,
+    ):
         host._build_transport({"command": "npx", "args": ["-y", "pkg"], "env": {"K": "v"}})
     kwargs = stdio.call_args.kwargs
     assert kwargs["command"] == "npx"
     assert kwargs["args"] == ["-y", "pkg"]
-    # server env is merged over the child's os.environ for a real process.
+    # server env is merged OVER the child's os.environ — both the server-specific key
+    # and the inherited parent vars (PATH/HOME) must survive (the compatibility
+    # guarantee npx/uvx rely on).
     assert kwargs["env"]["K"] == "v"
+    assert kwargs["env"]["PATH"] == "/bin"
+    assert kwargs["env"]["HOME"] == "/tmp"
 
 
 def test_build_transport_streamable_http_uses_url_and_headers():

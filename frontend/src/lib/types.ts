@@ -168,6 +168,10 @@ export interface CatalogDraft {
 export interface CatalogRemote {
 	type: string;
 	url: string;
+	/** Prefilled upstream auth headers (required ones scaffolded, possibly empty). */
+	headers: Record<string, string>;
+	/** Required/secret/placeholder headers or a templated URL the operator must fix. */
+	warnings: string[];
 }
 
 export interface CatalogServerMeta {

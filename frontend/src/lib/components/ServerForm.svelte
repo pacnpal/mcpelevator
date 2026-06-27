@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
+	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '$lib/remote';
 	import type { Runner, ServerAuthProvider, ServerCreate } from '$lib/types';
 
 	type Mode = 'create' | 'edit';
@@ -48,11 +49,6 @@
 		{ value: 'remote', label: 'remote', hint: 'Remote HTTP/SSE URL' }
 	];
 
-	// Transports the remote runner can proxy (mirrors backend `_REMOTE_TRANSPORTS`).
-	const REMOTE_TRANSPORTS: { value: string; label: string }[] = [
-		{ value: 'streamable-http', label: 'Streamable HTTP' },
-		{ value: 'sse', label: 'SSE' }
-	];
 
 	// ---- Form state -----------------------------------------------------------
 	//
@@ -87,11 +83,12 @@
 			extra0 = args0.slice(1).join('\n');
 		}
 		// remote stores [transport] in args (command holds the upstream URL).
-		// Canonicalize to a value the <select> actually offers: anything that isn't
-		// 'sse' (incl. the 'http' alias the backend accepts) maps to 'streamable-http',
-		// so the dropdown never renders blank for an imported/aliased transport.
+		// Canonicalize through the shared map so an imported/aliased transport (e.g.
+		// 'http') resolves to a value the <select> actually offers — never blank.
 		const transport0 =
-			runner0 === 'remote' && args0[0] === 'sse' ? 'sse' : 'streamable-http';
+			runner0 === 'remote'
+				? (canonicalRemoteTransport(args0[0]) ?? 'streamable-http')
+				: 'streamable-http';
 		return {
 			name: init.name ?? '',
 			slug: init.slug ?? '',
@@ -194,9 +191,11 @@
 	const isRemote = $derived(runner === 'remote');
 	const nameValid = $derived(name.trim().length > 0);
 	const commandValid = $derived(command.trim().length > 0);
-	// A remote server's "command" is an upstream URL — require http(s) so the bridge
-	// can build a transport (mirrors the backend's validation, surfaced earlier here).
-	const remoteUrlValid = $derived(!isRemote || /^https?:\/\//i.test(command.trim()));
+	// A remote server's "command" is an upstream URL — require http(s) + a host so the
+	// bridge can build a transport. Case-insensitive to match the backend (urlsplit
+	// lowercases the scheme), and requires something after :// so a hostless https://
+	// is rejected client-side instead of only on submit.
+	const remoteUrlValid = $derived(!isRemote || /^https?:\/\/[^/\s]+/i.test(command.trim()));
 
 	// Mirror the backend's slugify so the operator sees the value that will actually
 	// be stored (lowercased, non-alphanumerics collapsed to single dashes).

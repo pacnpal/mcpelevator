@@ -118,16 +118,22 @@ def argument_tokens(args: list[Any], warnings: list[str]) -> list[str]:
     return tokens
 
 
-def environment(env_vars: list[Any], warnings: list[str]) -> dict[str, str]:
+def environment(
+    env_vars: list[Any], warnings: list[str], *, label: str = "Environment variable"
+) -> dict[str, str]:
     """
     Build an environment mapping from registry environment variables.
-    
+
+    Also reused for remote-server HTTP ``headers`` (same name/value/isRequired/isSecret
+    shape) — pass ``label="Header"`` so the warnings read correctly.
+
     Parameters:
-    	env_vars (list[Any]): Registry environment variable entries.
+    	env_vars (list[Any]): Registry environment variable / header entries.
     	warnings (list[str]): Collected warning messages.
-    
+    	label (str): Noun used in warning text (e.g. "Environment variable" or "Header").
+
     Returns:
-    	dict[str, str]: Environment variables keyed by name, with missing values represented as empty strings.
+    	dict[str, str]: Variables keyed by name, with missing values represented as empty strings.
     """
     env: dict[str, str] = {}
     for var in env_vars:
@@ -148,12 +154,12 @@ def environment(env_vars: list[Any], warnings: list[str]) -> dict[str, str]:
         env[str(name)] = "" if value is None else str(value)
         if value is None and required:
             kind = "secret" if var.get("isSecret") else "required"
-            warnings.append(f"Environment variable {name} is {kind} — set its value before starting.")
+            warnings.append(f"{label} {name} is {kind} — set its value before starting.")
         elif value is not None and "{" in str(value) and "}" in str(value):
             # Unexpanded server.json "{variable}" placeholder — flag it so the draft isn't
             # auto-started with a literal "{token}" value.
             warnings.append(
-                f"Environment variable {name} contains a {{…}} placeholder — replace it with a real value."
+                f"{label} {name} contains a {{…}} placeholder — replace it with a real value."
             )
     return env
 

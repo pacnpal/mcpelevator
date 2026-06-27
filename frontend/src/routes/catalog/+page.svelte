@@ -8,6 +8,7 @@
 		listCatalogSources
 	} from '$lib/api';
 	import { setPendingInstall } from '$lib/catalogInstall';
+	import { canonicalRemoteTransport } from '$lib/remote';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 	import type { CatalogServer, CatalogSource, Runner } from '$lib/types';
@@ -228,25 +229,31 @@
 			const versionTag = detail.server.version ? `@${detail.server.version}` : '';
 
 			// Prefer a local package install; otherwise, if the server exposes a remote
-			// (HTTP/SSE) endpoint, install it as a proxied remote server. The bridge can
-			// front a remote upstream just like a stdio one.
-			const remote = detail.remotes[0];
-			if (!installableDraft && remote) {
+			// (HTTP/SSE) endpoint we can actually proxy, install it as a remote server.
+			// Pick the first endpoint whose transport is supported (not just remotes[0],
+			// which could be an unsupported type), and canonicalize any alias.
+			const remote = detail.remotes.find((r) => canonicalRemoteTransport(r.type));
+			const remoteTransport = remote ? canonicalRemoteTransport(remote.type) : null;
+			if (!installableDraft && remote && remoteTransport) {
 				setPendingInstall({
 					initial: {
 						name: detail.server.title || detail.server.name,
 						runner: 'remote',
 						command: remote.url,
-						args: [remote.type || 'streamable-http'],
-						env: {},
-						// Don't auto-start: the upstream may need auth headers the operator
-						// must add first. Review, then enable.
+						args: [remoteTransport],
+						// Scaffold the endpoint's declared headers (required ones prefilled
+						// empty) so the form prompts for upstream auth instead of silently
+						// dropping it.
+						env: remote.headers ?? {},
+						// Don't auto-start: required headers / a templated URL may need
+						// filling first. Review, then enable.
 						enabled: false
 					},
 					source: `catalog:${detail.server.name}${versionTag}`,
 					sourceLabel: supportMeta?.label ?? server.source,
 					installSupport: 'auto',
-					warnings: [],
+					// Carry header/URL-template warnings so required upstream auth isn't lost.
+					warnings: remote.warnings ?? [],
 					notes: [...detail.notes, `Proxying remote ${remote.type} endpoint: ${remote.url}`],
 					repositoryUrl: detail.server.repository_url,
 					webUrl: detail.server.web_url
@@ -417,16 +424,31 @@
 		<div class="flex flex-col items-center gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-10 text-center">
 			{#if filterActive && servers.length > 0}
 				<p class="text-sm text-[var(--color-ink-muted)]">
-					No <span class="font-mono">{selectedTypes.join(', ')}</span> servers match — {servers.length}
-					result{servers.length === 1 ? '' : 's'} of other types are hidden.
+					No <span class="font-mono">{selectedTypes.join(', ')}</span> servers on the loaded
+					pages — {servers.length} result{servers.length === 1 ? '' : 's'} of other types are
+					hidden{nextCursor ? ', and more pages remain' : ''}.
 				</p>
-				<button
-					type="button"
-					onclick={() => (selectedTypes = [])}
-					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm font-medium text-[var(--color-ink)] transition hover:border-[var(--color-line-strong)]"
-				>
-					Clear filter
-				</button>
+				<div class="flex flex-wrap items-center justify-center gap-2">
+					<button
+						type="button"
+						onclick={() => (selectedTypes = [])}
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm font-medium text-[var(--color-ink)] transition hover:border-[var(--color-line-strong)]"
+					>
+						Clear filter
+					</button>
+					{#if nextCursor}
+						<!-- Matches may be further in the catalog; keep pagination reachable even
+						     when the current pages filtered down to nothing. -->
+						<button
+							type="button"
+							onclick={loadMore}
+							disabled={loadingMore}
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm font-medium text-[var(--color-ink)] transition hover:border-[var(--color-line-strong)] disabled:opacity-60"
+						>
+							{loadingMore ? 'Loading…' : 'Load more'}
+						</button>
+					{/if}
+				</div>
 			{:else}
 				<p class="text-sm text-[var(--color-ink-muted)]">No servers match your search.</p>
 			{/if}

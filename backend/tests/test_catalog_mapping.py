@@ -296,7 +296,33 @@ def test_official_remotes_surfaced_not_installed():
         _official(packages=[], remotes=[{"type": "streamable-http", "url": "https://x/mcp"}])
     )
     assert detail["drafts"] == []
-    assert detail["remotes"] == [{"type": "streamable-http", "url": "https://x/mcp"}]
+    assert detail["remotes"] == [
+        {"type": "streamable-http", "url": "https://x/mcp", "headers": {}, "warnings": []}
+    ]
+
+
+def test_official_remote_headers_scaffolded_with_warnings():
+    detail = official.to_detail(
+        _official(
+            packages=[],
+            remotes=[
+                {
+                    "type": "streamable-http",
+                    "url": "https://{tenant}.x/mcp",
+                    "headers": [
+                        {"name": "Authorization", "isRequired": True, "isSecret": True},
+                        {"name": "X-Default", "default": "v"},
+                    ],
+                }
+            ],
+        )
+    )
+    remote = detail["remotes"][0]
+    # Required header is scaffolded empty + warned; a defaulted header is prefilled.
+    assert remote["headers"] == {"Authorization": "", "X-Default": "v"}
+    assert any("Authorization" in w for w in remote["warnings"])
+    # The templated URL is flagged too.
+    assert any("{…} placeholder" in w for w in remote["warnings"])
 
 
 # --- glama (discovery-only, manual scaffold) -------------------------------
