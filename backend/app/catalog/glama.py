@@ -24,6 +24,20 @@ def _repo_url(server: dict[str, Any]) -> str | None:
     return repo.get("url") if isinstance(repo, dict) else None
 
 
+def _lookup_id(server: dict[str, Any]) -> str:
+    """The key used to fetch this server's detail.
+
+    Glama's stable detail route is ``/v1/servers/{namespace}/{slug}``; the opaque
+    ``/v1/servers/{id}`` form is deprecated. Prefer ``namespace/slug`` and fall back to
+    the raw ``id`` only when those fields are missing.
+    """
+    namespace = str(server.get("namespace") or "").strip("/")
+    slug = str(server.get("slug") or "").strip("/")
+    if namespace and slug:
+        return f"{namespace}/{slug}"
+    return str(server.get("id") or "")
+
+
 def _env_from_schema(schema: dict[str, Any], warnings: list[str]) -> dict[str, str]:
     """
     Build an environment variable scaffold from a Glama schema.
@@ -62,7 +76,7 @@ def _list_item(server: dict[str, Any]) -> dict[str, Any]:
     """
     return {
         "source": "glama",
-        "id": str(server.get("id") or ""),
+        "id": _lookup_id(server),
         "name": str(server.get("name") or ""),
         "title": str(server.get("name") or ""),
         "description": str(server.get("description") or ""),
@@ -166,19 +180,20 @@ class GlamaSource:
     async def get_detail(
         self, http: httpx.AsyncClient, *, id: str, version: str
     ) -> dict[str, Any]:
-        # Glama's detail key is the opaque server id carried in the list item's ``id``.
         """
-        Fetches a Glama server's manual-install detail record.
-        
+        Fetch a Glama server's manual-install detail record.
+
         Parameters:
-        	http (httpx.AsyncClient): HTTP client used for the request.
-        	id (str): Opaque Glama server identifier.
-        	version (str): Catalog version associated with the request.
-        
+        	id (str): The list item's lookup key — ``namespace/slug`` (the stable detail
+        		route) or, for legacy rows, the opaque server id.
+        	version (str): Unused (Glama detail is unversioned); accepted for the Source contract.
+
         Returns:
         	dict[str, Any]: A manual-install detail record for the server.
         """
-        url = f"{BASE_URL}/v1/servers/{quote(id, safe='')}"
+        # ``safe="/"`` keeps the namespace/slug separator a path separator while still
+        # percent-encoding any unsafe characters within each segment.
+        url = f"{BASE_URL}/v1/servers/{quote(id, safe='/')}"
         data = await base.get_json(http, url, {})
         if not isinstance(data, dict):
             raise base.CatalogUpstreamError("unexpected detail response from the Glama directory")

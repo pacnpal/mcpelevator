@@ -198,3 +198,15 @@ def test_glama_detail_is_manual_scaffold_with_env_keys():
     # Full URL (scheme included), not a bare host substring, so it reads as a literal
     # presence check rather than URL-host sanitization.
     assert any("https://github.com/x/cool-mcp" in n for n in detail["notes"])
+
+
+def test_glama_list_item_id_prefers_namespace_slug():
+    item = glama._list_item({**_glama(), "namespace": "acme", "slug": "cool"})
+    # The stable detail route is /v1/servers/{namespace}/{slug}; key on that, not the
+    # deprecated opaque id.
+    assert item["id"] == "acme/cool"
+
+
+def test_glama_list_item_id_falls_back_to_opaque_id():
+    item = glama._list_item({"id": "abc123", "name": "x"})
+    assert item["id"] == "abc123"

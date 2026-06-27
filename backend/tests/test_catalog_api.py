@@ -47,11 +47,16 @@ _OFFICIAL_DETAIL = {
 }
 _GLAMA_LIST = {
     "pageInfo": {"endCursor": "cur2", "hasNextPage": True, "hasPreviousPage": False},
-    "servers": [{"id": "abc", "name": "cool", "description": "d",
+    "servers": [{"id": "abc", "namespace": "acme", "slug": "cool", "name": "cool",
+                 "description": "d",
                  "repository": {"url": "https://github.com/x/cool"},
                  "url": "https://glama.ai/mcp/servers/abc",
                  "environmentVariablesJsonSchema": {"properties": {}, "required": []}}],
 }
+_GLAMA_DETAIL = {"id": "abc", "namespace": "acme", "slug": "cool", "name": "cool",
+                 "description": "d", "repository": {"url": "https://github.com/x/cool"},
+                 "url": "https://glama.ai/mcp/servers/abc",
+                 "environmentVariablesJsonSchema": {"properties": {}, "required": []}}
 
 
 @pytest.fixture(autouse=True)
@@ -150,10 +155,27 @@ def test_glama_list_passthrough(monkeypatch):
         assert body["next_cursor"] == "cur2"
         assert body["servers"][0]["source"] == "glama"
         assert body["servers"][0]["installable"] is False
+        # The lookup id is the stable namespace/slug, not the deprecated opaque id.
+        assert body["servers"][0]["id"] == "acme/cool"
         # Glama uses its own param names; the source must translate to query/after.
         _, params = calls[0]
         assert params["query"] == "git"
         assert params["after"] == "cur1"
+
+
+def test_glama_detail_uses_namespace_slug_route(monkeypatch):
+    calls = _stub(monkeypatch, {"glama.ai/api/mcp/v1/servers/": _GLAMA_DETAIL})
+    with TestClient(app) as c:
+        r = c.get(
+            "/api/catalog/server",
+            params={"source": "glama", "id": "acme/cool"},
+            headers=LOOPBACK,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["manual_install"] is True
+        # The slash stays a path separator on the documented detail route.
+        url, _ = calls[0]
+        assert url.endswith("/v1/servers/acme/cool")
 
 
 def test_unknown_source_is_400():
