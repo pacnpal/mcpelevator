@@ -12,6 +12,9 @@ import { goto } from '$app/navigation';
 import { clearToken, getToken } from './auth';
 import type {
 	AuthStatus,
+	CatalogDetail,
+	CatalogList,
+	CatalogSource,
 	HealthResponse,
 	ImportResult,
 	ServerCreate,
@@ -135,6 +138,39 @@ export function createServer(body: ServerCreate): Promise<ServerSummary> {
 
 export function importServers(payload: unknown): Promise<ImportResult> {
 	return jsonRequest<ImportResult>('/servers/import', 'POST', payload);
+}
+
+// ---- Catalog (browse upstream MCP directories + install) --------------------
+
+/** The directories available to browse, and whether each supports auto-install. */
+export function listCatalogSources(): Promise<CatalogSource[]> {
+	return request<CatalogSource[]>('/catalog/sources');
+}
+
+/** Browse/search a directory. `cursor` pages through results (from `next_cursor`). */
+export function listCatalog(params: {
+	source?: string;
+	search?: string;
+	cursor?: string;
+	limit?: number;
+}): Promise<CatalogList> {
+	const q = new URLSearchParams();
+	if (params.source) q.set('source', params.source);
+	if (params.search) q.set('search', params.search);
+	if (params.cursor) q.set('cursor', params.cursor);
+	if (params.limit) q.set('limit', String(params.limit));
+	const qs = q.toString();
+	return request<CatalogList>(`/catalog/servers${qs ? `?${qs}` : ''}`);
+}
+
+/** Resolve one catalog server into install drafts + metadata. */
+export function getCatalogServer(
+	id: string,
+	source = 'official',
+	version = 'latest'
+): Promise<CatalogDetail> {
+	const q = new URLSearchParams({ id, source, version });
+	return request<CatalogDetail>(`/catalog/server?${q.toString()}`);
 }
 
 export function updateServer(

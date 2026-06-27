@@ -55,6 +55,26 @@ curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/jso
 
 Then point any MCP client at `http://127.0.0.1:8080/s/memory/mcp`.
 
+## Install from a registry (catalog)
+
+Don't know the package name? **Browse** finds servers for you. The catalog searches public
+MCP directories and resolves a chosen server into a launch spec you review and install — no
+hand-typing `npx -y …`.
+
+- **MCP Registry** (`registry.modelcontextprotocol.io`) — the official directory. Its
+  servers carry structured packages, so npm → `npx` and pypi → `uvx` are derived
+  automatically and pinned to the listed version: **one-click install**.
+- **Glama** (`glama.ai`) — a larger, curated directory for **discovery**. It publishes no
+  launch command, so installs open the review form pre-filled with the name + required
+  env-var keys + a repo link for you to complete.
+
+Open **Browse** in the header (or `/catalog`). The backend proxies the directories
+(`GET /api/catalog/servers`, `GET /api/catalog/server`) so the SPA stays same-origin;
+installing posts the reviewed draft to `POST /api/servers` tagged `source=catalog:<id>`.
+
+Adding another directory is a small plugin: one `Source` module + one line in the source
+registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md).
+
 ## Configuration (env vars, prefix `MCPE_`)
 
 | Var | Default | Meaning |
@@ -108,16 +128,16 @@ The `docker` runner (launch MCP servers that are Docker images) is **opt-in and 
 ## Project layout
 
 ```
-backend/app/   FastAPI control plane, supervisor, bridge host, runners, auth, proxy
+backend/app/   FastAPI control plane, supervisor, bridge host, runners, auth, proxy, catalog
 frontend/      SvelteKit (Svelte 5) SPA, adapter-static
 Dockerfile     multi-stage: build SPA → python+node+uv runtime
 ```
 
 ## Status / roadmap
 
-**Working today:** add a server (guided form, or paste an `mcpServers` config), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`. **Auth**: bearer tokens for `/s` (scope each to all servers or one), control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes.
+**Working today:** add a server (guided form, paste an `mcpServers` config, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`. **Auth**: bearer tokens for `/s` (scope each to all servers or one), control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes.
 
-**Planned:** REST/OpenAPI surface per server · `docker` runner · a server catalog · polish.
+**Planned:** REST/OpenAPI surface per server · `docker` runner (would unlock OCI catalog installs) · more catalog directories · polish.
 
 ## License
 

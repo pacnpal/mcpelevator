@@ -118,8 +118,15 @@ async def list_servers(request: Request, session: Session = Depends(get_session)
 async def create_server(
     payload: ServerCreate, request: Request, session: Session = Depends(get_session)
 ):
+    fields = payload.model_dump()
+    # Provenance: only a "catalog:<id>" value is trusted (a registry install); any other
+    # client-supplied string falls back to the service default ("manual"). Cap length so a
+    # giant value can't bloat the row.
+    raw_source = fields.pop("source", None)
+    if isinstance(raw_source, str) and raw_source.startswith("catalog:"):
+        fields["source"] = raw_source[:200]
     try:
-        server = service.create_server(session, **payload.model_dump())
+        server = service.create_server(session, **fields)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor

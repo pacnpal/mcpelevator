@@ -11,6 +11,7 @@
 	let { children } = $props();
 
 	const onSettings = $derived(page.url.pathname.startsWith('/settings'));
+	const onCatalog = $derived(page.url.pathname.startsWith('/catalog'));
 
 	// Auth guard: when the control plane enforces auth and this client isn't
 	// authenticated, bounce to /login. Re-runs on navigation (page.url is reactive);
@@ -63,6 +64,30 @@
 				<Logo />
 			</a>
 			<div class="flex items-center gap-3 sm:gap-4">
+				<a
+					href="/catalog"
+					aria-label="Browse the registry"
+					aria-current={onCatalog ? 'page' : undefined}
+					class="inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium transition active:translate-y-px"
+					style={onCatalog
+						? 'border-color: color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+						: 'border-color: var(--color-line); color: var(--color-ink-muted); background-color: var(--color-surface);'}
+				>
+					<svg
+						class="size-4"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<circle cx="11" cy="11" r="8" />
+						<path d="m21 21-4.3-4.3" />
+					</svg>
+					<span class="hidden sm:inline">Browse</span>
+				</a>
 				<a
 					href="/settings"
 					aria-label="Settings"

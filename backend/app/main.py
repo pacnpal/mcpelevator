@@ -20,6 +20,7 @@ from starlette.staticfiles import StaticFiles
 
 from app import __version__
 from app.api import auth as auth_api
+from app.api import catalog as catalog_api
 from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
@@ -181,6 +182,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_api.router, prefix="/api")
     gated = [Depends(require_control_plane)]
     app.include_router(servers_api.router, prefix="/api", dependencies=gated)
+    app.include_router(catalog_api.router, prefix="/api", dependencies=gated)
     app.include_router(tokens_api.router, prefix="/api", dependencies=gated)
     app.include_router(settings_api.router, prefix="/api", dependencies=gated)
     app.include_router(proxy_router)  # /s/{slug}/...

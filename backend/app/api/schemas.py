@@ -61,6 +61,9 @@ class ServerCreate(BaseModel):
     rest_openapi: bool = False
     auth_provider: AuthProvider = "inherit"
     enabled: bool = False
+    # Provenance. Only a "catalog:<id>" value is honored (a registry install);
+    # anything else falls back to "manual" server-side. See servers.create_server.
+    source: Optional[str] = None
 
 
 class ServerUpdate(BaseModel):
@@ -139,3 +142,76 @@ class SettingsUpdate(BaseModel):
 class AuthStatus(BaseModel):
     enforced: bool  # is a control token required right now?
     authenticated: bool  # did this request carry a valid control token?
+
+
+# ---- Catalog (MCP registry browse + install) --------------------------------
+
+
+class CatalogSource(BaseModel):
+    id: str
+    label: str
+    # "auto": a runnable command can be derived (npm/pypi); "manual": discovery only,
+    # the operator supplies the command in the review form.
+    install_support: Literal["auto", "manual"]
+
+
+class CatalogServer(BaseModel):
+    """One browse-view row, normalized across upstream directories."""
+
+    source: str
+    id: str  # opaque per-source key used to fetch detail
+    name: str
+    title: str
+    description: str = ""
+    version: Optional[str] = None
+    status: str = "active"
+    registry_types: list[str] = []
+    installable: bool = False  # at least one stdio package maps to a supported runner
+    repository_url: Optional[str] = None
+    web_url: Optional[str] = None
+
+
+class CatalogList(BaseModel):
+    source: str
+    servers: list[CatalogServer]
+    next_cursor: Optional[str] = None  # opaque pagination cursor for the next page
+
+
+class CatalogDraft(BaseModel):
+    """A reviewable, ServerCreate-shaped install draft for one package."""
+
+    package_index: int
+    registry_type: str
+    identifier: str = ""
+    version: Optional[str] = None
+    runner: Optional[str] = None
+    command: str = ""
+    args: list[str] = []
+    env: dict[str, str] = {}
+    installable: bool = False
+    reason: Optional[str] = None  # why this draft isn't auto-installable, if so
+    warnings: list[str] = []  # required/secret values the operator must fill in
+
+
+class CatalogRemote(BaseModel):
+    type: str
+    url: str
+
+
+class CatalogServerMeta(BaseModel):
+    name: str
+    title: str
+    description: str = ""
+    version: Optional[str] = None
+    status: str = "active"
+    repository_url: Optional[str] = None
+    web_url: Optional[str] = None
+
+
+class CatalogDetail(BaseModel):
+    source: str
+    manual_install: bool = False  # source has no launch spec; complete the form by hand
+    notes: list[str] = []
+    server: CatalogServerMeta
+    drafts: list[CatalogDraft] = []
+    remotes: list[CatalogRemote] = []
