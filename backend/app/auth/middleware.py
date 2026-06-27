@@ -140,11 +140,13 @@ def is_private_client(request: Request) -> bool:
     network may use a private-IP ``Host`` to pass the guard.
 
     A configured ``MCPE_TRUSTED_PROXIES`` forwarder is EXCLUDED, even when its own
-    address is private (e.g. the Docker bridge gateway ``172.20.0.1``): behind NAT/SNAT
-    the observed peer is the forwarder, which can't vouch for the real client, so trusting
-    it would let SNAT'd public traffic satisfy this gate. The trusted-proxy convenience
-    stays scoped to the loopback allowance; LAN access needs the real client IP visible
-    (host networking) — see docker-compose. A genuine loopback peer always qualifies.
+    address is private (the Docker bridge gateway ``172.20.0.1``) or loopback (a same-host
+    reverse proxy at ``127.0.0.1``): behind NAT/SNAT the observed peer is the forwarder,
+    which can't vouch for the real client, so trusting it would let forwarded public
+    traffic satisfy this gate. The exclusion runs FIRST, before the loopback shortcut, so a
+    loopback proxy can't slip through. The trusted-proxy convenience stays scoped to the
+    loopback allowance; LAN access needs the real client IP visible (host networking) —
+    see docker-compose.
     """
     client = request.client
     if client is None:
@@ -155,12 +157,11 @@ def is_private_client(request: Request) -> bool:
         # "localhost" can appear in some setups — neither is forgeable as a TCP source
         # by a remote client, so treat them as loopback.
         return client.host in {"localhost", "testclient"}
-    if ip.is_loopback:
-        return True
-    if not _is_private_lan_ip(ip):
+    # A configured forwarder can't vouch for the real client — reject it first, even if
+    # it's loopback (same-host reverse proxy) or a private gateway.
+    if any(ip in net for net in _trusted_networks(get_settings().trusted_proxies)):
         return False
-    # Private range, but reject it if it's a known forwarder address (see above).
-    return not any(ip in net for net in _trusted_networks(get_settings().trusted_proxies))
+    return ip.is_loopback or _is_private_lan_ip(ip)
 
 
 def _is_private_host_literal(host: str) -> bool:

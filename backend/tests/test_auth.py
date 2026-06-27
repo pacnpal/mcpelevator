@@ -263,6 +263,14 @@ def test_is_private_client_ignores_trusted_proxies(monkeypatch):
     assert middleware.is_private_client(req("172.20.0.1")) is False  # the gateway/forwarder
     assert middleware.is_private_client(req("172.20.0.5")) is True  # a real LAN peer
 
+    # A loopback forwarder (same-host reverse proxy) is excluded too — the exclusion
+    # runs before the loopback shortcut, so a public client proxied over localhost
+    # can't pass the LAN gate.
+    monkeypatch.setattr(
+        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="127.0.0.1/32")
+    )
+    assert middleware.is_private_client(req("127.0.0.1")) is False
+
 
 def test_private_lan_allowed_requires_setting_and_private_peer(session, monkeypatch):
     from types import SimpleNamespace
