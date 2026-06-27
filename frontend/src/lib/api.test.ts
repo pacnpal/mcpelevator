@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { goto } from '$app/navigation';
 
-import { ApiError, getHealth, streamLogs } from './api';
+import { ApiError, cloneServer, getHealth, streamLogs } from './api';
 import { getToken, setToken } from './auth';
 
 // api.ts imports goto at module load; mock the SvelteKit module so the 401 path
@@ -49,6 +49,22 @@ describe('api request()', () => {
 		await expect(getHealth()).rejects.toBeInstanceOf(ApiError);
 		expect(getToken()).toBeNull();
 		expect(goto).toHaveBeenCalledWith('/login');
+	});
+
+	it('cloneServer POSTs to the clone endpoint with an empty body by default', async () => {
+		const fetchMock = stubFetch(201, { id: 'new', slug: 'memory-2' });
+		await cloneServer('src-id');
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/servers/src-id/clone');
+		expect(init.method).toBe('POST');
+		expect(init.body).toBe('{}');
+	});
+
+	it('cloneServer forwards a custom name in the body', async () => {
+		const fetchMock = stubFetch(201, { id: 'new', slug: 'staging' });
+		await cloneServer('src-id', 'Memory staging');
+		const init = fetchMock.mock.calls[0][1] as RequestInit;
+		expect(init.body).toBe(JSON.stringify({ name: 'Memory staging' }));
 	});
 
 	it('parses both CRLF- and LF-framed SSE log frames', async () => {

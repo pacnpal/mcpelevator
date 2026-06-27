@@ -86,6 +86,23 @@ def _unique_slug(session: Session, name: str) -> str:
     return slug
 
 
+def _validate_slug(session: Session, raw: str, *, current_id: str) -> str:
+    """Normalize and validate an operator-chosen slug for an existing server.
+
+    Unlike ``_unique_slug`` (which silently disambiguates at creation), an explicit
+    rename must surface a conflict rather than guess: the operator picked this URL,
+    so a reserved word or a slug already taken by *another* server is a hard error.
+    Re-using the server's own current slug is a no-op and allowed.
+    """
+    slug = slugify(raw)
+    if slug in _RESERVED_SLUGS:
+        raise ValueError(f"slug {slug!r} is reserved")
+    existing = repo.get_server_by_slug(session, slug)
+    if existing is not None and existing.id != current_id:
+        raise ValueError(f"slug {slug!r} is already in use")
+    return slug
+
+
 def create_server(
     session: Session,
     *,
@@ -142,6 +159,10 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     server = repo.get_server(session, server_id)
     if server is None:
         raise KeyError(server_id)
+    # slug is identity/routing, not launch config: validated separately and excluded
+    # from config_hash, so a rename re-routes the proxy without bouncing the bridge.
+    if "slug" in changes:
+        server.slug = _validate_slug(session, changes["slug"], current_id=server.id)
     for key, value in changes.items():
         if key in _MUTABLE_FIELDS:
             setattr(server, key, value)
@@ -149,6 +170,36 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         raise ValueError(f"unknown runner {server.runner!r}")
     server.config_hash = compute_hash(server)  # recompute -> drives idempotent reconcile
     return repo.save_server(session, server)
+
+
+def clone_server(session: Session, server_id: str, *, name: Optional[str] = None) -> Server:
+    """Create a new server from an existing one's launch + exposure config.
+
+    The clone gets a fresh id and a unique slug derived from its name, and is always
+    created disabled (the operator reviews, then enables) so two identical servers
+    never race to bind/serve. Pass ``name`` to label the copy; defaults to
+    ``"<source> copy"``. Raises ``KeyError`` if the source doesn't exist.
+    """
+    src = repo.get_server(session, server_id)
+    if src is None:
+        raise KeyError(server_id)
+    new_name = (name or "").strip() or f"{src.name} copy"
+    return create_server(
+        session,
+        name=new_name,
+        runner=src.runner,
+        command=src.command,
+        # Tolerate a NULL JSON column from a legacy/hand-edited row (the model
+        # types these non-optional, but the DB can still hold null).
+        args=list(src.args or []),
+        env=dict(src.env or {}),
+        cwd=src.cwd,
+        mcp_http=src.mcp_http,
+        rest_openapi=src.rest_openapi,
+        auth_provider=src.auth_provider,
+        enabled=False,
+        source="clone",
+    )
 
 
 def set_enabled(session: Session, server_id: str, enabled: bool) -> Server:

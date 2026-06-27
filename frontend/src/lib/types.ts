@@ -72,8 +72,14 @@ export interface ServerCreate {
 	enabled?: boolean;
 }
 
-/** PATCH /api/servers/{id} accepts any subset of the create fields except `enabled`. */
-export type ServerUpdate = Partial<Omit<ServerCreate, 'enabled'>>;
+/**
+ * PATCH /api/servers/{id} accepts any subset of the create fields except `enabled`,
+ * plus an optional `slug` rename. Changing the slug re-points the server's public
+ * URLs — clients referencing the old slug must be updated.
+ */
+export type ServerUpdate = Partial<Omit<ServerCreate, 'enabled'>> & {
+	slug?: string;
+};
 
 /** A single entry the importer declined to create, with a human reason. */
 export interface ImportSkipped {

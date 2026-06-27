@@ -1,5 +1,7 @@
 <script lang="ts">
-	import { deleteServer, disableServer, enableServer } from '$lib/api';
+	import { goto } from '$app/navigation';
+
+	import { cloneServer, deleteServer, disableServer, enableServer, errorMessage } from '$lib/api';
 	import type { ServerSummary } from '$lib/types';
 	import CopyMenu from './CopyMenu.svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
@@ -24,6 +26,7 @@
 	let menuOpen = $state(false);
 	let confirmDelete = $state(false);
 	let deleting = $state(false);
+	let cloning = $state(false);
 	let cardEl = $state<HTMLElement>();
 
 	// The action available depends on desired-state (`enabled`), not live state:
@@ -80,6 +83,20 @@
 			document.removeEventListener('keydown', onKey);
 		};
 	});
+
+	async function doClone() {
+		if (cloning) return;
+		cloning = true;
+		try {
+			const copy = await cloneServer(server.id);
+			closeMenu();
+			// Land on the copy so it can be reviewed/edited, then enabled.
+			await goto(`/server/${copy.id}`);
+		} catch (err) {
+			onerror?.(errorMessage(err));
+			cloning = false;
+		}
+	}
 
 	async function doDelete() {
 		if (deleting) return;
@@ -168,6 +185,53 @@
 								</svg>
 								View details
 							</a>
+							<a
+								href={`${detailHref}/edit`}
+								role="menuitem"
+								class="flex items-center gap-2 px-3 py-2 text-sm text-[var(--color-ink-muted)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
+							>
+								<svg
+									class="size-4"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									aria-hidden="true"
+								>
+									<path d="M12 20h9" />
+									<path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+								</svg>
+								Edit
+							</a>
+							<button
+								type="button"
+								role="menuitem"
+								onclick={doClone}
+								disabled={cloning}
+								aria-busy={cloning}
+								class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-[var(--color-ink-muted)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
+							>
+								{#if cloning}
+									{@render spinner('size-4')}
+								{:else}
+									<svg
+										class="size-4"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="2"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										aria-hidden="true"
+									>
+										<rect x="9" y="9" width="11" height="11" rx="2" />
+										<path d="M5 15V5a2 2 0 0 1 2-2h10" />
+									</svg>
+								{/if}
+								Clone
+							</button>
 							<button
 								type="button"
 								role="menuitem"

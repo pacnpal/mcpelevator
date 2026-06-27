@@ -18,6 +18,36 @@
 	let copied = $state<string | null>(null); // label of the last-copied option
 	let copiedTimer: ReturnType<typeof setTimeout> | undefined;
 	let root = $state<HTMLElement>();
+	let trigger = $state<HTMLButtonElement>();
+
+	// Where the panel opens and how tall it may be. The menu can be long (many
+	// clients), so a fixed upward open clips above the viewport for cards near the
+	// top of the window. Measure the space above/below the trigger and open toward
+	// whichever side has more room, capping the height to fit (the panel scrolls).
+	let placement = $state<'up' | 'down'>('up');
+	let maxH = $state(448); // px; 28rem default
+
+	function measure() {
+		if (!trigger || typeof window === 'undefined') return;
+		const rect = trigger.getBoundingClientRect();
+		const margin = 12;
+		const spaceAbove = rect.top - margin;
+		const spaceBelow = window.innerHeight - rect.bottom - margin;
+		// Prefer opening upward (the trigger usually sits at a card's bottom), but
+		// flip down when there's meaningfully more room below.
+		if (spaceAbove >= spaceBelow) {
+			placement = 'up';
+			maxH = Math.max(160, Math.min(448, spaceAbove));
+		} else {
+			placement = 'down';
+			maxH = Math.max(160, Math.min(448, spaceBelow));
+		}
+	}
+
+	function toggle() {
+		if (!open) measure();
+		open = !open;
+	}
 
 	async function writeClipboard(text: string): Promise<boolean> {
 		try {
@@ -62,14 +92,31 @@
 		const onKey = (e: KeyboardEvent) => {
 			if (e.key === 'Escape') open = false;
 		};
+		// Keep the panel within the viewport as the page scrolls or resizes, but
+		// coalesce to one measure per frame: measure() reads getBoundingClientRect,
+		// so calling it on every scroll event would thrash layout.
+		let frameId: number | null = null;
+		const onReflow = () => {
+			if (frameId === null) {
+				frameId = requestAnimationFrame(() => {
+					frameId = null;
+					measure();
+				});
+			}
+		};
 		const id = setTimeout(() => {
 			document.addEventListener('pointerdown', onPointer);
 			document.addEventListener('keydown', onKey);
+			window.addEventListener('resize', onReflow);
+			window.addEventListener('scroll', onReflow, true);
 		}, 0);
 		return () => {
 			clearTimeout(id);
+			if (frameId !== null) cancelAnimationFrame(frameId);
 			document.removeEventListener('pointerdown', onPointer);
 			document.removeEventListener('keydown', onKey);
+			window.removeEventListener('resize', onReflow);
+			window.removeEventListener('scroll', onReflow, true);
 		};
 	});
 </script>
@@ -77,7 +124,8 @@
 <div class="relative" bind:this={root}>
 	<button
 		type="button"
-		onclick={() => (open = !open)}
+		bind:this={trigger}
+		onclick={toggle}
 		disabled={options.length === 0}
 		aria-haspopup="true"
 		aria-expanded={open}
@@ -114,9 +162,15 @@
 	</button>
 
 	{#if open}
-		<!-- Opens upward (the card footer sits at the bottom of the card). -->
+		<!-- Opens toward whichever side has room (measured on open); height is capped
+		     to the viewport so a long list never spills off-screen. -->
 		<div
-			class="absolute bottom-full left-0 z-30 mb-1.5 max-h-[min(70vh,28rem)] w-72 overflow-y-auto rounded-lg border border-[var(--color-line-strong)] bg-[var(--color-elevated)] py-1 shadow-2xl"
+			class="absolute left-0 z-30 w-72 overflow-y-auto rounded-lg border border-[var(--color-line-strong)] bg-[var(--color-elevated)] py-1 shadow-2xl"
+			class:bottom-full={placement === 'up'}
+			class:mb-1.5={placement === 'up'}
+			class:top-full={placement === 'down'}
+			class:mt-1.5={placement === 'down'}
+			style="max-height: {maxH}px;"
 		>
 			<p
 				class="px-3 pt-1.5 pb-1 text-[10px] font-semibold tracking-wider text-[var(--color-ink-dim)] uppercase"

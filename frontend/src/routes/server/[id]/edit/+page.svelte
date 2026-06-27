@@ -28,10 +28,11 @@
 	}
 
 	// Map the detail response into the form's initial (ServerCreate-shaped) values.
-	const initial = $derived<Partial<ServerCreate> | null>(
+	const initial = $derived<(Partial<ServerCreate> & { slug?: string }) | null>(
 		server
 			? {
 					name: server.name,
+					slug: server.slug,
 					runner: server.runner,
 					command: server.command,
 					args: server.args,
@@ -44,12 +45,13 @@
 			: null
 	);
 
-	async function handleSave(payload: ServerCreate) {
+	async function handleSave(payload: ServerCreate & { slug?: string }) {
 		if (!server || saving) return;
 		saving = true;
 		saveError = null;
-		// PATCH accepts any subset of create fields except `enabled`. The form in
-		// edit mode never emits `enabled`, but strip it defensively.
+		// PATCH accepts any subset of create fields except `enabled` (plus an optional
+		// `slug` rename). The form in edit mode never emits `enabled`, but strip it
+		// defensively.
 		const { enabled: _enabled, ...rest } = payload;
 		void _enabled;
 		const body: ServerUpdate = rest;
