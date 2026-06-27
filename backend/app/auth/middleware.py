@@ -107,40 +107,70 @@ def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | Non
         return None
 
 
-def is_private_client(request: Request) -> bool:
-    """True when the request's peer is on a private/loopback network (RFC 1918,
-    link-local, IPv6 ULA, …) or a configured trusted proxy.
+# Private (non-globally-routable) LAN ranges the allowance trusts. Explicit ranges,
+# NOT ``ipaddress.is_private`` — that also matches special-use ranges like TEST-NET
+# (203.0.113.0/24) and IPv6 documentation (2001:db8::/32), which aren't real LANs.
+# Mirrors the frontend's ``isPrivateIpHost`` and the ranges named in the README so the
+# UI lock-out guard and the backend agree on what counts as "local". Loopback is NOT
+# here — it's honoured only via the peer-gated ``_LOOPBACK`` path / a loopback peer.
+_PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "169.254.0.0/16",  # IPv4 link-local
+        "fc00::/7",  # IPv6 unique-local (ULA)
+        "fe80::/10",  # IPv6 link-local
+    )
+)
 
-    Used by the ``allow_private_lan`` allowance: a self-hosted box on a home LAN
-    (e.g. Unraid) should be reachable from other devices on the same network. The
-    peer check is what keeps that safe — only a request that actually originates on
-    a private network may use a private-IP ``Host`` to pass the guard, so a public
-    client can't reach it even if the box is bound to ``0.0.0.0``.
+
+def _is_private_lan_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return any(ip in net for net in _PRIVATE_NETWORKS)
+
+
+def is_private_client(request: Request) -> bool:
+    """True when the request's *real* peer is on a private/loopback network (RFC 1918,
+    link-local, IPv6 ULA, loopback).
+
+    Used by the ``allow_private_lan`` allowance: a self-hosted box on a home LAN (e.g.
+    Unraid) should be reachable from other devices on the same network. The peer check
+    is what keeps that safe — only a request that actually originates on a private
+    network may use a private-IP ``Host`` to pass the guard.
+
+    Deliberately does NOT honour ``MCPE_TRUSTED_PROXIES`` (unlike ``is_loopback_client``):
+    a trusted proxy may forward *public* traffic, so trusting the forwarder's address
+    would let a public client satisfy this gate. Behind NAT/SNAT the observed peer is the
+    forwarder, so LAN access needs the real client IP visible (host networking) — see
+    docker-compose. The trusted-proxy convenience stays scoped to the loopback allowance.
     """
-    if is_loopback_client(request):  # loopback / trusted proxy already qualify
-        return True
     client = request.client
     if client is None:
         return False
     ip = _parse_ip(client.host)
-    # is_private: 10/8, 172.16/12, 192.168/16, 169.254/16, fc00::/7, fe80::/10, …
-    return ip is not None and ip.is_private
+    if ip is None:
+        # Non-IP peer: Starlette's TestClient reports "testclient", and a bare
+        # "localhost" can appear in some setups — neither is forgeable as a TCP source
+        # by a remote client, so treat them as loopback.
+        return client.host in {"localhost", "testclient"}
+    return ip.is_loopback or _is_private_lan_ip(ip)
 
 
 def _is_private_host_literal(host: str) -> bool:
-    """True when ``host`` is a private/loopback IP *literal* (not a hostname).
+    """True when ``host`` is a private-LAN IP *literal* (not a hostname).
 
     Restricting the ``allow_private_lan`` allowance to IP literals is what makes it
     DNS-rebinding-safe: a rebinding attack delivers the attacker's *domain* in the
     Host header (``Host: evil.example``), which is never a bare private-IP literal,
     so it can't satisfy this check even after the name rebinds to a LAN address.
+
+    Loopback (127.0.0.1, ::1) and the unspecified address (0.0.0.0, ::) are excluded —
+    they're not in ``_PRIVATE_NETWORKS`` — so a private peer can't reach the box by
+    spoofing ``Host: 127.0.0.1`` without actually connecting from loopback.
     """
     ip = _parse_ip(host)
-    # is_private also matches loopback (127.0.0.1, ::1) and the unspecified address
-    # (0.0.0.0, ::). Those are honoured ONLY via the peer-gated _LOOPBACK path, so keep
-    # them out of the literal LAN allowance — a private peer shouldn't reach the box by
-    # spoofing Host: 127.0.0.1 without actually connecting from loopback.
-    return ip is not None and ip.is_private and not ip.is_loopback and not ip.is_unspecified
+    return ip is not None and _is_private_lan_ip(ip)
 
 
 def private_lan_allowed(request: Request, session: Session) -> bool:

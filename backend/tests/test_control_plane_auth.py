@@ -218,7 +218,9 @@ def test_allow_private_lan_env_seeds_on_first_boot(monkeypatch):
             if row is not None:
                 s.delete(row)
                 s.commit()
-        monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(allow_private_lan=True))
+        monkeypatch.setattr(
+            main, "get_settings", lambda: SimpleNamespace(allow_private_lan=True, port=8080)
+        )
         main._bootstrap_private_lan()
         with Session(get_engine()) as s:
             assert runtime_settings.allow_private_lan(s) is True

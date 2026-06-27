@@ -53,7 +53,16 @@ def _bootstrap_private_lan() -> None:
     with Session(get_engine()) as session:
         if repo.setting_get(session, "allow_private_lan", _UNSET) is _UNSET:
             runtime_settings.write(session, {"allow_private_lan": True})
-            print("[mcpelevator] MCPE_ALLOW_PRIVATE_LAN set — LAN access enabled", flush=True)
+            # The control-plane bootstrap below prints a 127.0.0.1 login URL (base_url
+            # rewrites the 0.0.0.0 bind to loopback). That's wrong for a LAN device
+            # reading these logs, so point at the box's own LAN address instead.
+            port = get_settings().port
+            print(
+                f"[mcpelevator] MCPE_ALLOW_PRIVATE_LAN set — LAN access enabled. "
+                f"Log in from a LAN device at  http://<this-box-LAN-IP>:{port}/login  "
+                f"(admin token printed below).",
+                flush=True,
+            )
 
 
 def _bootstrap_control_plane_auth() -> None:

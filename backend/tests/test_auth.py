@@ -199,6 +199,14 @@ def test_host_allowed_private_lan_literal():
     assert middleware.host_allowed(
         "127.0.0.1", None, [], client_is_loopback=True, allow_private=True
     )[0] is True
+    # special-use-but-not-LAN ranges (TEST-NET, IPv6 documentation) are NOT private LAN,
+    # even though stdlib ipaddress.is_private matches them — explicit ranges only
+    assert middleware.host_allowed(
+        "203.0.113.7", None, [], client_is_loopback=False, allow_private=True
+    )[0] is False
+    assert middleware.host_allowed(
+        "[2001:db8::1]", None, [], client_is_loopback=False, allow_private=True
+    )[0] is False
 
 
 def test_settings_update_rejects_coercible_allow_private_lan():
@@ -226,8 +234,25 @@ def test_is_private_client():
     assert middleware.is_private_client(req("fd00::1")) is True  # IPv6 ULA
     assert middleware.is_private_client(req("fe80::1%eth0")) is True  # link-local + zone id
     assert middleware.is_private_client(req("8.8.8.8")) is False  # public
+    assert middleware.is_private_client(req("203.0.113.7")) is False  # TEST-NET, not a LAN
+    assert middleware.is_private_client(req("testclient")) is True  # in-process TestClient
     assert middleware.is_private_client(req("not-an-ip")) is False  # unparseable peer
     assert middleware.is_private_client(req(None)) is False
+
+
+def test_is_private_client_ignores_trusted_proxies(monkeypatch):
+    from types import SimpleNamespace
+
+    def req(peer):
+        return SimpleNamespace(client=SimpleNamespace(host=peer))
+
+    # A trusted proxy may forward PUBLIC traffic, so it must not satisfy the LAN
+    # peer gate (unlike is_loopback_client, which trusts it for the loopback allowance).
+    monkeypatch.setattr(
+        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="8.8.8.8/32")
+    )
+    assert middleware.is_loopback_client(req("8.8.8.8")) is True  # trusted for loopback
+    assert middleware.is_private_client(req("8.8.8.8")) is False  # but NOT for the LAN gate
 
 
 def test_private_lan_allowed_requires_setting_and_private_peer(session, monkeypatch):
