@@ -14,15 +14,15 @@ pick.
 >   cannot send the bearer token that `/s/<slug>/mcp` expects.
 > - **Path A** (claude.ai web **and mobile**): public HTTPS tunnel **+ an
 >   OAuth-terminating edge**.
-> - **Path B** (Claude Code / Desktop): public HTTPS tunnel **+ mcpelevator's
->   built-in bearer auth**. Simplest, works today.
+> - **Path B** (Claude Code / Desktop via local config): public HTTPS tunnel **+
+>   mcpelevator's built-in bearer auth**. Simplest, works today.
 
 ## The constraint, in one picture
 
 ```text
-Claude Code / Desktop ────────────┐  can send Authorization: Bearer  ──►  Path B
-                                  │
-claude.ai web / mobile app ───────┘  OAuth or no-auth ONLY (no headers) ──►  Path A
+Claude Code / Desktop (local cfg) ─┐  can send Authorization: Bearer  ──►  Path B
+                                   │
+web / mobile / Desktop remote ─────┘  OAuth or no-auth ONLY (no headers) ──►  Path A
                                           │
                                           ▼
                           public HTTPS endpoint (Anthropic's IPs dial OUT to it)
@@ -96,8 +96,10 @@ PKCE login Claude initiates, then forwards the authenticated request to mcpeleva
 `/s/<slug>/mcp`. **Important:** that forwarded request carries the *edge's* identity
 (e.g. Cloudflare's `Cf-Access-Jwt-Assertion`), **not** the `Authorization: Bearer
 <mcpe token>` that mcpelevator's `bearer` provider checks (`backend/app/auth/bearer.py`).
-So behind the edge you must either run the target server with **`none`** (the edge is
-the sole gate) **or** add a component that injects the mcpe bearer — see step 1.
+So behind the edge you must give the origin auth the edge actually satisfies —
+preferably **inject the mcpe bearer at the edge**, and fall back to running the server
+with `none` **only if** the origin can't be reached except through the gated edge.
+See step 1; on a public tunnel origin, prefer bearer injection.
 
 Typical building blocks:
 
@@ -112,11 +114,20 @@ Typical building blocks:
 
 Steps (high level):
 
-1. Do the **Shared baseline** above, then pick how the edge reaches the backend,
-   since the edge forwards its own auth, not the mcpe token: **(a)** run the target
-   server with **`none`** and let the OAuth edge be the sole gate (simplest), or
-   **(b)** keep it on `bearer` and add a Worker / transform / reverse-proxy step that
-   injects `Authorization: Bearer <mcpe token>` before the request hits `/s/<slug>/mcp`.
+1. Do the **Shared baseline** above, then decide how the edge reaches the backend.
+   The edge forwards its own auth, not the mcpe token, so a bare `/s/<slug>/mcp`
+   origin would 401 (`bearer`) or be wide open (`none`). Pick:
+   - **(a) Inject the bearer — recommended for a public origin.** Keep the server on
+     `bearer` and add a Worker / transform / reverse-proxy step that sets
+     `Authorization: Bearer <mcpe token>` before the request reaches `/s/<slug>/mcp`.
+     Safe even if the origin URL leaks, because the token is still required.
+   - **(b) `none` — only if the origin is not independently reachable.** Acceptable
+     *only* when the gated edge is the sole ingress, i.e. the tunnel exposes no public
+     route straight to `/s/<slug>/mcp`. ⚠️ In Cloudflare's **MCP portal** model the
+     backend origin stays directly addressable, and [blocked users can bypass the
+     portal policy via the direct server URL](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/#add-an-mcp-server) —
+     so `none` there leaves the tools open to anyone who finds the origin. Use (a), or
+     also put an Access policy on the origin hostname/path itself.
 2. Stand up the tunnel: `cloudflared tunnel ...` mapping `https://mcp.example.com`
    → `http://127.0.0.1:8080`. Set `MCPE_PUBLIC_BASE_URL` to the **full absolute URL
    including the scheme** (`https://mcp.example.com`, not the bare hostname — it's
@@ -143,12 +154,14 @@ Steps (high level):
 ## Path B — Claude Code / Desktop (public HTTPS + bearer)
 
 This is the **simplest secure path that works today**, and it's the right one if
-"web" was loose and you'd accept Claude Code or Claude Desktop. These two **can send
-a static `Authorization: Bearer` header** (Code natively; Desktop via the local
-`mcp-remote` bridge), which is precisely what mcpelevator's built-in `bearer`
-provider checks — so no OAuth layer is needed. The **mobile** app is deliberately
-*not* here: like the browser, it's a remote connector dialed from Anthropic's cloud
-with nowhere to set a header, so mobile needs **Path A**.
+"web" was loose and you'd accept Claude Code or **locally-configured** Claude
+Desktop. These **can send a static `Authorization: Bearer` header** (Code natively;
+Desktop via the local `claude_desktop_config.json` + `mcp-remote` bridge), which is
+precisely what mcpelevator's built-in `bearer` provider checks — so no OAuth layer is
+needed. Two surfaces are deliberately *not* here: the **mobile** app, and Desktop's
+**remote connectors added through the Claude account UI** — both are dialed from
+Anthropic's cloud with nowhere to set a header, just like the browser, so they need
+**Path A**. (Only Desktop's *local* config path qualifies for bearer.)
 
 1. Do the **Shared baseline** above, with each server's auth set to `bearer` and a
    token minted (scope `all` or a single server).
@@ -173,7 +186,8 @@ with nowhere to set a header, so mobile needs **Path A**.
 |---|---|---|
 | Works in claude.ai **web browser** | ✅ (subject to the caveat above) | ❌ (web can't send a bearer) |
 | Works in Claude **mobile app** | ✅ (subject to the caveat above) | ❌ (mobile can't send a bearer) |
-| Works in Claude **Code / Desktop** | ✅ | ✅ |
+| Works in Claude **Code / Desktop (local config)** | ✅ | ✅ |
+| Works in Claude **Desktop remote connector** (account UI) | ✅ (subject to the caveat above) | ❌ (cloud-dialed, no header) |
 | Auth mechanism | OAuth 2.1 + PKCE at the edge | mcpelevator `bearer` token |
 | Setup effort | Higher (tunnel **+** OAuth provider) | Lower (tunnel only) |
 | Maturity today | Edge bug reported for web/mobile + Cloudflare Access | Stable, fully supported by mcpelevator v1 |
