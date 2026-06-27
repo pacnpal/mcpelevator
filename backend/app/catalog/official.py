@@ -36,6 +36,33 @@ def _unwrap(entry: dict[str, Any]) -> tuple[dict[str, Any], str]:
     return entry, str(entry.get("status") or "active")
 
 
+def dedupe_latest(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse the per-version registry feed to one entry per server.
+
+    The unfiltered ``/v0.1/servers`` listing returns one row per *published version*,
+    so a server shows up multiple times. Group by name and prefer the ``isLatest``
+    version, falling back to the first seen when none is flagged. We never drop a
+    server outright — if upstream metadata is missing/quirky (e.g. no row flagged
+    latest), the server still appears. Insertion order is preserved.
+    """
+    by_name: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        server, _ = _unwrap(entry)
+        name = str(server.get("name") or "")
+        if not name:
+            continue
+        existing = by_name.get(name)
+        if existing is None:
+            by_name[name] = entry
+            continue
+        meta = (entry.get("_meta") or {}).get(_META_KEY) or {}
+        existing_meta = (existing.get("_meta") or {}).get(_META_KEY) or {}
+        # Upgrade to the isLatest row, but never downgrade away from one.
+        if meta.get("isLatest") is True and existing_meta.get("isLatest") is not True:
+            by_name[name] = entry
+    return list(by_name.values())
+
+
 def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
     """
     Normalize a registry server entry for list responses.
@@ -165,15 +192,21 @@ class OfficialSource:
         cached = self._cache.get(key)
         if cached is not None:
             return cached
+        # Ask upstream for latest-only so pages aren't underfilled with versions we'd
+        # discard (and a page can't collapse to empty while a cursor remains). dedupe_latest
+        # below stays as a defensive net in case the filter is ignored.
         data = await base.get_json(
-            http, f"{BASE_URL}/v0.1/servers", {"search": search, "cursor": cursor, "limit": page}
+            http,
+            f"{BASE_URL}/v0.1/servers",
+            {"search": search, "cursor": cursor, "limit": page, "version": "latest"},
         )
         servers = data.get("servers") if isinstance(data, dict) else None
         if not isinstance(servers, list):
             raise base.CatalogUpstreamError("unexpected list response from the MCP Registry")
         metadata = data.get("metadata") or {}
+        entries = dedupe_latest([e for e in servers if isinstance(e, dict)])
         result = {
-            "servers": [_list_item(e) for e in servers if isinstance(e, dict)],
+            "servers": [_list_item(e) for e in entries],
             "next_cursor": metadata.get("nextCursor"),
         }
         self._cache.put(key, result)
@@ -196,3 +229,30 @@ class OfficialSource:
         if not isinstance(data, dict):
             raise base.CatalogUpstreamError("unexpected detail response from the MCP Registry")
         return to_detail(data)
+
+    async def list_versions(self, http: httpx.AsyncClient, *, id: str) -> list[str]:
+        """List a server's published versions, the registry's ``isLatest`` one first."""
+        url = f"{BASE_URL}/v0.1/servers/{quote(id, safe='')}/versions"
+        data = await base.get_json(http, url, {})
+        servers = data.get("servers") if isinstance(data, dict) else None
+        if not isinstance(servers, list):
+            # Fail loud, not silent: returning [] would make a registry outage look like
+            # a versionless server. The API layer maps this to a 502.
+            raise base.CatalogUpstreamError("unexpected versions response from the MCP Registry")
+        latest: list[str] = []
+        rest: list[str] = []
+        seen: set[str] = set()
+        for entry in servers:
+            if not isinstance(entry, dict):
+                continue
+            server, _ = _unwrap(entry)
+            version = server.get("version")
+            if not version:
+                continue
+            v_str = str(version)
+            if v_str in seen:  # registry can return duplicate version rows
+                continue
+            seen.add(v_str)
+            meta = (entry.get("_meta") or {}).get(_META_KEY) or {}
+            (latest if meta.get("isLatest") else rest).append(v_str)
+        return latest + rest

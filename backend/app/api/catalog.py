@@ -12,7 +12,7 @@ from __future__ import annotations
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.api.schemas import CatalogDetail, CatalogList, CatalogSource
+from app.api.schemas import CatalogDetail, CatalogList, CatalogSource, CatalogVersions
 from app.catalog import registry
 from app.catalog.base import CatalogUpstreamError, Source
 
@@ -81,6 +81,24 @@ async def list_catalog_servers(
     except CatalogUpstreamError as exc:
         raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable: {exc}")
     return CatalogList(source=source, servers=data["servers"], next_cursor=data["next_cursor"])
+
+
+@router.get("/catalog/server/versions", response_model=CatalogVersions)
+async def get_catalog_versions(
+    request: Request,
+    id: str = Query(..., description="the per-source server id/name from the list view"),
+    source: str = Query(registry.DEFAULT_SOURCE),
+):
+    src = _source(source)
+    try:
+        versions = await src.list_versions(request.app.state.http, id=id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="server not found in catalog")
+        raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable")
+    except CatalogUpstreamError as exc:
+        raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable: {exc}")
+    return CatalogVersions(versions=versions)
 
 
 @router.get("/catalog/server", response_model=CatalogDetail)

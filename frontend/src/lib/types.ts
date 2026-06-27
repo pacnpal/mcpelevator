@@ -143,6 +143,11 @@ export interface CatalogList {
 	next_cursor: string | null;
 }
 
+/** A server's selectable versions, latest first (empty for sources without versions). */
+export interface CatalogVersions {
+	versions: string[];
+}
+
 /** A reviewable, ServerCreate-shaped install draft for one package. */
 export interface CatalogDraft {
 	package_index: number;

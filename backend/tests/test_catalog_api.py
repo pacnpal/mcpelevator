@@ -130,6 +130,27 @@ def test_official_list_passthrough_and_cursor(monkeypatch):
         assert params["limit"] == 25
 
 
+_OFFICIAL_LIST_MULTIVERSION = {
+    "servers": [
+        {"server": {"name": "io.x/srv", "title": "Srv", "version": "1.0.0", "packages": []},
+         "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active", "isLatest": False}}},
+        {"server": {"name": "io.x/srv", "title": "Srv", "version": "1.0.1", "packages": []},
+         "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active", "isLatest": True}}},
+    ],
+    "metadata": {"nextCursor": None},
+}
+
+
+def test_official_list_dedupes_to_latest_version(monkeypatch):
+    calls = _stub(monkeypatch, {"registry.modelcontextprotocol.io/v0.1/servers": _OFFICIAL_LIST_MULTIVERSION})
+    with TestClient(app) as c:
+        body = c.get("/api/catalog/servers", headers=LOOPBACK).json()
+        # Upstream is asked for latest-only; dedupe still collapses any residual dups.
+        assert calls[0][1].get("version") == "latest"
+        assert len(body["servers"]) == 1
+        assert body["servers"][0]["version"] == "1.0.1"
+
+
 def test_official_detail_resolves_drafts(monkeypatch):
     _stub(monkeypatch, {"/versions/": _OFFICIAL_DETAIL})
     with TestClient(app) as c:
@@ -140,6 +161,39 @@ def test_official_detail_resolves_drafts(monkeypatch):
         draft = body["drafts"][0]
         assert draft["runner"] == "npx"
         assert draft["args"] == ["-y", "@me/memory@1.0.0"]
+
+
+_OFFICIAL_VERSIONS = {
+    "servers": [
+        {"server": {"name": "io.x/srv", "version": "1.0.1"},
+         "_meta": {"io.modelcontextprotocol.registry/official": {"isLatest": True}}},
+        {"server": {"name": "io.x/srv", "version": "1.0.0"},
+         "_meta": {"io.modelcontextprotocol.registry/official": {"isLatest": False}}},
+    ]
+}
+
+
+def test_official_versions_endpoint_latest_first(monkeypatch):
+    _stub(monkeypatch, {"/versions": _OFFICIAL_VERSIONS})
+    with TestClient(app) as c:
+        r = c.get("/api/catalog/server/versions", params={"id": "io.x/srv"}, headers=LOOPBACK)
+        assert r.status_code == 200, r.text
+        assert r.json()["versions"] == ["1.0.1", "1.0.0"]
+
+
+def test_official_versions_malformed_payload_is_502(monkeypatch):
+    _stub(monkeypatch, {"/versions": {"unexpected": "shape"}})
+    with TestClient(app) as c:
+        r = c.get("/api/catalog/server/versions", params={"id": "io.x/srv"}, headers=LOOPBACK)
+        assert r.status_code == 502, r.text
+
+
+def test_glama_versions_endpoint_is_empty():
+    # Glama has no version concept; the endpoint returns [] without hitting upstream.
+    with TestClient(app) as c:
+        r = c.get("/api/catalog/server/versions", params={"source": "glama", "id": "a/b"}, headers=LOOPBACK)
+        assert r.status_code == 200, r.text
+        assert r.json()["versions"] == []
 
 
 def test_glama_list_passthrough(monkeypatch):

@@ -181,3 +181,12 @@ class Source(Protocol):
         	dict[str, Any]: A normalized catalog detail mapping.
         """
         ...
+
+    async def list_versions(self, http: httpx.AsyncClient, *, id: str) -> list[str]:
+        """
+        List a server's available versions, latest first.
+
+        Returns an empty list for sources without a version concept (e.g. discovery-only
+        directories). Raises ``CatalogUpstreamError`` on a bad upstream.
+        """
+        ...
