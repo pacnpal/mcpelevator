@@ -168,6 +168,26 @@ def test_startup_bootstrap_mints_when_enforced():
         _reset()
 
 
+def test_bootstrap_prints_recovery_notice_when_token_already_exists(capsys):
+    """When enforcement turns on but a control token already exists, we can't reprint
+    its plaintext — but the LAN seed promises an admin-token notice, so the bootstrap
+    must still print a notice (pointing at recovery) instead of silently swallowing it."""
+    init_db()
+    try:
+        _mint("control")  # a token already exists; its plaintext is not held here
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"control_plane_auth": "always"})
+        capsys.readouterr()  # drop anything printed during setup
+        with TestClient(app):  # lifespan runs _bootstrap_control_plane_auth
+            pass
+        out = capsys.readouterr().out
+        assert "control-plane auth is ON" in out
+        assert "An admin token already exists" in out
+        assert "Settings → Security" in out
+    finally:
+        _reset()
+
+
 def test_enforcement_enabled_matrix():
     from app.auth.control_plane import enforcement_enabled
 
