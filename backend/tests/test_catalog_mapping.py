@@ -238,6 +238,8 @@ def test_official_deleted_status_blocks_install():
     assert official._list_item(entry)["installable"] is False
     detail = official.to_detail(entry)
     assert all(d["installable"] is False for d in detail["drafts"])
+    # The runnable command is stripped so the review form can't launch a removed package.
+    assert all(d["command"] == "" and d["runner"] is None and d["args"] == [] for d in detail["drafts"])
     assert any("deleted" in n for n in detail["notes"])
 
 

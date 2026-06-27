@@ -130,6 +130,11 @@
 			// Resolve the exact version shown on the card, not "latest": a list can
 			// surface older/multiple versions, and Install must pin the one chosen.
 			const detail = await getCatalogServer(server.id, server.source, server.version ?? 'latest');
+			if (detail.server.status === 'deleted') {
+				// Removed from the registry for moderation — don't hand over an install form.
+				flashToast('This server was removed from the registry and can’t be installed.', 'error');
+				return;
+			}
 			const draft = detail.drafts.find((d) => d.installable) ?? detail.drafts[0] ?? null;
 			const supportMeta = sources.find((s) => s.id === server.source);
 			const versionTag = detail.server.version ? `@${detail.server.version}` : '';

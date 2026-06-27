@@ -103,11 +103,17 @@ def to_detail(entry: dict[str, Any]) -> dict[str, Any]:
 
     notes: list[str] = []
     if status == "deleted":
-        # Removed from the registry — block install and explain why on the review page.
+        # Removed from the registry (spam/malware/policy). Block install AND strip the
+        # runnable command, so the review form can't be pre-filled with a launchable
+        # spec for a moderation-removed package.
         reason = "This server was removed from the registry (status: deleted) — install is blocked."
         for d in drafts:
             d["installable"] = False
             d["reason"] = reason
+            d["runner"] = None
+            d["command"] = ""
+            d["args"] = []
+            d["env"] = {}
         notes.append(reason)
 
     return {
