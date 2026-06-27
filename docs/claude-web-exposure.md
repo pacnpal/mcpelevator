@@ -177,7 +177,7 @@ Create `~/.cloudflared/config.yml`:
 
 ```yaml
 tunnel: <Tunnel-UUID>
-credentials-file: /root/.cloudflared/<Tunnel-UUID>.json
+credentials-file: /home/<user>/.cloudflared/<Tunnel-UUID>.json  # absolute path; cloudflared does not expand ~
 ingress:
   - hostname: mcp.example.com
     service: http://127.0.0.1:8080
@@ -307,7 +307,9 @@ Either tunnel gives you a public HTTPS URL mapped to `http://127.0.0.1:8080`:
   # serves https://<device>.<tailnet>.ts.net  → http://127.0.0.1:8080
   ```
 
-  Use the printed `*.ts.net` host as `MCPE_PUBLIC_BASE_URL` / `allowed_hosts`.
+  Use the printed `*.ts.net` host — the **full URL** `https://<device>.<tailnet>.ts.net`
+  for `MCPE_PUBLIC_BASE_URL`, and the **bare hostname** `<device>.<tailnet>.ts.net`
+  for `allowed_hosts`.
 
 ### Step 3 — Add the connector in your client
 
