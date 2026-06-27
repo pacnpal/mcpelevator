@@ -57,9 +57,12 @@ def _env_from_schema(schema: dict[str, Any], warnings: list[str]) -> dict[str, s
     req_list = schema.get("required")
     required = set(req_list) if isinstance(req_list, (list, set, tuple)) else set()
     env: dict[str, str] = {}
+    # Only prefill REQUIRED keys. Scaffolding optional ones as "" would export VAR= and
+    # override the package's own default/absence behavior; the operator can add optional
+    # vars in the form if needed.
     for key in props:
-        env[str(key)] = ""
         if key in required:
+            env[str(key)] = ""
             warnings.append(f"Environment variable {key} is required — set its value before starting.")
     return env
 

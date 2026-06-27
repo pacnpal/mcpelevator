@@ -92,7 +92,7 @@ def test_boolean_flag_kept_but_optional_value_option_omitted():
     assert draft["args"] == ["-y", "pkg@1.0.0", "--verbose"]
 
 
-def test_runtime_arguments_folded_before_package():
+def test_runtime_arguments_scaffold_but_not_auto_installable():
     draft = mapping.package_draft(
         0,
         _pkg(
@@ -100,8 +100,28 @@ def test_runtime_arguments_folded_before_package():
             packageArguments=[{"type": "positional", "value": "serve"}],
         ),
     )
+    # The scaffold folds runtime args before the package, but stays manual since runtime
+    # args may already supply the package (avoids duplicating it).
     assert draft["args"] == ["-y", "--package", "@scope/real", "pkg@1.0.0", "serve"]
-    assert any("runtime arguments" in w for w in draft["warnings"])
+    assert draft["installable"] is False
+    assert "runtime arguments" in (draft["reason"] or "")
+
+
+def test_unsupported_runtime_hint_not_installable():
+    draft = mapping.package_draft(0, _pkg(runtimeHint="node"))
+    assert draft["installable"] is False
+    assert "node" in (draft["reason"] or "")
+
+
+def test_supported_runtime_hint_is_installable():
+    assert mapping.package_draft(0, _pkg(runtimeHint="npx"))["installable"] is True
+    assert mapping.package_draft(0, _pkg(registryType="pypi", identifier="t", runtimeHint="uv"))["installable"] is True
+
+
+def test_templated_env_value_warns():
+    draft = mapping.package_draft(0, _pkg(environmentVariables=[{"name": "TOKEN", "value": "{token}"}]))
+    assert draft["env"] == {"TOKEN": "{token}"}
+    assert any("TOKEN" in w and "placeholder" in w for w in draft["warnings"])
 
 
 def test_optional_env_var_without_value_is_omitted():
@@ -187,6 +207,14 @@ def test_official_status_from_meta():
     assert detail["manual_install"] is False
 
 
+def test_official_deleted_status_blocks_install():
+    entry = _official([_pkg()], status="deleted")
+    assert official._list_item(entry)["installable"] is False
+    detail = official.to_detail(entry)
+    assert all(d["installable"] is False for d in detail["drafts"])
+    assert any("deleted" in n for n in detail["notes"])
+
+
 def test_official_remotes_surfaced_not_installed():
     detail = official.to_detail(
         _official(packages=[], remotes=[{"type": "streamable-http", "url": "https://x/mcp"}])
@@ -231,7 +259,8 @@ def test_glama_detail_is_manual_scaffold_with_env_keys():
     draft = detail["drafts"][0]
     assert draft["installable"] is False
     assert draft["command"] == "" and draft["runner"] is None
-    assert draft["env"] == {"TOKEN": "", "REGION": ""}
+    # Only the required key is scaffolded; optional REGION is omitted (no VAR= override).
+    assert draft["env"] == {"TOKEN": ""}
     assert any("TOKEN" in w for w in draft["warnings"])
     # Full URL (scheme included), not a bare host substring, so it reads as a literal
     # presence check rather than URL-host sanitization.

@@ -20,6 +20,10 @@ from typing import Any
 # registryType → mcpelevator runner. The only two we can launch today (SSOT for the map).
 RUNNER_BY_TYPE = {"npm": "npx", "pypi": "uvx"}
 
+# runtimeHint values each runner can honor. A package asking for a different runtime
+# (node, bun, dnx, …) wouldn't actually launch via npx/uvx, so it's treated as manual.
+_ACCEPTED_HINTS = {"npx": {"npx"}, "uvx": {"uvx", "uv"}}
+
 # Why a given registry type can't be auto-installed yet (shown in the UI).
 UNSUPPORTED_REASON = {
     "oci": "Docker/OCI packages aren't installable yet (the docker runner is not enabled).",
@@ -137,6 +141,12 @@ def environment(env_vars: list[Any], warnings: list[str]) -> dict[str, str]:
         if value is None and required:
             kind = "secret" if var.get("isSecret") else "required"
             warnings.append(f"Environment variable {name} is {kind} — set its value before starting.")
+        elif value is not None and "{" in str(value) and "}" in str(value):
+            # Unexpanded server.json "{variable}" placeholder — flag it so the draft isn't
+            # auto-started with a literal "{token}" value.
+            warnings.append(
+                f"Environment variable {name} contains a {{…}} placeholder — replace it with a real value."
+            )
     return env
 
 
@@ -204,6 +214,13 @@ def package_draft(index: int, pkg: dict[str, Any]) -> dict[str, Any]:
         draft["reason"] = "Package is missing an identifier."
         return draft
 
+    # A package can ask for a specific runtime; if it isn't one this runner provides,
+    # an npx/uvx command would launch the wrong thing, so leave it for manual setup.
+    runtime_hint = str(pkg.get("runtimeHint") or "").lower()
+    if runtime_hint and runtime_hint not in _ACCEPTED_HINTS[runner]:
+        draft["reason"] = f"Package requests the '{runtime_hint}' runtime, which isn't supported yet."
+        return draft
+
     warnings: list[str] = []
     pinned = pin_identifier(registry_type, identifier, version)
     # runtimeArguments are flags for the runner itself (e.g. npx --package=…, uvx --from …)
@@ -211,12 +228,6 @@ def package_draft(index: int, pkg: dict[str, Any]) -> dict[str, Any]:
     runtime_args = argument_tokens(pkg.get("runtimeArguments") or [], warnings)
     pkg_args = argument_tokens(pkg.get("packageArguments") or [], warnings)
     env = environment(pkg.get("environmentVariables") or [], warnings)
-
-    if runtime_args:
-        warnings.append(
-            "This package uses runtime arguments — they're placed before the package; "
-            "review the resolved command before starting."
-        )
 
     if runner == "npx":
         draft["command"] = "npx"
@@ -227,6 +238,18 @@ def package_draft(index: int, pkg: dict[str, Any]) -> dict[str, Any]:
 
     draft["runner"] = runner
     draft["env"] = env
-    draft["installable"] = True
     draft["warnings"] = warnings
+
+    if runtime_args:
+        # runtimeArguments may already supply the package/executable (e.g. uvx --from
+        # pkg binary), so blindly appending the pinned identifier can duplicate it. The
+        # command above is a best-effort scaffold — keep it for the form, but require
+        # manual review rather than marking it auto-installable.
+        draft["reason"] = (
+            "This package declares runtime arguments; the generated command is a "
+            "best-effort scaffold — review and adjust it before starting."
+        )
+        draft["installable"] = False
+    else:
+        draft["installable"] = True
     return draft

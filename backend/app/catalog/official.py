@@ -63,6 +63,11 @@ def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
         if transport_type == "stdio" and rtype in mapping.RUNNER_BY_TYPE and pkg.get("identifier"):
             installable = True
 
+    # A "deleted" server was removed from the registry (typically spam/malware/policy);
+    # never offer it for install.
+    if status == "deleted":
+        installable = False
+
     return {
         "source": "official",
         "id": name,
@@ -96,10 +101,19 @@ def to_detail(entry: dict[str, Any]) -> dict[str, Any]:
 
     drafts = [mapping.package_draft(i, pkg) for i, pkg in enumerate(packages) if isinstance(pkg, dict)]
 
+    notes: list[str] = []
+    if status == "deleted":
+        # Removed from the registry — block install and explain why on the review page.
+        reason = "This server was removed from the registry (status: deleted) — install is blocked."
+        for d in drafts:
+            d["installable"] = False
+            d["reason"] = reason
+        notes.append(reason)
+
     return {
         "source": "official",
         "manual_install": False,
-        "notes": [],
+        "notes": notes,
         "server": {
             "name": name,
             "title": server.get("title") or name,
