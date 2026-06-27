@@ -243,7 +243,7 @@ The forwarded request won't carry an mcpe bearer token, so pick one:
 
 In claude.ai → **Settings** → **Connectors** → **Add custom connector**, paste:
 
-```
+```text
 https://mcp.example.com/s/<slug>/mcp
 ```
 
