@@ -25,6 +25,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates gnupg tini git \
     && curl -fsSL https://deb.nodesource.com/setup_26.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
+    # Refresh npm to a build whose bundled deps carry the fixes Trivy flags in the
+    # version Node ships (tar >=7.5.16, the patched brace-expansion via minimatch,
+    # and ip-address via the socks proxy chain).
+    && npm install -g npm@11.17.0 \
+    && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 
 # uv + uvx (Python MCP servers) from the official image
