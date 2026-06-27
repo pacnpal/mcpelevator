@@ -44,9 +44,24 @@ def _live_state(server: Server, sup, session: Session):
     return "stopped", None, None, None, []
 
 
-def _summary(server: Server, sup, session: Session) -> ServerSummary:
+def _base_url(request: Request) -> str:
+    """Base URL for the copy-menu server links. Prefer the operator-declared public URL;
+    otherwise use the host the client actually reached us on — so a LAN device (with
+    ``allow_private_lan``) copies ``http://192.168.1.50:8080/...`` rather than the
+    ``0.0.0.0``→``127.0.0.1`` rewrite baked into ``settings.base_url``. The Host header is
+    already validated by the control-plane allowlist before any handler runs, so it's a
+    trusted value here. Falls back to the derived settings URL when there's no Host."""
+    settings = get_settings()
+    if settings.public_base_url:
+        return settings.base_url  # operator-declared canonical URL wins
+    host = request.headers.get("host", "").strip()
+    if host:
+        return f"{request.url.scheme or 'http'}://{host}"
+    return settings.base_url
+
+
+def _summary(server: Server, sup, session: Session, base: str) -> ServerSummary:
     state, last_error, pid, port, tools = _live_state(server, sup, session)
-    base = get_settings().base_url
     auth = server.auth_provider
     if auth == "inherit":
         auth = runtime_settings.default_auth_provider(session)
@@ -75,8 +90,8 @@ def _summary(server: Server, sup, session: Session) -> ServerSummary:
     )
 
 
-def _detail(server: Server, sup, session: Session) -> ServerDetail:
-    summary = _summary(server, sup, session)
+def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
+    summary = _summary(server, sup, session, base)
     _, _, _, _, tools = _live_state(server, sup, session)
     return ServerDetail(
         **summary.model_dump(),
@@ -94,7 +109,8 @@ def _detail(server: Server, sup, session: Session) -> ServerDetail:
 @router.get("/servers", response_model=list[ServerSummary])
 async def list_servers(request: Request, session: Session = Depends(get_session)):
     sup = request.app.state.supervisor
-    return [_summary(s, sup, session) for s in repo.list_servers(session)]
+    base = _base_url(request)
+    return [_summary(s, sup, session, base) for s in repo.list_servers(session)]
 
 
 @router.post("/servers", response_model=ServerSummary, status_code=201)
@@ -108,7 +124,7 @@ async def create_server(
     sup = request.app.state.supervisor
     if server.enabled:
         sup.nudge()
-    return _summary(server, sup, session)
+    return _summary(server, sup, session, _base_url(request))
 
 
 @router.get("/servers/{server_id}", response_model=ServerDetail)
@@ -116,7 +132,7 @@ async def get_server(server_id: str, request: Request, session: Session = Depend
     server = repo.get_server(session, server_id)
     if server is None:
         raise HTTPException(status_code=404, detail="server not found")
-    return _detail(server, request.app.state.supervisor, session)
+    return _detail(server, request.app.state.supervisor, session, _base_url(request))
 
 
 @router.patch("/servers/{server_id}", response_model=ServerSummary)
@@ -135,7 +151,7 @@ async def update_server(
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
     sup.nudge()  # config_hash may have changed -> reconciler restarts if needed
-    return _summary(server, sup, session)
+    return _summary(server, sup, session, _base_url(request))
 
 
 @router.delete("/servers/{server_id}", status_code=204)
@@ -155,7 +171,7 @@ async def enable_server(server_id: str, request: Request, session: Session = Dep
         raise HTTPException(status_code=404, detail="server not found")
     sup = request.app.state.supervisor
     sup.nudge()
-    return _summary(server, sup, session)
+    return _summary(server, sup, session, _base_url(request))
 
 
 @router.post("/servers/{server_id}/disable", response_model=ServerSummary)
@@ -166,7 +182,7 @@ async def disable_server(server_id: str, request: Request, session: Session = De
         raise HTTPException(status_code=404, detail="server not found")
     sup = request.app.state.supervisor
     sup.nudge()
-    return _summary(server, sup, session)
+    return _summary(server, sup, session, _base_url(request))
 
 
 @router.post("/servers/import", response_model=ImportResult, status_code=201)
@@ -182,8 +198,9 @@ async def import_servers(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
+    base = _base_url(request)
     return ImportResult(
-        created=[_summary(s, sup, session) for s in created],
+        created=[_summary(s, sup, session, base) for s in created],
         skipped=[ImportSkipped(**s) for s in skipped],
     )
 

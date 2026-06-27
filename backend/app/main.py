@@ -25,12 +25,44 @@ from app.api import servers as servers_api
 from app.api import settings as settings_api
 from app.api import tokens as tokens_api
 from app.auth.control_plane import ensure_control_token, enforcement_enabled, require_control_plane
-from app.auth.middleware import host_allowed, is_loopback_client, request_allowlist
+from app.auth.middleware import (
+    host_allowed,
+    is_loopback_client,
+    private_lan_allowed,
+    request_allowlist,
+)
 from app.config import get_settings
-from app.db import get_engine, init_db
+from app.db import get_engine, init_db, repo
 from app.proxy.router import router as proxy_router
 from app.registry import service
+from app.registry import settings as runtime_settings
 from app.supervisor.supervisor import Supervisor
+
+
+_UNSET = object()
+
+
+def _bootstrap_private_lan() -> None:
+    """Seed the ``allow_private_lan`` runtime setting from ``MCPE_ALLOW_PRIVATE_LAN``
+    on first boot, so a headless box (no loopback browser to reach the UI) can enable
+    LAN access declaratively. Seeds only when the setting has never been written, so a
+    later UI toggle stays authoritative across restarts. Runs before the control-plane
+    bootstrap so the minted admin token reflects the now-on enforcement."""
+    if not get_settings().allow_private_lan:
+        return
+    with Session(get_engine()) as session:
+        if repo.setting_get(session, "allow_private_lan", _UNSET) is _UNSET:
+            runtime_settings.write(session, {"allow_private_lan": True})
+            # The control-plane bootstrap below prints a 127.0.0.1 login URL (base_url
+            # rewrites the 0.0.0.0 bind to loopback). That's wrong for a LAN device
+            # reading these logs, so point at the box's own LAN address instead.
+            port = get_settings().port
+            print(
+                f"[mcpelevator] MCPE_ALLOW_PRIVATE_LAN set — LAN access enabled. "
+                f"Log in from a LAN device at  http://<this-box-LAN-IP>:{port}/login  "
+                f"(admin token printed below).",
+                flush=True,
+            )
 
 
 def _bootstrap_control_plane_auth() -> None:
@@ -62,6 +94,7 @@ async def lifespan(app: FastAPI):
     with Session(get_engine()) as session:
         service.normalize_auth_providers(session)  # canonicalize legacy auth_provider values
         service.backfill_config_hashes(session)  # rehash upgraded rows -> no spurious restarts
+    _bootstrap_private_lan()  # seed LAN access from env before deciding auth enforcement
     _bootstrap_control_plane_auth()
     app.state.http = httpx.AsyncClient(timeout=None)  # no timeout: long-lived SSE streams
     supervisor = Supervisor()
@@ -108,11 +141,13 @@ def create_app() -> FastAPI:
         if request.url.path == "/api" or request.url.path.startswith("/api/"):
             with Session(get_engine()) as session:
                 allowed = request_allowlist(session)
+                allow_private = private_lan_allowed(request, session)
             ok, reason = host_allowed(
                 request.headers.get("host", ""),
                 request.headers.get("origin"),
                 allowed,
                 client_is_loopback=is_loopback_client(request),
+                allow_private=allow_private,
             )
             if not ok:
                 return JSONResponse({"detail": reason}, status_code=403)

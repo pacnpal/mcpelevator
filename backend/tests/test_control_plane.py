@@ -184,3 +184,30 @@ def test_create_token_scope_defaults_to_all_and_echoes_server_scope():
         client.delete(f"/api/tokens/{unscoped.json()['id']}", headers=host)
         client.delete(f"/api/tokens/{scoped.json()['id']}", headers=host)
         client.delete(f"/api/servers/{server['id']}", headers=host)
+
+
+def test_base_url_prefers_request_host_for_copy_links(monkeypatch):
+    """Copy-menu URLs use the host the client reached us on (so a LAN device gets LAN
+    URLs), unless an operator-declared public URL is set, which always wins."""
+    from types import SimpleNamespace
+
+    from app.api import servers
+
+    def req(host: str | None, scheme: str = "http"):
+        headers = {"host": host} if host is not None else {}
+        return SimpleNamespace(headers=headers, url=SimpleNamespace(scheme=scheme))
+
+    # No public URL: use the request Host (LAN address, port preserved).
+    monkeypatch.setattr(
+        servers, "get_settings",
+        lambda: SimpleNamespace(public_base_url=None, base_url="http://127.0.0.1:8080"),
+    )
+    assert servers._base_url(req("192.168.1.50:8080")) == "http://192.168.1.50:8080"
+    # No Host header -> fall back to the derived settings URL.
+    assert servers._base_url(req(None)) == "http://127.0.0.1:8080"
+    # A configured public URL always wins, regardless of the request Host.
+    monkeypatch.setattr(
+        servers, "get_settings",
+        lambda: SimpleNamespace(public_base_url="https://mcp.example.com", base_url="https://mcp.example.com"),
+    )
+    assert servers._base_url(req("192.168.1.50:8080")) == "https://mcp.example.com"

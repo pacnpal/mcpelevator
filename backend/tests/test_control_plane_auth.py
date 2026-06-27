@@ -34,7 +34,15 @@ def _reset() -> None:
     """Back to a clean default (local/auto, no allowlist, no tokens) so the shared
     engine doesn't leak state (or a bootstrapped admin token) into later tests."""
     with Session(get_engine()) as s:
-        runtime_settings.write(s, {"bind_mode": "local", "allowed_hosts": [], "control_plane_auth": "auto"})
+        runtime_settings.write(
+            s,
+            {
+                "bind_mode": "local",
+                "allowed_hosts": [],
+                "control_plane_auth": "auto",
+                "allow_private_lan": False,
+            },
+        )
         for t in repo.list_tokens(s):
             repo.delete_token(s, t.id)
 
@@ -174,6 +182,86 @@ def test_enforcement_enabled_matrix():
             assert enforcement_enabled(s) is True
     finally:
         _reset()
+
+
+def test_allow_private_lan_enforces_under_auto():
+    """Opening to the LAN makes the box reachable off-host, so `auto` must enforce
+    even while bind_mode stays `local` — otherwise the LAN would reach /api
+    unauthenticated."""
+    from app.auth.control_plane import enforcement_enabled
+
+    init_db()
+    try:
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"control_plane_auth": "auto", "bind_mode": "local"})
+            assert enforcement_enabled(s) is False  # zero-config loopback install
+            runtime_settings.write(s, {"allow_private_lan": True})
+            assert enforcement_enabled(s) is True  # LAN open -> token required
+    finally:
+        _reset()
+
+
+def test_allow_private_lan_env_seeds_on_first_boot(monkeypatch):
+    """A headless box can enable LAN access via MCPE_ALLOW_PRIVATE_LAN: on first boot
+    (setting never written) the env seeds it true, and enforcement turns on so the
+    bootstrap mints/prints an admin token the operator reads from the logs."""
+    from types import SimpleNamespace
+
+    from app import main
+    from app.auth.control_plane import enforcement_enabled
+    from app.db.models import Setting
+
+    init_db()
+    try:
+        with Session(get_engine()) as s:  # simulate "never written"
+            row = s.get(Setting, "allow_private_lan")
+            if row is not None:
+                s.delete(row)
+                s.commit()
+        monkeypatch.setattr(
+            main, "get_settings", lambda: SimpleNamespace(allow_private_lan=True, port=8080)
+        )
+        main._bootstrap_private_lan()
+        with Session(get_engine()) as s:
+            assert runtime_settings.allow_private_lan(s) is True
+            assert enforcement_enabled(s) is True  # LAN open -> /api now requires a token
+    finally:
+        _reset()
+
+
+def test_allow_private_lan_env_does_not_override_a_user_choice(monkeypatch):
+    """The env is a first-boot seed only: if the setting was already written (e.g. the
+    operator turned it off in the UI), a later boot with the env set must not re-enable."""
+    from types import SimpleNamespace
+
+    from app import main
+
+    init_db()
+    try:
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"allow_private_lan": False})  # explicit user choice
+        monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(allow_private_lan=True))
+        main._bootstrap_private_lan()  # row exists -> no reseed
+        with Session(get_engine()) as s:
+            assert runtime_settings.allow_private_lan(s) is False
+    finally:
+        _reset()
+
+
+def test_enabling_private_lan_without_credential_is_refused():
+    """Enabling allow_private_lan turns enforcement on (auto), so the PATCH must carry
+    a control credential or it would lock the operator out — same guard as expose."""
+    with TestClient(app) as client:
+        try:
+            assert client.patch(
+                "/api/settings", json={"allow_private_lan": True}, headers=LOOPBACK
+            ).status_code == 400
+            control = _mint("control")
+            assert client.patch(
+                "/api/settings", json={"allow_private_lan": True}, headers=_bearer(control)
+            ).status_code == 200
+        finally:
+            _reset()
 
 
 def test_ensure_control_token_is_idempotent():
