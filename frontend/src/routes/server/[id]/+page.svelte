@@ -69,19 +69,28 @@
 	async function toggle() {
 		if (!server || busy) return;
 		busy = true;
+		// Capture the id this action targets. Clone reuses this component (same-route
+		// nav), so if the route changes mid-flight the resolved summary belongs to the
+		// *previous* server — drop it instead of clobbering the copy with the source.
+		const requestedId = id;
 		try {
-			server = wantsRun
-				? { ...server, ...(await disableServer(server.id)) }
-				: { ...server, ...(await enableServer(server.id)) };
+			const updated = wantsRun
+				? await disableServer(requestedId)
+				: await enableServer(requestedId);
+			if (requestedId !== id || !server) return; // route changed mid-flight
+			server = { ...server, ...updated };
 		} catch (err) {
-			flashToast(errorMessage(err));
+			if (requestedId === id) flashToast(errorMessage(err));
 		} finally {
 			busy = false;
 		}
 	}
 
 	async function doClone() {
-		if (!server || cloning) return;
+		// Don't start a clone while an enable/disable or delete is still in flight —
+		// the toggle response is id-guarded above, but blocking here keeps the source
+		// page from kicking off conflicting actions right before it navigates away.
+		if (!server || cloning || busy || deleting) return;
 		cloning = true;
 		try {
 			const copy = await cloneServer(server.id);
@@ -248,7 +257,7 @@
 				<button
 					type="button"
 					onclick={doClone}
-					disabled={cloning}
+					disabled={cloning || busy || deleting}
 					aria-busy={cloning}
 					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3.5 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
 				>
