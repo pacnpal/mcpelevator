@@ -170,6 +170,10 @@ def test_host_allowed_private_lan_literal():
     assert middleware.host_allowed(
         "[fd00::1]", None, [], client_is_loopback=False, allow_private=True
     )[0] is True
+    # IPv4-mapped IPv6 Host literal unwraps to its RFC1918 IPv4 address and passes
+    assert middleware.host_allowed(
+        "[::ffff:10.0.0.5]", None, [], client_is_loopback=False, allow_private=True
+    )[0] is True
     # a public IP literal is NOT private -> rejected even with allow_private
     assert middleware.host_allowed(
         "8.8.8.8", None, [], client_is_loopback=False, allow_private=True
@@ -233,6 +237,7 @@ def test_is_private_client():
     assert middleware.is_private_client(req("172.16.4.4")) is True
     assert middleware.is_private_client(req("fd00::1")) is True  # IPv6 ULA
     assert middleware.is_private_client(req("fe80::1%eth0")) is True  # link-local + zone id
+    assert middleware.is_private_client(req("::ffff:192.168.1.23")) is True  # IPv4-mapped (dual-stack)
     assert middleware.is_private_client(req("8.8.8.8")) is False  # public
     assert middleware.is_private_client(req("203.0.113.7")) is False  # TEST-NET, not a LAN
     assert middleware.is_private_client(req("testclient")) is True  # in-process TestClient
@@ -270,6 +275,8 @@ def test_is_private_client_ignores_trusted_proxies(monkeypatch):
         middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="127.0.0.1/32")
     )
     assert middleware.is_private_client(req("127.0.0.1")) is False
+    # IPv4-mapped form of the same forwarder (dual-stack socket) is excluded too
+    assert middleware.is_private_client(req("::ffff:127.0.0.1")) is False
 
 
 def test_private_lan_allowed_requires_setting_and_private_peer(session, monkeypatch):

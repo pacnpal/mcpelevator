@@ -102,9 +102,15 @@ def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | Non
         value = value[1:-1]
     value = value.split("%", 1)[0]  # drop the zone index ipaddress can't read
     try:
-        return ipaddress.ip_address(value)
+        ip = ipaddress.ip_address(value)
     except ValueError:
         return None
+    # A dual-stack socket (MCPE_HOST=::) reports IPv4 clients as IPv4-mapped IPv6
+    # (::ffff:192.168.1.23). Unwrap so RFC1918 / loopback / trusted-proxy checks see the
+    # real IPv4 address instead of comparing a mapped literal that matches none of them.
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
 
 
 # Private (non-globally-routable) LAN ranges the allowance trusts. Explicit ranges,
