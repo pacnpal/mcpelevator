@@ -214,18 +214,31 @@ Managed OAuth ([secure MCP servers with Access](https://developers.cloudflare.co
    domain. (Configure an identity provider first under
    **Settings → Authentication** if you haven't; Cloudflare's own login works as a
    default IdP.)
-4. Open the application's **Advanced settings** and toggle **Managed OAuth** **on**,
-   then **Save**. This is the piece that makes Access emit OAuth discovery metadata
-   and complete the PKCE flow for Claude.
+4. Open the application's **Advanced settings** and toggle **Managed OAuth** **on**.
+   This is the piece that makes Access emit OAuth discovery metadata and complete the
+   PKCE flow for Claude.
+5. Still in **Advanced settings**, add Claude's callback to **Allowed redirect
+   URIs** — Managed OAuth uses this allowlist to vet *dynamically registered*
+   clients (Claude registers via DCR), and a client whose redirect URI isn't
+   allowed is rejected before the flow ever reaches mcpelevator. The value must be
+   `https` and may end in `/*` to match sub-paths, so add `https://claude.ai/*` and
+   `https://claude.com/*` (leave **Allow localhost/loopback clients** off unless you
+   also test from a local client). Then **Save**.
 
-Verify the gate is live: an unauthenticated request to
-`https://mcp.example.com/s/<slug>/mcp` should now return **`401`** with a
-`WWW-Authenticate` header (not your tool list, and not a `302` HTML redirect):
+Verify the gate is live — and verify it's **Access**, not mcpelevator, answering.
+This matters because mcpelevator's own `bearer` provider *also* returns
+`401 WWW-Authenticate: Bearer` (with **no** `resource_metadata`), so a bare 401 is
+**not** proof Access is in front. Require the Cloudflare discovery pointer
+specifically:
 
 ```bash
 curl -i https://mcp.example.com/s/<slug>/mcp
-# expect: HTTP/2 401 ... www-authenticate: Bearer resource_metadata="https://.../.well-known/..."
+# Access is live  → 401 with: www-authenticate: Bearer resource_metadata="https://<your-team>.cloudflareaccess.com/cdn-cgi/access/.well-known/oauth-protected-resource"
+# bare Bearer 401 → you're hitting mcpelevator directly; Access is NOT protecting the hostname — fix the app before Step 4
 ```
+
+Do not proceed to Step 4 (and never switch a server to `none`) until you see the
+`resource_metadata=`/`.well-known` marker, not just any `WWW-Authenticate: Bearer`.
 
 ### Step 4 — Choose how Access reaches mcpelevator
 
@@ -239,11 +252,16 @@ The forwarded request won't carry an mcpe bearer token, so pick one:
 - **`bearer` + header injection (defense in depth).** Keep servers on `bearer` and
   have Cloudflare add the header *after* the Access gate. The simplest grounded way
   is a [Request Header Transform Rule](https://developers.cloudflare.com/rules/transform/request-header-modification/)
-  that, for `http.host eq "mcp.example.com"`, **sets** `Authorization` to
-  `Bearer <YOUR_MCPE_TOKEN>` (a Worker bound to the route with the token as a
-  secret is the more secret-safe alternative). ⚠️ This only helps because Access
-  already gated the hostname; never put the injection on an ungated public hostname,
-  or a direct hit gets the token injected and bypasses OAuth.
+  that **sets** `Authorization` to `Bearer <YOUR_MCPE_TOKEN>` (a Worker bound to the
+  route with the token as a secret is the more secret-safe alternative). ⚠️ **Scope
+  the rule to the proxy routes only** — match
+  `http.host eq "mcp.example.com" and starts_with(http.request.uri.path, "/s/")`, not
+  the bare host. A host-only rule also overwrites `Authorization` on `/api/*`, and
+  the control plane only accepts `control`-scoped tokens — so injecting a per-server
+  proxy token there returns `wrong_scope`/403 and **locks you out of Settings via the
+  public URL**. ⚠️ Also note this only helps because Access already gated the
+  hostname; never put the injection on an ungated public hostname, or a direct hit
+  gets the token injected and bypasses OAuth.
 
 ### Step 5 — Add the connector in Claude
 
