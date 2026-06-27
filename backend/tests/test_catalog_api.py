@@ -142,9 +142,11 @@ _OFFICIAL_LIST_MULTIVERSION = {
 
 
 def test_official_list_dedupes_to_latest_version(monkeypatch):
-    _stub(monkeypatch, {"registry.modelcontextprotocol.io/v0.1/servers": _OFFICIAL_LIST_MULTIVERSION})
+    calls = _stub(monkeypatch, {"registry.modelcontextprotocol.io/v0.1/servers": _OFFICIAL_LIST_MULTIVERSION})
     with TestClient(app) as c:
         body = c.get("/api/catalog/servers", headers=LOOPBACK).json()
+        # Upstream is asked for latest-only; dedupe still collapses any residual dups.
+        assert calls[0][1].get("version") == "latest"
         assert len(body["servers"]) == 1
         assert body["servers"][0]["version"] == "1.0.1"
 

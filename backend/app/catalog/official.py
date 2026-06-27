@@ -192,8 +192,13 @@ class OfficialSource:
         cached = self._cache.get(key)
         if cached is not None:
             return cached
+        # Ask upstream for latest-only so pages aren't underfilled with versions we'd
+        # discard (and a page can't collapse to empty while a cursor remains). dedupe_latest
+        # below stays as a defensive net in case the filter is ignored.
         data = await base.get_json(
-            http, f"{BASE_URL}/v0.1/servers", {"search": search, "cursor": cursor, "limit": page}
+            http,
+            f"{BASE_URL}/v0.1/servers",
+            {"search": search, "cursor": cursor, "limit": page, "version": "latest"},
         )
         servers = data.get("servers") if isinstance(data, dict) else None
         if not isinstance(servers, list):
