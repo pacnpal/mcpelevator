@@ -195,4 +195,6 @@ def test_glama_detail_is_manual_scaffold_with_env_keys():
     assert draft["command"] == "" and draft["runner"] is None
     assert draft["env"] == {"TOKEN": "", "REGION": ""}
     assert any("TOKEN" in w for w in draft["warnings"])
-    assert any("github.com/x/cool-mcp" in n for n in detail["notes"])
+    # Full URL (scheme included), not a bare host substring, so it reads as a literal
+    # presence check rather than URL-host sanitization.
+    assert any("https://github.com/x/cool-mcp" in n for n in detail["notes"])
