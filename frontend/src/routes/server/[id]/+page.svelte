@@ -43,12 +43,20 @@
 	}
 
 	async function load(silent = false) {
+		// Capture the id this request is for. A clone navigates /server/[id] ->
+		// /server/[id] (same route, reused component), so an in-flight request from
+		// the source page (initial load or silent poll) can resolve *after* the
+		// copy's load — drop it instead of clobbering `server` with the source.
+		const requestedId = id;
 		if (!silent) loadState = 'loading';
 		try {
-			server = await getServer(id);
+			const result = await getServer(requestedId);
+			if (requestedId !== id) return; // route changed mid-flight; stale response
+			server = result;
 			loadState = 'ready';
 			loadError = null;
 		} catch (err) {
+			if (requestedId !== id) return;
 			if (!silent) {
 				loadState = 'error';
 				loadError = errorMessage(err);
