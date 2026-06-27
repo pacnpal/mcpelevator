@@ -53,6 +53,21 @@ def test_import_creates_stdio_and_remote(session):
     assert set(reasons) == {"nocmd"}
 
 
+def test_import_skips_malformed_entries_without_crashing(session):
+    # A non-mapping `headers` makes dict() raise TypeError; the import must skip the
+    # entry (not 500) and still create the valid ones.
+    data = {
+        "mcpServers": {
+            "ok": {"command": "npx", "args": []},
+            "badheaders": {"url": "https://x/mcp", "headers": 5},
+            "badenv": {"command": "npx", "env": "nope"},
+        }
+    }
+    created, skipped = service.import_mcp_servers(session, data)
+    assert {c.name for c in created} == {"ok"}
+    assert {s["name"] for s in skipped} == {"badheaders", "badenv"}
+
+
 def test_import_accepts_bare_map(session):
     created, skipped = service.import_mcp_servers(session, {"m": {"command": "npx", "args": []}})
     assert len(created) == 1 and created[0].runner == "npx"

@@ -94,6 +94,12 @@ def test_remote_server_rejects_non_url(session):
         service.create_server(session, name="R", runner="remote", command="not-a-url")
 
 
+def test_remote_server_accepts_uppercase_scheme(session):
+    # URL schemes are case-insensitive — HTTPS:// must not be rejected.
+    s = service.create_server(session, name="R", runner="remote", command="HTTPS://x/mcp")
+    assert s.runner == "remote"
+
+
 def test_remote_server_rejects_bad_transport(session):
     with pytest.raises(ValueError):
         service.create_server(

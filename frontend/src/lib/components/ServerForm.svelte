@@ -87,7 +87,11 @@
 			extra0 = args0.slice(1).join('\n');
 		}
 		// remote stores [transport] in args (command holds the upstream URL).
-		const transport0 = runner0 === 'remote' ? (args0[0] ?? 'streamable-http') : 'streamable-http';
+		// Canonicalize to a value the <select> actually offers: anything that isn't
+		// 'sse' (incl. the 'http' alias the backend accepts) maps to 'streamable-http',
+		// so the dropdown never renders blank for an imported/aliased transport.
+		const transport0 =
+			runner0 === 'remote' && args0[0] === 'sse' ? 'sse' : 'streamable-http';
 		return {
 			name: init.name ?? '',
 			slug: init.slug ?? '',

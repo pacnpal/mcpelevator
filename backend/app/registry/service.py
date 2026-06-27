@@ -39,7 +39,8 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
     ``config_hash`` — is deterministic. Raises ``ValueError`` on a bad URL/transport.
     """
     url = (command or "").strip()
-    if not (url.startswith("http://") or url.startswith("https://")):
+    # URL schemes are case-insensitive (RFC 3986) — accept HTTPS:// etc.
+    if not url.lower().startswith(("http://", "https://")):
         raise ValueError("a remote server's command must be an http(s):// URL")
     raw = str(args[0]).strip().lower() if args else _DEFAULT_REMOTE_TRANSPORT
     transport = _REMOTE_TRANSPORT_ALIASES.get(raw)
@@ -308,7 +309,9 @@ def import_mcp_servers(session: Session, data: dict) -> tuple[list[Server], list
                         enabled=False,
                     )
                 )
-            except ValueError as exc:
+            # A malformed entry (e.g. non-mapping `headers`/`env` → dict() raises
+            # TypeError, or a bad URL/transport → ValueError) is skipped, never fatal.
+            except (ValueError, TypeError) as exc:
                 skipped.append({"name": str(name), "reason": str(exc)})
             continue
         command = entry.get("command")
@@ -328,6 +331,6 @@ def import_mcp_servers(session: Session, data: dict) -> tuple[list[Server], list
                     enabled=False,
                 )
             )
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:
             skipped.append({"name": str(name), "reason": str(exc)})
     return created, skipped
