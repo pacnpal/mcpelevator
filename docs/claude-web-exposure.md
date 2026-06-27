@@ -12,16 +12,17 @@ pick.
 >   **no field for a static bearer token or custom headers**.
 > - mcpelevator v1 ships `none` and `bearer` auth, **not OAuth**. So Claude web
 >   cannot send the bearer token that `/s/<slug>/mcp` expects.
-> - **Path A** (claude.ai web): public HTTPS tunnel **+ an OAuth-terminating edge**.
-> - **Path B** (Claude Code / Desktop / mobile): public HTTPS tunnel **+
->   mcpelevator's built-in bearer auth**. Simplest, works today.
+> - **Path A** (claude.ai web **and mobile**): public HTTPS tunnel **+ an
+>   OAuth-terminating edge**.
+> - **Path B** (Claude Code / Desktop): public HTTPS tunnel **+ mcpelevator's
+>   built-in bearer auth**. Simplest, works today.
 
 ## The constraint, in one picture
 
-```
-Claude Code / Desktop / mobile ──┐  can send Authorization: Bearer  ──►  Path B
-                                 │
-claude.ai web ───────────────────┘  OAuth or no-auth ONLY (no headers) ──►  Path A
+```text
+Claude Code / Desktop ────────────┐  can send Authorization: Bearer  ──►  Path B
+                                  │
+claude.ai web / mobile app ───────┘  OAuth or no-auth ONLY (no headers) ──►  Path A
                                           │
                                           ▼
                           public HTTPS endpoint (Anthropic's IPs dial OUT to it)
@@ -90,35 +91,45 @@ reachable.
 
 This is the path if you specifically want the connector to work in the **browser**
 (and mobile) at claude.ai. Because Claude web demands OAuth and mcpelevator doesn't
-speak it, you put an **OAuth-terminating reverse proxy** in front. It handles the
-OAuth 2.1 + PKCE login Claude initiates, then forwards authenticated requests to
-mcpelevator's `/s/<slug>/mcp` (injecting the bearer mcpelevator expects, or running
-the server with `none` auth behind a network it fully controls).
+speak it, you put an **OAuth-terminating edge** in front. It handles the OAuth 2.1 +
+PKCE login Claude initiates, then forwards the authenticated request to mcpelevator's
+`/s/<slug>/mcp`. **Important:** that forwarded request carries the *edge's* identity
+(e.g. Cloudflare's `Cf-Access-Jwt-Assertion`), **not** the `Authorization: Bearer
+<mcpe token>` that mcpelevator's `bearer` provider checks (`backend/app/auth/bearer.py`).
+So behind the edge you must either run the target server with **`none`** (the edge is
+the sole gate) **or** add a component that injects the mcpe bearer — see step 1.
 
 Typical building blocks:
 
 - **Cloudflare Tunnel (`cloudflared`)** — gives a public HTTPS hostname with a valid
   cert and **no inbound ports opened** on your host. It dials out to Cloudflare and
   to your local `127.0.0.1:8080`.
-- **Cloudflare Access** in front of it as the OAuth provider — e.g. an **MCP server
-  portal** or **Access for SaaS**. Cloudflare Access supports both unauthenticated
-  MCP servers and OAuth-secured ones, and issues the tokens Claude's connector flow
-  needs.
+- **An OAuth-terminating edge that speaks OAuth *on mcpelevator's behalf*** (since
+  mcpelevator v1 doesn't): Cloudflare's **Managed OAuth / MCP server portal**, or a
+  self-hosted OAuth shim/proxy. Note that plain **Access for SaaS** is *not* this —
+  it targets apps that implement their own OAuth flow, which mcpelevator doesn't, so
+  it leaves no authorization/token endpoint for Claude to complete against.
 
 Steps (high level):
 
-1. Do the **Shared baseline** above. For Path A you may run the target server with
-   `bearer` (the proxy injects the header) or `none` if and only if the proxy fully
-   gates access.
+1. Do the **Shared baseline** above, then pick how the edge reaches the backend,
+   since the edge forwards its own auth, not the mcpe token: **(a)** run the target
+   server with **`none`** and let the OAuth edge be the sole gate (simplest), or
+   **(b)** keep it on `bearer` and add a Worker / transform / reverse-proxy step that
+   injects `Authorization: Bearer <mcpe token>` before the request hits `/s/<slug>/mcp`.
 2. Stand up the tunnel: `cloudflared tunnel ...` mapping `https://mcp.example.com`
    → `http://127.0.0.1:8080`. Set `MCPE_PUBLIC_BASE_URL` to the **full absolute URL
    including the scheme** (`https://mcp.example.com`, not the bare hostname — it's
    parsed as a URL), and add just the **hostname** (`mcp.example.com`) to
    `allowed_hosts`.
-3. Put Cloudflare Access (Managed OAuth / MCP portal) in front of the public
-   hostname and allowlist the **claude.ai and claude.com OAuth callback URLs**.
-4. In claude.ai → **Settings → Connectors → Add custom connector**, paste
-   `https://mcp.example.com/s/<slug>/mcp`, and complete the OAuth login.
+3. Put the OAuth edge (Cloudflare Managed OAuth / MCP portal, or your shim) in front
+   of the public hostname; register mcpelevator's
+   `https://mcp.example.com/s/<slug>/mcp` as the **backend origin** inside it, and
+   allowlist the **claude.ai and claude.com OAuth callback URLs**.
+4. In claude.ai → **Settings → Connectors → Add custom connector**, paste the URL the
+   **edge** exposes to clients — for an MCP server portal that's the **portal URL**
+   (`https://<portal-domain>/mcp`), *not* mcpelevator's origin `/s/<slug>/mcp` path —
+   then complete the OAuth login.
 
 > ⚠️ **Known caveat (verify before committing to this path).** As of mid-2026 there
 > is an open report that claude.ai **web and mobile** fail to connect to Cloudflare
@@ -129,13 +140,15 @@ Steps (high level):
 > protected-resource metadata, or fall back to Path B for now. Test with a throwaway
 > server before relying on it.
 
-## Path B — Claude Code / Desktop / mobile (public HTTPS + bearer)
+## Path B — Claude Code / Desktop (public HTTPS + bearer)
 
 This is the **simplest secure path that works today**, and it's the right one if
-"web" was loose and you'd accept Claude Code, Claude Desktop, or the mobile app.
-These surfaces **can send a static `Authorization: Bearer` header**, which is
-exactly what mcpelevator's built-in `bearer` provider checks — so no OAuth layer is
-needed.
+"web" was loose and you'd accept Claude Code or Claude Desktop. These two **can send
+a static `Authorization: Bearer` header** (Code natively; Desktop via the local
+`mcp-remote` bridge), which is precisely what mcpelevator's built-in `bearer`
+provider checks — so no OAuth layer is needed. The **mobile** app is deliberately
+*not* here: like the browser, it's a remote connector dialed from Anthropic's cloud
+with nowhere to set a header, so mobile needs **Path A**.
 
 1. Do the **Shared baseline** above, with each server's auth set to `bearer` and a
    token minted (scope `all` or a single server).
@@ -159,20 +172,21 @@ needed.
 | Capability | **Path A — OAuth edge** | **Path B — bearer** |
 |---|---|---|
 | Works in claude.ai **web browser** | ✅ (subject to the caveat above) | ❌ (web can't send a bearer) |
-| Works in Claude **Code / Desktop / mobile** | ✅ | ✅ |
+| Works in Claude **mobile app** | ✅ (subject to the caveat above) | ❌ (mobile can't send a bearer) |
+| Works in Claude **Code / Desktop** | ✅ | ✅ |
 | Auth mechanism | OAuth 2.1 + PKCE at the edge | mcpelevator `bearer` token |
 | Setup effort | Higher (tunnel **+** OAuth provider) | Lower (tunnel only) |
 | Maturity today | Edge bug reported for web/mobile + Cloudflare Access | Stable, fully supported by mcpelevator v1 |
 
-**Rule of thumb:** if you truly need the **browser** connector, take **Path A** and
-test the OAuth edge with a throwaway server first. If Claude Code / Desktop / mobile
-is acceptable, take **Path B** — it's secure, simpler, and uses only what
-mcpelevator already ships.
+**Rule of thumb:** if you need the **browser or mobile** connector, take **Path A**
+and test the OAuth edge with a throwaway server first. If Claude Code / Desktop is
+acceptable, take **Path B** — it's secure, simpler, and uses only what mcpelevator
+already ships.
 
 ## Security checklist before you go live
 
 - [ ] Published port is still `127.0.0.1:8080` (tunnel does the public part).
-- [ ] `MCPE_PUBLIC_BASE_URL` set to the HTTPS hostname; that host is in `allowed_hosts`.
+- [ ] `MCPE_PUBLIC_BASE_URL` set to the full HTTPS URL (e.g. `https://mcp.example.com`); that host is in `allowed_hosts`.
 - [ ] `bind_mode = expose`; control-plane auth enforced (admin token minted).
 - [ ] `MCPE_ADMIN_TOKEN` set as break-glass (so you can't lock yourself out).
 - [ ] Per-server auth is `bearer` (Path B) or fronted by the OAuth edge (Path A) — never an

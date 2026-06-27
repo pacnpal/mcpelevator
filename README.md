@@ -73,8 +73,8 @@ Then point any MCP client at `http://127.0.0.1:8080/s/memory/mcp`.
 ## Security
 
 > **Exposing this to Claude?** See [docs/claude-web-exposure.md](docs/claude-web-exposure.md)
-> for the secure paths — and why claude.ai **web** (OAuth-only) differs from Claude
-> Code / Desktop / mobile (which can use mcpelevator's bearer auth directly).
+> for the secure paths — and why claude.ai **web** and **mobile** (OAuth-only) differ
+> from Claude Code / Desktop (which can use mcpelevator's bearer auth directly).
 
 Two independent layers guard the system, and a request must pass both.
 
