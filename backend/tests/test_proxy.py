@@ -198,6 +198,118 @@ def test_streams_sse_and_sanitizes_headers():
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 
 
+def test_forwards_delete_method_to_backend():
+    """DELETE must be forwarded just like POST — the method set in _PROXY_METHODS."""
+    with TestClient(app) as client:
+        srv = _create_server(client)
+        try:
+            _point_proxy_at_upstream(client)
+            r = client.delete(f"/s/{srv['slug']}/resource/42", headers=LOOPBACK)
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["method"] == "DELETE"
+            assert data["path"] == "/resource/42"
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_forwards_get_with_query_string():
+    """Query parameters must survive the proxy hop intact."""
+    with TestClient(app) as client:
+        srv = _create_server(client)
+        try:
+            _point_proxy_at_upstream(client)
+            r = client.get(f"/s/{srv['slug']}/items?foo=bar&baz=1", headers=LOOPBACK)
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["method"] == "GET"
+            assert data["path"] == "/items"
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_none_auth_server_passes_without_token():
+    """A server configured with auth_provider='none' must accept requests that
+    carry no Authorization header at all (the default for new servers)."""
+    with TestClient(app) as client:
+        srv = _create_server(client, auth="none")
+        try:
+            _point_proxy_at_upstream(client)
+            # no Authorization header, loopback peer -> must reach the backend
+            r = client.get(f"/s/{srv['slug']}/sse", headers=LOOPBACK)
+            assert r.status_code == 200
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_server_scoped_token_accepted_for_matching_server():
+    """A token whose scope is set to a specific server.id must be accepted on
+    that server's proxy path (not only 'all'-scoped tokens are valid)."""
+    with TestClient(app) as client:
+        srv = _create_server(client, auth="bearer")
+        try:
+            _point_proxy_at_upstream(client)
+            # mint a token scoped to exactly this server's ID
+            server_id = srv["id"]
+            scoped_token = _mint_token(scope=server_id)
+            headers = {**LOOPBACK, "authorization": f"Bearer {scoped_token}"}
+            r = client.get(f"/s/{srv['slug']}/sse", headers=headers)
+            assert r.status_code == 200
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_hop_by_hop_request_headers_not_forwarded():
+    """The proxy must strip hop-by-hop headers from the outgoing request so they
+    don't leak into the upstream connection (e.g. connection, keep-alive)."""
+    received_headers: dict = {}
+
+    async def _capture(request):
+        received_headers.update(dict(request.headers))
+        return JSONResponse({"ok": True})
+
+    capture_app = Starlette(routes=[Route("/{path:path}", _capture, methods=["GET"])])
+
+    with TestClient(app) as client:
+        srv = _create_server(client)
+        try:
+            client.app.state.http = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=capture_app)
+            )
+            client.app.state.supervisor.endpoint = lambda slug: ("backend", 9000)
+            client.get(
+                f"/s/{srv['slug']}/probe",
+                headers={**LOOPBACK, "connection": "keep-alive", "keep-alive": "timeout=5"},
+            )
+            hop_by_hop = {"connection", "keep-alive", "transfer-encoding", "te", "trailers",
+                          "proxy-authenticate", "proxy-authorization", "upgrade"}
+            forwarded_lower = {k.lower() for k in received_headers}
+            assert hop_by_hop.isdisjoint(forwarded_lower), (
+                f"hop-by-hop headers leaked to upstream: "
+                f"{hop_by_hop & forwarded_lower}"
+            )
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_proxy_path_stripped_to_root_when_no_subpath():
+    """When the client requests /s/<slug>/ with an empty remainder the forwarded
+    path must be empty (or '/'), not the raw slug path."""
+    with TestClient(app) as client:
+        srv = _create_server(client)
+        try:
+            _point_proxy_at_upstream(client)
+            # trailing slash -> empty path remainder
+            r = client.get(f"/s/{srv['slug']}/", headers=LOOPBACK)
+            # The upstream echo handler returns a 200 for any path
+            assert r.status_code == 200
+            data = r.json()
+            # The slug must have been stripped; path should not contain the slug
+            assert srv["slug"] not in data["path"]
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
 @pytest.fixture(autouse=True)
 def _reset_settings():
     """Keep the shared test DB in local mode regardless of test order."""
