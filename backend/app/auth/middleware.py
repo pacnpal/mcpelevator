@@ -68,6 +68,42 @@ def _trusted_networks(raw: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6N
     return tuple(nets)
 
 
+@functools.lru_cache(maxsize=1)
+def _docker_host_ip() -> str | None:
+    """The container's default-gateway IPv4 — the Docker host as seen from inside a
+    bridge-networked container (a loopback-published port arrives from here via the
+    host's docker-proxy). Read from ``/proc/net/route`` (Linux); ``None`` when it can't
+    be determined (non-Linux, host networking, or a parse failure). Cached: the
+    container's gateway is fixed for the process lifetime."""
+    try:
+        with open("/proc/net/route") as fh:
+            for line in fh.read().splitlines()[1:]:
+                fields = line.split()
+                if len(fields) >= 3 and fields[1] == "00000000":  # the default route
+                    gw = int(fields[2], 16).to_bytes(4, "little")  # gateway, little-endian hex
+                    return str(ipaddress.IPv4Address(gw))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _is_trusted_proxy(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True when ``ip`` is a trusted forwarder: a configured ``MCPE_TRUSTED_PROXIES``
+    peer, or the auto-detected Docker host when ``MCPE_TRUST_DOCKER_HOST`` is on. Such a
+    peer is the forwarder, not the real client — so it is trusted for the loopback
+    allowance (``is_loopback_client``) but EXCLUDED from the LAN peer gate
+    (``is_private_client``), since behind SNAT it can't vouch for the real client.
+    Shared by both so the two checks can never disagree about who the forwarder is."""
+    settings = get_settings()
+    if any(ip in net for net in _trusted_networks(settings.trusted_proxies)):
+        return True
+    if settings.trust_docker_host:
+        gateway = _docker_host_ip()
+        if gateway is not None and ip == ipaddress.ip_address(gateway):
+            return True
+    return False
+
+
 def is_loopback_client(request: Request) -> bool:
     """True when the request's peer is loopback (or a configured trusted proxy).
 
@@ -75,7 +111,8 @@ def is_loopback_client(request: Request) -> bool:
     client (e.g. a Docker ``0.0.0.0`` bind reachable from the LAN), so the implicit
     loopback allowance in ``host_allowed`` is granted only to real loopback peers — or
     to a peer inside ``MCPE_TRUSTED_PROXIES`` (e.g. the Docker bridge gateway that
-    forwards a loopback-published port, where the real source is already loopback).
+    forwards a loopback-published port, where the real source is already loopback), or
+    to the auto-detected Docker host when ``MCPE_TRUST_DOCKER_HOST`` is set.
     """
     client = request.client
     if client is None:
@@ -89,7 +126,7 @@ def is_loopback_client(request: Request) -> bool:
         return client.host in {"localhost", "testclient"}
     if ip.is_loopback:
         return True
-    return any(ip in net for net in _trusted_networks(get_settings().trusted_proxies))
+    return _is_trusted_proxy(ip)
 
 
 def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -145,14 +182,15 @@ def is_private_client(request: Request) -> bool:
     is what keeps that safe — only a request that actually originates on a private
     network may use a private-IP ``Host`` to pass the guard.
 
-    A configured ``MCPE_TRUSTED_PROXIES`` forwarder is EXCLUDED, even when its own
-    address is private (the Docker bridge gateway ``172.20.0.1``) or loopback (a same-host
-    reverse proxy at ``127.0.0.1``): behind NAT/SNAT the observed peer is the forwarder,
-    which can't vouch for the real client, so trusting it would let forwarded public
-    traffic satisfy this gate. The exclusion runs FIRST, before the loopback shortcut, so a
-    loopback proxy can't slip through. The trusted-proxy convenience stays scoped to the
-    loopback allowance; LAN access needs the real client IP visible (host networking) —
-    see docker-compose.
+    A trusted forwarder is EXCLUDED, even when its own address is private (the Docker
+    bridge gateway ``172.20.0.1``) or loopback (a same-host reverse proxy at ``127.0.0.1``):
+    behind NAT/SNAT the observed peer is the forwarder, which can't vouch for the real
+    client, so trusting it would let forwarded public traffic satisfy this gate. This
+    covers both ``MCPE_TRUSTED_PROXIES`` and the auto-detected Docker host
+    (``MCPE_TRUST_DOCKER_HOST``) via the shared ``_is_trusted_proxy``. The exclusion runs
+    FIRST, before the loopback shortcut, so a loopback proxy can't slip through. The
+    trusted-proxy convenience stays scoped to the loopback allowance; LAN access needs the
+    real client IP visible (host networking) — see docker-compose.
     """
     client = request.client
     if client is None:
@@ -163,9 +201,9 @@ def is_private_client(request: Request) -> bool:
         # "localhost" can appear in some setups — neither is forgeable as a TCP source
         # by a remote client, so treat them as loopback.
         return client.host in {"localhost", "testclient"}
-    # A configured forwarder can't vouch for the real client — reject it first, even if
+    # A trusted forwarder can't vouch for the real client — reject it first, even if
     # it's loopback (same-host reverse proxy) or a private gateway.
-    if any(ip in net for net in _trusted_networks(get_settings().trusted_proxies)):
+    if _is_trusted_proxy(ip):
         return False
     return ip.is_loopback or _is_private_lan_ip(ip)
 
@@ -236,15 +274,16 @@ def host_allowed(
 
 def request_allowlist(session: Session) -> list[str]:
     """Hosts allowed beyond loopback for the Host/Origin guard: the runtime allowlist
-    (only when ``bind_mode`` is ``expose``) plus the operator-configured public host.
-    ``MCPE_PUBLIC_BASE_URL`` is an explicit "this is my URL" declaration, so its host
-    is always trusted — otherwise the advertised public URL would 403 itself before
-    the operator could add it to the allowlist."""
+    (only when ``bind_mode`` is ``expose``) plus the operator-configured public host and
+    any MCPE_ALLOWED_HOSTS. ``MCPE_PUBLIC_BASE_URL`` / ``MCPE_ALLOWED_HOSTS`` are explicit
+    "these are my origins" declarations, so their hosts are always trusted — otherwise the
+    advertised URL would 403 itself before the operator could add it to the allowlist."""
     mode = runtime_settings.bind_mode(session)
     allowed = list(runtime_settings.allowed_hosts(session)) if mode == "expose" else []
-    public = get_settings().public_host
-    if public:
-        allowed.append(public)
+    settings = get_settings()
+    if settings.public_host:
+        allowed.append(settings.public_host)
+    allowed.extend(settings.extra_allowed_hosts)
     return allowed
 
 

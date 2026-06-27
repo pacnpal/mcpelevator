@@ -127,7 +127,10 @@ def test_break_glass_admin_token(monkeypatch):
         control_plane,
         "get_settings",
         lambda: SimpleNamespace(
-            admin_token="mcpe_break_glass", base_url="http://127.0.0.1:8080", public_host=None
+            admin_token="mcpe_break_glass",
+            base_url="http://127.0.0.1:8080",
+            public_host=None,
+            extra_allowed_hosts=[],
         ),
     )
     with TestClient(app) as client:
@@ -164,6 +167,65 @@ def test_startup_bootstrap_mints_when_enforced():
         with TestClient(app):  # lifespan runs _bootstrap_control_plane_auth
             with Session(get_engine()) as s:
                 assert repo.control_token_exists(s)
+    finally:
+        _reset()
+
+
+def test_bootstrap_prints_recovery_notice_when_token_already_exists(capsys):
+    """When enforcement turns on but a control token already exists, we can't reprint
+    its plaintext — but the LAN seed promises an admin-token notice, so the bootstrap
+    must still print a notice (pointing at recovery) instead of silently swallowing it."""
+    init_db()
+    try:
+        _mint("control")  # a token already exists; its plaintext is not held here
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"control_plane_auth": "always"})
+        capsys.readouterr()  # drop anything printed during setup
+        with TestClient(app):  # lifespan runs _bootstrap_control_plane_auth
+            pass
+        out = capsys.readouterr().out
+        assert "control-plane auth is ON" in out
+        assert "An admin token already exists" in out
+        assert "Settings → Security" in out
+    finally:
+        _reset()
+
+
+def test_bootstrap_force_mints_a_fresh_token_when_env_set(monkeypatch, capsys):
+    """MCPE_MINT_ADMIN_TOKEN recovers a headless box whose admin token was lost: even
+    though a control token already exists, the bootstrap mints a fresh one and prints
+    it (existing tokens keep working — it only adds one)."""
+    from types import SimpleNamespace
+
+    from app import main
+    from app.auth import control_plane
+
+    init_db()
+    try:
+        _mint("control")  # one already exists -> ensure_control_token() would mint nothing
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"control_plane_auth": "always"})
+            before = len([t for t in repo.list_tokens(s) if t.scope == "control"])
+        monkeypatch.setattr(
+            control_plane,
+            "get_settings",
+            lambda: SimpleNamespace(public_host=None, admin_token=None, extra_allowed_hosts=[]),
+        )
+        monkeypatch.setattr(
+            main,
+            "get_settings",
+            lambda: SimpleNamespace(
+                admin_token=None, mint_admin_token=True, base_url="http://127.0.0.1:8080"
+            ),
+        )
+        capsys.readouterr()  # drop setup output
+        main._bootstrap_control_plane_auth()
+        out = capsys.readouterr().out
+        with Session(get_engine()) as s:
+            after = len([t for t in repo.list_tokens(s) if t.scope == "control"])
+        assert after == before + 1  # a fresh token was minted despite one already existing
+        assert "Admin token (shown once" in out
+        assert "MCPE_MINT_ADMIN_TOKEN" in out
     finally:
         _reset()
 
@@ -292,14 +354,25 @@ def test_public_base_url_enforces_under_auto(monkeypatch):
             runtime_settings.write(s, {"bind_mode": "local", "control_plane_auth": "auto"})
             monkeypatch.setattr(
                 control_plane, "get_settings",
-                lambda: SimpleNamespace(public_host=None, admin_token=None),
+                lambda: SimpleNamespace(public_host=None, admin_token=None, extra_allowed_hosts=[]),
             )
             assert control_plane.enforcement_enabled(s) is False  # local + no public URL -> zero-config
             monkeypatch.setattr(
                 control_plane, "get_settings",
-                lambda: SimpleNamespace(public_host="mcp.example.com", admin_token=None),
+                lambda: SimpleNamespace(
+                    public_host="mcp.example.com", admin_token=None, extra_allowed_hosts=[]
+                ),
             )
             assert control_plane.enforcement_enabled(s) is True  # public URL -> enforced
+            # MCPE_ALLOWED_HOSTS alone (no public URL) also makes the box reachable off-host
+            # via that hostname, so `auto` must enforce too — the P1 fix.
+            monkeypatch.setattr(
+                control_plane, "get_settings",
+                lambda: SimpleNamespace(
+                    public_host=None, admin_token=None, extra_allowed_hosts=["mcp.example.com"]
+                ),
+            )
+            assert control_plane.enforcement_enabled(s) is True  # env-allowed host -> enforced
     finally:
         _reset()
 

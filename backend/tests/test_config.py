@@ -25,3 +25,23 @@ def test_base_url_brackets_ipv6_literal_host():
 def test_public_host_extracts_configured_url():
     assert Settings(public_base_url="https://mcp.example.com:8443/").public_host == "mcp.example.com"
     assert Settings(public_base_url=None).public_host is None
+
+
+def test_extra_allowed_hosts_parses_normalizes_and_dedupes():
+    s = Settings(allowed_hosts="mcp.example.com, https://Other.test:8443 , mcp.example.com, ")
+    # comma-split, trimmed, reduced to bare lowercased hostnames, empties dropped, deduped
+    assert s.extra_allowed_hosts == ["mcp.example.com", "other.test"]
+    assert Settings(allowed_hosts="").extra_allowed_hosts == []
+
+
+def test_env_values_tolerate_surrounding_whitespace(monkeypatch):
+    # A stray trailing space (compose/.env line) or newline (mounted secret file)
+    # must not blow up bootstrap — pydantic's strict bool/path parsers would
+    # otherwise reject "true " before the app can start.
+    monkeypatch.setenv("MCPE_ALLOW_PRIVATE_LAN", "true ")
+    monkeypatch.setenv("MCPE_ADMIN_TOKEN", " secret\n")
+    monkeypatch.setenv("MCPE_HOST", " 0.0.0.0 ")
+    settings = Settings(_env_file=None)
+    assert settings.allow_private_lan is True
+    assert settings.admin_token == "secret"
+    assert settings.host == "0.0.0.0"

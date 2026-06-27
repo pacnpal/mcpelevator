@@ -106,7 +106,9 @@ def test_request_allowlist_trusts_configured_public_host(session, monkeypatch):
     # local mode + a configured public host -> the public host is allowed, so the
     # advertised public URL doesn't 403 itself before it can be allowlisted.
     monkeypatch.setattr(
-        middleware, "get_settings", lambda: SimpleNamespace(public_host="mcp.example.com")
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(public_host="mcp.example.com", extra_allowed_hosts=[]),
     )
     allowed = middleware.request_allowlist(session)
     assert "mcp.example.com" in allowed
@@ -254,7 +256,9 @@ def test_is_private_client_ignores_trusted_proxies(monkeypatch):
     # A trusted proxy may forward PUBLIC traffic, so it must not satisfy the LAN
     # peer gate (unlike is_loopback_client, which trusts it for the loopback allowance).
     monkeypatch.setattr(
-        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="8.8.8.8/32")
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(trusted_proxies="8.8.8.8/32", trust_docker_host=False),
     )
     assert middleware.is_loopback_client(req("8.8.8.8")) is True  # trusted for loopback
     assert middleware.is_private_client(req("8.8.8.8")) is False  # but NOT for the LAN gate
@@ -263,7 +267,9 @@ def test_is_private_client_ignores_trusted_proxies(monkeypatch):
     # excluded — it can't vouch for the real client behind SNAT — while a real LAN peer
     # in the same range that is not the forwarder still qualifies.
     monkeypatch.setattr(
-        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="172.20.0.1/32")
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(trusted_proxies="172.20.0.1/32", trust_docker_host=False),
     )
     assert middleware.is_private_client(req("172.20.0.1")) is False  # the gateway/forwarder
     assert middleware.is_private_client(req("172.20.0.5")) is True  # a real LAN peer
@@ -272,18 +278,79 @@ def test_is_private_client_ignores_trusted_proxies(monkeypatch):
     # runs before the loopback shortcut, so a public client proxied over localhost
     # can't pass the LAN gate.
     monkeypatch.setattr(
-        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="127.0.0.1/32")
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(trusted_proxies="127.0.0.1/32", trust_docker_host=False),
     )
     assert middleware.is_private_client(req("127.0.0.1")) is False
     # IPv4-mapped form of the same forwarder (dual-stack socket) is excluded too
     assert middleware.is_private_client(req("::ffff:127.0.0.1")) is False
 
 
+def test_is_loopback_client_trusts_detected_docker_host(monkeypatch):
+    from types import SimpleNamespace
+
+    def req(peer):
+        return SimpleNamespace(client=SimpleNamespace(host=peer))
+
+    monkeypatch.setattr(middleware, "_docker_host_ip", lambda: "172.17.0.1")
+
+    # MCPE_TRUST_DOCKER_HOST off -> the detected gateway is just another off-host peer
+    monkeypatch.setattr(
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(trusted_proxies="", trust_docker_host=False),
+    )
+    assert middleware.is_loopback_client(req("172.17.0.1")) is False
+
+    # on -> the auto-detected Docker host is trusted for the loopback allowance, but a
+    # different peer in the same subnet is not (only the gateway itself qualifies)
+    monkeypatch.setattr(
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(trusted_proxies="", trust_docker_host=True),
+    )
+    assert middleware.is_loopback_client(req("172.17.0.1")) is True
+    assert middleware.is_loopback_client(req("172.17.0.9")) is False
+    # ...but the trusted gateway is a forwarder, so it must NOT satisfy the LAN peer gate
+    # (else SNATed public traffic from the Docker host could pass allow_private_lan),
+    # while a real private-LAN peer that isn't the gateway still qualifies.
+    assert middleware.is_private_client(req("172.17.0.1")) is False  # the gateway/forwarder
+    assert middleware.is_private_client(req("172.17.0.9")) is True  # a real LAN peer
+
+
+def test_docker_host_ip_parses_default_route(monkeypatch, tmp_path):
+    import builtins
+
+    # /proc/net/route stores the gateway as little-endian hex; 0100007F == 127.0.0.1,
+    # and the default route is the row whose destination is 00000000.
+    route = (
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+        "eth0\t0000FEA9\t00000000\t0001\t0\t0\t0\t0000FFFF\n"  # on-link, no gateway
+        "eth0\t00000000\t0100007F\t0003\t0\t0\t0\t00000000\n"  # default -> 127.0.0.1
+    )
+    real_open = builtins.open
+    monkeypatch.setattr(
+        builtins,
+        "open",
+        lambda f, *a, **k: real_open(route_file, *a, **k) if f == "/proc/net/route" else real_open(f, *a, **k),
+    )
+    route_file = tmp_path / "route"
+    route_file.write_text(route)
+    middleware._docker_host_ip.cache_clear()
+    try:
+        assert middleware._docker_host_ip() == "127.0.0.1"
+    finally:
+        middleware._docker_host_ip.cache_clear()
+
+
 def test_private_lan_allowed_requires_setting_and_private_peer(session, monkeypatch):
     from types import SimpleNamespace
 
     monkeypatch.setattr(
-        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="")
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(trusted_proxies="", trust_docker_host=False),
     )
 
     def req(peer):
@@ -319,12 +386,15 @@ def test_is_loopback_client_trusts_configured_proxy(monkeypatch):
     def req(peer):
         return SimpleNamespace(client=SimpleNamespace(host=peer))
 
-    # Without a trusted-proxy config, the compose gateway peer is NOT loopback.
+    # Without a trusted-proxy config, the compose gateway peer is NOT loopback
+    # (trust_docker_host is off by default, so the gateway isn't consulted).
     assert middleware.is_loopback_client(req("172.20.0.1")) is False
     # With MCPE_TRUSTED_PROXIES = the gateway /32 (the compose default), only that
     # exact address is trusted — a sibling container on the same network is not.
     monkeypatch.setattr(
-        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="172.20.0.1/32")
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(trusted_proxies="172.20.0.1/32", trust_docker_host=False),
     )
     assert middleware.is_loopback_client(req("172.20.0.1")) is True  # the gateway
     assert middleware.is_loopback_client(req("172.20.0.5")) is False  # a sibling container

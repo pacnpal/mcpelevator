@@ -24,7 +24,12 @@ from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
 from app.api import tokens as tokens_api
-from app.auth.control_plane import ensure_control_token, enforcement_enabled, require_control_plane
+from app.auth.control_plane import (
+    ensure_control_token,
+    enforcement_enabled,
+    mint_control_token,
+    require_control_plane,
+)
 from app.auth.middleware import (
     host_allowed,
     is_loopback_client,
@@ -60,29 +65,46 @@ def _bootstrap_private_lan() -> None:
             print(
                 f"[mcpelevator] MCPE_ALLOW_PRIVATE_LAN set — LAN access enabled. "
                 f"Log in from a LAN device at  http://<this-box-LAN-IP>:{port}/login  "
-                f"(admin token printed below).",
+                f"(see the admin-token notice below).",
                 flush=True,
             )
 
 
 def _bootstrap_control_plane_auth() -> None:
-    """On boot, if control-plane auth is enforced and no admin credential exists,
-    mint one control token and print it once so a headless/compose deployment is
-    not locked out. Idempotent across restarts (mints only when none exists); when
-    MCPE_ADMIN_TOKEN is set it is the credential and nothing is minted."""
+    """On boot, if control-plane auth is enforced, make sure the operator has a usable
+    admin credential and is told how to get it — so a headless/compose deployment is
+    not locked out. Mints one control token when none exists (idempotent across
+    restarts); when one already exists we can't reprint its plaintext, so point at
+    recovery instead of minting a second on every boot; when MCPE_ADMIN_TOKEN is set
+    it is the credential and nothing is minted."""
     with Session(get_engine()) as session:
         if not enforcement_enabled(session):
             return
         if get_settings().admin_token:
             print("[mcpelevator] control-plane auth is ON, using MCPE_ADMIN_TOKEN", flush=True)
             return
-        token = ensure_control_token(session)
-    if not token:
-        return
+        forced = get_settings().mint_admin_token
+        token = mint_control_token(session) if forced else ensure_control_token(session)
+    if token:
+        credential = f"\n  Admin token (shown once, store it now):  {token}"
+        if forced:
+            credential += (
+                "\n  (minted via MCPE_MINT_ADMIN_TOKEN — unset it after saving, or a new"
+                "\n  token is minted on every restart.)"
+            )
+    else:
+        # A control token already exists (a prior boot minted it, or it was created in
+        # the UI) but we don't hold its plaintext to reprint. Don't silently swallow
+        # the notice — the LAN seed above promised one — and don't rotate, which would
+        # invalidate tokens already in use; point the operator at recovery instead.
+        credential = (
+            "\n  An admin token already exists — log in with the one you saved, set"
+            "\n  MCPE_ADMIN_TOKEN to a known value, or rotate it from Settings → Security."
+        )
     bar = "=" * 72
     print(
         f"\n{bar}\n  mcpelevator control-plane auth is ON."
-        f"\n  Admin token (shown once, store it now):  {token}"
+        f"{credential}"
         f"\n  Log in at:  {get_settings().base_url}/login\n{bar}\n",
         flush=True,
     )
