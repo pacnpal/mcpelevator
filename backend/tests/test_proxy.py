@@ -53,9 +53,16 @@ async def _upstream_sse(request):
 
 
 async def _upstream_echo(request):
-    """Echo method + path + body so forwarding of each can be asserted."""
+    """Echo method + path + query + body so forwarding of each can be asserted."""
     body = (await request.body()).decode()
-    return JSONResponse({"method": request.method, "path": request.url.path, "body": body})
+    return JSONResponse(
+        {
+            "method": request.method,
+            "path": request.url.path,
+            "query": request.url.query,
+            "body": body,
+        }
+    )
 
 
 _upstream = Starlette(
@@ -224,6 +231,7 @@ def test_forwards_get_with_query_string():
             data = r.json()
             assert data["method"] == "GET"
             assert data["path"] == "/items"
+            assert data["query"] == "foo=bar&baz=1"  # query survives the proxy hop
         finally:
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 
@@ -277,10 +285,14 @@ def test_hop_by_hop_request_headers_not_forwarded():
                 transport=httpx.ASGITransport(app=capture_app)
             )
             client.app.state.supervisor.endpoint = lambda slug: ("backend", 9000)
-            client.get(
+            r = client.get(
                 f"/s/{srv['slug']}/probe",
                 headers={**LOOPBACK, "connection": "keep-alive", "keep-alive": "timeout=5"},
             )
+            # Prove the request actually reached the upstream — otherwise an early
+            # 4xx/5xx leaves received_headers empty and the strip check passes vacuously.
+            assert r.status_code == 200, r.text
+            assert received_headers
             forwarded_lower = {k.lower() for k in received_headers}
             # The proxy strips the *client's* hop-by-hop headers before forwarding.
             # `keep-alive` is the clean probe: the client sent it and httpx never adds
@@ -308,8 +320,8 @@ def test_proxy_path_stripped_to_root_when_no_subpath():
             # The upstream echo handler returns a 200 for any path
             assert r.status_code == 200
             data = r.json()
-            # The slug must have been stripped; path should not contain the slug
-            assert srv["slug"] not in data["path"]
+            # The slug is stripped and the remainder normalizes to exactly "/"
+            assert data["path"] == "/"
         finally:
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 

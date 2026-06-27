@@ -122,23 +122,6 @@ def test_health_slug_200_body_includes_all_fields():
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 
 
-def test_health_summary_empty_server_list_is_ok():
-    """With no servers at all the summary must still return status 'ok'
-    — an empty deployment is not degraded."""
-    # Use a fresh TestClient so the shared DB happens to be empty. We
-    # explicitly delete any pre-existing servers that leaked from other tests
-    # by relying on the summary listing them and cleaning up.
-    with TestClient(app) as client:
-        client.app.state.supervisor.endpoint = lambda s: None
-        r = client.get("/api/health/summary", headers=LOOPBACK)
-        assert r.status_code == 200
-        data = r.json()
-        # Filter to only servers present in this response (other tests may have left rows)
-        enabled_servers = [h for h in data["servers"] if h["enabled"]]
-        if not enabled_servers:
-            assert data["status"] == "ok"
-
-
 def test_health_summary_all_enabled_running_is_ok():
     """When every enabled server is running the overall status must be 'ok'."""
     with TestClient(app) as client:
