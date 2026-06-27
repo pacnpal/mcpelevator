@@ -415,8 +415,9 @@ test with a throwaway server first. If Claude Code / Desktop is acceptable, take
 - [ ] `MCPE_PUBLIC_BASE_URL` set to the full HTTPS URL (e.g. `https://mcp.example.com`); that host is in `allowed_hosts`.
 - [ ] `bind_mode = expose`; control-plane auth enforced (admin token minted).
 - [ ] `MCPE_ADMIN_TOKEN` set as break-glass (so you can't lock yourself out).
-- [ ] **Path A:** an Access self-hosted application guards the hostname **and** Managed OAuth is **on**; a `curl` to `/s/<slug>/mcp` returns `401` with `WWW-Authenticate`, not your tool list.
-- [ ] **Path A with `bearer`:** the header-injection rule fires **only** behind the Access gate, never on an ungated hostname.
+- [ ] **Path A:** an Access self-hosted application guards the hostname **and** Managed OAuth is **on**; a `curl` to `/s/<slug>/mcp` returns `401` whose `WWW-Authenticate` carries the Cloudflare `resource_metadata=`/`.well-known` marker (a *bare* `Bearer` challenge means mcpelevator is answering directly — Access is **not** in front).
+- [ ] **Path A:** Managed OAuth **Allowed redirect URIs** include Claude's callbacks (`https://claude.ai/*`, `https://claude.com/*`).
+- [ ] **Path A with `bearer`:** the header-injection rule is scoped to `/s/` routes and fires **only** behind the Access gate, never on an ungated hostname or on `/api/*`.
 - [ ] **Path B:** per-server auth is `bearer` with a minted token; no server is reachable unauthenticated from the public URL.
 - [ ] `MCPE_TRUSTED_PROXIES` is **not** trusting a publicly-reachable interface.
 - [ ] Tested: no/invalid token → 401, wrong scope → 403, valid → connects.
