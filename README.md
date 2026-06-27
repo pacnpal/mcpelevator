@@ -72,6 +72,10 @@ Then point any MCP client at `http://127.0.0.1:8080/s/memory/mcp`.
 
 ## Security
 
+> **Exposing this to Claude?** See [docs/claude-web-exposure.md](docs/claude-web-exposure.md)
+> for the secure paths — and why claude.ai **web** (OAuth-only) differs from Claude
+> Code / Desktop / mobile (which can use mcpelevator's bearer auth directly).
+
 Two independent layers guard the system, and a request must pass both.
 
 **Host/Origin allowlist** (DNS-rebinding defense), enforced on every request in every mode. A loopback `Host` is trusted only when the request's **peer** actually connects from loopback, so an off-host bind can't spoof `Host: localhost`. `expose` mode adds the hosts you allowlist, and the host in `MCPE_PUBLIC_BASE_URL` is always trusted. Behind a local reverse proxy or Docker's bridge gateway (where the peer is the forwarder, not the real client), set `MCPE_TRUSTED_PROXIES` (CIDRs) to trust it. The default `docker-compose.yml` does this for the bridge range, which is safe only with a loopback-published port.
