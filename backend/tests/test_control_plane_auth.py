@@ -188,6 +188,43 @@ def test_bootstrap_prints_recovery_notice_when_token_already_exists(capsys):
         _reset()
 
 
+def test_bootstrap_force_mints_a_fresh_token_when_env_set(monkeypatch, capsys):
+    """MCPE_MINT_ADMIN_TOKEN recovers a headless box whose admin token was lost: even
+    though a control token already exists, the bootstrap mints a fresh one and prints
+    it (existing tokens keep working — it only adds one)."""
+    from types import SimpleNamespace
+
+    from app import main
+    from app.auth import control_plane
+
+    init_db()
+    try:
+        _mint("control")  # one already exists -> ensure_control_token() would mint nothing
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"control_plane_auth": "always"})
+            before = len([t for t in repo.list_tokens(s) if t.scope == "control"])
+        monkeypatch.setattr(
+            control_plane, "get_settings", lambda: SimpleNamespace(public_host=None, admin_token=None)
+        )
+        monkeypatch.setattr(
+            main,
+            "get_settings",
+            lambda: SimpleNamespace(
+                admin_token=None, mint_admin_token=True, base_url="http://127.0.0.1:8080"
+            ),
+        )
+        capsys.readouterr()  # drop setup output
+        main._bootstrap_control_plane_auth()
+        out = capsys.readouterr().out
+        with Session(get_engine()) as s:
+            after = len([t for t in repo.list_tokens(s) if t.scope == "control"])
+        assert after == before + 1  # a fresh token was minted despite one already existing
+        assert "Admin token (shown once" in out
+        assert "MCPE_MINT_ADMIN_TOKEN" in out
+    finally:
+        _reset()
+
+
 def test_enforcement_enabled_matrix():
     from app.auth.control_plane import enforcement_enabled
 

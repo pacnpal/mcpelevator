@@ -27,6 +27,13 @@ def test_public_host_extracts_configured_url():
     assert Settings(public_base_url=None).public_host is None
 
 
+def test_extra_allowed_hosts_parses_normalizes_and_dedupes():
+    s = Settings(allowed_hosts="mcp.example.com, https://Other.test:8443 , mcp.example.com, ")
+    # comma-split, trimmed, reduced to bare lowercased hostnames, empties dropped, deduped
+    assert s.extra_allowed_hosts == ["mcp.example.com", "other.test"]
+    assert Settings(allowed_hosts="").extra_allowed_hosts == []
+
+
 def test_env_values_tolerate_surrounding_whitespace(monkeypatch):
     # A stray trailing space (compose/.env line) or newline (mounted secret file)
     # must not blow up bootstrap — pydantic's strict bool/path parsers would

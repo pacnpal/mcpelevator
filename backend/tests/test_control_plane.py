@@ -111,6 +111,31 @@ def test_create_server_rejects_unknown_auth_provider():
             assert r.status_code == 422, (bad, r.status_code, r.text)
 
 
+def test_api_trusts_env_allowed_hosts(monkeypatch):
+    """MCPE_ALLOWED_HOSTS declares extra trusted origins, honoured even in local mode
+    (like the public host) so a headless box can name its origin via env without UI."""
+    from types import SimpleNamespace
+
+    from app.auth import middleware
+
+    monkeypatch.setattr(
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(
+            trusted_proxies="", public_host=None, extra_allowed_hosts=["mcp.example.com"]
+        ),
+    )
+    with TestClient(app) as client:
+        try:
+            with Session(get_engine()) as s:
+                runtime_settings.write(s, {"bind_mode": "local", "allowed_hosts": []})
+            assert client.get("/api/health", headers={"host": "mcp.example.com"}).status_code == 200
+            assert client.get("/api/health", headers={"host": "evil.com"}).status_code == 403
+        finally:
+            with Session(get_engine()) as s:
+                runtime_settings.write(s, {"bind_mode": "local", "allowed_hosts": []})
+
+
 def test_api_trusts_docker_gateway_when_configured(monkeypatch):
     """With MCPE_TRUSTED_PROXIES = the compose gateway /32, a request forwarded by
     that gateway may use Host: localhost (a fresh `docker compose up` reaching the
@@ -123,7 +148,12 @@ def test_api_trusts_docker_gateway_when_configured(monkeypatch):
     monkeypatch.setattr(
         middleware,
         "get_settings",
-        lambda: SimpleNamespace(trusted_proxies="172.20.0.1/32", public_host=public),
+        lambda: SimpleNamespace(
+            trusted_proxies="172.20.0.1/32",
+            public_host=public,
+            extra_allowed_hosts=[],
+            trust_docker_host=False,
+        ),
     )
     with TestClient(app, client=("172.20.0.1", 5000)) as gateway:  # the gateway -> trusted
         with Session(get_engine()) as s:

@@ -24,7 +24,12 @@ from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
 from app.api import tokens as tokens_api
-from app.auth.control_plane import ensure_control_token, enforcement_enabled, require_control_plane
+from app.auth.control_plane import (
+    ensure_control_token,
+    enforcement_enabled,
+    mint_control_token,
+    require_control_plane,
+)
 from app.auth.middleware import (
     host_allowed,
     is_loopback_client,
@@ -78,9 +83,15 @@ def _bootstrap_control_plane_auth() -> None:
         if get_settings().admin_token:
             print("[mcpelevator] control-plane auth is ON, using MCPE_ADMIN_TOKEN", flush=True)
             return
-        token = ensure_control_token(session)
+        forced = get_settings().mint_admin_token
+        token = mint_control_token(session) if forced else ensure_control_token(session)
     if token:
         credential = f"\n  Admin token (shown once, store it now):  {token}"
+        if forced:
+            credential += (
+                "\n  (minted via MCPE_MINT_ADMIN_TOKEN — unset it after saving, or a new"
+                "\n  token is minted on every restart.)"
+            )
     else:
         # A control token already exists (a prior boot minted it, or it was created in
         # the UI) but we don't hold its plaintext to reprint. Don't silently swallow

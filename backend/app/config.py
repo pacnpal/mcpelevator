@@ -37,9 +37,24 @@ class Settings(BaseSettings):
     # guard — e.g. a reverse proxy or the Docker bridge gateway forwarding a
     # loopback-published port. Empty by default; a bare bind trusts only real loopback.
     trusted_proxies: str = ""
+    # Treat the container's default gateway — the Docker host as seen from inside a
+    # bridge-networked container — as a trusted proxy, without hardcoding the per-network
+    # gateway CIDR in MCPE_TRUSTED_PROXIES. Lets a loopback-published port (-p 8080:8080)
+    # reaching the container via the host's docker-proxy pass the Host/Origin guard.
+    trust_docker_host: bool = False
+    # Comma-separated extra hostnames the Host/Origin guard always trusts, exactly like
+    # the host of MCPE_PUBLIC_BASE_URL but for additional origins (a reverse proxy, a
+    # tunnel, a second domain). Lets a headless box declare its allowed origins via env
+    # without UI access; the runtime allowed_hosts setting still applies under expose.
+    allowed_hosts: str = ""
     # Break-glass control-plane admin token: if set, it's always accepted on /api
     # (constant-time compared). Recovers a lost minted token; handy for CI/automation.
     admin_token: str | None = None
+    # Force-mint a fresh control (admin) token on boot even when one already exists, then
+    # print it — the recovery hatch for a headless box whose admin token was lost. Mints
+    # a NEW token (existing ones keep working); unset it after grabbing the token from the
+    # logs, or a new one is minted on every restart.
+    mint_admin_token: bool = False
     # First-boot seed for the `allow_private_lan` runtime setting. Lets a headless box
     # (no loopback browser to reach the UI) enable LAN access declaratively: set this
     # true and, because LAN access turns control-plane auth on, the startup bootstrap
@@ -85,6 +100,17 @@ class Settings(BaseSettings):
         host that the Host/Origin guard always allows (so the advertised public URL
         doesn't 403 itself before the operator can add it to the allowlist)."""
         return host_only(self.public_base_url) if self.public_base_url else None
+
+    @property
+    def extra_allowed_hosts(self) -> list[str]:
+        """Hostnames from MCPE_ALLOWED_HOSTS, normalized and de-duped — the Host/Origin
+        guard always trusts these (see ``app.auth.middleware.request_allowlist``)."""
+        seen: list[str] = []
+        for raw in self.allowed_hosts.split(","):
+            host = host_only(raw)
+            if host and host not in seen:
+                seen.append(host)
+        return seen
 
     @property
     def backend_root(self) -> Path:

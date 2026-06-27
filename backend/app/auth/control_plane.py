@@ -101,15 +101,22 @@ def require_control_plane(request: Request, session: Session = Depends(get_sessi
     )
 
 
-def ensure_control_token(session: Session) -> str | None:
-    """Mint a control token if none exists (idempotent). Returns the plaintext once,
-    or ``None`` when one already exists or ``MCPE_ADMIN_TOKEN`` supplies the
-    credential. Called from startup and from the UI's generate-admin action."""
-    if get_settings().admin_token or repo.control_token_exists(session):
-        return None
+def mint_control_token(session: Session) -> str:
+    """Mint a new control token unconditionally and return its plaintext once. Existing
+    tokens keep working — this only adds one. Use ``ensure_control_token`` for the
+    idempotent startup path; this is the force/recovery path."""
     raw = new_token()
     repo.create_token(
         session,
         Token(id=new_id(), name="admin", token_hash=hash_token(raw), prefix=raw[:12], scope="control"),
     )
     return raw
+
+
+def ensure_control_token(session: Session) -> str | None:
+    """Mint a control token if none exists (idempotent). Returns the plaintext once,
+    or ``None`` when one already exists or ``MCPE_ADMIN_TOKEN`` supplies the
+    credential. Called from startup and from the UI's generate-admin action."""
+    if get_settings().admin_token or repo.control_token_exists(session):
+        return None
+    return mint_control_token(session)

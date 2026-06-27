@@ -68,6 +68,25 @@ def _trusted_networks(raw: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6N
     return tuple(nets)
 
 
+@functools.lru_cache(maxsize=1)
+def _docker_host_ip() -> str | None:
+    """The container's default-gateway IPv4 — the Docker host as seen from inside a
+    bridge-networked container (a loopback-published port arrives from here via the
+    host's docker-proxy). Read from ``/proc/net/route`` (Linux); ``None`` when it can't
+    be determined (non-Linux, host networking, or a parse failure). Cached: the
+    container's gateway is fixed for the process lifetime."""
+    try:
+        with open("/proc/net/route") as fh:
+            for line in fh.read().splitlines()[1:]:
+                fields = line.split()
+                if len(fields) >= 3 and fields[1] == "00000000":  # the default route
+                    gw = int(fields[2], 16).to_bytes(4, "little")  # gateway, little-endian hex
+                    return str(ipaddress.IPv4Address(gw))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def is_loopback_client(request: Request) -> bool:
     """True when the request's peer is loopback (or a configured trusted proxy).
 
@@ -75,7 +94,8 @@ def is_loopback_client(request: Request) -> bool:
     client (e.g. a Docker ``0.0.0.0`` bind reachable from the LAN), so the implicit
     loopback allowance in ``host_allowed`` is granted only to real loopback peers — or
     to a peer inside ``MCPE_TRUSTED_PROXIES`` (e.g. the Docker bridge gateway that
-    forwards a loopback-published port, where the real source is already loopback).
+    forwards a loopback-published port, where the real source is already loopback), or
+    to the auto-detected Docker host when ``MCPE_TRUST_DOCKER_HOST`` is set.
     """
     client = request.client
     if client is None:
@@ -89,7 +109,14 @@ def is_loopback_client(request: Request) -> bool:
         return client.host in {"localhost", "testclient"}
     if ip.is_loopback:
         return True
-    return any(ip in net for net in _trusted_networks(get_settings().trusted_proxies))
+    settings = get_settings()
+    if any(ip in net for net in _trusted_networks(settings.trusted_proxies)):
+        return True
+    if settings.trust_docker_host:
+        gateway = _docker_host_ip()
+        if gateway is not None and ip == ipaddress.ip_address(gateway):
+            return True
+    return False
 
 
 def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -236,15 +263,16 @@ def host_allowed(
 
 def request_allowlist(session: Session) -> list[str]:
     """Hosts allowed beyond loopback for the Host/Origin guard: the runtime allowlist
-    (only when ``bind_mode`` is ``expose``) plus the operator-configured public host.
-    ``MCPE_PUBLIC_BASE_URL`` is an explicit "this is my URL" declaration, so its host
-    is always trusted — otherwise the advertised public URL would 403 itself before
-    the operator could add it to the allowlist."""
+    (only when ``bind_mode`` is ``expose``) plus the operator-configured public host and
+    any MCPE_ALLOWED_HOSTS. ``MCPE_PUBLIC_BASE_URL`` / ``MCPE_ALLOWED_HOSTS`` are explicit
+    "these are my origins" declarations, so their hosts are always trusted — otherwise the
+    advertised URL would 403 itself before the operator could add it to the allowlist."""
     mode = runtime_settings.bind_mode(session)
     allowed = list(runtime_settings.allowed_hosts(session)) if mode == "expose" else []
-    public = get_settings().public_host
-    if public:
-        allowed.append(public)
+    settings = get_settings()
+    if settings.public_host:
+        allowed.append(settings.public_host)
+    allowed.extend(settings.extra_allowed_hosts)
     return allowed
 
 

@@ -106,7 +106,9 @@ def test_request_allowlist_trusts_configured_public_host(session, monkeypatch):
     # local mode + a configured public host -> the public host is allowed, so the
     # advertised public URL doesn't 403 itself before it can be allowlisted.
     monkeypatch.setattr(
-        middleware, "get_settings", lambda: SimpleNamespace(public_host="mcp.example.com")
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(public_host="mcp.example.com", extra_allowed_hosts=[]),
     )
     allowed = middleware.request_allowlist(session)
     assert "mcp.example.com" in allowed
@@ -279,6 +281,58 @@ def test_is_private_client_ignores_trusted_proxies(monkeypatch):
     assert middleware.is_private_client(req("::ffff:127.0.0.1")) is False
 
 
+def test_is_loopback_client_trusts_detected_docker_host(monkeypatch):
+    from types import SimpleNamespace
+
+    def req(peer):
+        return SimpleNamespace(client=SimpleNamespace(host=peer))
+
+    monkeypatch.setattr(middleware, "_docker_host_ip", lambda: "172.17.0.1")
+
+    # MCPE_TRUST_DOCKER_HOST off -> the detected gateway is just another off-host peer
+    monkeypatch.setattr(
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(trusted_proxies="", trust_docker_host=False),
+    )
+    assert middleware.is_loopback_client(req("172.17.0.1")) is False
+
+    # on -> the auto-detected Docker host is trusted for the loopback allowance, but a
+    # different peer in the same subnet is not (only the gateway itself qualifies)
+    monkeypatch.setattr(
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(trusted_proxies="", trust_docker_host=True),
+    )
+    assert middleware.is_loopback_client(req("172.17.0.1")) is True
+    assert middleware.is_loopback_client(req("172.17.0.9")) is False
+
+
+def test_docker_host_ip_parses_default_route(monkeypatch, tmp_path):
+    import builtins
+
+    # /proc/net/route stores the gateway as little-endian hex; 0100007F == 127.0.0.1,
+    # and the default route is the row whose destination is 00000000.
+    route = (
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+        "eth0\t0000FEA9\t00000000\t0001\t0\t0\t0\t0000FFFF\n"  # on-link, no gateway
+        "eth0\t00000000\t0100007F\t0003\t0\t0\t0\t00000000\n"  # default -> 127.0.0.1
+    )
+    real_open = builtins.open
+    monkeypatch.setattr(
+        builtins,
+        "open",
+        lambda f, *a, **k: real_open(route_file, *a, **k) if f == "/proc/net/route" else real_open(f, *a, **k),
+    )
+    route_file = tmp_path / "route"
+    route_file.write_text(route)
+    middleware._docker_host_ip.cache_clear()
+    try:
+        assert middleware._docker_host_ip() == "127.0.0.1"
+    finally:
+        middleware._docker_host_ip.cache_clear()
+
+
 def test_private_lan_allowed_requires_setting_and_private_peer(session, monkeypatch):
     from types import SimpleNamespace
 
@@ -324,7 +378,9 @@ def test_is_loopback_client_trusts_configured_proxy(monkeypatch):
     # With MCPE_TRUSTED_PROXIES = the gateway /32 (the compose default), only that
     # exact address is trusted — a sibling container on the same network is not.
     monkeypatch.setattr(
-        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="172.20.0.1/32")
+        middleware,
+        "get_settings",
+        lambda: SimpleNamespace(trusted_proxies="172.20.0.1/32", trust_docker_host=False),
     )
     assert middleware.is_loopback_client(req("172.20.0.1")) is True  # the gateway
     assert middleware.is_loopback_client(req("172.20.0.5")) is False  # a sibling container
