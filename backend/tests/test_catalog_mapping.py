@@ -269,6 +269,17 @@ def test_official_dedupe_falls_back_to_first_seen_without_islatest():
     assert len(deduped) == 1
 
 
+def test_official_dedupe_never_drops_server_when_all_non_latest():
+    # Upstream quirk: every row flagged isLatest=False. The server must still appear.
+    def row(version):
+        e = _official([_pkg()], name="io.x/srv", version=version)
+        e["_meta"]["io.modelcontextprotocol.registry/official"]["isLatest"] = False
+        return e
+
+    deduped = official.dedupe_latest([row("1.0.0"), row("1.0.1")])
+    assert len(deduped) == 1
+
+
 def test_official_deleted_status_blocks_install():
     entry = _official([_pkg()], status="deleted")
     assert official._list_item(entry)["installable"] is False

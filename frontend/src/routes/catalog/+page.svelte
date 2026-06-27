@@ -105,9 +105,11 @@
 		versionsLoading[key] = true;
 		try {
 			const res = await getCatalogVersions(server.id, server.source);
-			if (res.versions.length) versionsByKey[key] = res.versions;
+			// Cache the result (or the current version as fallback) so an empty/failed
+			// fetch doesn't re-request on every subsequent focus/hover.
+			versionsByKey[key] = res.versions.length ? res.versions : [server.version];
 		} catch {
-			// Non-fatal: keep just the latest version in the dropdown.
+			versionsByKey[key] = [server.version];
 		} finally {
 			versionsLoading[key] = false;
 		}
@@ -340,6 +342,7 @@
 									<select
 										aria-label="Version for {server.name}"
 										value={chosenVersion[serverKey(server)] ?? server.version}
+										onmouseenter={() => loadVersions(server)}
 										onfocus={() => loadVersions(server)}
 										onpointerdown={() => loadVersions(server)}
 										onchange={(e) => (chosenVersion[serverKey(server)] = e.currentTarget.value)}

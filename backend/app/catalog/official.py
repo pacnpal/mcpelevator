@@ -40,24 +40,27 @@ def dedupe_latest(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse the per-version registry feed to one entry per server.
 
     The unfiltered ``/v0.1/servers`` listing returns one row per *published version*,
-    so a server shows up multiple times. Keep the version the registry flags
-    ``isLatest`` (drop rows explicitly marked non-latest), then guard against any
-    residual same-name duplicates by keeping the first seen. Order is preserved.
+    so a server shows up multiple times. Group by name and prefer the ``isLatest``
+    version, falling back to the first seen when none is flagged. We never drop a
+    server outright — if upstream metadata is missing/quirky (e.g. no row flagged
+    latest), the server still appears. Insertion order is preserved.
     """
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    by_name: dict[str, dict[str, Any]] = {}
     for entry in entries:
-        meta = (entry.get("_meta") or {}).get(_META_KEY) or {}
-        if meta.get("isLatest") is False:
-            continue  # an older version superseded by a later one
         server, _ = _unwrap(entry)
         name = str(server.get("name") or "")
-        if name and name in seen:
+        if not name:
             continue
-        if name:
-            seen.add(name)
-        out.append(entry)
-    return out
+        existing = by_name.get(name)
+        if existing is None:
+            by_name[name] = entry
+            continue
+        meta = (entry.get("_meta") or {}).get(_META_KEY) or {}
+        existing_meta = (existing.get("_meta") or {}).get(_META_KEY) or {}
+        # Upgrade to the isLatest row, but never downgrade away from one.
+        if meta.get("isLatest") is True and existing_meta.get("isLatest") is not True:
+            by_name[name] = entry
+    return list(by_name.values())
 
 
 def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
@@ -231,6 +234,7 @@ class OfficialSource:
             return []
         latest: list[str] = []
         rest: list[str] = []
+        seen: set[str] = set()
         for entry in servers:
             if not isinstance(entry, dict):
                 continue
@@ -238,6 +242,10 @@ class OfficialSource:
             version = server.get("version")
             if not version:
                 continue
+            v_str = str(version)
+            if v_str in seen:  # registry can return duplicate version rows
+                continue
+            seen.add(v_str)
             meta = (entry.get("_meta") or {}).get(_META_KEY) or {}
-            (latest if meta.get("isLatest") else rest).append(str(version))
+            (latest if meta.get("isLatest") else rest).append(v_str)
         return latest + rest
