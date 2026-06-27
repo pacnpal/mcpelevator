@@ -106,6 +106,28 @@ describe('installOptions', () => {
 			expect(byLabel(opts, 'Claude web / mobile').hint).not.toContain('needs a public');
 			expect(byLabel(opts, 'ChatGPT').hint).not.toContain('needs a public');
 		});
+
+		it('warns for private HTTPS hosts a vendor cloud cannot reach', () => {
+			const privateHosts = [
+				'https://10.0.0.5/s/memory/mcp',
+				'https://192.168.1.10/s/memory/mcp',
+				'https://172.16.4.4/s/memory/mcp',
+				'https://localhost:8443/s/memory/mcp',
+				'https://mcp.lab.local/s/memory/mcp'
+			];
+			for (const mcp of privateHosts) {
+				const opts = installOptions({ ...base, urls: { mcp, rest: null } });
+				expect(byLabel(opts, 'ChatGPT').hint).toContain('needs a public HTTPS URL');
+			}
+		});
+
+		it('does not flag a public host that merely starts like a private range', () => {
+			// 172.15.x and 172.32.x are public (private block is 172.16–31 only).
+			for (const mcp of ['https://172.15.0.1/mcp', 'https://172.32.0.1/mcp', 'https://11.0.0.1/mcp']) {
+				const opts = installOptions({ ...base, urls: { mcp, rest: null } });
+				expect(byLabel(opts, 'ChatGPT').hint).not.toContain('needs a public');
+			}
+		});
 	});
 
 	describe('bearer auth', () => {

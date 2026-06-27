@@ -144,7 +144,7 @@
 							<span class="min-w-0">
 								<span class="block truncate">{opt.label}</span>
 								{#if opt.hint}
-									<span class="block truncate text-[11px] text-[var(--color-ink-dim)]">{opt.hint}</span>
+									<span class="block text-[11px] leading-tight text-[var(--color-ink-dim)]">{opt.hint}</span>
 								{/if}
 							</span>
 						</span>

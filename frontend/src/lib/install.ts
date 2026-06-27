@@ -29,11 +29,35 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+// A loopback / private / link-local host that a vendor cloud can't dial.
+function isPrivateHost(host: string): boolean {
+	const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/);
+	if (v4) {
+		const a = Number(v4[1]);
+		const b = Number(v4[2]);
+		return (
+			a === 0 || // 0.0.0.0/8
+			a === 10 || // 10.0.0.0/8
+			a === 127 || // 127.0.0.0/8 loopback
+			(a === 169 && b === 254) || // 169.254.0.0/16 link-local
+			(a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+			(a === 192 && b === 168) // 192.168.0.0/16
+		);
+	}
+	const h = host.toLowerCase();
+	return (
+		h === '::1' || // IPv6 loopback
+		/^f[cd][0-9a-f]{2}:/.test(h) || // fc00::/7 unique-local
+		/^fe[89ab][0-9a-f]:/.test(h) // fe80::/10 link-local
+	);
+}
+
 // Whether a URL is not reachable from the public internet — plain http, or an
-// http(s) loopback / private host. Cloud connector UIs (claude.ai, ChatGPT)
-// dial the server from Anthropic/OpenAI infrastructure, so a local default like
-// `http://127.0.0.1:8080/...` can't be reached; mcp-remote also needs
-// `--allow-http` for non-https endpoints.
+// http(s) loopback / private / link-local host. Cloud connector UIs (claude.ai,
+// ChatGPT) dial the server from Anthropic/OpenAI infrastructure, so a local
+// default like `http://127.0.0.1:8080/...` or a LAN/VPC address like
+// `https://192.168.1.10` can't be reached; mcp-remote also needs `--allow-http`
+// for non-https endpoints.
 function isLocalUrl(value: string): boolean {
 	let url: URL;
 	try {
@@ -45,10 +69,9 @@ function isLocalUrl(value: string): boolean {
 	const host = url.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
 	return (
 		host === 'localhost' ||
-		host === '127.0.0.1' ||
-		host === '::1' ||
 		host.endsWith('.local') ||
-		host.endsWith('.localhost')
+		host.endsWith('.localhost') ||
+		isPrivateHost(host)
 	);
 }
 
