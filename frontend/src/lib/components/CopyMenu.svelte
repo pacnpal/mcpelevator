@@ -92,8 +92,18 @@
 		const onKey = (e: KeyboardEvent) => {
 			if (e.key === 'Escape') open = false;
 		};
-		// Keep the panel within the viewport as the page scrolls or resizes.
-		const onReflow = () => measure();
+		// Keep the panel within the viewport as the page scrolls or resizes, but
+		// coalesce to one measure per frame: measure() reads getBoundingClientRect,
+		// so calling it on every scroll event would thrash layout.
+		let frameId: number | null = null;
+		const onReflow = () => {
+			if (frameId === null) {
+				frameId = requestAnimationFrame(() => {
+					frameId = null;
+					measure();
+				});
+			}
+		};
 		const id = setTimeout(() => {
 			document.addEventListener('pointerdown', onPointer);
 			document.addEventListener('keydown', onKey);
@@ -102,6 +112,7 @@
 		}, 0);
 		return () => {
 			clearTimeout(id);
+			if (frameId !== null) cancelAnimationFrame(frameId);
 			document.removeEventListener('pointerdown', onPointer);
 			document.removeEventListener('keydown', onKey);
 			window.removeEventListener('resize', onReflow);

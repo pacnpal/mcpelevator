@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 
-	import { cloneServer, deleteServer, disableServer, enableServer } from '$lib/api';
+	import { cloneServer, deleteServer, disableServer, enableServer, errorMessage } from '$lib/api';
 	import type { ServerSummary } from '$lib/types';
 	import CopyMenu from './CopyMenu.svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
@@ -93,9 +93,7 @@
 			// Land on the copy so it can be reviewed/edited, then enabled.
 			await goto(`/server/${copy.id}`);
 		} catch (err) {
-			const message =
-				err instanceof Error ? err.message : 'Failed to clone server';
-			onerror?.(message);
+			onerror?.(errorMessage(err));
 			cloning = false;
 		}
 	}

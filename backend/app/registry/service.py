@@ -189,8 +189,10 @@ def clone_server(session: Session, server_id: str, *, name: Optional[str] = None
         name=new_name,
         runner=src.runner,
         command=src.command,
-        args=list(src.args),
-        env=dict(src.env),
+        # Tolerate a NULL JSON column from a legacy/hand-edited row (the model
+        # types these non-optional, but the DB can still hold null).
+        args=list(src.args or []),
+        env=dict(src.env or {}),
         cwd=src.cwd,
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,
