@@ -172,6 +172,13 @@ describe('installOptions', () => {
 			expect(byLabel(opts, 'ChatGPT').hint).not.toContain('bearer');
 		});
 
+		it('surfaces both caveats when a server is local AND bearer-protected', () => {
+			// default base URL is local http; bearer adds the second blocker
+			const hint = byLabel(installOptions(bearer), 'ChatGPT').hint ?? '';
+			expect(hint).toContain('needs a public HTTPS URL');
+			expect(hint).toContain('bearer auth not supported here');
+		});
+
 		it('adds headers to the Gemini CLI and mcpServers entries', () => {
 			const opts = installOptions(bearer);
 			expect(JSON.parse(byLabel(opts, 'Gemini CLI').value).mcpServers.memory.headers).toEqual({

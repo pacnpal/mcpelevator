@@ -119,12 +119,12 @@ export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls' | 'au
 		// URL-only connector UIs (claude.ai, ChatGPT) dial the server from the
 		// vendor's cloud, so a local URL is unreachable there; and they handle auth
 		// via their own OAuth / no-auth flow, so a static bearer token can't be
-		// attached. Warn about whichever applies (reachability dominates).
-		const connectorCaveat = local
-			? ' · needs a public HTTPS URL'
-			: bearer
-				? ' · bearer auth not supported here'
-				: '';
+		// attached. These are independent blockers — surface every one that applies,
+		// so fixing reachability doesn't hide the still-present auth problem.
+		const connectorCaveats: string[] = [];
+		if (local) connectorCaveats.push('needs a public HTTPS URL');
+		if (bearer) connectorCaveats.push('bearer auth not supported here');
+		const connectorCaveat = connectorCaveats.length ? ` · ${connectorCaveats.join(' · ')}` : '';
 
 		// — Claude —
 		out.push({
