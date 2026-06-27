@@ -201,7 +201,9 @@ def test_is_private_client():
     assert middleware.is_private_client(req("10.0.0.5")) is True
     assert middleware.is_private_client(req("172.16.4.4")) is True
     assert middleware.is_private_client(req("fd00::1")) is True  # IPv6 ULA
+    assert middleware.is_private_client(req("fe80::1%eth0")) is True  # link-local + zone id
     assert middleware.is_private_client(req("8.8.8.8")) is False  # public
+    assert middleware.is_private_client(req("not-an-ip")) is False  # unparseable peer
     assert middleware.is_private_client(req(None)) is False
 
 

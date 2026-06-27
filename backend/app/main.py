@@ -32,10 +32,28 @@ from app.auth.middleware import (
     request_allowlist,
 )
 from app.config import get_settings
-from app.db import get_engine, init_db
+from app.db import get_engine, init_db, repo
 from app.proxy.router import router as proxy_router
 from app.registry import service
+from app.registry import settings as runtime_settings
 from app.supervisor.supervisor import Supervisor
+
+
+_UNSET = object()
+
+
+def _bootstrap_private_lan() -> None:
+    """Seed the ``allow_private_lan`` runtime setting from ``MCPE_ALLOW_PRIVATE_LAN``
+    on first boot, so a headless box (no loopback browser to reach the UI) can enable
+    LAN access declaratively. Seeds only when the setting has never been written, so a
+    later UI toggle stays authoritative across restarts. Runs before the control-plane
+    bootstrap so the minted admin token reflects the now-on enforcement."""
+    if not get_settings().allow_private_lan:
+        return
+    with Session(get_engine()) as session:
+        if repo.setting_get(session, "allow_private_lan", _UNSET) is _UNSET:
+            runtime_settings.write(session, {"allow_private_lan": True})
+            print("[mcpelevator] MCPE_ALLOW_PRIVATE_LAN set — LAN access enabled", flush=True)
 
 
 def _bootstrap_control_plane_auth() -> None:
@@ -67,6 +85,7 @@ async def lifespan(app: FastAPI):
     with Session(get_engine()) as session:
         service.normalize_auth_providers(session)  # canonicalize legacy auth_provider values
         service.backfill_config_hashes(session)  # rehash upgraded rows -> no spurious restarts
+    _bootstrap_private_lan()  # seed LAN access from env before deciding auth enforcement
     _bootstrap_control_plane_auth()
     app.state.http = httpx.AsyncClient(timeout=None)  # no timeout: long-lived SSE streams
     supervisor = Supervisor()

@@ -44,6 +44,11 @@ services:
       # SAFE only while the port is published to 127.0.0.1 (the default); for an
       # off-host bind, drop this and use expose mode + auth instead.
       - MCPE_TRUSTED_PROXIES=${MCPE_GATEWAY:-172.20.0.1}/32
+      # Headless LAN bootstrap: seed the `allow_private_lan` setting on first boot so a
+      # box with no loopback browser can be reached from the LAN. It turns control-plane
+      # auth on, so the admin token is minted and PRINTED TO THE LOGS on first start —
+      # read it there to log in. Pair with host networking above so the peer gate works.
+      # - MCPE_ALLOW_PRIVATE_LAN=true
       # Absolute URL clients use to reach this instance (behind a tunnel/proxy):
       # - MCPE_PUBLIC_BASE_URL=https://mcp.example.com
     restart: unless-stopped

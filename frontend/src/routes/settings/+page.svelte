@@ -297,14 +297,19 @@
 	// (under `auto`) it turns control-plane auth on — hence the admin-token gate when
 	// enabling, mirroring `expose`. Turning it OFF while this tab is reached through a
 	// private IP would lock the tab out, so confirm that direction.
-	function setAllowPrivateLan(value: boolean) {
+	// A checkbox flips its own `checked` on click; when we intercept without patching,
+	// Svelte won't re-assert it (the bound state is unchanged), so snap `el` back to the
+	// real value imperatively — same idea as resetBindRadios() for the radios.
+	function setAllowPrivateLan(value: boolean, el: HTMLInputElement) {
 		if (!settings || settings.allow_private_lan === value) return;
 		if (value && !hasUsableAdminCredential) {
 			flashToast('Generate an admin token before opening the control plane to the LAN.');
+			el.checked = settings.allow_private_lan;
 			return;
 		}
 		if (!value && onPrivateLan) {
 			confirmDisableLan = true;
+			el.checked = settings.allow_private_lan; // keep it shown on while the confirm is open
 			return;
 		}
 		patchSettings({ allow_private_lan: value }, 'allow_private_lan');
@@ -752,7 +757,7 @@
 					<input
 						type="checkbox"
 						checked={settings.allow_private_lan}
-						onchange={(e) => setAllowPrivateLan(e.currentTarget.checked)}
+						onchange={(e) => setAllowPrivateLan(e.currentTarget.checked, e.currentTarget)}
 						disabled={savingField === 'allow_private_lan'}
 						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
 					/>

@@ -92,6 +92,21 @@ def is_loopback_client(request: Request) -> bool:
     return any(ip in net for net in _trusted_networks(get_settings().trusted_proxies))
 
 
+def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse an IP literal, tolerating a ``[...]`` IPv6 wrapper and a ``%zone`` scope
+    id — neither of which ``ipaddress.ip_address`` accepts, yet both can appear (a
+    bracketed Host, or a link-local peer like ``fe80::1%eth0``). Returns None for a
+    hostname or anything unparseable, so callers fail closed."""
+    value = value.strip()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    value = value.split("%", 1)[0]  # drop the zone index ipaddress can't read
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
 def is_private_client(request: Request) -> bool:
     """True when the request's peer is on a private/loopback network (RFC 1918,
     link-local, IPv6 ULA, …) or a configured trusted proxy.
@@ -107,11 +122,9 @@ def is_private_client(request: Request) -> bool:
     client = request.client
     if client is None:
         return False
-    try:
-        ip = ipaddress.ip_address(client.host)
-    except ValueError:
-        return False
-    return ip.is_private  # 10/8, 172.16/12, 192.168/16, 169.254/16, fc00::/7, fe80::/10, …
+    ip = _parse_ip(client.host)
+    # is_private: 10/8, 172.16/12, 192.168/16, 169.254/16, fc00::/7, fe80::/10, …
+    return ip is not None and ip.is_private
 
 
 def _is_private_host_literal(host: str) -> bool:
@@ -122,10 +135,8 @@ def _is_private_host_literal(host: str) -> bool:
     Host header (``Host: evil.example``), which is never a bare private-IP literal,
     so it can't satisfy this check even after the name rebinds to a LAN address.
     """
-    try:
-        return ipaddress.ip_address(host).is_private
-    except ValueError:
-        return False
+    ip = _parse_ip(host)
+    return ip is not None and ip.is_private
 
 
 def private_lan_allowed(request: Request, session: Session) -> bool:

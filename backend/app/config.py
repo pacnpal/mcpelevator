@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     # Break-glass control-plane admin token: if set, it's always accepted on /api
     # (constant-time compared). Recovers a lost minted token; handy for CI/automation.
     admin_token: str | None = None
+    # First-boot seed for the `allow_private_lan` runtime setting. Lets a headless box
+    # (no loopback browser to reach the UI) enable LAN access declaratively: set this
+    # true and, because LAN access turns control-plane auth on, the startup bootstrap
+    # mints an admin token and prints it to the logs. Seeds only when the setting has
+    # never been written; the Settings UI is authoritative afterwards.
+    allow_private_lan: bool = False
 
     # --- data / persistence ---
     data_dir: Path = Path("./data")
