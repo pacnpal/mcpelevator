@@ -362,7 +362,11 @@ Either tunnel gives you a public HTTPS URL mapped to `http://127.0.0.1:8080`:
 - **Claude Desktop (local config)**: the copy menu's `mcpServers` JSON is the
   remote-HTTP form (`{"type":"http", …}`) that Code/VS Code accept — Desktop's
   `claude_desktop_config.json` runs **stdio** servers, so wrap the URL in the
-  `mcp-remote` bridge and inject the header with `--header`:
+  `mcp-remote` bridge. Pass the token via an **`env` variable**, not inline:
+  `mcp-remote`'s `--header "Authorization: Bearer …"` form has a space inside the
+  arg, which **Claude Desktop on Windows mangles**, corrupting the header. The
+  `${AUTH_HEADER}` form (what the copy menu emits) keeps the arg space-free and works
+  on every platform:
 
   ```json
   {
@@ -372,8 +376,9 @@ Either tunnel gives you a public HTTPS URL mapped to `http://127.0.0.1:8080`:
         "args": [
           "-y", "mcp-remote",
           "https://mcp.example.com/s/<slug>/mcp",
-          "--header", "Authorization: Bearer <YOUR_TOKEN>"
-        ]
+          "--header", "Authorization:${AUTH_HEADER}"
+        ],
+        "env": { "AUTH_HEADER": "Bearer <YOUR_TOKEN>" }
       }
     }
   }
