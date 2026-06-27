@@ -77,9 +77,13 @@ Then point any MCP client at `http://127.0.0.1:8080/s/memory/mcp`.
 ## Security
 
 > **Exposing this to Claude?** See [docs/claude-web-exposure.md](docs/claude-web-exposure.md)
-> for the secure paths — and why claude.ai **web**, **mobile**, and Desktop's
-> account-UI **remote connectors** (OAuth-only) differ from Claude Code and
-> **locally-configured** Desktop (which can use mcpelevator's bearer auth directly).
+> for two concrete, secure recipes: **Path A** (claude.ai **web/mobile**) —
+> a Cloudflare Tunnel plus a Cloudflare Access self-hosted app with **Managed OAuth**,
+> since web/mobile and Desktop's account-UI **remote connectors** are OAuth-only and
+> can't send a bearer; and **Path B** (Claude **Code** / **locally-configured**
+> Desktop) — a public HTTPS tunnel plus mcpelevator's built-in **bearer** auth.
+> The guide has the exact `cloudflared`/Access steps, `curl` checks, and the
+> connector caveats to test before relying on web/mobile.
 
 Two independent layers guard the system, and a request must pass both.
 
