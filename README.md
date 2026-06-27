@@ -76,7 +76,8 @@ Then point any MCP client at `http://127.0.0.1:8080/s/memory/mcp`.
 
 ## Security
 
-> **Exposing this to Claude?** See [docs/claude-web-exposure.md](docs/claude-web-exposure.md)
+> **Want to expose this over the internet — e.g. to reach it from Claude?** See
+> [docs/claude-web-exposure.md](docs/claude-web-exposure.md)
 > for two concrete, secure recipes: **Path A** (claude.ai **web/mobile**) —
 > a Cloudflare Tunnel plus a Cloudflare Access self-hosted app with **Managed OAuth**,
 > since web/mobile and Desktop's account-UI **remote connectors** are OAuth-only and
