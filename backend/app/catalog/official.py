@@ -236,7 +236,9 @@ class OfficialSource:
         data = await base.get_json(http, url, {})
         servers = data.get("servers") if isinstance(data, dict) else None
         if not isinstance(servers, list):
-            return []
+            # Fail loud, not silent: returning [] would make a registry outage look like
+            # a versionless server. The API layer maps this to a 502.
+            raise base.CatalogUpstreamError("unexpected versions response from the MCP Registry")
         latest: list[str] = []
         rest: list[str] = []
         seen: set[str] = set()

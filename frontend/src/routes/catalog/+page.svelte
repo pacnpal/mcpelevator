@@ -101,13 +101,20 @@
 
 	async function loadVersions(server: CatalogServer) {
 		const key = serverKey(server);
-		if (!server.version || versionsByKey[key] || versionsLoading[key]) return;
+		if (!server.version || versionsLoading[key]) return;
+		// Skip if the cache is already fresh for this card's current latest (the list is
+		// latest-first, so cache[0] is the latest). This also stops empty/failed fetches
+		// from retrying, yet still refetches when the card later returns a newer latest.
+		const cached = versionsByKey[key];
+		if (cached && cached[0] === server.version) return;
 		versionsLoading[key] = true;
 		try {
 			const res = await getCatalogVersions(server.id, server.source);
-			// Cache the result (or the current version as fallback) so an empty/failed
-			// fetch doesn't re-request on every subsequent focus/hover.
 			versionsByKey[key] = res.versions.length ? res.versions : [server.version];
+			// If a previously chosen version is no longer offered, fall back to latest.
+			if (chosenVersion[key] && !versionsByKey[key].includes(chosenVersion[key])) {
+				chosenVersion[key] = server.version;
+			}
 		} catch {
 			versionsByKey[key] = [server.version];
 		} finally {

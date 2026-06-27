@@ -267,6 +267,7 @@ def test_official_dedupe_falls_back_to_first_seen_without_islatest():
                _official([_pkg()], name="io.x/srv", version="1.0.1")]
     deduped = official.dedupe_latest(entries)
     assert len(deduped) == 1
+    assert official._list_item(deduped[0])["version"] == "1.0.0"  # first-seen is kept
 
 
 def test_official_dedupe_never_drops_server_when_all_non_latest():

@@ -181,6 +181,13 @@ def test_official_versions_endpoint_latest_first(monkeypatch):
         assert r.json()["versions"] == ["1.0.1", "1.0.0"]
 
 
+def test_official_versions_malformed_payload_is_502(monkeypatch):
+    _stub(monkeypatch, {"/versions": {"unexpected": "shape"}})
+    with TestClient(app) as c:
+        r = c.get("/api/catalog/server/versions", params={"id": "io.x/srv"}, headers=LOOPBACK)
+        assert r.status_code == 502, r.text
+
+
 def test_glama_versions_endpoint_is_empty():
     # Glama has no version concept; the endpoint returns [] without hitting upstream.
     with TestClient(app) as c:
