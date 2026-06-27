@@ -1,6 +1,6 @@
 # mcpelevator — single image: control plane + reverse proxy + SPA, batteries-included.
 # Stage 1: build the SvelteKit SPA.
-FROM node:22-bookworm-slim AS frontend
+FROM node:26-bookworm-slim AS frontend
 WORKDIR /fe
 COPY frontend/package*.json ./
 RUN npm ci
