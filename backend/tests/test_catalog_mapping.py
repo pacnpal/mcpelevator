@@ -151,6 +151,15 @@ def test_required_argument_without_value_warns():
     assert any("DB_PATH" in w for w in draft["warnings"])
 
 
+def test_required_named_argument_without_value_warns():
+    draft = mapping.package_draft(
+        0,
+        _pkg(packageArguments=[{"type": "named", "name": "--config", "isRequired": True, "valueHint": "PATH"}]),
+    )
+    assert draft["args"] == ["-y", "pkg@1.0.0", "--config", "<PATH>"]
+    assert any("--config" in w and "PATH" in w for w in draft["warnings"])
+
+
 def test_environment_variables_become_env_with_warnings():
     draft = mapping.package_draft(
         0,

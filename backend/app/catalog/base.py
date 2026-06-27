@@ -121,7 +121,9 @@ class TTLCache:
         if len(self._store) >= self._max_entries:
             now = time.monotonic()
             self._store = {k: (exp, v) for k, (exp, v) in self._store.items() if exp > now}
-            if len(self._store) >= self._max_entries:
+            # Only evict for a genuine insert; refreshing an existing live key must not
+            # shrink the cache (that would evict a hot entry and cause avoidable fetches).
+            if key not in self._store and len(self._store) >= self._max_entries:
                 oldest = min(self._store, key=lambda k: self._store[k][0])
                 self._store.pop(oldest, None)
         self._store[key] = (time.monotonic() + self._ttl, value)
