@@ -139,11 +139,12 @@ def is_private_client(request: Request) -> bool:
     is what keeps that safe — only a request that actually originates on a private
     network may use a private-IP ``Host`` to pass the guard.
 
-    Deliberately does NOT honour ``MCPE_TRUSTED_PROXIES`` (unlike ``is_loopback_client``):
-    a trusted proxy may forward *public* traffic, so trusting the forwarder's address
-    would let a public client satisfy this gate. Behind NAT/SNAT the observed peer is the
-    forwarder, so LAN access needs the real client IP visible (host networking) — see
-    docker-compose. The trusted-proxy convenience stays scoped to the loopback allowance.
+    A configured ``MCPE_TRUSTED_PROXIES`` forwarder is EXCLUDED, even when its own
+    address is private (e.g. the Docker bridge gateway ``172.20.0.1``): behind NAT/SNAT
+    the observed peer is the forwarder, which can't vouch for the real client, so trusting
+    it would let SNAT'd public traffic satisfy this gate. The trusted-proxy convenience
+    stays scoped to the loopback allowance; LAN access needs the real client IP visible
+    (host networking) — see docker-compose. A genuine loopback peer always qualifies.
     """
     client = request.client
     if client is None:
@@ -154,7 +155,12 @@ def is_private_client(request: Request) -> bool:
         # "localhost" can appear in some setups — neither is forgeable as a TCP source
         # by a remote client, so treat them as loopback.
         return client.host in {"localhost", "testclient"}
-    return ip.is_loopback or _is_private_lan_ip(ip)
+    if ip.is_loopback:
+        return True
+    if not _is_private_lan_ip(ip):
+        return False
+    # Private range, but reject it if it's a known forwarder address (see above).
+    return not any(ip in net for net in _trusted_networks(get_settings().trusted_proxies))
 
 
 def _is_private_host_literal(host: str) -> bool:

@@ -254,6 +254,15 @@ def test_is_private_client_ignores_trusted_proxies(monkeypatch):
     assert middleware.is_loopback_client(req("8.8.8.8")) is True  # trusted for loopback
     assert middleware.is_private_client(req("8.8.8.8")) is False  # but NOT for the LAN gate
 
+    # A forwarder whose OWN address is private (the Docker bridge gateway) is still
+    # excluded — it can't vouch for the real client behind SNAT — while a real LAN peer
+    # in the same range that is not the forwarder still qualifies.
+    monkeypatch.setattr(
+        middleware, "get_settings", lambda: SimpleNamespace(trusted_proxies="172.20.0.1/32")
+    )
+    assert middleware.is_private_client(req("172.20.0.1")) is False  # the gateway/forwarder
+    assert middleware.is_private_client(req("172.20.0.5")) is True  # a real LAN peer
+
 
 def test_private_lan_allowed_requires_setting_and_private_peer(session, monkeypatch):
     from types import SimpleNamespace
