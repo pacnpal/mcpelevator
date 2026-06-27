@@ -39,6 +39,7 @@ function isPrivateHost(host: string): boolean {
 			a === 0 || // 0.0.0.0/8
 			a === 10 || // 10.0.0.0/8
 			a === 127 || // 127.0.0.0/8 loopback
+			(a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10 CGNAT/RFC 6598 (e.g. Tailscale)
 			(a === 169 && b === 254) || // 169.254.0.0/16 link-local
 			(a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
 			(a === 192 && b === 168) // 192.168.0.0/16
@@ -97,8 +98,10 @@ export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls' | 'au
 		// Claude Desktop's config validates stdio entries only — a bare `url` is
 		// dropped — so remote servers go through the `mcp-remote` stdio bridge.
 		// `--allow-http` is required for non-https endpoints (the default local
-		// install advertises an http loopback URL).
-		const remoteArgs = ['mcp-remote', mcp];
+		// install advertises an http loopback URL). `-y` auto-accepts the npx
+		// install prompt, which Claude Desktop (launching npx as a stdio server)
+		// can't answer on a machine that hasn't cached mcp-remote yet.
+		const remoteArgs = ['-y', 'mcp-remote', mcp];
 		if (local) remoteArgs.push('--allow-http');
 		// For the bearer header we use mcp-remote's documented `${VAR}` form with an
 		// `env` value instead of an inline `--header "Authorization: Bearer …"`:

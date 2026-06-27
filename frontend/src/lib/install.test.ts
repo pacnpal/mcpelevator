@@ -80,17 +80,22 @@ describe('installOptions', () => {
 	});
 
 	describe('Claude Desktop (mcp-remote bridge)', () => {
-		it('bridges remote HTTP through mcp-remote (stdio)', () => {
+		it('bridges remote HTTP through mcp-remote (stdio), auto-accepting the npx prompt', () => {
 			const entry = JSON.parse(byLabel(installOptions(pub), 'Claude Desktop').value);
 			expect(entry.mcpServers.memory).toEqual({
 				command: 'npx',
-				args: ['mcp-remote', PUBLIC_MCP]
+				args: ['-y', 'mcp-remote', PUBLIC_MCP]
 			});
 		});
 
 		it('adds --allow-http for non-https (local) endpoints', () => {
 			const entry = JSON.parse(byLabel(installOptions(base), 'Claude Desktop').value);
-			expect(entry.mcpServers.memory.args).toEqual(['mcp-remote', base.urls.mcp, '--allow-http']);
+			expect(entry.mcpServers.memory.args).toEqual([
+				'-y',
+				'mcp-remote',
+				base.urls.mcp,
+				'--allow-http'
+			]);
 		});
 	});
 
@@ -112,6 +117,7 @@ describe('installOptions', () => {
 				'https://10.0.0.5/s/memory/mcp',
 				'https://192.168.1.10/s/memory/mcp',
 				'https://172.16.4.4/s/memory/mcp',
+				'https://100.100.100.100/s/memory/mcp', // CGNAT/Tailscale
 				'https://localhost:8443/s/memory/mcp',
 				'https://mcp.lab.local/s/memory/mcp'
 			];
@@ -123,7 +129,13 @@ describe('installOptions', () => {
 
 		it('does not flag a public host that merely starts like a private range', () => {
 			// 172.15.x and 172.32.x are public (private block is 172.16–31 only).
-			for (const mcp of ['https://172.15.0.1/mcp', 'https://172.32.0.1/mcp', 'https://11.0.0.1/mcp']) {
+			for (const mcp of [
+				'https://172.15.0.1/mcp',
+				'https://172.32.0.1/mcp',
+				'https://11.0.0.1/mcp',
+				'https://100.63.0.1/mcp', // just below CGNAT block
+				'https://100.128.0.1/mcp' // just above CGNAT block
+			]) {
 				const opts = installOptions({ ...base, urls: { mcp, rest: null } });
 				expect(byLabel(opts, 'ChatGPT').hint).not.toContain('needs a public');
 			}
@@ -144,7 +156,7 @@ describe('installOptions', () => {
 			const entry = JSON.parse(byLabel(installOptions(pubBearer), 'Claude Desktop').value);
 			expect(entry.mcpServers.memory).toEqual({
 				command: 'npx',
-				args: ['mcp-remote', PUBLIC_MCP, '--header', 'Authorization:${AUTH_HEADER}'],
+				args: ['-y', 'mcp-remote', PUBLIC_MCP, '--header', 'Authorization:${AUTH_HEADER}'],
 				env: { AUTH_HEADER: 'Bearer <YOUR_TOKEN>' }
 			});
 		});
@@ -152,6 +164,7 @@ describe('installOptions', () => {
 		it('keeps --allow-http alongside the bearer header for local endpoints', () => {
 			const entry = JSON.parse(byLabel(installOptions(bearer), 'Claude Desktop').value);
 			expect(entry.mcpServers.memory.args).toEqual([
+				'-y',
 				'mcp-remote',
 				base.urls.mcp,
 				'--allow-http',
