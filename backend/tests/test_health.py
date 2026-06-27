@@ -84,17 +84,16 @@ def test_health_summary_lists_servers_and_overall_status():
 
 
 def test_health_slug_503_body_contains_health_dict():
-    """A 503 response must carry the diagnostic health dict in its detail body,
-    so a load balancer or operator can see state/last_error without a second call."""
+    """A 503 response must carry the diagnostic health dict, so a load balancer or
+    operator can see state/last_error without a second call. The body is flat — the
+    same shape as the 200 — not nested under ``detail``, so one schema parses both."""
     with TestClient(app) as client:
         srv = _create_server(client)
         try:
             client.app.state.supervisor.endpoint = lambda s: None
             r = client.get(f"/api/health/{srv['slug']}", headers=LOOPBACK)
             assert r.status_code == 503
-            # FastAPI wraps HTTPException details in {"detail": ...}
-            body = r.json()
-            detail = body["detail"]
+            detail = r.json()
             assert detail["slug"] == srv["slug"]
             assert detail["running"] is False
             assert "enabled" in detail
@@ -186,9 +185,9 @@ def test_server_health_uses_unit_state_when_unit_present():
             client.app.state.supervisor.endpoint = lambda s: None
 
             r = client.get(f"/api/health/{srv['slug']}", headers=LOOPBACK)
-            # Server is not running -> 503
+            # Server is not running -> 503 (flat body, same shape as the 200)
             assert r.status_code == 503
-            detail = r.json()["detail"]
+            detail = r.json()
             # State must come from the unit, not from the (absent) runtime row
             assert detail["state"] == "failed"
             assert detail["last_error"] == "spawn error"
@@ -210,7 +209,7 @@ def test_server_health_falls_back_to_stopped_when_no_unit_and_no_runtime():
 
             r = client.get(f"/api/health/{srv['slug']}", headers=LOOPBACK)
             assert r.status_code == 503
-            detail = r.json()["detail"]
+            detail = r.json()
             assert detail["state"] == "stopped"
             assert detail["last_error"] is None
         finally:

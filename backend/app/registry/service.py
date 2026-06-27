@@ -68,11 +68,19 @@ def normalize_auth_providers(session: Session) -> int:
     return changed
 
 
+# Slugs that would collide with a sibling literal segment on the proxy/API routes
+# and shadow it. A server slugged "summary" would capture GET /api/health/summary
+# (the aggregate route) so its own /api/health/{slug} could never be reached, and a
+# load balancer would read the aggregate instead of that server's status. Reserved
+# here so such a name is disambiguated (e.g. "summary" -> "summary-2") at creation.
+_RESERVED_SLUGS = frozenset({"summary"})
+
+
 def _unique_slug(session: Session, name: str) -> str:
     base = slugify(name)
     slug = base
     n = 2
-    while repo.get_server_by_slug(session, slug) is not None:
+    while slug in _RESERVED_SLUGS or repo.get_server_by_slug(session, slug) is not None:
         slug = f"{base}-{n}"
         n += 1
     return slug

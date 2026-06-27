@@ -281,13 +281,17 @@ def test_hop_by_hop_request_headers_not_forwarded():
                 f"/s/{srv['slug']}/probe",
                 headers={**LOOPBACK, "connection": "keep-alive", "keep-alive": "timeout=5"},
             )
-            hop_by_hop = {"connection", "keep-alive", "transfer-encoding", "te", "trailers",
-                          "proxy-authenticate", "proxy-authorization", "upgrade"}
             forwarded_lower = {k.lower() for k in received_headers}
-            assert hop_by_hop.isdisjoint(forwarded_lower), (
-                f"hop-by-hop headers leaked to upstream: "
-                f"{hop_by_hop & forwarded_lower}"
-            )
+            # The proxy strips the *client's* hop-by-hop headers before forwarding.
+            # `keep-alive` is the clean probe: the client sent it and httpx never adds
+            # it on its own, so its absence upstream proves the strip. (A `connection`
+            # header IS present upstream, but that's httpx setting its own per-hop
+            # header for the proxy->backend connection — not the client's, which was
+            # dropped — and stripping it would break that connection's management.)
+            client_hop_by_hop = {"keep-alive", "transfer-encoding", "te", "trailers",
+                                 "proxy-authenticate", "proxy-authorization", "upgrade"}
+            leaked = client_hop_by_hop & forwarded_lower
+            assert not leaked, f"client hop-by-hop headers leaked to upstream: {leaked}"
         finally:
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 
