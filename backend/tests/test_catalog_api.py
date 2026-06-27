@@ -73,11 +73,18 @@ def _clear_cache():
 def _stub(monkeypatch, routes: dict):
     """
     Stub upstream catalog responses by matching URL substrings.
-    
+
     Parameters:
     	routes (dict): A mapping of URL substrings to JSON payloads.
+
+    Returns:
+    	list: Captured (url, params) tuples for every outbound call, so tests can
+    	assert the forwarded search/cursor/limit values.
     """
+    calls: list[tuple[str, dict]] = []
+
     async def fake_get_json(http, url, params):
+        calls.append((url, params))
         for needle, payload in routes.items():
             if needle in url:
                 return payload
@@ -85,6 +92,7 @@ def _stub(monkeypatch, routes: dict):
 
     # Sources call base.get_json via the module attribute, so patching it here is enough.
     monkeypatch.setattr(base, "get_json", fake_get_json)
+    return calls
 
 
 def test_sources_lists_official_and_glama():
@@ -97,15 +105,24 @@ def test_sources_lists_official_and_glama():
 
 
 def test_official_list_passthrough_and_cursor(monkeypatch):
-    _stub(monkeypatch, {"registry.modelcontextprotocol.io/v0.1/servers": _OFFICIAL_LIST})
+    calls = _stub(monkeypatch, {"registry.modelcontextprotocol.io/v0.1/servers": _OFFICIAL_LIST})
     with TestClient(app) as c:
-        r = c.get("/api/catalog/servers", params={"search": "memory"}, headers=LOOPBACK)
+        r = c.get(
+            "/api/catalog/servers",
+            params={"search": "memory", "cursor": "io.example/a:1.0.0", "limit": 25},
+            headers=LOOPBACK,
+        )
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["source"] == "official"
         assert body["next_cursor"] == "io.example/memory:1.0.0"
         assert body["servers"][0]["installable"] is True
         assert body["servers"][0]["registry_types"] == ["npm"]
+        # The query/cursor/limit must be forwarded to the upstream (pagination contract).
+        _, params = calls[0]
+        assert params["search"] == "memory"
+        assert params["cursor"] == "io.example/a:1.0.0"
+        assert params["limit"] == 25
 
 
 def test_official_detail_resolves_drafts(monkeypatch):
@@ -121,14 +138,22 @@ def test_official_detail_resolves_drafts(monkeypatch):
 
 
 def test_glama_list_passthrough(monkeypatch):
-    _stub(monkeypatch, {"glama.ai/api/mcp/v1/servers": _GLAMA_LIST})
+    calls = _stub(monkeypatch, {"glama.ai/api/mcp/v1/servers": _GLAMA_LIST})
     with TestClient(app) as c:
-        r = c.get("/api/catalog/servers", params={"source": "glama"}, headers=LOOPBACK)
+        r = c.get(
+            "/api/catalog/servers",
+            params={"source": "glama", "search": "git", "cursor": "cur1"},
+            headers=LOOPBACK,
+        )
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["next_cursor"] == "cur2"
         assert body["servers"][0]["source"] == "glama"
         assert body["servers"][0]["installable"] is False
+        # Glama uses its own param names; the source must translate to query/after.
+        _, params = calls[0]
+        assert params["query"] == "git"
+        assert params["after"] == "cur1"
 
 
 def test_unknown_source_is_400():

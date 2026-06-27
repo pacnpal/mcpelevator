@@ -72,19 +72,24 @@ def argument_tokens(args: list[Any], warnings: list[str]) -> list[str]:
             name = arg.get("name")
             if not name:
                 continue
-            tokens.append(str(name))
             if value is not None:
-                tokens.append(str(value))
+                tokens.extend([str(name), str(value)])
             elif arg.get("isRequired"):
-                tokens.append("")
-                warnings.append(f"Argument {name} is required — fill in its value before starting.")
+                # A required option needs a value. Emit a VISIBLE placeholder, not an
+                # empty string — the form's splitLines() drops blank tokens, which would
+                # silently omit the argument; "<hint>" survives and shows where to fill in.
+                hint = arg.get("valueHint") or "value"
+                tokens.extend([str(name), f"<{hint}>"])
+                warnings.append(f"Argument {name} needs a value — replace <{hint}> before starting.")
+            else:
+                tokens.append(str(name))  # a bare flag (e.g. --verbose); no value to add
         else:  # positional
             if value is not None:
                 tokens.append(str(value))
             elif arg.get("isRequired"):
-                tokens.append("")
-                hint = arg.get("valueHint") or arg.get("description") or "a positional argument"
-                warnings.append(f"Required argument ({hint}) — fill in its value before starting.")
+                hint = arg.get("valueHint") or arg.get("description") or "value"
+                tokens.append(f"<{hint}>")
+                warnings.append(f"Replace the <{hint}> positional argument with a real value before starting.")
     return tokens
 
 

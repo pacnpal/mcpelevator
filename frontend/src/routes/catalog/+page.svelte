@@ -118,7 +118,9 @@
 		if (installing) return;
 		installing = server.id;
 		try {
-			const detail = await getCatalogServer(server.id, server.source);
+			// Resolve the exact version shown on the card, not "latest": a list can
+			// surface older/multiple versions, and Install must pin the one chosen.
+			const detail = await getCatalogServer(server.id, server.source, server.version ?? 'latest');
 			const drafts = detail.drafts;
 			const draft = drafts.find((d) => d.installable) ?? drafts[0] ?? null;
 			const supportMeta = sources.find((s) => s.id === server.source);

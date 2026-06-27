@@ -14,7 +14,7 @@ to a clean 502.
 from __future__ import annotations
 
 import time
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import httpx
 
@@ -115,11 +115,15 @@ class TTLCache:
         	value (Any): Value to store.
         """
         # `get` only evicts the keys it touches, so a stream of unique search queries
-        # would otherwise accumulate dead entries forever. When the store grows past the
-        # cap, drop everything already expired before inserting (bounded memory).
+        # (keyed by user-controlled search/cursor) would otherwise grow _store forever.
+        # At the cap, drop expired entries first, then — if still full (all live) — the
+        # soonest-to-expire one, so the cap is a hard bound, not just expiry-bounded.
         if len(self._store) >= self._max_entries:
             now = time.monotonic()
             self._store = {k: (exp, v) for k, (exp, v) in self._store.items() if exp > now}
+            if len(self._store) >= self._max_entries:
+                oldest = min(self._store, key=lambda k: self._store[k][0])
+                self._store.pop(oldest, None)
         self._store[key] = (time.monotonic() + self._ttl, value)
 
     def clear(self) -> None:
@@ -141,18 +145,21 @@ class Source(Protocol):
 
     id: str
     label: str
-    install_support: str  # "auto" (runnable command derivable) | "manual" (discovery only)
+    # "auto" (a runnable command is derivable) | "manual" (discovery only). Same literal
+    # domain as the CatalogSource API contract, so sources are type-checked against it.
+    install_support: Literal["auto", "manual"]
 
     async def list_servers(
         self, http: httpx.AsyncClient, *, search: str | None, cursor: str | None, limit: int | None
-    ) -> dict[str, Any]: """
+    ) -> dict[str, Any]:
+        """
         List servers from the source.
-        
+
         Parameters:
         	search (str | None): Search text used to filter matching servers.
         	cursor (str | None): Pagination cursor for the next page of results.
         	limit (int | None): Maximum number of servers to return.
-        
+
         Returns:
         	dict[str, Any]: A normalized listing with server entries and a next-page cursor.
         """
@@ -160,13 +167,14 @@ class Source(Protocol):
 
     async def get_detail(
         self, http: httpx.AsyncClient, *, id: str, version: str
-    ) -> dict[str, Any]: """
+    ) -> dict[str, Any]:
+        """
         Fetch a normalized catalog entry detail for a specific server version.
-        
+
         Parameters:
         	id (str): The server identifier.
         	version (str): The server version to retrieve.
-        
+
         Returns:
         	dict[str, Any]: A normalized catalog detail mapping.
         """

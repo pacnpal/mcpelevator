@@ -88,7 +88,8 @@ def test_required_argument_without_value_warns():
             packageArguments=[{"type": "positional", "isRequired": True, "valueHint": "DB_PATH"}],
         ),
     )
-    assert draft["args"] == ["tool==1.0.0", ""]  # empty placeholder for the user to fill
+    # A visible placeholder (not "") so the form's splitLines() can't silently drop it.
+    assert draft["args"] == ["tool==1.0.0", "<DB_PATH>"]
     assert any("DB_PATH" in w for w in draft["warnings"])
 
 
@@ -120,10 +121,17 @@ def test_non_stdio_transport_not_installable():
     assert "stdio" in draft["reason"]
 
 
-def test_determinism_same_package_same_draft():
+def test_determinism_and_purity():
     pkg = _pkg(packageArguments=[{"type": "named", "name": "--x", "value": "1"}],
                environmentVariables=[{"name": "A", "default": "b"}])
-    assert mapping.package_draft(0, pkg) == mapping.package_draft(0, pkg)
+    import copy
+
+    original = copy.deepcopy(pkg)
+    first = mapping.package_draft(0, pkg)
+    # Deterministic: an equivalent fresh input yields an equal draft...
+    assert first == mapping.package_draft(0, copy.deepcopy(original))
+    # ...and pure: the call must not mutate its input.
+    assert pkg == original
 
 
 # --- official document normalization ---------------------------------------

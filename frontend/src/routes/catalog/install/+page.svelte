@@ -17,6 +17,21 @@
 		pending = p;
 	});
 
+	// Repo/web links come from public directory metadata (untrusted). Only render an
+	// anchor when the URL parses as http(s), so a malicious entry can't slip a
+	// `javascript:` (or other unsafe-scheme) href into the review page.
+	function safeUrl(url: string | null): string | null {
+		if (!url) return null;
+		try {
+			const u = new URL(url);
+			return u.protocol === 'http:' || u.protocol === 'https:' ? url : null;
+		} catch {
+			return null;
+		}
+	}
+	const repoUrl = $derived(safeUrl(pending?.repositoryUrl ?? null));
+	const webUrl = $derived(safeUrl(pending?.webUrl ?? null));
+
 	let creating = $state(false);
 	let createError = $state<string | null>(null);
 
@@ -65,19 +80,19 @@
 		</div>
 
 		<!-- Manual / repo notes -->
-		{#if pending.notes.length || pending.repositoryUrl || pending.webUrl}
+		{#if pending.notes.length || repoUrl || webUrl}
 			<div class="flex flex-col gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3.5 py-3 text-xs text-[var(--color-ink-muted)]">
 				{#each pending.notes as note (note)}
 					<p>{note}</p>
 				{/each}
 				<div class="flex flex-wrap gap-3 pt-0.5">
-					{#if pending.repositoryUrl}
-						<a href={pending.repositoryUrl} target="_blank" rel="noreferrer noopener" class="font-medium text-[var(--color-accent)] transition hover:text-[var(--color-accent-strong)]">
+					{#if repoUrl}
+						<a href={repoUrl} target="_blank" rel="noreferrer noopener" class="font-medium text-[var(--color-accent)] transition hover:text-[var(--color-accent-strong)]">
 							Repository ↗
 						</a>
 					{/if}
-					{#if pending.webUrl}
-						<a href={pending.webUrl} target="_blank" rel="noreferrer noopener" class="font-medium text-[var(--color-accent)] transition hover:text-[var(--color-accent-strong)]">
+					{#if webUrl}
+						<a href={webUrl} target="_blank" rel="noreferrer noopener" class="font-medium text-[var(--color-accent)] transition hover:text-[var(--color-accent-strong)]">
 							Directory page ↗
 						</a>
 					{/if}
