@@ -32,6 +32,17 @@ def test_unique_slugs(session):
     assert b.slug == "memory-2"
 
 
+def test_reserved_slug_is_not_assigned(session):
+    """A server named "summary" must not get the slug "summary" — that would shadow
+    the static /api/health/summary route so its own /api/health/{slug} is unreachable.
+    It's disambiguated instead, leaving the reserved word free for the aggregate route."""
+    a = _mk(session, name="summary")
+    assert a.slug == "summary-2"
+    # the reserved word stays free no matter how the name is cased/spaced
+    b = _mk(session, name="Summary")
+    assert b.slug == "summary-3"
+
+
 def test_config_hash_changes_on_edit(session):
     a = _mk(session, args=["-y", "x"])
     before = a.config_hash
