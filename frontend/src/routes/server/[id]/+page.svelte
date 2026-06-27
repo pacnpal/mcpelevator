@@ -79,6 +79,10 @@
 			const copy = await cloneServer(server.id);
 			// Land on the copy so the operator can review/edit, then enable it.
 			await goto(`/server/${copy.id}`);
+			// This is a same-route navigation (/server/[id] -> /server/[id]), so the
+			// component instance is reused — clear the in-flight flag or the copy's
+			// page would show the Clone button stuck disabled.
+			cloning = false;
 		} catch (err) {
 			flashToast(errorMessage(err));
 			cloning = false;
