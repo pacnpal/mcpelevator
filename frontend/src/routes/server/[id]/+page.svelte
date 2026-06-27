@@ -91,13 +91,18 @@
 		// the toggle response is id-guarded above, but blocking here keeps the source
 		// page from kicking off conflicting actions right before it navigates away.
 		if (!server || cloning || busy || deleting) return;
+		// Capture the route + target id: if the user leaves this page before the
+		// clone resolves, don't navigate to the copy or toast on the wrong route.
+		const requestedId = id;
+		const sourceId = server.id;
 		cloning = true;
 		try {
-			const copy = await cloneServer(server.id);
+			const copy = await cloneServer(sourceId);
+			if (requestedId !== id) return; // navigated away mid-flight
 			// Land on the copy so the operator can review/edit, then enable it.
 			await goto(`/server/${copy.id}`);
 		} catch (err) {
-			flashToast(errorMessage(err));
+			if (requestedId === id) flashToast(errorMessage(err));
 		} finally {
 			// Same-route nav (/server/[id] -> /server/[id]) reuses this component, and
 			// an aborted goto resolves false without throwing — always clear the flag
