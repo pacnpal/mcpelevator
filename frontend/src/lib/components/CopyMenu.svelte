@@ -1,10 +1,18 @@
 <script lang="ts">
-	import { installOptions, type InstallOption } from '$lib/install';
+	import { installOptions, INSTALL_GROUP_ORDER, type InstallOption } from '$lib/install';
 	import type { ServerSummary } from '$lib/types';
 
 	let { server }: { server: ServerSummary } = $props();
 
 	const options = $derived(installOptions(server));
+	// Bucket options by group, preserving the canonical group order and dropping
+	// any group with no options for this server.
+	const groups = $derived(
+		INSTALL_GROUP_ORDER.map((group) => ({
+			group,
+			items: options.filter((o) => o.group === group)
+		})).filter((g) => g.items.length > 0)
+	);
 
 	let open = $state(false);
 	let copied = $state<string | null>(null); // label of the last-copied option
@@ -108,45 +116,57 @@
 	{#if open}
 		<!-- Opens upward (the card footer sits at the bottom of the card). -->
 		<div
-			class="absolute bottom-full left-0 z-30 mb-1.5 w-60 overflow-hidden rounded-lg border border-[var(--color-line-strong)] bg-[var(--color-elevated)] py-1 shadow-2xl"
+			class="absolute bottom-full left-0 z-30 mb-1.5 max-h-[min(70vh,28rem)] w-72 overflow-y-auto rounded-lg border border-[var(--color-line-strong)] bg-[var(--color-elevated)] py-1 shadow-2xl"
 		>
 			<p
 				class="px-3 pt-1.5 pb-1 text-[10px] font-semibold tracking-wider text-[var(--color-ink-dim)] uppercase"
 			>
 				Add to client
 			</p>
-			{#each options as opt (opt.label)}
-				<button
-					type="button"
-					onclick={() => copy(opt)}
-					class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm text-[var(--color-ink-muted)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
+			{#each groups as { group, items } (group)}
+				<p
+					class="mt-1 px-3 pt-1.5 pb-0.5 text-[10px] font-semibold tracking-wider text-[var(--color-ink-dim)] uppercase"
 				>
-					<span class="flex min-w-0 items-center gap-2">
-						<span
-							class="inline-block w-8 shrink-0 font-mono text-[10px] tracking-wide text-[var(--color-ink-dim)] uppercase"
-						>
-							{opt.kind}
-						</span>
-						<span class="truncate">{opt.label}</span>
-					</span>
-					{#if copied === opt.label}
-						<span class="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-[var(--color-accent)]">
-							<svg
-								class="size-3.5"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2.5"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								aria-hidden="true"
+					{group}
+				</p>
+				{#each items as opt (opt.label)}
+					<button
+						type="button"
+						onclick={() => copy(opt)}
+						class="flex w-full items-start justify-between gap-3 px-3 py-2 text-left text-sm text-[var(--color-ink-muted)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
+					>
+						<span class="flex min-w-0 items-start gap-2">
+							<span
+								class="mt-0.5 inline-block w-8 shrink-0 font-mono text-[10px] tracking-wide text-[var(--color-ink-dim)] uppercase"
 							>
-								<path d="M20 6 9 17l-5-5" />
-							</svg>
-							Copied
+								{opt.kind}
+							</span>
+							<span class="min-w-0">
+								<span class="block truncate">{opt.label}</span>
+								{#if opt.hint}
+									<span class="block text-[11px] leading-tight text-[var(--color-ink-dim)]">{opt.hint}</span>
+								{/if}
+							</span>
 						</span>
-					{/if}
-				</button>
+						{#if copied === opt.label}
+							<span class="mt-0.5 inline-flex shrink-0 items-center gap-1 text-xs font-medium text-[var(--color-accent)]">
+								<svg
+									class="size-3.5"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2.5"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									aria-hidden="true"
+								>
+									<path d="M20 6 9 17l-5-5" />
+								</svg>
+								Copied
+							</span>
+						{/if}
+					</button>
+				{/each}
 			{/each}
 		</div>
 	{/if}
