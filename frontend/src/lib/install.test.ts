@@ -101,6 +101,18 @@ describe('installOptions', () => {
 			]);
 		});
 
+		it('warns that URL-only connectors do not support bearer auth', () => {
+			const opts = installOptions(bearer);
+			expect(byLabel(opts, 'Claude web / mobile').hint).toContain('bearer auth not supported');
+			expect(byLabel(opts, 'ChatGPT').hint).toContain('bearer auth not supported');
+		});
+
+		it('omits the bearer warning for none-auth servers', () => {
+			const opts = installOptions(base);
+			expect(byLabel(opts, 'Claude web / mobile').hint).not.toContain('bearer');
+			expect(byLabel(opts, 'ChatGPT').hint).not.toContain('bearer');
+		});
+
 		it('adds headers to the Gemini CLI and mcpServers entries', () => {
 			const opts = installOptions(bearer);
 			expect(JSON.parse(byLabel(opts, 'Gemini CLI').value).mcpServers.memory.headers).toEqual({

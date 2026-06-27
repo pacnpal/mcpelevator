@@ -59,10 +59,8 @@ export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls' | 'au
 			: { httpUrl: mcp };
 		// URL-only connector UIs (claude.ai, ChatGPT) take just the endpoint and
 		// handle auth via their own OAuth / no-auth flow — a static token can't be
-		// attached, so for bearer servers paste the URL into a `none`-auth server.
-		const connectorHint = bearer
-			? 'Paste this URL into the connector UI (bearer auth not supported there)'
-			: 'Paste this URL into the connector UI';
+		// attached, so warn that a bearer-protected server won't work there.
+		const connectorCaveat = bearer ? ' · bearer auth not supported here' : '';
 
 		// — Claude —
 		out.push({
@@ -82,7 +80,7 @@ export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls' | 'au
 			kind: 'url',
 			group: 'Claude',
 			label: 'Claude web / mobile',
-			hint: 'Settings → Connectors → Add custom connector',
+			hint: `Settings → Connectors → Add custom connector${connectorCaveat}`,
 			value: mcp
 		});
 
@@ -99,7 +97,7 @@ export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls' | 'au
 			kind: 'url',
 			group: 'OpenAI',
 			label: 'ChatGPT',
-			hint: 'Developer mode → Settings → Connectors → Create',
+			hint: `Developer mode → Settings → Connectors → Create${connectorCaveat}`,
 			value: mcp
 		});
 
