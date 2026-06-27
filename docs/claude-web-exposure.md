@@ -165,17 +165,38 @@ Anthropic's cloud with nowhere to set a header, just like the browser, so they n
 
 1. Do the **Shared baseline** above, with each server's auth set to `bearer` and a
    token minted (scope `all` or a single server).
-2. Stand up a tunnel that gives a public/edge HTTPS URL:
+2. Stand up a tunnel that gives a public HTTPS URL:
    - **Cloudflare Tunnel** — public HTTPS hostname, no inbound ports.
-   - **Tailscale Funnel** — HTTPS URL reachable from outside your tailnet; good if
-     you want it tied to your Tailscale identity.
+   - **Tailscale Funnel** — also a **public** HTTPS tunnel: Tailscale documents
+     Funnel as sharing a service "for anyone to access — even if they don't use
+     Tailscale" (that's Funnel; `tailscale serve` is the tailnet-only variant). So it
+     does **not** identity-gate the endpoint — the mcpe **bearer token remains your
+     auth boundary**. Pick it for the convenient HTTPS URL, not as a substitute for auth.
    Map it to `http://127.0.0.1:8080`, set `MCPE_PUBLIC_BASE_URL`, and add the host to
    `allowed_hosts`.
-3. Add the connector in your client. mcpelevator's per-server **copy menu** emits
-   the right snippet per client (Claude Code, Codex, `mcpServers`/VS Code JSON, raw
-   URL). For Claude Desktop, use the `mcp-remote` bridge with the URL +
-   `Authorization: Bearer <token>` header. The URL is
-   `https://mcp.example.com/s/<slug>/mcp`.
+3. Add the connector in your client.
+   - **Claude Code** / **Codex** / **VS Code**: use mcpelevator's per-server **copy
+     menu**, which emits the right snippet (it includes the `Authorization: Bearer`
+     header). The URL is `https://mcp.example.com/s/<slug>/mcp`.
+   - **Claude Desktop (local config)**: the copy menu's `mcpServers` JSON is the
+     remote-HTTP form (`{"type":"http", …}`) that Code/VS Code accept — Desktop's
+     `claude_desktop_config.json` runs **stdio** servers, so wrap the URL in the
+     `mcp-remote` bridge and inject the header with `--header`:
+
+     ```json
+     {
+       "mcpServers": {
+         "<slug>": {
+           "command": "npx",
+           "args": [
+             "-y", "mcp-remote",
+             "https://mcp.example.com/s/<slug>/mcp",
+             "--header", "Authorization: Bearer <YOUR_TOKEN>"
+           ]
+         }
+       }
+     }
+     ```
 4. Verify the token is required: a request without `Authorization: Bearer` should
    get a **401**; with the wrong token a **401**; with a token scoped to a different
    server a **403**.
