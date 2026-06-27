@@ -136,7 +136,11 @@ def _is_private_host_literal(host: str) -> bool:
     so it can't satisfy this check even after the name rebinds to a LAN address.
     """
     ip = _parse_ip(host)
-    return ip is not None and ip.is_private
+    # is_private also matches loopback (127.0.0.1, ::1) and the unspecified address
+    # (0.0.0.0, ::). Those are honoured ONLY via the peer-gated _LOOPBACK path, so keep
+    # them out of the literal LAN allowance — a private peer shouldn't reach the box by
+    # spoofing Host: 127.0.0.1 without actually connecting from loopback.
+    return ip is not None and ip.is_private and not ip.is_loopback and not ip.is_unspecified
 
 
 def private_lan_allowed(request: Request, session: Session) -> bool:

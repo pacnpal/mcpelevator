@@ -187,6 +187,29 @@ def test_host_allowed_private_lan_literal():
     assert middleware.host_allowed(
         "192.168.1.50", None, [], client_is_loopback=False, allow_private=False
     )[0] is False
+    # loopback / unspecified literals do NOT pass via the LAN literal path — they're
+    # honoured only through the peer-gated _LOOPBACK set, never spoofed from a LAN peer
+    assert middleware.host_allowed(
+        "127.0.0.1", None, [], client_is_loopback=False, allow_private=True
+    )[0] is False
+    assert middleware.host_allowed(
+        "0.0.0.0", None, [], client_is_loopback=False, allow_private=True
+    )[0] is False
+    # but a real loopback peer still gets loopback Host via _LOOPBACK, LAN flag or not
+    assert middleware.host_allowed(
+        "127.0.0.1", None, [], client_is_loopback=True, allow_private=True
+    )[0] is True
+
+
+def test_settings_update_rejects_coercible_allow_private_lan():
+    from pydantic import ValidationError
+
+    from app.api.schemas import SettingsUpdate
+
+    assert SettingsUpdate(allow_private_lan=True).allow_private_lan is True
+    assert SettingsUpdate().allow_private_lan is None  # still optional
+    with pytest.raises(ValidationError):  # StrictBool: no "yes"/"true"/1 coercion
+        SettingsUpdate(allow_private_lan="yes")
 
 
 def test_is_private_client():

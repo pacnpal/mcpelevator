@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 # The auth providers a server may select. Constrained here so a malformed value
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
@@ -121,7 +121,10 @@ class SettingsUpdate(BaseModel):
     allowed_hosts: Optional[list[str]] = None
     default_auth_provider: Optional[str] = None
     control_plane_auth: Optional[ControlPlaneAuthMode] = None
-    allow_private_lan: Optional[bool] = None
+    # StrictBool, not bool: Optional[bool] would coerce "yes"/"true"/1 to True at the
+    # API boundary, so the registry's isinstance(bool) invariant would never fire for an
+    # API caller. Strict keeps the bool-only contract end to end (the SPA sends a JSON bool).
+    allow_private_lan: Optional[StrictBool] = None
 
 
 class AuthStatus(BaseModel):
