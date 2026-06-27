@@ -111,8 +111,10 @@ Steps (high level):
    `bearer` (the proxy injects the header) or `none` if and only if the proxy fully
    gates access.
 2. Stand up the tunnel: `cloudflared tunnel ...` mapping `https://mcp.example.com`
-   → `http://127.0.0.1:8080`. Point `MCPE_PUBLIC_BASE_URL` at that hostname and add
-   it to `allowed_hosts`.
+   → `http://127.0.0.1:8080`. Set `MCPE_PUBLIC_BASE_URL` to the **full absolute URL
+   including the scheme** (`https://mcp.example.com`, not the bare hostname — it's
+   parsed as a URL), and add just the **hostname** (`mcp.example.com`) to
+   `allowed_hosts`.
 3. Put Cloudflare Access (Managed OAuth / MCP portal) in front of the public
    hostname and allowlist the **claude.ai and claude.com OAuth callback URLs**.
 4. In claude.ai → **Settings → Connectors → Add custom connector**, paste
@@ -154,7 +156,7 @@ needed.
 
 ## Choosing
 
-| | **Path A — OAuth edge** | **Path B — bearer** |
+| Capability | **Path A — OAuth edge** | **Path B — bearer** |
 |---|---|---|
 | Works in claude.ai **web browser** | ✅ (subject to the caveat above) | ❌ (web can't send a bearer) |
 | Works in Claude **Code / Desktop / mobile** | ✅ | ✅ |
