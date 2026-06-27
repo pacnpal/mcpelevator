@@ -136,18 +136,37 @@ export function createServer(body: ServerCreate): Promise<ServerSummary> {
 	return jsonRequest<ServerSummary>('/servers', 'POST', body);
 }
 
+/**
+ * Imports servers from a payload.
+ *
+ * @param payload - The import data to send to the server
+ * @returns The import result
+ */
 export function importServers(payload: unknown): Promise<ImportResult> {
 	return jsonRequest<ImportResult>('/servers/import', 'POST', payload);
 }
 
 // ---- Catalog (browse upstream MCP directories + install) --------------------
 
-/** The directories available to browse, and whether each supports auto-install. */
+/**
+ * Lists the available catalog sources.
+ *
+ * @returns The catalog sources available for browsing.
+ */
 export function listCatalogSources(): Promise<CatalogSource[]> {
 	return request<CatalogSource[]>('/catalog/sources');
 }
 
-/** Browse/search a directory. `cursor` pages through results (from `next_cursor`). */
+/**
+ * Browses catalog servers with optional filtering and pagination.
+ *
+ * @param params - Query parameters used to filter and page the catalog results.
+ * @param params.source - The catalog source to query.
+ * @param params.search - A search term to match against catalog entries.
+ * @param params.cursor - The pagination cursor from the previous result page.
+ * @param params.limit - The maximum number of results to return.
+ * @returns The catalog listing for the requested query.
+ */
 export function listCatalog(params: {
 	source?: string;
 	search?: string;
@@ -163,7 +182,14 @@ export function listCatalog(params: {
 	return request<CatalogList>(`/catalog/servers${qs ? `?${qs}` : ''}`);
 }
 
-/** Resolve one catalog server into install drafts + metadata. */
+/**
+ * Resolves a catalog server to its install details and metadata.
+ *
+ * @param id - The catalog server ID
+ * @param source - The catalog source to query
+ * @param version - The catalog version to query
+ * @returns The catalog server details
+ */
 export function getCatalogServer(
 	id: string,
 	source = 'official',
@@ -173,6 +199,13 @@ export function getCatalogServer(
 	return request<CatalogDetail>(`/catalog/server?${q.toString()}`);
 }
 
+/**
+ * Updates a server.
+ *
+ * @param id - The server ID.
+ * @param body - The fields to update.
+ * @returns The updated server summary.
+ */
 export function updateServer(
 	id: string,
 	body: ServerUpdate

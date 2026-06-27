@@ -29,11 +29,16 @@ UNSUPPORTED_REASON = {
 
 
 def pin_identifier(registry_type: str, identifier: str, version: str | None) -> str:
-    """Pin to the registry's version so installs are reproducible (Idempotency).
-
-    npm uses ``name@version`` (works with scoped ``@scope/name@version`` too); pypi uses
-    a PEP 508 ``name==version`` specifier ``uvx`` accepts as a positional. A missing or
-    ``"latest"`` version is left unpinned.
+    """
+    Pin an identifier to a specific registry version for reproducible installs.
+    
+    Parameters:
+        registry_type (str): The registry type.
+        identifier (str): The package identifier.
+        version (str | None): The package version to pin.
+    
+    Returns:
+        str: The pinned identifier, or the original identifier when the version is missing or set to ``"latest"``.
     """
     if not version or version == "latest":
         return identifier
@@ -45,11 +50,15 @@ def pin_identifier(registry_type: str, identifier: str, version: str | None) -> 
 
 
 def argument_tokens(args: list[Any], warnings: list[str]) -> list[str]:
-    """Flatten registry ``packageArguments`` into argv tokens (best effort, stable order).
-
-    positional → its ``value``/``default``; named → ``name`` then ``value``/``default``.
-    A required argument with no concrete value contributes an empty placeholder and a
-    warning, so the operator notices it in the review form rather than at launch.
+    """
+    Flatten registry package arguments into argv tokens.
+    
+    Parameters:
+    	args (list[Any]): Package argument definitions to convert.
+    	warnings (list[str]): A list that receives warnings for required arguments without values.
+    
+    Returns:
+    	list[str]: The flattened argument tokens in input order.
     """
     tokens: list[str] = []
     for arg in args:
@@ -80,11 +89,15 @@ def argument_tokens(args: list[Any], warnings: list[str]) -> list[str]:
 
 
 def environment(env_vars: list[Any], warnings: list[str]) -> dict[str, str]:
-    """Build the ``env`` dict from registry ``environmentVariables`` (insertion-ordered).
-
-    Each variable becomes ``name → value/default/""``. Required or secret variables with
-    no default are prefilled empty and flagged so the operator supplies them in the
-    review form (secrets are never invented).
+    """
+    Build an environment mapping from registry environment variables.
+    
+    Parameters:
+    	env_vars (list[Any]): Registry environment variable entries.
+    	warnings (list[str]): Collected warning messages.
+    
+    Returns:
+    	dict[str, str]: Environment variables keyed by name, with missing values represented as empty strings.
     """
     env: dict[str, str] = {}
     for var in env_vars:
@@ -104,7 +117,18 @@ def environment(env_vars: list[Any], warnings: list[str]) -> dict[str, str]:
 
 
 def blank_draft(index: int, registry_type: str, identifier: str, version: Any) -> dict[str, Any]:
-    """A not-yet-installable draft shell (also the manual-install scaffold base)."""
+    """
+    Create a non-installable draft scaffold for a registry package.
+    
+    Parameters:
+        index (int): The package position in the registry list.
+        registry_type (str): The package's registry type.
+        identifier (str): The package identifier.
+        version (Any): The package version value.
+    
+    Returns:
+        dict[str, Any]: A draft with normalized package metadata and empty command, arguments, environment, warnings, and reason fields.
+    """
     return {
         "package_index": index,
         "registry_type": registry_type or "unknown",
@@ -121,11 +145,17 @@ def blank_draft(index: int, registry_type: str, identifier: str, version: Any) -
 
 
 def package_draft(index: int, pkg: dict[str, Any]) -> dict[str, Any]:
-    """Map one registry ``packages[]`` entry to an install draft.
-
-    Handles the common ``server.json`` package shape (registryType/identifier/version/
-    transport/packageArguments/environmentVariables). Unknown types, non-stdio
-    transports, or missing identifiers come back ``installable=False`` with a reason.
+    """Map a registry package entry to an install draft.
+    
+    Produces a draft for local stdio packages with supported registry types, or a
+    non-installable draft with a reason when the package cannot be mapped.
+    
+    Parameters:
+    	index (int): Package index in the registry list.
+    	pkg (dict[str, Any]): Registry package entry.
+    
+    Returns:
+    	dict[str, Any]: The mapped install draft.
     """
     registry_type = str(pkg.get("registryType") or "").lower()
     identifier = str(pkg.get("identifier") or "")

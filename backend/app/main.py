@@ -149,6 +149,14 @@ class SPAStaticFiles(StaticFiles):
 
 
 def create_app() -> FastAPI:
+    """
+    Create the FastAPI application.
+    
+    Includes the public and control-plane API routers, the reverse-proxy routes, and either the built SPA or a JSON root response when the frontend is unavailable.
+    
+    Returns:
+    	app (FastAPI): The configured application instance.
+    """
     settings = get_settings()
     app = FastAPI(title="mcpelevator", version=__version__, lifespan=lifespan)
 

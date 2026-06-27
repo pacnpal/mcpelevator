@@ -26,11 +26,20 @@ export interface PendingInstall {
 
 let pending: PendingInstall | null = null;
 
+/**
+ * Stores a pending install hand-off.
+ *
+ * @param value - The pending install data to retain for the next review step
+ */
 export function setPendingInstall(value: PendingInstall): void {
 	pending = value;
 }
 
-/** Read and clear the pending install (single-use hand-off). */
+/**
+ * Retrieves the pending install and clears the hand-off store.
+ *
+ * @returns The stored pending install, or `null` if none is set.
+ */
 export function takePendingInstall(): PendingInstall | null {
 	const value = pending;
 	pending = null;

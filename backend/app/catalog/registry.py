@@ -23,11 +23,26 @@ DEFAULT_SOURCE: str = _SOURCES[0].id
 
 
 def get_source(source_id: str) -> Source | None:
+    """
+    Get the catalog source registered for the given identifier.
+    
+    Parameters:
+    	source_id (str): The source identifier.
+    
+    Returns:
+    	Source | None: The matching source, or None if no source is registered for the identifier.
+    """
     return SOURCES.get(source_id)
 
 
 def source_list() -> list[dict[str, str]]:
-    """The browse-view source descriptors (id/label/install_support)."""
+    """
+    Return the catalog source descriptors used by the browse view.
+    
+    Returns:
+        list[dict[str, str]]: A list of source descriptors containing each source's
+        ``id``, ``label``, and ``install_support`` values.
+    """
     return [
         {"id": s.id, "label": s.label, "install_support": s.install_support}
         for s in _SOURCES

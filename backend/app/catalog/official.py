@@ -20,7 +20,15 @@ _META_KEY = "io.modelcontextprotocol.registry/official"
 
 
 def _unwrap(entry: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    """Split a registry entry into (server.json, status). Tolerates a bare document."""
+    """
+    Extract the server document and status from a registry entry.
+    
+    Parameters:
+    	entry (dict[str, Any]): A registry entry or a bare server document.
+    
+    Returns:
+    	tuple[dict[str, Any], str]: The server document and its status string.
+    """
     if isinstance(entry.get("server"), dict):
         server = entry["server"]
         official = (entry.get("_meta") or {}).get(_META_KEY) or {}
@@ -29,6 +37,15 @@ def _unwrap(entry: dict[str, Any]) -> tuple[dict[str, Any], str]:
 
 
 def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
+    """
+    Normalize a registry server entry for list responses.
+    
+    Parameters:
+    	entry (dict[str, Any]): Raw registry entry document.
+    
+    Returns:
+    	dict[str, Any]: Normalized list-item metadata for the server.
+    """
     server, status = _unwrap(entry)
     name = str(server.get("name") or "")
     version = server.get("version")
@@ -62,7 +79,15 @@ def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def to_detail(entry: dict[str, Any]) -> dict[str, Any]:
-    """Resolve an official registry document into install drafts + metadata (pure)."""
+    """
+    Convert an official registry document into detail metadata and install drafts.
+    
+    Parameters:
+    	entry (dict[str, Any]): Registry document to normalize.
+    
+    Returns:
+    	dict[str, Any]: Normalized detail data containing server metadata, package drafts, and remotes.
+    """
     server, status = _unwrap(entry)
     name = str(server.get("name") or "")
     version = server.get("version")
@@ -104,6 +129,17 @@ class OfficialSource:
     async def list_servers(
         self, http: httpx.AsyncClient, *, search: str | None, cursor: str | None, limit: int | None
     ) -> dict[str, Any]:
+        """
+        Fetch a page of registry servers.
+        
+        Parameters:
+        	search (str | None): Text used to filter the server list.
+        	cursor (str | None): Pagination cursor for the page to load.
+        	limit (int | None): Maximum number of servers to return.
+        
+        Returns:
+        	dict[str, Any]: A dictionary containing a normalized `servers` list and the next pagination cursor.
+        """
         page = base.clamp_limit(limit)
         key = f"list:{search}:{cursor}:{page}"
         cached = self._cache.get(key)
@@ -127,6 +163,12 @@ class OfficialSource:
         self, http: httpx.AsyncClient, *, id: str, version: str
     ) -> dict[str, Any]:
         # Path params must be URL-encoded (e.g. ``io.x/name`` → ``io.x%2Fname``).
+        """
+        Fetch the registry detail document for a server version.
+        
+        Returns:
+        	dict[str, Any]: The normalized detail record for the requested server version.
+        """
         enc_name = quote(id, safe="")
         enc_version = quote(version or "latest", safe="")
         url = f"{BASE_URL}/v0.1/servers/{enc_name}/versions/{enc_version}"

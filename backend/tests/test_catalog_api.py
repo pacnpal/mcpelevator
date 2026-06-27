@@ -56,6 +56,9 @@ _GLAMA_LIST = {
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
+    """
+    Clear cached catalog source data before and after each test.
+    """
     def clear():
         for src in registry.SOURCES.values():
             cache = getattr(src, "_cache", None)
@@ -68,6 +71,12 @@ def _clear_cache():
 
 
 def _stub(monkeypatch, routes: dict):
+    """
+    Stub upstream catalog responses by matching URL substrings.
+    
+    Parameters:
+    	routes (dict): A mapping of URL substrings to JSON payloads.
+    """
     async def fake_get_json(http, url, params):
         for needle, payload in routes.items():
             if needle in url:

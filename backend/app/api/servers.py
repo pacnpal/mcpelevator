@@ -118,6 +118,17 @@ async def list_servers(request: Request, session: Session = Depends(get_session)
 async def create_server(
     payload: ServerCreate, request: Request, session: Session = Depends(get_session)
 ):
+    """
+    Create a new server in the desired state.
+    
+    Parameters:
+        payload (ServerCreate): Server configuration to persist.
+        request (Request): Incoming request used to access the supervisor and base URL.
+        session (Session): Database session.
+    
+    Returns:
+        ServerSummary: The created server summary.
+    """
     fields = payload.model_dump()
     # Provenance: only a "catalog:<id>" value is trusted (a registry install); any other
     # client-supplied string falls back to the service default ("manual"). Cap length so a

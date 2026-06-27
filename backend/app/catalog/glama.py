@@ -19,7 +19,16 @@ BASE_URL = "https://glama.ai/api/mcp"
 
 
 def _env_from_schema(schema: dict[str, Any], warnings: list[str]) -> dict[str, str]:
-    """Scaffold an ``env`` dict from Glama's ``environmentVariablesJsonSchema`` (ordered)."""
+    """
+    Build an environment variable scaffold from a Glama schema.
+    
+    Parameters:
+    	schema (dict[str, Any]): The ``environmentVariablesJsonSchema`` value.
+    	warnings (list[str]): Warning messages to extend for required variables.
+    
+    Returns:
+    	dict[str, str]: An ``env`` mapping with one empty string entry per schema property.
+    """
     if not isinstance(schema, dict):
         return {}
     props = schema.get("properties") or {}
@@ -33,6 +42,15 @@ def _env_from_schema(schema: dict[str, Any], warnings: list[str]) -> dict[str, s
 
 
 def _list_item(server: dict[str, Any]) -> dict[str, Any]:
+    """
+    Convert a Glama server record into a directory listing item.
+    
+    Parameters:
+    	server (dict[str, Any]): Glama server metadata.
+    
+    Returns:
+    	dict[str, Any]: A directory item with Glama source fields and links.
+    """
     return {
         "source": "glama",
         "id": str(server.get("id") or ""),
@@ -50,7 +68,15 @@ def _list_item(server: dict[str, Any]) -> dict[str, Any]:
 
 
 def to_detail(server: dict[str, Any]) -> dict[str, Any]:
-    """Resolve a Glama server into a *manual* install scaffold (pure)."""
+    """
+    Create a manual-install detail record for a Glama server.
+    
+    Parameters:
+    	server (dict[str, Any]): Glama server metadata.
+    
+    Returns:
+    	dict[str, Any]: A detail payload containing the server metadata, a manual-install draft, notes, and no remotes.
+    """
     name = str(server.get("name") or "")
     repo_url = (server.get("repository") or {}).get("url")
     warnings: list[str] = []
@@ -89,11 +115,25 @@ class GlamaSource:
     install_support = "manual"
 
     def __init__(self) -> None:
+        """
+        Initialize the Glama source cache.
+        """
         self._cache = base.TTLCache()
 
     async def list_servers(
         self, http: httpx.AsyncClient, *, search: str | None, cursor: str | None, limit: int | None
     ) -> dict[str, Any]:
+        """
+        List Glama servers with optional search and pagination.
+        
+        Parameters:
+        	search (str | None): Search text to filter servers.
+        	cursor (str | None): Pagination cursor for the next page.
+        	limit (int | None): Maximum number of servers to request.
+        
+        Returns:
+        	dict[str, Any]: A dictionary containing the server list and the next pagination cursor.
+        """
         page = base.clamp_limit(limit)
         key = f"list:{search}:{cursor}:{page}"
         cached = self._cache.get(key)
@@ -118,6 +158,17 @@ class GlamaSource:
         self, http: httpx.AsyncClient, *, id: str, version: str
     ) -> dict[str, Any]:
         # Glama's detail key is the opaque server id carried in the list item's ``id``.
+        """
+        Fetches a Glama server's manual-install detail record.
+        
+        Parameters:
+        	http (httpx.AsyncClient): HTTP client used for the request.
+        	id (str): Opaque Glama server identifier.
+        	version (str): Catalog version associated with the request.
+        
+        Returns:
+        	dict[str, Any]: A manual-install detail record for the server.
+        """
         url = f"{BASE_URL}/v1/servers/{quote(id, safe='')}"
         data = await base.get_json(http, url, {})
         if not isinstance(data, dict):

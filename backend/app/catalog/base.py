@@ -28,16 +28,35 @@ class CatalogUpstreamError(Exception):
 
 
 def clamp_limit(limit: int | None) -> int:
-    """Normalize a page size into ``[1, MAX_LIMIT]`` (deterministic default)."""
+    """
+    Normalize a requested page size to the supported range.
+    
+    Parameters:
+    	limit (int | None): Requested page size.
+    
+    Returns:
+    	int: The normalized page size, using the default value when the request is missing or less than 1, and capped at the maximum limit otherwise.
+    """
     if not limit or limit < 1:
         return DEFAULT_LIMIT
     return min(limit, MAX_LIMIT)
 
 
 async def get_json(http: httpx.AsyncClient, url: str, params: dict[str, Any]) -> Any:
-    """GET + parse JSON with a fast timeout. 404 propagates; everything else → CatalogUpstreamError.
-
-    Empty/None params are dropped so cache keys and upstream URLs stay stable.
+    """
+    Fetch JSON from an upstream endpoint.
+    
+    Parameters:
+    	http (httpx.AsyncClient): HTTP client used for the request.
+    	url (str): Request URL.
+    	params (dict[str, Any]): Query parameters to include after removing entries with `None` or empty-string values.
+    
+    Returns:
+    	Any: The decoded JSON response.
+    
+    Raises:
+    	CatalogUpstreamError: If the request fails, the response is not usable, or the upstream returns a non-404 HTTP error.
+    	httpx.HTTPStatusError: If the upstream returns a 404 response.
     """
     clean = {k: v for k, v in params.items() if v not in (None, "")}
     try:
@@ -57,10 +76,25 @@ class TTLCache:
     queries (the browse view re-queries on every debounced keystroke)."""
 
     def __init__(self, ttl: float = 300.0) -> None:
+        """
+        Initialize the cache with a time-to-live.
+        
+        Parameters:
+        	ttl (float): Cache lifetime in seconds.
+        """
         self._ttl = ttl
         self._store: dict[str, tuple[float, Any]] = {}
 
     def get(self, key: str) -> Any | None:
+        """
+        Get a cached value if it is still valid.
+        
+        Parameters:
+        	key (str): Cache key.
+        
+        Returns:
+        	The cached value if present and not expired, or None.
+        """
         hit = self._store.get(key)
         if hit is None:
             return None
@@ -71,9 +105,19 @@ class TTLCache:
         return value
 
     def put(self, key: str, value: Any) -> None:
+        """
+        Store a value in the cache with a fresh expiration time.
+        
+        Parameters:
+        	key (str): Cache key.
+        	value (Any): Value to store.
+        """
         self._store[key] = (time.monotonic() + self._ttl, value)
 
     def clear(self) -> None:
+        """
+        Clear all cached entries.
+        """
         self._store.clear()
 
 
@@ -93,8 +137,29 @@ class Source(Protocol):
 
     async def list_servers(
         self, http: httpx.AsyncClient, *, search: str | None, cursor: str | None, limit: int | None
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]: """
+        List servers from the source.
+        
+        Parameters:
+        	search (str | None): Search text used to filter matching servers.
+        	cursor (str | None): Pagination cursor for the next page of results.
+        	limit (int | None): Maximum number of servers to return.
+        
+        Returns:
+        	dict[str, Any]: A normalized listing with server entries and a next-page cursor.
+        """
+        ...
 
     async def get_detail(
         self, http: httpx.AsyncClient, *, id: str, version: str
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]: """
+        Fetch a normalized catalog entry detail for a specific server version.
+        
+        Parameters:
+        	id (str): The server identifier.
+        	version (str): The server version to retrieve.
+        
+        Returns:
+        	dict[str, Any]: A normalized catalog detail mapping.
+        """
+        ...

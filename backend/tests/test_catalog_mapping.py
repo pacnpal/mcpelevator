@@ -16,7 +16,19 @@ def _pkg(**over):
 
 
 def _official(packages=None, *, name="io.example/srv", version="1.0.0", remotes=None, status="active"):
-    """Wrap a server.json the way the registry API does ({"server", "_meta"})."""
+    """
+    Build a mock official registry document.
+    
+    Parameters:
+        packages: Package records to include under server packages.
+        name: Server name to place in the document.
+        version: Server version to place in the document.
+        remotes: Remote entries to include under server remotes.
+        status: Official registry status to store in metadata.
+    
+    Returns:
+        dict: A registry document with server data and official metadata.
+    """
     server = {"name": name, "title": "Srv", "description": "d", "version": version}
     if packages is not None:
         server["packages"] = packages
@@ -141,6 +153,15 @@ def test_official_remotes_surfaced_not_installed():
 
 
 def _glama(**over):
+    """
+    Build a mock Glama discovery object.
+    
+    Parameters:
+    	**over: Additional fields to merge into the default object.
+    
+    Returns:
+    	dict: A mock Glama server record.
+    """
     base = {
         "id": "abc123",
         "name": "cool-mcp",
