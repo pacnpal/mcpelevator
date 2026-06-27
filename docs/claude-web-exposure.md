@@ -133,8 +133,11 @@ the cardinal rule below is satisfied by construction.
 
 ### Step 1 — Shared baseline
 
-Do the **Shared baseline** above. For Path A you can leave per-server auth at
-`none` (decide in step 4).
+Do the **Shared baseline** above. **Keep each server on `bearer` (or stopped) for
+now** — Step 2 publishes the hostname to the public internet *before* Step 3 puts
+Access in front, and a server left on `none` during that window is reachable with
+no auth at all. You only switch to `none` in Step 4, after the Access `401` gate is
+verified.
 
 ### Step 2 — Stand up the Cloudflare Tunnel
 
@@ -191,9 +194,11 @@ cloudflared tunnel run mcpelevator
 ```
 
 Either way you should now be able to reach mcpelevator at
-`https://mcp.example.com` over HTTPS. **Don't add the connector to Claude yet** —
-right now the origin is publicly reachable with whatever per-server auth you set.
-Step 3 puts Access in front.
+`https://mcp.example.com` over HTTPS. ⚠️ **The hostname is now public with no
+Access gate yet.** Until Step 3 is done, your only protection is the per-server
+auth from Step 1 — so keep servers on `bearer` (or stopped) and **don't add the
+connector to Claude yet**. Don't switch any server to `none` while this window is
+open.
 
 ### Step 3 — Put Access (Managed OAuth) in front
 
@@ -226,10 +231,11 @@ curl -i https://mcp.example.com/s/<slug>/mcp
 
 The forwarded request won't carry an mcpe bearer token, so pick one:
 
-- **`none` (simplest, recommended here).** Leave each server's auth at `none`.
-  Access is the sole gate and the origin is only reachable through the gated tunnel,
-  so this is safe **as long as** you used a self-hosted Access *application* on the
-  hostname (above). The mcpe Host/Origin guard still applies as defense in depth.
+- **`none` (simplest, recommended here).** **Only after the Step 3 `401` gate is
+  verified**, switch each server's auth to `none`. Access is then the sole gate and
+  the origin is only reachable through the gated tunnel, so this is safe **as long
+  as** you used a self-hosted Access *application* on the hostname (above). The mcpe
+  Host/Origin guard still applies as defense in depth.
 - **`bearer` + header injection (defense in depth).** Keep servers on `bearer` and
   have Cloudflare add the header *after* the Access gate. The simplest grounded way
   is a [Request Header Transform Rule](https://developers.cloudflare.com/rules/transform/request-header-modification/)
@@ -250,6 +256,18 @@ https://mcp.example.com/s/<slug>/mcp
 Click connect; Claude's OAuth discovery hits the `WWW-Authenticate` metadata,
 Access shows your IdP login, and after you approve, the connector goes live. The
 same connector then works in the **mobile** app.
+
+> ⚠️ **Known caveat — test before relying on this for web/mobile.** Even with the
+> self-hosted recipe above, there is a report
+> ([anthropics/claude-ai-mcp #478](https://github.com/anthropics/claude-ai-mcp/issues/478),
+> June 2026, closed as not-planned) that claude.ai's OAuth flow against a Cloudflare
+> Access app with Managed OAuth completes but **registers 0 tools** — because
+> Cloudflare's `/authorize` requires the RFC 8707 `resource` parameter and claude.ai
+> doesn't send it (the request returns `error=invalid_target` / "No resource
+> parameter found"). It belongs to a cluster of related Access OAuth reports
+> (#410, #436, #449, #454). This is outside mcpelevator's control. **Verify the full
+> connect with a throwaway server first**; if you hit it, fall back to **Path B** for
+> the surfaces it covers.
 
 > ### Alternative: an MCP server portal (and why it's the second choice)
 > Cloudflare also offers [MCP server portals](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/),
@@ -360,13 +378,13 @@ curl -i -H "Authorization: Bearer <OTHER_SERVER_TOKEN>" https://mcp.example.com/
 
 | Capability | **Path A — Access Managed OAuth** | **Path B — bearer** |
 |---|---|---|
-| Works in claude.ai **web browser** | ✅ (self-hosted-app recipe) | ❌ (web can't send a bearer) |
-| Works in Claude **mobile app** | ✅ | ❌ (mobile can't send a bearer) |
+| Works in claude.ai **web browser** | ⚠️ (self-hosted-app recipe; verify — see #478) | ❌ (web can't send a bearer) |
+| Works in Claude **mobile app** | ⚠️ (same caveat as web) | ❌ (mobile can't send a bearer) |
 | Works in Claude **Code / Desktop (local config)** | ✅ | ✅ |
 | Works in Claude **Desktop remote connector** (account UI) | ✅ | ❌ (cloud-dialed, no header) |
 | Auth mechanism | OAuth 2.1 + PKCE at the Access edge | mcpelevator `bearer` token |
 | Setup effort | Higher (tunnel **+** Access app + Managed OAuth) | Lower (tunnel only) |
-| Maturity today | Solid via self-hosted app; **avoid** the MCP *portal* for web (bug #410) | Stable, fully supported by mcpelevator v1 |
+| Maturity today | Depends on Anthropic's connector edge; **test first** — open reports for both self-hosted (#478) and the MCP *portal* (#410) | Stable, fully supported by mcpelevator v1 |
 
 **Rule of thumb:** if you need the **browser or mobile** connector, take **Path A**
 using a **self-hosted Access application + Managed OAuth** (not the MCP portal), and
@@ -390,6 +408,7 @@ test with a throwaway server first. If Claude Code / Desktop is acceptable, take
 - [Get started with custom connectors using remote MCP — Claude Help Center](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
 - [Custom connectors only support OAuth client id/secret — no bearer/custom headers (anthropics/claude-ai-mcp #112)](https://github.com/anthropics/claude-ai-mcp/issues/112)
 - [claude.ai web/mobile OAuth fails against Cloudflare Access Managed OAuth MCP portal (anthropics/claude-ai-mcp #410)](https://github.com/anthropics/claude-ai-mcp/issues/410)
+- [claude.ai connector registers 0 tools against a self-hosted Access app — missing RFC 8707 `resource` parameter (anthropics/claude-ai-mcp #478)](https://github.com/anthropics/claude-ai-mcp/issues/478)
 - [Create a remotely-managed Cloudflare Tunnel — Cloudflare One docs](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/)
 - [Create a locally-managed Cloudflare Tunnel (`config.yml`) — Cloudflare One docs](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/local-management/create-local-tunnel/)
 - [Managed OAuth — Cloudflare One docs](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/)
