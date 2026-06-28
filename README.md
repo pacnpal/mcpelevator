@@ -4,6 +4,8 @@
 
 Most [MCP](https://modelcontextprotocol.io) servers ship as **stdio** programs (`npx -y …`, `uvx …`, a command, a docker image). Stdio only works when the client can spawn the process locally, which **phones and most "any device" setups can't do**. mcpelevator runs those servers for you and exposes each one as a remote **Streamable HTTP** endpoint (the transport Claude mobile, Flutter clients, etc. connect to), plus an optional REST/OpenAPI surface. Add a server, press start, copy the URL into your client.
 
+Already-remote servers work too: point mcpelevator at an existing Streamable-HTTP/SSE MCP URL (the `remote` runner) and it proxies that upstream behind the same auth, supervision, and per-client copy menu as a local one — handy for putting bearer auth in front of a remote server, or giving every client one consistent endpoint.
+
 The protocol bridging is done by [FastMCP](https://gofastmcp.com); mcpelevator is the **control plane**: a clean UI, process supervision, security, and onboarding around it.
 
 ## How it works
@@ -16,7 +18,7 @@ The protocol bridging is done by [FastMCP](https://gofastmcp.com); mcpelevator i
           ─ /s/<slug>/mcp   reverse-proxy ─┐  auth + Host/Origin enforced here
                                            ▼
   per enabled server: 1 supervised bridge process (own uvicorn on a loopback port)
-      FastMCP.as_proxy(stdio server) → Streamable HTTP   ← fault-isolated, real PID/logs
+      FastMCP proxy(stdio command — or a remote HTTP/SSE URL) → Streamable HTTP   ← fault-isolated, real PID/logs
 ```
 
 A reconciler converges running processes to the desired state in SQLite (Kubernetes-style), so the system is idempotent and survives restarts.
@@ -55,6 +57,18 @@ curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/jso
 
 Then point any MCP client at `http://127.0.0.1:8080/s/memory/mcp`.
 
+**Already remote?** Use the `remote` runner to proxy an existing Streamable-HTTP/SSE MCP URL — no local process. The launch spec reuses the same fields: `command` is the upstream URL, `args[0]` is the transport (`streamable-http` or `sse`), and `env` is the upstream HTTP headers.
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/json' -d '{
+  "name": "Remote MCP", "runner": "remote",
+  "command": "https://example.com/mcp", "args": ["streamable-http"],
+  "env": {"Authorization": "Bearer <upstream-token>"}, "enabled": true
+}'
+```
+
+Pasting an `mcpServers` config that contains remote entries (`url` / `httpUrl` / `type` / `transport`) imports them as `remote` servers too — they're no longer skipped.
+
 ## Install from a registry (catalog)
 
 Don't know the package name? **Browse** finds servers for you. The catalog searches public
@@ -67,6 +81,12 @@ hand-typing `npx -y …`.
 - **Glama** (`glama.ai`) — a larger, curated directory for **discovery**. It publishes no
   launch command, so installs open the review form pre-filled with the name + required
   env-var keys + a repo link for you to complete.
+
+**Filter by type** — narrow the browse list to one or more package/registry types (`npm`,
+`pypi`, `oci`, `nuget`, `mcpb`, `remote`) with the type chips. A server that publishes a
+remote (HTTP/SSE) endpoint is installable as a proxied **`remote`** server: install carries
+the endpoint's declared headers into the review form (required ones flagged) so you can fill
+in upstream auth before starting.
 
 Open **Browse** in the header (or `/catalog`). The backend proxies the directories
 (`GET /api/catalog/servers`, `GET /api/catalog/server`) so the SPA stays same-origin;
@@ -135,7 +155,7 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 ## Status / roadmap
 
-**Working today:** add a server (guided form, paste an `mcpServers` config, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`. **Auth**: bearer tokens for `/s` (scope each to all servers or one), control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes.
+**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including remote endpoints. **Auth**: bearer tokens for `/s` (scope each to all servers or one), control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes.
 
 **Planned:** REST/OpenAPI surface per server · `docker` runner (would unlock OCI catalog installs) · more catalog directories · polish.
 
