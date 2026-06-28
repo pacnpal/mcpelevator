@@ -22,8 +22,9 @@ server, tagged with `source="catalog:<id>"`.
 
 The API (`app/api/catalog.py`) and the SPA (`/catalog`) read from `registry.py`; they
 never name a source. The normalized response shapes live once in `app/api/schemas.py`
-(`CatalogServer`, `CatalogList`, `CatalogDraft`, `CatalogDetail`, `CatalogRemote`,
-`CatalogSource`).
+(`CatalogServer`, `CatalogList`, `CatalogVersions`, `CatalogDraft`, `CatalogDetail`,
+`CatalogRemote`, `CatalogSource`). The endpoints are `GET /api/catalog/sources`,
+`/catalog/servers`, `/catalog/server`, and `/catalog/server/versions`.
 
 ## The `Source` contract
 
@@ -40,7 +41,13 @@ class Source(Protocol):
 
     async def get_detail(self, http, *, id, version) -> dict: ...
     #   → a CatalogDetail-dict (server meta + drafts + remotes + notes)
+
+    async def list_versions(self, http, *, id) -> list[str]: ...
+    #   → version strings, latest first; [] for a source with no version concept
 ```
+
+All three are required (the version picker calls `list_versions`); a source without a
+version concept returns `[]`.
 
 `http` is the shared `httpx.AsyncClient` (`app.state.http`). Use `base.get_json`, which
 applies a fast 15s timeout (the shared client itself has `timeout=None` for SSE
@@ -126,6 +133,11 @@ class AcmeSource:
     async def get_detail(self, http, *, id, version):
         url = f"{BASE_URL}/servers/{quote(id, safe='')}"
         return to_detail(await base.get_json(http, url, {}))
+
+    async def list_versions(self, http, *, id):
+        # Acme has no version concept — the picker just shows the latest. A versioned
+        # registry would fetch and return the version strings here, latest first.
+        return []
 ```
 
 Guidelines:

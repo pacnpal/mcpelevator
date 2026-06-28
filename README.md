@@ -1,6 +1,6 @@
 # mcpelevator
 
-**Elevate stdio MCP servers into authenticated HTTP endpoints. Self-hosted, in one container.**
+**Elevate MCP servers into authenticated HTTP endpoints. Self-hosted, in one container.**
 
 Most [MCP](https://modelcontextprotocol.io) servers ship as **stdio** programs (`npx -y …`, `uvx …`, a command, a docker image). Stdio only works when the client can spawn the process locally, which **phones and most "any device" setups can't do**. mcpelevator runs those servers for you and exposes each one as a remote **Streamable HTTP** endpoint (the transport Claude mobile, Flutter clients, etc. connect to), plus an optional REST/OpenAPI surface. Add a server, press start, copy the URL into your client.
 
@@ -67,7 +67,7 @@ curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/jso
 }'
 ```
 
-Pasting an `mcpServers` config that contains remote entries (`url` / `httpUrl` / `type` / `transport`) imports them as `remote` servers too — they're no longer skipped.
+Pasting an `mcpServers` config with remote entries now imports them as `remote` servers instead of skipping: a `url` (or Gemini CLI's `httpUrl`) becomes the upstream, and a `type` / `transport` field selects the transport (defaulting to `streamable-http`).
 
 ## Install from a registry (catalog)
 
@@ -77,7 +77,8 @@ hand-typing `npx -y …`.
 
 - **MCP Registry** (`registry.modelcontextprotocol.io`) — the official directory. Its
   servers carry structured packages, so npm → `npx` and pypi → `uvx` are derived
-  automatically and pinned to the listed version: **one-click install**.
+  automatically and pinned to the latest version (a per-card dropdown picks an older
+  one): **one-click install**.
 - **Glama** (`glama.ai`) — a larger, curated directory for **discovery**. It publishes no
   launch command, so installs open the review form pre-filled with the name + required
   env-var keys + a repo link for you to complete.
