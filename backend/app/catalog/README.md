@@ -22,7 +22,8 @@ server, tagged with `source="catalog:<id>"`.
 
 The API (`app/api/catalog.py`) and the SPA (`/catalog`) read from `registry.py`; they
 never name a source. The normalized response shapes live once in `app/api/schemas.py`
-(`CatalogServer`, `CatalogList`, `CatalogDraft`, `CatalogDetail`, `CatalogSource`).
+(`CatalogServer`, `CatalogList`, `CatalogDraft`, `CatalogDetail`, `CatalogRemote`,
+`CatalogSource`).
 
 ## The `Source` contract
 
@@ -139,6 +140,23 @@ Guidelines:
 - For a **discovery-only** directory (no launch spec), set `install_support = "manual"`,
   return `manual_install: True`, and use `mapping.blank_draft(...)` to scaffold the name +
   env keys. See `glama.py`.
+
+### Remote endpoints & the type facet
+
+A server can be installable without a package: if it exposes a remote (HTTP/SSE) endpoint,
+mcpelevator proxies it via the `remote` runner. To surface that from a source:
+
+- In `_list_item`, mark the server `installable` and add `"remote"` to `registry_types` when
+  it has a remote endpoint whose transport the runner supports. Filter with
+  `app.runners.remote.canonical_transport(type)` (the SSOT for transport names/aliases) so an
+  unsupported type (e.g. `websocket`) isn't offered. `registry_types` is what the `/catalog`
+  **by-type filter** chips are built from, so include every type the entry actually carries.
+- In `to_detail`, return each remote as a `CatalogRemote` dict —
+  `{"type", "url", "headers", "warnings"}`. Reuse `mapping.environment(headers, warnings,
+  label="Header")` to scaffold declared auth headers (required ones flagged as warnings), and
+  canonicalize `type` the same way as the list item so list and detail agree. A
+  moderation-removed entry (e.g. `status == "deleted"`) must drop its `remotes` just like its
+  drafts, so a removed server can't surface a launchable spec.
 
 ### 2. Register it — `app/catalog/registry.py`
 
