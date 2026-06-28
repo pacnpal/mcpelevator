@@ -148,15 +148,16 @@ mcpelevator proxies it via the `remote` runner. To surface that from a source:
 
 - In `_list_item`, mark the server `installable` and add `"remote"` to `registry_types` when
   it has a remote endpoint whose transport the runner supports. Filter with
-  `app.runners.remote.canonical_transport(type)` (the SSOT for transport names/aliases) so an
-  unsupported type (e.g. `websocket`) isn't offered. `registry_types` is what the `/catalog`
-  **by-type filter** chips are built from, so include every type the entry actually carries.
-- In `to_detail`, return each remote as a `CatalogRemote` dict —
-  `{"type", "url", "headers", "warnings"}`. Reuse `mapping.environment(headers, warnings,
-  label="Header")` to scaffold declared auth headers (required ones flagged as warnings), and
-  canonicalize `type` the same way as the list item so list and detail agree. A
-  moderation-removed entry (e.g. `status == "deleted"`) must drop its `remotes` just like its
-  drafts, so a removed server can't surface a launchable spec.
+  `app.runners.remote.canonical_transport(r.get("type"))` (the SSOT for transport
+  names/aliases) so an unsupported transport (e.g. `websocket`) isn't offered.
+  `registry_types` is what the `/catalog` **by-type filter** chips are built from, so include
+  every type the entry actually carries.
+- In `to_detail`, return each remote as a `CatalogRemote` dict — keys `type`, `url`,
+  `headers`, `warnings`. Reuse `mapping.environment(headers, warnings, label="Header")` to
+  scaffold declared auth headers (required ones flagged as warnings), and canonicalize the
+  `type` field the same way as the list item so list and detail agree. A moderation-removed
+  entry (e.g. `status == "deleted"`) must drop its `remotes` just like its drafts, so a
+  removed server can't surface a launchable spec.
 
 ### 2. Register it — `app/catalog/registry.py`
 
