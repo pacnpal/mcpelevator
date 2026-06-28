@@ -114,7 +114,13 @@
 		}
 		const entries: PreviewEntry[] = names.map((name) => {
 			const e = map[name];
-			const type = typeof e.type === 'string' ? e.type : undefined;
+			// The backend importer accepts the transport under either `type` or `transport`.
+			const type =
+				typeof e.type === 'string'
+					? e.type
+					: typeof e.transport === 'string'
+						? e.transport
+						: undefined;
 			const url = typeof e.url === 'string' ? e.url : undefined;
 			// A remote (already-HTTP) entry is elevated into a proxied "remote" server.
 			const looksRemote = !!url || (type !== undefined && REMOTE_TYPES.has(type.toLowerCase()));

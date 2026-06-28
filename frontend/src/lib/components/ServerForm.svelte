@@ -191,11 +191,21 @@
 	const isRemote = $derived(runner === 'remote');
 	const nameValid = $derived(name.trim().length > 0);
 	const commandValid = $derived(command.trim().length > 0);
-	// A remote server's "command" is an upstream URL — require http(s) + a host so the
-	// bridge can build a transport. Case-insensitive to match the backend (urlsplit
-	// lowercases the scheme), and requires something after :// so a hostless https://
-	// is rejected client-side instead of only on submit.
-	const remoteUrlValid = $derived(!isRemote || /^https?:\/\/[^/\s]+/i.test(command.trim()));
+	// A remote server's "command" is an upstream URL. Parse it (rather than regex) so the
+	// client-side rule matches the backend's normalize_remote: http(s) scheme + a real
+	// hostname, no whitespace. This rejects hostless values like "https://:443/mcp" that
+	// the regex let through and the backend would 400.
+	function isValidRemoteUrl(value: string): boolean {
+		const trimmed = value.trim();
+		if (!trimmed || /\s/.test(trimmed)) return false;
+		try {
+			const url = new URL(trimmed);
+			return (url.protocol === 'http:' || url.protocol === 'https:') && url.hostname.length > 0;
+		} catch {
+			return false;
+		}
+	}
+	const remoteUrlValid = $derived(!isRemote || isValidRemoteUrl(command));
 
 	// Mirror the backend's slugify so the operator sees the value that will actually
 	// be stored (lowercased, non-alphanumerics collapsed to single dashes).

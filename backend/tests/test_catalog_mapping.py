@@ -301,6 +301,26 @@ def test_official_remotes_surfaced_not_installed():
     ]
 
 
+def test_official_deleted_server_drops_remotes():
+    # Moderation block: a deleted server must not surface a launchable remote spec.
+    detail = official.to_detail(
+        _official(
+            packages=[],
+            remotes=[{"type": "streamable-http", "url": "https://x/mcp"}],
+            status="deleted",
+        )
+    )
+    assert detail["remotes"] == []
+
+
+def test_official_remote_detail_canonicalizes_transport():
+    # Detail transport must match the canonical value used for installability.
+    detail = official.to_detail(
+        _official(packages=[], remotes=[{"type": "http", "url": "https://x/mcp"}])
+    )
+    assert detail["remotes"][0]["type"] == "streamable-http"
+
+
 def test_official_remote_headers_scaffolded_with_warnings():
     detail = official.to_detail(
         _official(

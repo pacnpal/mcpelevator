@@ -171,7 +171,12 @@ def to_detail(entry: dict[str, Any]) -> dict[str, Any]:
             "web_url": server.get("websiteUrl"),
         },
         "drafts": drafts,
-        "remotes": [_remote_entry(r) for r in remotes if isinstance(r, dict)],
+        # A deleted (moderation-removed) server must not surface a launchable spec.
+        # Drafts are neutralized above; drop the remotes the same way so the install
+        # flow can't proxy a removed upstream.
+        "remotes": (
+            [] if status == "deleted" else [_remote_entry(r) for r in remotes if isinstance(r, dict)]
+        ),
     }
 
 
@@ -184,6 +189,9 @@ def _remote_entry(r: dict[str, Any]) -> dict[str, Any]:
     isn't silently missing the upstream auth the endpoint needs.
     """
     url = str(r.get("url") or "")
+    # Canonicalize the transport the same way _list_item does, so the detail payload
+    # never diverges (e.g. list says installable while detail shows type="http"/"").
+    transport = canonical_transport(r.get("type"))
     warnings: list[str] = []
     headers = mapping.environment(r.get("headers") or [], warnings, label="Header")
     if "{" in url and "}" in url:
@@ -191,7 +199,7 @@ def _remote_entry(r: dict[str, Any]) -> dict[str, Any]:
             "The remote URL contains a {…} placeholder — replace it with a real value before starting."
         )
     return {
-        "type": str(r.get("type") or ""),
+        "type": transport or str(r.get("type") or ""),
         "url": url,
         "headers": headers,
         "warnings": warnings,

@@ -103,6 +103,7 @@ export interface McpServerEntry {
 	// Remote-style entries: the backend imports these as proxied "remote" servers.
 	url?: string;
 	type?: string;
+	transport?: string; // alias the backend accepts in place of `type`
 	headers?: Record<string, string>;
 }
 
