@@ -115,13 +115,23 @@
 		const entries: PreviewEntry[] = names.map((name) => {
 			const e = map[name];
 			// The backend importer accepts the transport under either `type` or `transport`.
-			const type =
+			let type =
 				typeof e.type === 'string'
 					? e.type
 					: typeof e.transport === 'string'
 						? e.transport
 						: undefined;
-			const url = typeof e.url === 'string' ? e.url : undefined;
+			// URL under `url` or Gemini CLI's `httpUrl` (Streamable-HTTP); a bare httpUrl
+			// implies streamable-http. Mirrors import_mcp_servers.
+			const url =
+				typeof e.url === 'string'
+					? e.url
+					: typeof e.httpUrl === 'string'
+						? e.httpUrl
+						: undefined;
+			if (type === undefined && typeof e.httpUrl === 'string' && typeof e.url !== 'string') {
+				type = 'streamable-http';
+			}
 			// A remote (already-HTTP) entry is elevated into a proxied "remote" server.
 			const looksRemote = !!url || (type !== undefined && REMOTE_TYPES.has(type.toLowerCase()));
 			if (looksRemote) {

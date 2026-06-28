@@ -106,6 +106,14 @@ def test_remote_server_rejects_hostless_url(session):
         service.create_server(session, name="R", runner="remote", command="https://:443/mcp")
 
 
+def test_remote_server_rejects_invalid_port(session):
+    # A malformed port must be rejected at create time, not left to fail at readiness.
+    with pytest.raises(ValueError):
+        service.create_server(
+            session, name="R", runner="remote", command="https://up.example:bad/mcp"
+        )
+
+
 def test_remote_server_rejects_bad_transport(session):
     with pytest.raises(ValueError):
         service.create_server(

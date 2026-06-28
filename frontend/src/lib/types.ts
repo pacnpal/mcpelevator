@@ -102,6 +102,7 @@ export interface McpServerEntry {
 	env?: Record<string, string>;
 	// Remote-style entries: the backend imports these as proxied "remote" servers.
 	url?: string;
+	httpUrl?: string; // Gemini CLI's Streamable-HTTP shape (alias for a streamable-http url)
 	type?: string;
 	transport?: string; // alias the backend accepts in place of `type`
 	headers?: Record<string, string>;

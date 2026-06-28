@@ -63,6 +63,16 @@ def test_import_remote_honors_transport_field_alias(session):
     assert created[0].args == ["sse"]
 
 
+def test_import_remote_honors_gemini_http_url(session):
+    # Gemini CLI (and our own install snippets) use `httpUrl` for Streamable HTTP.
+    data = {"mcpServers": {"r": {"httpUrl": "https://up.example/mcp"}}}
+    created, skipped = service.import_mcp_servers(session, data)
+    assert skipped == []
+    assert created[0].runner == "remote"
+    assert created[0].command == "https://up.example/mcp"
+    assert created[0].args == ["streamable-http"]
+
+
 def test_import_skips_malformed_entries_without_crashing(session):
     # A non-mapping `headers` makes dict() raise TypeError; the import must skip the
     # entry (not 500) and still create the valid ones.

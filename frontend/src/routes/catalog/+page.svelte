@@ -232,7 +232,7 @@
 			// (HTTP/SSE) endpoint we can actually proxy, install it as a remote server.
 			// Pick the first endpoint whose transport is supported (not just remotes[0],
 			// which could be an unsupported type), and canonicalize any alias.
-			const remote = detail.remotes.find((r) => canonicalRemoteTransport(r.type));
+			const remote = detail.remotes.find((r) => r.url && canonicalRemoteTransport(r.type));
 			const remoteTransport = remote ? canonicalRemoteTransport(remote.type) : null;
 			if (!installableDraft && remote && remoteTransport) {
 				setPendingInstall({

@@ -37,8 +37,19 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
     # urlsplit lowercases the scheme, so an uppercase HTTPS:// is accepted.
     parsed = urlsplit(url)
     # Check hostname, not just netloc: "https://:443/mcp" has a truthy netloc (":443")
-    # but no host, and would only fail later when the bridge tries to connect.
-    if parsed.scheme not in ("http", "https") or not parsed.hostname or any(c.isspace() for c in url):
+    # but no host, and would only fail later when the bridge tries to connect. Also
+    # validate the port — `parsed.port` raises ValueError on a malformed one (":bad").
+    try:
+        parsed.port  # noqa: B018 — property access validates the port
+        valid_port = True
+    except ValueError:
+        valid_port = False
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or not valid_port
+        or any(c.isspace() for c in url)
+    ):
         raise ValueError("a remote server's command must be an http(s):// URL with a host")
     transport = canonical_transport(args[0] if args else None)
     if transport is None:
@@ -290,9 +301,14 @@ def import_mcp_servers(session: Session, data: dict) -> tuple[list[Server], list
         if not isinstance(entry, dict):
             skipped.append({"name": str(name), "reason": "entry is not an object"})
             continue
-        url = entry.get("url")
-        # mcpServers configs spell the remote transport as either "type" or "transport".
+        # Accept the URL under "url" or Gemini CLI's "httpUrl" (its Streamable-HTTP shape,
+        # which our own install snippets emit — see frontend/src/lib/install.ts).
+        url = entry.get("url") or entry.get("httpUrl")
+        # mcpServers configs spell the remote transport as either "type" or "transport";
+        # a bare httpUrl implies streamable-http.
         etype = entry.get("type") or entry.get("transport")
+        if etype is None and entry.get("httpUrl") and not entry.get("url"):
+            etype = "streamable-http"
         if url or etype in ("sse", "streamable-http", "http"):
             # A remote (already-HTTP) MCP server: elevate it as a proxied remote runner.
             if not url:
