@@ -307,15 +307,7 @@
 		>
 			MCP
 		</span>
-		<span
-			class="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-medium transition-colors"
-			class:opacity-40={!server.transports.rest_openapi}
-			style={server.transports.rest_openapi
-				? 'color: var(--color-accent); border-color: color-mix(in oklab, var(--color-accent) 30%, transparent); background-color: color-mix(in oklab, var(--color-accent) 10%, transparent);'
-				: 'color: var(--color-ink-dim); border-color: var(--color-line);'}
-		>
-			REST
-		</span>
+		<!-- REST/OpenAPI badge omitted: the surface isn't served yet (planned, M6). -->
 	</div>
 
 	<!-- Error surface -->

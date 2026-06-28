@@ -77,7 +77,7 @@ function isLocalUrl(value: string): boolean {
 }
 
 export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls' | 'auth'>): InstallOption[] {
-	const { mcp, rest } = server.urls;
+	const { mcp } = server.urls;
 	const name = server.slug;
 	const bearer = server.auth === 'bearer';
 	const out: InstallOption[] = [];
@@ -195,8 +195,7 @@ export function installOptions(server: Pick<ServerSummary, 'slug' | 'urls' | 'au
 		});
 		out.push({ kind: 'url', group: 'Generic', label: 'MCP URL', value: mcp });
 	}
-	if (rest) {
-		out.push({ kind: 'url', group: 'Generic', label: 'REST URL', value: rest });
-	}
+	// The per-server REST/OpenAPI surface isn't served yet (planned, M6), so it's not
+	// offered here even if a (legacy) server still has rest_openapi set.
 	return out;
 }

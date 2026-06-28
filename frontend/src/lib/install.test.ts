@@ -42,12 +42,12 @@ describe('installOptions', () => {
 		expect(installOptions({ ...base, urls: { mcp: null, rest: null } })).toEqual([]);
 	});
 
-	it('only emits the REST URL when there is no MCP URL', () => {
+	it('does not surface a REST-only server (REST/OpenAPI not served yet)', () => {
 		const opts = installOptions({
 			...base,
 			urls: { mcp: null, rest: 'http://127.0.0.1:8080/s/memory/rest' }
 		});
-		expect(opts.map((o) => o.label)).toEqual(['REST URL']);
+		expect(opts).toEqual([]);
 	});
 
 	it('assigns every option to a known group', () => {
