@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { createServer, errorMessage, importServers } from '$lib/api';
+	import { canonicalRemoteTransport } from '$lib/remote';
 	import type {
 		ImportResult,
 		McpServerEntry,
@@ -56,8 +57,12 @@
 		command: string;
 		args: string[];
 		skip: boolean;
+		remote?: boolean;
 		reason?: string;
 	};
+
+	// Entry shapes the backend treats as a remote server (mirrors import_mcp_servers).
+	const REMOTE_TYPES = new Set(['sse', 'streamable-http', 'http']);
 
 	type Parsed =
 		| { ok: true; entries: PreviewEntry[]; payload: unknown }
@@ -109,18 +114,32 @@
 		}
 		const entries: PreviewEntry[] = names.map((name) => {
 			const e = map[name];
-			// Remote-style entries (url / type) are skipped server-side.
-			const remote = typeof e.url === 'string' || typeof e.type === 'string';
+			const type = typeof e.type === 'string' ? e.type : undefined;
+			const url = typeof e.url === 'string' ? e.url : undefined;
+			// A remote (already-HTTP) entry is elevated into a proxied "remote" server.
+			const looksRemote = !!url || (type !== undefined && REMOTE_TYPES.has(type.toLowerCase()));
+			if (looksRemote) {
+				if (!url) {
+					return { name, command: '', args: [], skip: true, reason: 'Remote entry has no url' };
+				}
+				const transport = canonicalRemoteTransport(type);
+				if (!transport) {
+					return {
+						name,
+						command: url,
+						args: [],
+						skip: true,
+						reason: `Unsupported remote transport "${type}"`
+					};
+				}
+				return { name, command: url, args: [transport], skip: false, remote: true };
+			}
 			return {
 				name,
 				command: e.command ?? '',
 				args: Array.isArray(e.args) ? e.args : [],
-				skip: remote || !e.command,
-				reason: remote
-					? 'Remote entry (url/type) — not a local runner'
-					: !e.command
-						? 'No command specified'
-						: undefined
+				skip: !e.command,
+				reason: !e.command ? 'No command specified' : undefined
 			};
 		});
 		return { ok: true, entries, payload: raw };
@@ -322,8 +341,12 @@
 									<code
 										class="truncate font-mono text-[11px] text-[var(--color-ink-muted)]"
 									>
-										{entry.command}
-										{entry.args.join(' ')}
+										{#if entry.remote}
+											remote → {entry.command} ({entry.args.join(' ')})
+										{:else}
+											{entry.command}
+											{entry.args.join(' ')}
+										{/if}
 									</code>
 								{/if}
 							</li>
@@ -335,8 +358,8 @@
 					class="rounded-lg border border-dashed border-[var(--color-line)] px-3.5 py-3 text-xs text-[var(--color-ink-dim)]"
 				>
 					Paste a config to preview what will be imported. Entries with a
-					<code class="font-mono">url</code> or <code class="font-mono">type</code>
-					(remote servers) are skipped automatically.
+					<code class="font-mono">url</code> (remote servers) are imported as proxied
+					remote endpoints; only malformed entries are skipped.
 				</p>
 			{/if}
 

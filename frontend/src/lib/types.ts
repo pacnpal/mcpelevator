@@ -100,9 +100,10 @@ export interface McpServerEntry {
 	command?: string;
 	args?: string[];
 	env?: Record<string, string>;
-	// Remote-style entries the backend skips on import.
+	// Remote-style entries: the backend imports these as proxied "remote" servers.
 	url?: string;
 	type?: string;
+	headers?: Record<string, string>;
 }
 
 export interface HealthResponse {
