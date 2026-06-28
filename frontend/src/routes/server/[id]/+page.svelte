@@ -337,17 +337,7 @@
 					</div>
 					<CopyButton value={server.urls.mcp} label="Copy" />
 				</div>
-				{#if server.transports.rest_openapi || server.urls.rest}
-					<div class="flex items-center justify-between gap-3 border-t border-[var(--color-line)] pt-2.5">
-						<div class="min-w-0 flex-1">
-							<p class="text-xs font-medium text-[var(--color-ink-muted)]">REST</p>
-							<p class="truncate font-mono text-xs text-[var(--color-ink)]">
-								{server.urls.rest ?? '— not exposed —'}
-							</p>
-						</div>
-					<CopyButton value={server.urls.rest} label="Copy" />
-					</div>
-				{/if}
+				<!-- REST/OpenAPI endpoint omitted: the surface isn't served yet (planned, M6). -->
 			</div>
 			{#if effectiveBearer}
 				<p
