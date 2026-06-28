@@ -136,6 +136,21 @@ def test_official_list_item_unsupported_remote_is_not_installable():
     assert "remote" not in item["registry_types"]
 
 
+def test_official_list_item_non_string_remote_type_does_not_crash():
+    from app.catalog import official
+
+    # A malformed registry record (non-string `type`) must be treated as unsupported,
+    # not raise and break the whole catalog page.
+    item = official._list_item(
+        {
+            "server": {"name": "io.x/bad", "remotes": [{"type": 5, "url": "https://up/mcp"}]},
+            "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+        }
+    )
+    assert item["installable"] is False
+    assert "remote" not in item["registry_types"]
+
+
 def test_official_list_item_deleted_remote_is_not_installable():
     from app.catalog import official
 

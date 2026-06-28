@@ -36,7 +36,9 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
     # whitespace-bearing values that would only fail later when the bridge connects.
     # urlsplit lowercases the scheme, so an uppercase HTTPS:// is accepted.
     parsed = urlsplit(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc or any(c.isspace() for c in url):
+    # Check hostname, not just netloc: "https://:443/mcp" has a truthy netloc (":443")
+    # but no host, and would only fail later when the bridge tries to connect.
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or any(c.isspace() for c in url):
         raise ValueError("a remote server's command must be an http(s):// URL with a host")
     transport = canonical_transport(args[0] if args else None)
     if transport is None:
@@ -154,9 +156,11 @@ def create_server(
     if not command.strip():
         raise ValueError("command is required")
     # A remote server reuses command/args for the upstream URL + transport; canonicalize
-    # them up front so the persisted row (and config_hash) is deterministic.
+    # them up front so the persisted row (and config_hash) is deterministic. There is no
+    # local process, so a working directory is meaningless — drop it.
     if runner == "remote":
         command, args = normalize_remote(command, args)
+        cwd = None
 
     server = Server(
         id=new_id(),
@@ -205,6 +209,9 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         raise ValueError(f"unknown runner {server.runner!r}")
     if server.runner == "remote":
         server.command, server.args = normalize_remote(server.command, server.args)
+        # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
+        # the stale working directory here (remote has no process) to keep the row canonical.
+        server.cwd = None
     server.config_hash = compute_hash(server)  # recompute -> drives idempotent reconcile
     return repo.save_server(session, server)
 
@@ -284,7 +291,8 @@ def import_mcp_servers(session: Session, data: dict) -> tuple[list[Server], list
             skipped.append({"name": str(name), "reason": "entry is not an object"})
             continue
         url = entry.get("url")
-        etype = entry.get("type")
+        # mcpServers configs spell the remote transport as either "type" or "transport".
+        etype = entry.get("type") or entry.get("transport")
         if url or etype in ("sse", "streamable-http", "http"):
             # A remote (already-HTTP) MCP server: elevate it as a proxied remote runner.
             if not url:

@@ -100,11 +100,37 @@ def test_remote_server_accepts_uppercase_scheme(session):
     assert s.runner == "remote"
 
 
+def test_remote_server_rejects_hostless_url(session):
+    # "https://:443/mcp" has a netloc but no host — reject up front, not at connect time.
+    with pytest.raises(ValueError):
+        service.create_server(session, name="R", runner="remote", command="https://:443/mcp")
+
+
 def test_remote_server_rejects_bad_transport(session):
     with pytest.raises(ValueError):
         service.create_server(
             session, name="R", runner="remote", command="https://x/mcp", args=["websocket"]
         )
+
+
+def test_remote_update_clears_stale_cwd(session):
+    # Converting a local server (with a cwd) to remote must drop the now-meaningless cwd.
+    s = service.create_server(
+        session, name="L", runner="npx", command="npx", args=["-y", "p"], cwd="/tmp"
+    )
+    assert s.cwd == "/tmp"
+    updated = service.update_server(
+        session, s.id, {"runner": "remote", "command": "https://x/mcp", "args": ["sse"]}
+    )
+    assert updated.runner == "remote"
+    assert updated.cwd is None
+
+
+def test_remote_create_ignores_cwd(session):
+    s = service.create_server(
+        session, name="R", runner="remote", command="https://x/mcp", cwd="/tmp"
+    )
+    assert s.cwd is None
 
 
 def test_remote_config_hash_is_deterministic(session):

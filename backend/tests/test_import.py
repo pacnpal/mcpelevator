@@ -53,6 +53,16 @@ def test_import_creates_stdio_and_remote(session):
     assert set(reasons) == {"nocmd"}
 
 
+def test_import_remote_honors_transport_field_alias(session):
+    # An entry may spell the transport as `transport` instead of `type`; an SSE-only
+    # upstream must not be silently imported as streamable-http.
+    data = {"mcpServers": {"r": {"url": "https://up.example/sse", "transport": "sse"}}}
+    created, skipped = service.import_mcp_servers(session, data)
+    assert skipped == []
+    assert created[0].runner == "remote"
+    assert created[0].args == ["sse"]
+
+
 def test_import_skips_malformed_entries_without_crashing(session):
     # A non-mapping `headers` makes dict() raise TypeError; the import must skip the
     # entry (not 500) and still create the valid ones.

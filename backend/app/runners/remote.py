@@ -28,13 +28,16 @@ TRANSPORT_ALIASES = {
 }
 
 
-def canonical_transport(value: str | None) -> str | None:
+def canonical_transport(value: object) -> str | None:
     """Map a transport name/alias to its canonical form, or ``None`` if unsupported.
 
-    A missing/empty value defaults to ``streamable-http`` (the common case). Used as
-    the SSOT gate everywhere a remote transport is validated or filtered.
+    A missing/empty value defaults to ``streamable-http`` (the common case). A truthy
+    non-string (e.g. a number from a malformed registry record) is coerced to its string
+    form, which simply won't match an alias → ``None`` (unsupported) rather than raising.
+    Used as the SSOT gate everywhere a remote transport is validated or filtered.
     """
-    return TRANSPORT_ALIASES.get((value or DEFAULT_TRANSPORT).strip().lower())
+    text = str(value).strip().lower() if value else DEFAULT_TRANSPORT
+    return TRANSPORT_ALIASES.get(text)
 
 
 @register("remote")
