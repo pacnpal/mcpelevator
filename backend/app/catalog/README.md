@@ -24,7 +24,7 @@ The API (`app/api/catalog.py`) and the SPA (`/catalog`) read from `registry.py`;
 never name a source. The normalized response shapes live once in `app/api/schemas.py`
 (`CatalogServer`, `CatalogList`, `CatalogVersions`, `CatalogDraft`, `CatalogDetail`,
 `CatalogRemote`, `CatalogSource`). The endpoints are `GET /api/catalog/sources`,
-`/catalog/servers`, `/catalog/server`, and `/catalog/server/versions`.
+`/api/catalog/servers`, `/api/catalog/server`, and `/api/catalog/server/versions`.
 
 ## The `Source` contract
 
