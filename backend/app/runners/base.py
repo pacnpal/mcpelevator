@@ -20,12 +20,21 @@ from app.db.models import Server
 
 @dataclass(frozen=True)
 class ProcessSpec:
-    """The literal stdio command the bridge host will launch."""
+    """What the bridge host will front.
+
+    For ``transport == "stdio"`` (the default, every local runner) this is the
+    literal stdio command to launch: ``command``/``args``/``env``/``cwd``. For a
+    remote runner the same fields are reused with different meaning — ``command``
+    is the upstream URL, ``env`` is the upstream HTTP headers, and ``transport``
+    selects the remote client (``streamable-http`` | ``sse``). The discriminator
+    keeps the runner seam a pure ``Server -> ProcessSpec`` mapping either way.
+    """
 
     command: str
     args: list[str] = field(default_factory=list)
-    env: dict[str, str] = field(default_factory=dict)  # server-specific vars only
+    env: dict[str, str] = field(default_factory=dict)  # server-specific vars / headers
     cwd: str | None = None
+    transport: str = "stdio"  # stdio | streamable-http | sse
 
 
 Builder = Callable[[Server], ProcessSpec]

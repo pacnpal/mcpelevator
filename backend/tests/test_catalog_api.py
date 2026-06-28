@@ -100,6 +100,72 @@ def _stub(monkeypatch, routes: dict):
     return calls
 
 
+def test_official_list_item_surfaces_remote_type_and_installable():
+    from app.catalog import official
+
+    item = official._list_item(
+        {
+            "server": {
+                "name": "io.x/remote",
+                "title": "Remote",
+                "remotes": [{"type": "streamable-http", "url": "https://up/mcp"}],
+            },
+            "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+        }
+    )
+    # The proxy can run a remote upstream, so it's installable and carries a "remote" type
+    # for the browse facet.
+    assert item["installable"] is True
+    assert "remote" in item["registry_types"]
+
+
+def test_official_list_item_unsupported_remote_is_not_installable():
+    from app.catalog import official
+
+    item = official._list_item(
+        {
+            "server": {
+                "name": "io.x/ws",
+                "remotes": [{"type": "websocket", "url": "wss://up/ws"}],
+            },
+            "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+        }
+    )
+    # The remote runner can't proxy websocket — don't surface it as installable/remote.
+    assert item["installable"] is False
+    assert "remote" not in item["registry_types"]
+
+
+def test_official_list_item_non_string_remote_type_does_not_crash():
+    from app.catalog import official
+
+    # A malformed registry record (non-string `type`) must be treated as unsupported,
+    # not raise and break the whole catalog page.
+    item = official._list_item(
+        {
+            "server": {"name": "io.x/bad", "remotes": [{"type": 5, "url": "https://up/mcp"}]},
+            "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+        }
+    )
+    assert item["installable"] is False
+    assert "remote" not in item["registry_types"]
+
+
+def test_official_list_item_deleted_remote_is_not_installable():
+    from app.catalog import official
+
+    item = official._list_item(
+        {
+            "server": {
+                "name": "io.x/bad",
+                "remotes": [{"type": "sse", "url": "https://up/sse"}],
+            },
+            "_meta": {"io.modelcontextprotocol.registry/official": {"status": "deleted"}},
+        }
+    )
+    assert item["installable"] is False
+
+
 def test_sources_lists_official_and_glama():
     with TestClient(app) as c:
         r = c.get("/api/catalog/sources", headers=LOOPBACK)

@@ -7,7 +7,8 @@
 		npx: 'npx',
 		uvx: 'uvx',
 		command: 'cmd',
-		docker: 'docker'
+		docker: 'docker',
+		remote: 'remote'
 	};
 </script>
 

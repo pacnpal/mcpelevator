@@ -14,6 +14,7 @@ from urllib.parse import quote
 import httpx
 
 from app.catalog import base, mapping
+from app.runners.remote import canonical_transport
 
 BASE_URL = "https://registry.modelcontextprotocol.io"
 _META_KEY = "io.modelcontextprotocol.registry/official"
@@ -77,6 +78,7 @@ def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
     name = str(server.get("name") or "")
     version = server.get("version")
     packages = server.get("packages") or []
+    remotes = server.get("remotes") or []
 
     registry_types: list[str] = []
     installable = False
@@ -89,6 +91,18 @@ def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
         transport_type = str((pkg.get("transport") or {}).get("type") or "stdio").lower()
         if transport_type == "stdio" and rtype in mapping.RUNNER_BY_TYPE and pkg.get("identifier"):
             installable = True
+
+    # A server exposing a remote (HTTP/SSE) endpoint the remote runner can actually
+    # proxy is now installable. Filter by the shared transport vocabulary so an
+    # unsupported remote type (e.g. a future "websocket") isn't surfaced as installable
+    # and then fail in the install flow. Surface "remote" as a browse-facet type.
+    if any(
+        isinstance(r, dict) and r.get("url") and canonical_transport(r.get("type")) is not None
+        for r in remotes
+    ):
+        if "remote" not in registry_types:
+            registry_types.append("remote")
+        installable = True
 
     # A "deleted" server was removed from the registry (typically spam/malware/policy);
     # never offer it for install.
@@ -157,11 +171,38 @@ def to_detail(entry: dict[str, Any]) -> dict[str, Any]:
             "web_url": server.get("websiteUrl"),
         },
         "drafts": drafts,
-        "remotes": [
-            {"type": str(r.get("type") or ""), "url": str(r.get("url") or "")}
-            for r in remotes
-            if isinstance(r, dict)
-        ],
+        # A deleted (moderation-removed) server must not surface a launchable spec.
+        # Drafts are neutralized above; drop the remotes the same way so the install
+        # flow can't proxy a removed upstream.
+        "remotes": (
+            [] if status == "deleted" else [_remote_entry(r) for r in remotes if isinstance(r, dict)]
+        ),
+    }
+
+
+def _remote_entry(r: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a registry ``remotes[]`` entry, scaffolding its declared ``headers``.
+
+    A remote can declare required auth headers (same shape as package env vars); carry
+    them into the install draft (prefilled where possible) and surface warnings for
+    required/secret/placeholder values — and for a templated URL — so the review form
+    isn't silently missing the upstream auth the endpoint needs.
+    """
+    url = str(r.get("url") or "")
+    # Canonicalize the transport the same way _list_item does, so the detail payload
+    # never diverges (e.g. list says installable while detail shows type="http"/"").
+    transport = canonical_transport(r.get("type"))
+    warnings: list[str] = []
+    headers = mapping.environment(r.get("headers") or [], warnings, label="Header")
+    if "{" in url and "}" in url:
+        warnings.append(
+            "The remote URL contains a {…} placeholder — replace it with a real value before starting."
+        )
+    return {
+        "type": transport or str(r.get("type") or ""),
+        "url": url,
+        "headers": headers,
+        "warnings": warnings,
     }
 
 

@@ -8,9 +8,13 @@ down the control plane or its peers) and a real PID/port for supervision.
 The control plane resolves the runner -> a literal ProcessSpec, then launches this
 module as a subprocess, passing the spec + port via environment variables:
 
-    MCPE_BRIDGE_SPEC  JSON: {command, args, env, cwd, name, mcp_http, rest_openapi}
+    MCPE_BRIDGE_SPEC  JSON: {command, args, env, cwd, name, transport, mcp_http, rest_openapi}
     MCPE_BRIDGE_HOST  loopback host (default 127.0.0.1)
     MCPE_BRIDGE_PORT  port to listen on
+
+``transport`` selects the upstream: ``stdio`` (spawn command/args) or
+``streamable-http`` / ``sse`` (front a remote URL; ``command`` is the URL and ``env``
+is the upstream HTTP headers).
 
 Session isolation: ``FastMCP.as_proxy(transport)`` gives a fresh upstream session
 per request (no cross-client context mixing). "Sharing one subprocess" means
@@ -27,7 +31,7 @@ import os
 
 import uvicorn
 from fastmcp import FastMCP
-from fastmcp.client.transports import StdioTransport
+from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
 from fastmcp.server import create_proxy
 from fastmcp.server.dependencies import get_context
 from fastmcp.server.providers.proxy import ProxyClient
@@ -69,14 +73,20 @@ async def _forward_roots(context) -> list[Root]:
         return []
 
 
-def build_proxy(spec: dict) -> FastMCP:
-    """Build the FastMCP proxy that fronts one stdio MCP server.
+def _build_transport(spec: dict):
+    """Pick the upstream transport from the spec's ``transport`` discriminator.
 
-    The upstream server is wrapped in a ``ProxyClient`` carrying our tolerant
-    roots handler (see :func:`_forward_roots`); all other advanced forwarding
-    and the fresh-session-per-request isolation keep FastMCP's proxy defaults.
+    ``stdio`` (the default) spawns the local command; ``streamable-http`` / ``sse``
+    front an already-remote MCP URL. For the remote kinds ``command`` is the URL and
+    ``env`` is the upstream HTTP headers — so they are NOT merged into ``os.environ``
+    (that merge is only meaningful for a real child process).
     """
-    transport = StdioTransport(
+    kind = spec.get("transport") or "stdio"
+    if kind in ("streamable-http", "http"):
+        return StreamableHttpTransport(url=spec["command"], headers=dict(spec.get("env") or {}))
+    if kind == "sse":
+        return SSETransport(url=spec["command"], headers=dict(spec.get("env") or {}))
+    return StdioTransport(
         command=spec["command"],
         args=list(spec.get("args") or []),
         # Merge the child's own environment (PATH, HOME, caches) with the
@@ -84,6 +94,17 @@ def build_proxy(spec: dict) -> FastMCP:
         env={**os.environ, **(spec.get("env") or {})},
         cwd=spec.get("cwd") or None,
     )
+
+
+def build_proxy(spec: dict) -> FastMCP:
+    """Build the FastMCP proxy that fronts one upstream MCP server.
+
+    The upstream — a local stdio process or a remote HTTP/SSE URL, per
+    :func:`_build_transport` — is wrapped in a ``ProxyClient`` carrying our tolerant
+    roots handler (see :func:`_forward_roots`); all other advanced forwarding and the
+    fresh-session-per-request isolation keep FastMCP's proxy defaults.
+    """
+    transport = _build_transport(spec)
     # Wrap the transport in a ProxyClient ourselves so we can install a roots
     # handler that tolerates clients without roots support (see _forward_roots).
     # Everything else — sampling, elicitation, logging, progress forwarding, and

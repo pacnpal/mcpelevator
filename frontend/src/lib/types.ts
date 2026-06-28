@@ -2,7 +2,7 @@
 // These mirror the FastAPI backend's response shapes exactly (verified against
 // the live backend's OpenAPI schema at /openapi.json).
 
-export type Runner = 'npx' | 'uvx' | 'command' | 'docker';
+export type Runner = 'npx' | 'uvx' | 'command' | 'docker' | 'remote';
 
 export type ServerState =
 	| 'stopped'
@@ -100,9 +100,12 @@ export interface McpServerEntry {
 	command?: string;
 	args?: string[];
 	env?: Record<string, string>;
-	// Remote-style entries the backend skips on import.
+	// Remote-style entries: the backend imports these as proxied "remote" servers.
 	url?: string;
+	httpUrl?: string; // Gemini CLI's Streamable-HTTP shape (alias for a streamable-http url)
 	type?: string;
+	transport?: string; // alias the backend accepts in place of `type`
+	headers?: Record<string, string>;
 }
 
 export interface HealthResponse {
@@ -168,6 +171,10 @@ export interface CatalogDraft {
 export interface CatalogRemote {
 	type: string;
 	url: string;
+	/** Prefilled upstream auth headers (required ones scaffolded, possibly empty). */
+	headers: Record<string, string>;
+	/** Required/secret/placeholder headers or a templated URL the operator must fix. */
+	warnings: string[];
 }
 
 export interface CatalogServerMeta {
