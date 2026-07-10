@@ -132,7 +132,8 @@ The full list, including reverse-proxy knobs (`MCPE_TRUSTED_PROXIES`,
   from a private-network peer). Check the container log for the auth banner; verify
   `MCPE_ALLOW_PRIVATE_LAN=true` was set on *first* boot, or toggle **Allow access from
   devices on your local network** in Settings via a loopback path (SSH tunnel:
-  `ssh -L 8080:127.0.0.1:8080 root@<unraid-ip>`, then `http://localhost:8080`).
+  `ssh -L 8080:127.0.0.1:8080 root@<unraid-ip>`, then `http://localhost:8080` —
+  substitute your `MCPE_PORT` for both `8080`s if you changed it).
   Only private-IP-literal hosts qualify — a hostname that resolves to a LAN IP is
   rejected by design; add such a hostname via `MCPE_ALLOWED_HOSTS` instead.
 - **Login screen but no token** — the token is printed only when it's first minted.
