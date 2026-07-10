@@ -13,6 +13,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch, sentinel
 
 import pytest
+from fastmcp import Client, FastMCP
+from fastmcp.client.transports import FastMCPTransport
 from mcp.server.session import ServerSession
 from mcp.types import Root
 
@@ -93,6 +95,44 @@ def test_build_proxy_installs_custom_roots_handler():
     assert result is sentinel.proxy
     assert proxy_client_cls.call_args.kwargs["roots"] is host._forward_roots
     create_proxy_mock.assert_called_once_with(proxy_client_cls.return_value, name="t")
+
+
+@pytest.mark.asyncio
+async def test_proxy_preserves_tool_output_schema():
+    """Elevation must pass tool schemas through unchanged. A client connected to
+    the bridge sees the upstream tool's ``outputSchema`` exactly as authored (and
+    no schema invented for tools that don't declare one) — otherwise every client
+    shows the "recommended: add an outputSchema" hint for tools that do have one.
+
+    Uses an in-memory upstream (FastMCPTransport) in place of the stdio child so
+    the whole round-trip runs without spawning processes.
+    """
+
+    answer_schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    upstream = FastMCP("upstream")
+
+    @upstream.tool(output_schema=answer_schema)
+    def structured(q: str):
+        """Has an output schema."""
+        return {"answer": q}
+
+    @upstream.tool
+    def unstructured(q: str):
+        """No return annotation -> no output schema."""
+        return q
+
+    with patch.object(host, "_build_transport", return_value=FastMCPTransport(upstream)):
+        proxy = host.build_proxy({"command": "ignored", "name": "t"})
+
+    async with Client(proxy) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+
+    assert tools["structured"].outputSchema == answer_schema
+    assert tools["unstructured"].outputSchema is None
 
 
 def test_build_transport_stdio_is_default():

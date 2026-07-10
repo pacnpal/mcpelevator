@@ -446,8 +446,21 @@
 				<ul class="flex flex-col divide-y divide-[var(--color-line)]">
 					{#each server.tools as tool (tool.name)}
 						<li class="flex flex-col gap-0.5 py-2 first:pt-0 last:pb-0">
-							<span class="font-mono text-xs font-medium text-[var(--color-ink)]">
-								{tool.name}
+							<span class="flex flex-wrap items-center gap-1.5">
+								<span class="font-mono text-xs font-medium text-[var(--color-ink)]">
+									{tool.name}
+								</span>
+								{#if tool.has_output_schema === false}
+									<!-- Mirrors the hint MCP clients show for schema-less tools. The
+									     schema lives in the upstream server's tool definition and is
+									     proxied through unchanged, so this is diagnostic only. -->
+									<span
+										class="rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-dim)]"
+										title="This tool doesn't declare an outputSchema. MCP clients recommend adding one so models can better understand the tool's results. It comes from the upstream server's tool definition — mcpelevator proxies schemas through unchanged, so the fix belongs upstream."
+									>
+										no output schema
+									</span>
+								{/if}
 							</span>
 							{#if tool.description}
 								<span class="text-xs leading-relaxed text-[var(--color-ink-muted)]">

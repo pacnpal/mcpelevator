@@ -75,7 +75,8 @@ class ServerRuntime(SQLModel, table=True):
     last_error: Optional[str] = None
     restart_count: int = 0
     last_health: Optional[datetime] = None
-    tools: list = Field(sa_column=Column(JSON))  # cached [{name, description}] for the UI
+    # cached [{name, description, has_output_schema}] for the UI (see unit.tool_summary)
+    tools: list = Field(sa_column=Column(JSON))
     updated_at: datetime = Field(default_factory=utcnow)
 
 
