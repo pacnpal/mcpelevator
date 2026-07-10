@@ -1,7 +1,8 @@
 <script lang="ts">
-	// Wordmark for mcpelevator. The mark is a stack of three rising bars — an
-	// "elevator going up" glyph — paired with the wordmark. Simple geometric
-	// shapes only, themeable via currentColor / accent token.
+	// Wordmark for mcpelevator. The mark is a pair of elevator doors parting, where
+	// the negative space between the panels forms an up arrow — stdio going up to
+	// HTTP. One-color variant (no indicator lamp) per the identity's small-size
+	// rules; a single evenodd path, themeable via the accent token.
 	let { compact = false }: { compact?: boolean } = $props();
 </script>
 
@@ -10,13 +11,12 @@
 		class="flex size-7 items-center justify-center rounded-lg border border-[var(--color-line-strong)] bg-[var(--color-surface-2)]"
 		aria-hidden="true"
 	>
-		<svg class="size-4" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+		<svg class="size-4" viewBox="22 30 84 76" fill="none" aria-hidden="true">
 			<path
-				d="M12 4 7 10h10z"
 				fill="var(--color-accent)"
+				fill-rule="evenodd"
+				d="M34 32 H94 A10 10 0 0 1 104 42 V94 A10 10 0 0 1 94 104 H34 A10 10 0 0 1 24 94 V42 A10 10 0 0 1 34 32 Z M60 32 L68 32 L88 58 L72 58 L72 104 L56 104 L56 58 L40 58 Z"
 			/>
-			<rect x="6" y="13" width="12" height="2" rx="1" fill="var(--color-ink-muted)" />
-			<rect x="8" y="17" width="8" height="2" rx="1" fill="var(--color-ink-dim)" />
 		</svg>
 	</span>
 	{#if !compact}
