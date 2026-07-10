@@ -2,7 +2,10 @@
 
 mcpelevator runs as a single Docker container on Unraid and turns your server into a
 self-hosted hub for MCP servers: add a server in the web UI, press start, and point
-Claude mobile (or any MCP client) on your LAN at `http://<unraid-ip>:8080/s/<slug>/mcp`.
+MCP clients on your LAN at `http://<unraid-ip>:8080/s/<slug>/mcp`. (Claude **web/mobile**
+connectors dial from Anthropic's cloud, not your device — they need the tunnel recipe in
+**Exposing beyond your LAN** below; locally-dialing clients like Claude Code, Claude
+Desktop, VS Code, and Gemini CLI work with the LAN URL directly.)
 
 The published image is multi-arch (`amd64` + `arm64`) and batteries-included — Node/npx
 and Python/uv are preinstalled, so `npx`/`uvx` MCP servers run with zero extra setup.
@@ -18,14 +21,22 @@ Search for **mcpelevator** in the **Apps** tab and click **Install**. The templa
 defaults are the recommended setup; review them against the table below and hit
 **Apply**.
 
-### Option B — template URL (before/without CA listing)
+### Option B — manual template (before/without CA listing)
 
-1. Go to **Docker → Add Container**.
-2. Set **Template repositories** (Docker tab, bottom) to
-   `https://github.com/pacnpal/unraid-templates` — or paste the raw template URL
-   `https://raw.githubusercontent.com/pacnpal/unraid-templates/main/mcpelevator.xml`
-   directly into the template field.
-3. Select the **mcpelevator** template and **Apply**.
+Unraid 6.10 removed the old "Template repositories" field, so place the XML on the
+flash drive yourself:
+
+1. From a terminal on the box (SSH or the web terminal), download the template into
+   dockerMan's user-templates folder:
+
+   ```bash
+   curl -fL -o /boot/config/plugins/dockerMan/templates-user/my-mcpelevator.xml \
+     https://raw.githubusercontent.com/pacnpal/unraid-templates/main/mcpelevator.xml
+   ```
+
+2. Go to **Docker → Add Container** and pick **mcpelevator** from the **Template**
+   dropdown (under *User templates*).
+3. Review the settings against the table below and **Apply**.
 
 ## Recommended settings (what the template does and why)
 
@@ -73,8 +84,11 @@ container, add the variable, restart):
 1. Open the web UI, **Add server** (guided form, paste an `mcpServers` JSON config, or
    **Browse** a registry and one-click install).
 2. Start it, then use the per-client **copy menu** on the server page — it has ready-made
-   snippets for Claude mobile/web connectors, Claude Code, Claude Desktop, VS Code,
-   Gemini CLI, and more, already pointing at `http://<unraid-ip>:8080/s/<slug>/mcp`.
+   snippets for Claude Code, Claude Desktop (via `mcp-remote`), VS Code, Gemini CLI, and
+   more, already pointing at `http://<unraid-ip>:8080/s/<slug>/mcp`. The Claude
+   **web/mobile connector** snippets need a public HTTPS URL to be usable — those
+   connectors are dialed from Anthropic's cloud, so set up a tunnel first (see
+   **Exposing beyond your LAN**).
 3. For anything reachable off-host, put a **bearer token** on the server (Auth →
    `bearer`) so the endpoint isn't open to everyone on your network.
 
