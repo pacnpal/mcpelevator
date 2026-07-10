@@ -61,4 +61,7 @@ EXPOSE 8080
 
 # tini as PID 1 reaps the bridge/npx/uvx subprocess trees (no zombies/orphans).
 ENTRYPOINT ["tini", "--"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Bind where MCPE_HOST/MCPE_PORT say, not a hardcoded 8080: under host networking
+# (the recommended Unraid/NAS setup) there is no port mapping, so the env var is
+# the only way to move the port. `exec` keeps uvicorn as tini's direct child.
+CMD ["/bin/sh", "-c", "exec uvicorn app.main:app --host \"${MCPE_HOST:-0.0.0.0}\" --port \"${MCPE_PORT:-8080}\""]

@@ -32,6 +32,17 @@ docker compose up --build
 
 The image is batteries-included (Node/npx + Python/uv preinstalled), so `npx`/`uvx` servers run with no extra setup. Data (SQLite + package caches) persists in the `mcpe-data` volume. By default the port is published to host loopback only. See **Security**.
 
+## Quickstart (Unraid)
+
+A Community Applications template lives in
+[pacnpal/unraid-templates](https://github.com/pacnpal/unraid-templates)
+(`mcpelevator.xml`). It ships the recommended self-hosted-box setup out of the box:
+**host networking** (so the LAN gate sees real client IPs), appdata persisted to
+`/mnt/user/appdata/mcpelevator`, and `MCPE_ALLOW_PRIVATE_LAN=true` so the headless box
+is reachable from your LAN on first boot — the admin token is printed once to the
+container log for you to log in with. Full walkthrough (install, first login, updating,
+troubleshooting): [docs/unraid.md](docs/unraid.md).
+
 ## Quickstart (local dev)
 
 ```bash
