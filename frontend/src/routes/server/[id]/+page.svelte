@@ -456,7 +456,7 @@
 									     proxied through unchanged, so this is diagnostic only. -->
 									<span
 										class="rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-dim)]"
-										title="This tool doesn't declare an outputSchema. Clients like Claude recommend adding one so models can better understand the tool's results. It comes from the upstream server's tool definition — mcpelevator proxies schemas through unchanged, so the fix belongs upstream."
+										title="This tool doesn't declare an outputSchema. MCP clients recommend adding one so models can better understand the tool's results. It comes from the upstream server's tool definition — mcpelevator proxies schemas through unchanged, so the fix belongs upstream."
 									>
 										no output schema
 									</span>

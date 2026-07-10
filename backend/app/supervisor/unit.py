@@ -32,8 +32,9 @@ from app.supervisor.logbuffer import LogBuffer
 def tool_summary(tool) -> dict:
     """One cached-tool entry for the UI, from a probed ``mcp.types.Tool``.
 
-    ``has_output_schema`` mirrors what MCP clients (e.g. Claude) surface: a tool
-    without an ``outputSchema`` gets a "recommended: add one" hint. The schema is
+    ``has_output_schema`` mirrors the hint MCP clients and app-review tools
+    surface: a tool without an ``outputSchema`` gets a "recommended: add one so
+    models can better understand this tool's results" nudge. The schema is
     authored upstream and proxied through unchanged, so this flag is diagnostic —
     it tells the operator which upstream tools lack one, not something mcpelevator
     can fix.
