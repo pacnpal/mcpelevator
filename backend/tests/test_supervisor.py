@@ -13,11 +13,37 @@ from types import SimpleNamespace
 
 from sqlmodel import Session
 
+from mcp.types import Tool
+
 from app.db import get_engine, init_db, repo
 from app.registry import service
 from app.supervisor.supervisor import Supervisor
+from app.supervisor.unit import tool_summary
 
 init_db()  # ensure the global-engine tables exist when this module runs alone
+
+
+def test_tool_summary_records_output_schema_presence():
+    """The probe's cached entry must tell the UI whether a tool declares an
+    outputSchema (the signal behind clients' "recommended: add one" hint)."""
+    with_schema = Tool(
+        name="structured",
+        description="d",
+        inputSchema={"type": "object"},
+        outputSchema={"type": "object", "properties": {"x": {"type": "string"}}},
+    )
+    without_schema = Tool(name="bare", inputSchema={"type": "object"})
+
+    assert tool_summary(with_schema) == {
+        "name": "structured",
+        "description": "d",
+        "has_output_schema": True,
+    }
+    assert tool_summary(without_schema) == {
+        "name": "bare",
+        "description": "",
+        "has_output_schema": False,
+    }
 
 
 def _fake_unit(server) -> SimpleNamespace:
