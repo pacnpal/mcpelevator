@@ -29,6 +29,23 @@ from app.runners import build_spec
 from app.supervisor.logbuffer import LogBuffer
 
 
+def tool_summary(tool) -> dict:
+    """One cached-tool entry for the UI, from a probed ``mcp.types.Tool``.
+
+    ``has_output_schema`` mirrors the hint MCP clients and app-review tools
+    surface: a tool without an ``outputSchema`` gets a "recommended: add one so
+    models can better understand this tool's results" nudge. The schema is
+    authored upstream and proxied through unchanged, so this flag is diagnostic —
+    it tells the operator which upstream tools lack one, not something mcpelevator
+    can fix.
+    """
+    return {
+        "name": tool.name,
+        "description": tool.description or "",
+        "has_output_schema": tool.outputSchema is not None,
+    }
+
+
 class ServerUnit:
     def __init__(self, server: Server):
         # snapshot primitives — never hold a live ORM object
@@ -129,7 +146,7 @@ class ServerUnit:
             try:
                 async with Client(url, timeout=settings.start_timeout_s) as client:
                     tools = await client.list_tools()
-                self.tools = [{"name": t.name, "description": t.description or ""} for t in tools]
+                self.tools = [tool_summary(t) for t in tools]
                 if self.state == "starting":
                     self.state = "running"
                     self.last_error = None

@@ -43,6 +43,11 @@ export interface ServerSummary {
 export interface ServerTool {
 	name: string;
 	description: string;
+	/** Whether the tool declares an MCP `outputSchema`. Schemas are authored by
+	 * the upstream server and proxied through unchanged; MCP clients recommend
+	 * tools declare one so models can better understand results.
+	 * Absent on tool lists cached before this field existed. */
+	has_output_schema?: boolean;
 }
 
 // Superset of ServerSummary returned by GET /api/servers/{id}.
