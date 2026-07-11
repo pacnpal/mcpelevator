@@ -208,7 +208,9 @@ def package_draft(index: int, pkg: dict[str, Any]) -> dict[str, Any]:
     registry_type = str(pkg.get("registryType") or "").lower()
     identifier = str(pkg.get("identifier") or "")
     version = pkg.get("version")
-    transport = pkg.get("transport") or {}
+    transport = pkg.get("transport")
+    if not isinstance(transport, dict):
+        transport = {}
     transport_type = str(transport.get("type") or "stdio").lower()
 
     draft = blank_draft(index, registry_type, identifier, version)
