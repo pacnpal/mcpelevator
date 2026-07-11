@@ -8,7 +8,7 @@ Streamable-HTTP endpoint (`/s/<slug>/mcp`) with a SvelteKit UI, process supervis
 Run backend commands from `backend/`, frontend commands from `frontend/`. The `Makefile`
 wraps the common ones.
 
-- Backend dev (autoreload, http://127.0.0.1:8080): `cd backend && uv run uvicorn app.main:app --reload` — `make dev-backend`
+- Backend dev (autoreload, http://127.0.0.1:8080): cd backend && uv run uvicorn app.main:app --reload --port 8080 — make dev-backend
 - Frontend dev (HMR, http://localhost:5173, proxies /api and /s to :8080): `cd frontend && npm install && npm run dev` — `make dev-frontend`
 - Build SPA into `frontend/build`: `cd frontend && npm ci && npm run build` — `make build`
 - Backend tests: `cd backend && uv run pytest -q` — `make test`
