@@ -434,9 +434,12 @@ curl -i -H "Authorization: Bearer <OTHER_SERVER_TOKEN>" https://mcp.example.com/
 | Setup effort | Higher (tunnel **+** Access app + Managed OAuth) | Lower (tunnel only) |
 | Maturity today | Self-hosted-app recipe works today — the #478 failure did not reproduce in local testing (exact cause unconfirmed); the separate MCP *portal* path still has an open report (#410) | Stable, fully supported by mcpelevator v1 |
 
-¹ ✅ here means **verified once in local testing** (a self-hosted Access app with
-Managed OAuth completed `/authorize` and issued an OAuth code), not a
-generally-confirmed fix. #478 reports no upstream resolution, so treat this as
+¹ ✅ here means **verified once in local testing**: against a self-hosted Access
+app with Managed OAuth, the claude.ai connector completed the OAuth login **and
+registered the server's tools** (not merely issued a code — #478's failure mode
+is a completed login that lists **0 tools**, so tool registration is the test
+that matters). It is **not** a generally-confirmed upstream fix — #478 reports no
+resolution and the exact cause wasn't confirmed from the wire — so treat this as
 "works in this configuration" and test with a throwaway server before relying on it.
 
 **Rule of thumb:** if you need the **browser or mobile** connector, take **Path A**
