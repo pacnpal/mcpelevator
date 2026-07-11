@@ -293,12 +293,15 @@ add the connector URL.
 > RFC 8707 `resource` parameter and claude.ai wasn't sending it (the request returned
 > `error=invalid_target` / "No resource parameter found" — see
 > [anthropics/claude-ai-mcp #478](https://github.com/anthropics/claude-ai-mcp/issues/478),
-> closed as not-planned, plus the related reports #436, #449, #454). Claude's connector
-> is now **RFC 8707-compliant and sends the `resource` parameter**, so a self-hosted
-> Access application with Managed OAuth connects and registers tools in **claude.ai web
-> and mobile**. (Cloudflare's Managed OAuth panel still states *"Clients must be RFC
-> 8707 compliant"* — Claude now satisfies that.) It's still good practice to **verify
-> the full connect with a throwaway server first**. This resolution is specific to the
+> closed as not-planned, plus the related reports #436, #449, #454). In practice this
+> **no longer reproduces**: a self-hosted Access application with Managed OAuth now
+> connects and registers tools in **claude.ai web and mobile** (verified end-to-end).
+> The precise reason isn't confirmed from the wire — the claude.ai connector may now
+> send the RFC 8707 `resource` parameter, or the requirement may be satisfied some
+> other way — but the practical result is a clean connect. (Cloudflare's Managed OAuth
+> panel still states *"Clients must be RFC 8707 compliant."*) It's still good practice
+> to **verify the full connect with a throwaway server first**. This resolution is
+> specific to the
 > **self-hosted-app** recipe here; the separate MCP *portal* report (#410) is discussed
 > below.
 
@@ -421,13 +424,13 @@ curl -i -H "Authorization: Bearer <OTHER_SERVER_TOKEN>" https://mcp.example.com/
 
 | Capability | **Path A — Access Managed OAuth** | **Path B — bearer** |
 |---|---|---|
-| Works in claude.ai **web browser** | ✅ (self-hosted-app recipe; the #478 gap is fixed) | ❌ (web can't send a bearer) |
+| Works in claude.ai **web browser** | ✅ (self-hosted-app recipe; #478 no longer reproduces) | ❌ (web can't send a bearer) |
 | Works in Claude **mobile app** | ✅ (same self-hosted-app recipe as web) | ❌ (mobile can't send a bearer) |
 | Works in Claude **Code / Desktop (local config)** | ✅ (turn on **Allow loopback clients** on the Access app — see Step 3) | ✅ |
 | Works in Claude **Desktop remote connector** (account UI) | ✅ (cloud-dialed like web; same self-hosted-app recipe) | ❌ (cloud-dialed, no header) |
 | Auth mechanism | OAuth 2.1 + PKCE at the Access edge | mcpelevator `bearer` token |
 | Setup effort | Higher (tunnel **+** Access app + Managed OAuth) | Lower (tunnel only) |
-| Maturity today | Self-hosted-app recipe works today — the #478 `resource`-parameter gap is fixed; the separate MCP *portal* path still has an open report (#410) | Stable, fully supported by mcpelevator v1 |
+| Maturity today | Self-hosted-app recipe works today — the #478 failure no longer reproduces (exact cause unconfirmed); the separate MCP *portal* path still has an open report (#410) | Stable, fully supported by mcpelevator v1 |
 
 **Rule of thumb:** if you need the **browser or mobile** connector, take **Path A**
 using a **self-hosted Access application + Managed OAuth** (not the MCP portal), and
@@ -452,7 +455,7 @@ test with a throwaway server first. If Claude Code / Desktop is acceptable, take
 - [Get started with custom connectors using remote MCP — Claude Help Center](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
 - [Custom connectors only support OAuth client id/secret — no bearer/custom headers (anthropics/claude-ai-mcp #112)](https://github.com/anthropics/claude-ai-mcp/issues/112)
 - [claude.ai web/mobile OAuth fails against Cloudflare Access Managed OAuth MCP portal (anthropics/claude-ai-mcp #410)](https://github.com/anthropics/claude-ai-mcp/issues/410)
-- [claude.ai connector registers 0 tools against a self-hosted Access app — missing RFC 8707 `resource` parameter (anthropics/claude-ai-mcp #478)](https://github.com/anthropics/claude-ai-mcp/issues/478) — mid-2026 report, **since resolved**: Claude's connector now sends the `resource` parameter, so the self-hosted-app recipe connects and registers tools.
+- [claude.ai connector registers 0 tools against a self-hosted Access app — missing RFC 8707 `resource` parameter (anthropics/claude-ai-mcp #478)](https://github.com/anthropics/claude-ai-mcp/issues/478) — mid-2026 report; **no longer reproduces** — the self-hosted-app recipe now connects and registers tools (exact cause not confirmed from the wire).
 - [Create a remotely-managed Cloudflare Tunnel — Cloudflare One docs](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/)
 - [Create a locally-managed Cloudflare Tunnel (`config.yml`) — Cloudflare One docs](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/local-management/create-local-tunnel/)
 - [Managed OAuth — Cloudflare One docs](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/)
