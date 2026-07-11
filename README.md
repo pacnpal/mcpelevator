@@ -23,6 +23,30 @@ The protocol bridging is done by [FastMCP](https://gofastmcp.com); mcpelevator i
 
 A reconciler converges running processes to the desired state in SQLite (Kubernetes-style), so the system is idempotent and survives restarts.
 
+## Screenshots
+
+Add a server, press start, copy the URL. The dashboard supervises each one — live state, per-server errors, and a copy menu for the endpoint.
+
+![Servers dashboard — Memory and Time running, Filesystem and a remote proxy failed with inline errors, one stopped, each with runner badge and copy/start/stop controls](docs/screenshots/servers.png)
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/catalog-browse.png" alt="Browse the registry"><br><b>Browse the registry</b> — search public MCP directories.</td>
+    <td width="50%"><img src="docs/screenshots/catalog-search.png" alt="Search the registry for a server"><br><b>Search &amp; install</b> — pick a version, install with one review.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/add-server.png" alt="Add a server form"><br><b>Add a server</b> — npx, uvx, a command, or a remote URL.</td>
+    <td><img src="docs/screenshots/settings.png" alt="Settings — access tokens and network security"><br><b>Settings</b> — access tokens, bind mode, and the LAN gate.</td>
+  </tr>
+</table>
+
+<details>
+<summary>Mobile</summary>
+
+<img src="docs/screenshots/servers-mobile.png" alt="Servers dashboard on a phone-width viewport" width="360">
+
+</details>
+
 ## Quickstart (Docker)
 
 ```bash
