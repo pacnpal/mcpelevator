@@ -86,9 +86,11 @@ and docs.
 
 **Data plane (`/s/<slug>/...`).** `backend/app/proxy/router.py` looks up the slug, calls
 the same `enforce()` chokepoint, then streams to the loopback bridge, stripping
-hop-by-hop headers and content encoding. Bearer tokens are SHA-256-hashed at rest; the
-break-glass env token uses `secrets.compare_digest`, while persisted tokens are matched by
-hash lookup rather than plaintext comparison. Data tokens with `scope=all` or the matching
+hop-by-hop headers and content encoding. Bearer tokens are SHA-256-hashed at rest and
+matched by hash lookup rather than plaintext comparison. There is no data-plane
+break-glass credential — `MCPE_ADMIN_TOKEN` is accepted only on the control plane
+(where it is compared with `secrets.compare_digest`), never as a `/s/<slug>` token. Data
+tokens with `scope=all` or the matching
 `server.id` are accepted, while `control` tokens are not valid data-plane tokens. Unknown
 auth providers fail closed and API schemas restrict provider values. A critical bug would
 be resolving `bearer` or `inherit` to `none`, accepting a single-server token for another
