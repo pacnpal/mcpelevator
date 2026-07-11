@@ -10,6 +10,15 @@ updates:
     # Check the npm registry for updates every day (weekdays)
     schedule:
       interval: "daily"
+    ignore:
+      # TypeScript 7.x is the native Go port, which does not yet expose a
+      # stable programmatic API. Tools that embed the compiler — svelte-check,
+      # @sveltejs/kit — can only target the TS 6.0 API, so `npm run check`
+      # breaks under TS 7. Stay on 6.x until the Svelte toolchain adopts the
+      # TS 7.1 API. Revisit by dropping this ignore once svelte-check ships
+      # TS 7 support and @sveltejs/kit widens its typescript peer to ^7.0.0.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   # Enable version updates for Docker
   - package-ecosystem: "docker"
