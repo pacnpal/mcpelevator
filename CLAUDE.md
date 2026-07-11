@@ -31,8 +31,10 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
 - **Runners** (`runners/`): `npx`, `uvx`, `command`, `remote` (proxy an already-remote MCP URL),
   and `docker` (opt-in, root-equivalent, milestone M7).
 - **Auth** (`auth/`): two independent layers per request — a Host/Origin allowlist middleware
-  (DNS-rebinding defense) plus pluggable per-server bearer auth on `/s` and a control-plane admin
-  token on `/api`. See README "Security" for the full model.
+  (DNS-rebinding defense) plus pluggable per-server bearer auth on `/s` and control-plane bearer
+  auth that gates the sensitive `/api` routers only when enforcement is on (default `auto`: when
+  the box is exposed off-host); `/api/health*` and `/api/auth/status` stay public. See README
+  "Security" for the full model.
 - **Catalog** (`catalog/`): backend proxies public MCP directories (official registry, Glama) into
   reviewable launch specs; the SPA stays same-origin.
 - **Frontend** (`frontend/src/`): SvelteKit (Svelte 5) SPA, `adapter-static`, no SSR — rendered
@@ -44,8 +46,9 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   they win over the client-side router (`backend/app/main.py`). Keep new API/proxy routes above it.
 - Svelte runes mode is forced everywhere via `compilerOptions.runes` (`frontend/svelte.config.js`)
   — the codebase is Svelte 5; write runes, not legacy reactive syntax.
-- Backend dependencies are lockfile-driven for determinism: change `pyproject.toml`, then run
-  `uv lock`; the Dockerfile builds `--frozen`.
+- Backend dependencies are lockfile-driven: change `pyproject.toml`, then run `uv lock` so the
+  committed `uv.lock` stays in sync for reproducible installs (the Docker build prefers `--frozen`,
+  falling back to a resolve).
 - Config is env vars prefixed `MCPE_` (`backend/app/config.py`; table in README "Configuration").
 - The image version is stamped from the release tag by CI (`Dockerfile` `APP_VERSION`,
   `.github/workflows/docker-image.yml`) — don't hardcode a version string.
