@@ -222,7 +222,9 @@ Managed OAuth ([secure MCP servers with Access](https://developers.cloudflare.co
    clients (Claude registers via DCR), and a client whose redirect URI isn't
    allowed is rejected before the flow ever reaches mcpelevator. The value must be
    `https` and may end in `/*` to match sub-paths, so add `https://claude.ai/*` and
-   `https://claude.com/*`. **If you also want a *local* client (Claude Code,
+   `https://claude.com/*` (and `https://chatgpt.com/*` if you'll also connect the
+   same Access app from ChatGPT's developer-mode connector).
+   **If you also want a *local* client (Claude Code,
    `mcp-remote`, locally-configured Desktop) to connect through this Access app's
    OAuth**, turn on **Allow loopback clients** (and **Allow localhost clients**) too
    — those clients use an `http://localhost:<port>/callback` redirect that DCR
@@ -282,19 +284,28 @@ https://mcp.example.com/s/<slug>/mcp
 
 Click connect; Claude's OAuth discovery hits the `WWW-Authenticate` metadata,
 Access shows your IdP login, and after you approve, the connector goes live. The
-same connector then works in the **mobile** app.
+same connector then works in the **mobile** app. You don't paste a bearer token or
+fill in any OAuth **Client ID/Secret** on the claude.ai side — with the server on
+`none`, the Access gate is the only credential and it drives the whole login. Just
+add the connector URL.
 
-> ⚠️ **Known caveat — test before relying on this for web/mobile.** Even with the
-> self-hosted recipe above, there is a report
-> ([anthropics/claude-ai-mcp #478](https://github.com/anthropics/claude-ai-mcp/issues/478),
-> June 2026, closed as not-planned) that claude.ai's OAuth flow against a Cloudflare
-> Access app with Managed OAuth completes but **registers 0 tools** — because
-> Cloudflare's `/authorize` requires the RFC 8707 `resource` parameter and claude.ai
-> doesn't send it (the request returns `error=invalid_target` / "No resource
-> parameter found"). It belongs to a cluster of related Access OAuth reports
-> (#410, #436, #449, #454). This is outside mcpelevator's control. **Verify the full
-> connect with a throwaway server first**; if you hit it, fall back to **Path B** for
-> the surfaces it covers.
+> **Historical note — this now works (was broken mid-2026).** For a stretch in
+> mid-2026, claude.ai's OAuth flow against a Cloudflare Access app with Managed OAuth
+> completed but **registered 0 tools**, because Cloudflare's `/authorize` requires the
+> RFC 8707 `resource` parameter and claude.ai wasn't sending it (the request returned
+> `error=invalid_target` / "No resource parameter found" — see
+> [anthropics/claude-ai-mcp #478](https://github.com/anthropics/claude-ai-mcp/issues/478),
+> closed as not-planned, plus the related reports #436, #449, #454). In practice this
+> **no longer reproduces**: a self-hosted Access application with Managed OAuth now
+> connects and registers tools in **claude.ai web and mobile** (verified end-to-end).
+> The precise reason isn't confirmed from the wire — the claude.ai connector may now
+> send the RFC 8707 `resource` parameter, or the requirement may be satisfied some
+> other way — but the practical result is a clean connect. (Cloudflare's Managed OAuth
+> panel still states *"Clients must be RFC 8707 compliant."*) It's still good practice
+> to **verify the full connect with a throwaway server first**. This resolution is
+> specific to the
+> **self-hosted-app** recipe here; the separate MCP *portal* report (#410) is discussed
+> below.
 
 > ### Alternative: an MCP server portal (and why it's the second choice)
 > Cloudflare also offers [MCP server portals](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/),
@@ -415,13 +426,21 @@ curl -i -H "Authorization: Bearer <OTHER_SERVER_TOKEN>" https://mcp.example.com/
 
 | Capability | **Path A — Access Managed OAuth** | **Path B — bearer** |
 |---|---|---|
-| Works in claude.ai **web browser** | ⚠️ (self-hosted-app recipe; verify — see #478) | ❌ (web can't send a bearer) |
-| Works in Claude **mobile app** | ⚠️ (same caveat as web) | ❌ (mobile can't send a bearer) |
-| Works in Claude **Code / Desktop (local config)** | ⚠️ (needs **Allow loopback clients** on the Access app — see Step 3) | ✅ |
-| Works in Claude **Desktop remote connector** (account UI) | ⚠️ (cloud-dialed like web; same #478 caveat) | ❌ (cloud-dialed, no header) |
+| Works in claude.ai **web browser** | ✅¹ (self-hosted-app recipe; #478 did not reproduce in local testing) | ❌ (web can't send a bearer) |
+| Works in Claude **mobile app** | ✅ (same self-hosted-app recipe as web) | ❌ (mobile can't send a bearer) |
+| Works in Claude **Code / Desktop (local config)** | ✅ (turn on **Allow loopback clients** on the Access app — see Step 3) | ✅ |
+| Works in Claude **Desktop remote connector** (account UI) | ✅ (cloud-dialed like web; same self-hosted-app recipe) | ❌ (cloud-dialed, no header) |
 | Auth mechanism | OAuth 2.1 + PKCE at the Access edge | mcpelevator `bearer` token |
 | Setup effort | Higher (tunnel **+** Access app + Managed OAuth) | Lower (tunnel only) |
-| Maturity today | Depends on Anthropic's connector edge; **test first** — open reports for both self-hosted (#478) and the MCP *portal* (#410) | Stable, fully supported by mcpelevator v1 |
+| Maturity today | Self-hosted-app recipe works today — the #478 failure did not reproduce in local testing (exact cause unconfirmed); the separate MCP *portal* path still has an open report (#410) | Stable, fully supported by mcpelevator v1 |
+
+¹ ✅ here means **verified once in local testing**: against a self-hosted Access
+app with Managed OAuth, the claude.ai connector completed the OAuth login **and
+registered the server's tools** (not merely issued a code — #478's failure mode
+is a completed login that lists **0 tools**, so tool registration is the test
+that matters). It is **not** a generally-confirmed upstream fix — #478 reports no
+resolution and the exact cause wasn't confirmed from the wire — so treat this as
+"works in this configuration" and test with a throwaway server before relying on it.
 
 **Rule of thumb:** if you need the **browser or mobile** connector, take **Path A**
 using a **self-hosted Access application + Managed OAuth** (not the MCP portal), and
@@ -446,7 +465,7 @@ test with a throwaway server first. If Claude Code / Desktop is acceptable, take
 - [Get started with custom connectors using remote MCP — Claude Help Center](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
 - [Custom connectors only support OAuth client id/secret — no bearer/custom headers (anthropics/claude-ai-mcp #112)](https://github.com/anthropics/claude-ai-mcp/issues/112)
 - [claude.ai web/mobile OAuth fails against Cloudflare Access Managed OAuth MCP portal (anthropics/claude-ai-mcp #410)](https://github.com/anthropics/claude-ai-mcp/issues/410)
-- [claude.ai connector registers 0 tools against a self-hosted Access app — missing RFC 8707 `resource` parameter (anthropics/claude-ai-mcp #478)](https://github.com/anthropics/claude-ai-mcp/issues/478)
+- [claude.ai connector registers 0 tools against a self-hosted Access app — missing RFC 8707 `resource` parameter (anthropics/claude-ai-mcp #478)](https://github.com/anthropics/claude-ai-mcp/issues/478) — mid-2026 report; **no longer reproduces** — the self-hosted-app recipe now connects and registers tools (exact cause not confirmed from the wire).
 - [Create a remotely-managed Cloudflare Tunnel — Cloudflare One docs](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/)
 - [Create a locally-managed Cloudflare Tunnel (`config.yml`) — Cloudflare One docs](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/local-management/create-local-tunnel/)
 - [Managed OAuth — Cloudflare One docs](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/)
