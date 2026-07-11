@@ -47,17 +47,22 @@
         while (Date.now() - t0 < ms) { if (fn()) return true; await new Promise(r => setTimeout(r, 150)); }
         return false;
       };
-      await until(() => document.querySelector('input'), 10000);
+      // Throw on timeout so shot-scraper (run with --fail) fails the workflow
+      // instead of committing a blank/wrong search screenshot.
+      if (!await until(() => document.querySelector('input'), 10000)) {
+        throw new Error('catalog search input never appeared');
+      }
       const box = document.querySelector('input');
-      if (!box) return;
       box.focus();
       box.value = 'github';
       box.dispatchEvent(new Event('input', { bubbles: true }));
       // Wait until github-named result cards have replaced the default listing.
-      await until(
+      if (!await until(
         () => Array.from(document.querySelectorAll('h3')).filter(h => /github/i.test(h.textContent)).length >= 3,
         15000,
-      );
+      )) {
+        throw new Error("catalog search for 'github' returned no results in time");
+      }
       await new Promise(r => setTimeout(r, 800));
     })()
 
@@ -72,5 +77,7 @@
 - output: docs/screenshots/servers-mobile.png
   url: http://localhost:8080/
   width: 390
-  wait_for: document.body.innerText.includes('Upstream Weather')
+  wait_for: |
+    document.body.innerText.includes('Upstream Weather') &&
+    !document.body.innerText.includes('Starting')
   wait: 500
