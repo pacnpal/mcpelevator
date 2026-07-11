@@ -1,0 +1,76 @@
+# Screenshot definitions for shot-scraper (https://shot-scraper.datasette.io).
+# Captured against a locally-served, demo-seeded instance — see
+# scripts/screenshots-serve.sh and .github/workflows/screenshots.yml.
+#
+#   shot-scraper multi shots.yml --retina
+#
+# Shots with a `height:` are clipped to that viewport; shots without one capture
+# the full page. `--retina` doubles every dimension for crisp 2x output.
+
+# Dashboard — the hero shot: running / failed / stopped servers with live state.
+- output: docs/screenshots/servers.png
+  url: http://localhost:8080/
+  width: 1440
+  wait_for: |
+    document.body.innerText.includes('Upstream Weather') &&
+    !document.body.innerText.includes('Starting')
+  wait: 500
+
+# Add a server — the manual runner form (npx / uvx / command / remote).
+- output: docs/screenshots/add-server.png
+  url: http://localhost:8080/add
+  width: 1440
+  wait_for: document.body.innerText.includes('Create server')
+  wait: 400
+
+# Browse the registry — default listing from a public MCP directory.
+- output: docs/screenshots/catalog-browse.png
+  url: http://localhost:8080/catalog
+  width: 1440
+  height: 1150
+  wait_for: |
+    Array.from(document.querySelectorAll('button'))
+      .some(b => /Install|Set up/.test(b.textContent))
+  wait: 600
+
+# Search the registry — type a query and wait for the results to reload.
+# `javascript` runs before the shot (Playwright awaits the returned promise), so
+# the async IIFE drives the search box and settles before capture.
+- output: docs/screenshots/catalog-search.png
+  url: http://localhost:8080/catalog
+  width: 1440
+  height: 1150
+  javascript: |
+    (async () => {
+      const until = async (fn, ms) => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < ms) { if (fn()) return true; await new Promise(r => setTimeout(r, 150)); }
+        return false;
+      };
+      await until(() => document.querySelector('input'), 10000);
+      const box = document.querySelector('input');
+      if (!box) return;
+      box.focus();
+      box.value = 'github';
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      // Wait until github-named result cards have replaced the default listing.
+      await until(
+        () => Array.from(document.querySelectorAll('h3')).filter(h => /github/i.test(h.textContent)).length >= 3,
+        15000,
+      );
+      await new Promise(r => setTimeout(r, 800));
+    })()
+
+# Settings — access tokens and the network-security controls.
+- output: docs/screenshots/settings.png
+  url: http://localhost:8080/settings
+  width: 1440
+  wait_for: document.body.innerText.includes('Access tokens')
+  wait: 400
+
+# Dashboard on a phone-width viewport (single-column responsive layout).
+- output: docs/screenshots/servers-mobile.png
+  url: http://localhost:8080/
+  width: 390
+  wait_for: document.body.innerText.includes('Upstream Weather')
+  wait: 500
