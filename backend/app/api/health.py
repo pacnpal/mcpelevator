@@ -5,9 +5,10 @@
 balancer or client can check whether a specific proxied MCP server is accepting
 requests before sending traffic.
 
-These three stay public (outside the bearer-gated routers); the Host/Origin
-allowlist middleware still guards every ``/api`` path. Because they're
-unauthenticated, the per-server responses are deliberately COARSE — only a
+Only ``/health`` stays public (outside the bearer-gated routers). The
+inventory-bearing per-server health routes use the control-plane bearer gate when
+enforcement is on. The Host/Origin allowlist middleware still guards every
+``/api`` path. The per-server responses are deliberately COARSE — only a
 pass/fail ``running`` signal, never ``state``/``last_error``/inventory detail.
 Surfacing raw error text or lifecycle state here would turn a readiness probe
 into an unauthenticated diagnostics endpoint; detailed state lives behind the
@@ -21,6 +22,7 @@ from fastapi.responses import JSONResponse
 from sqlmodel import Session
 
 from app import __version__
+from app.auth.control_plane import require_control_plane
 from app.db import get_session, repo
 
 router = APIRouter()
@@ -31,7 +33,7 @@ async def health() -> dict:
     return {"status": "ok", "version": __version__}
 
 
-@router.get("/health/summary")
+@router.get("/health/summary", dependencies=[Depends(require_control_plane)])
 async def health_summary(request: Request, session: Session = Depends(get_session)) -> dict:
     """Pass/fail readiness for every server, plus an overall flag. ``ok`` is true
     when no *enabled* server is failing to run — disabled servers are intentionally
@@ -51,7 +53,7 @@ async def health_summary(request: Request, session: Session = Depends(get_sessio
     return {"status": "ok" if ok else "degraded", "servers": servers}
 
 
-@router.get("/health/{slug}", response_model=None)
+@router.get("/health/{slug}", response_model=None, dependencies=[Depends(require_control_plane)])
 async def health_slug(
     slug: str, request: Request, session: Session = Depends(get_session)
 ) -> dict | JSONResponse:
