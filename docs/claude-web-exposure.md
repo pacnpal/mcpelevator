@@ -222,7 +222,9 @@ Managed OAuth ([secure MCP servers with Access](https://developers.cloudflare.co
    clients (Claude registers via DCR), and a client whose redirect URI isn't
    allowed is rejected before the flow ever reaches mcpelevator. The value must be
    `https` and may end in `/*` to match sub-paths, so add `https://claude.ai/*` and
-   `https://claude.com/*`. **If you also want a *local* client (Claude Code,
+   `https://claude.com/*` (and `https://chatgpt.com/*` if you'll also connect the
+   same Access app from ChatGPT's developer-mode connector).
+   **If you also want a *local* client (Claude Code,
    `mcp-remote`, locally-configured Desktop) to connect through this Access app's
    OAuth**, turn on **Allow loopback clients** (and **Allow localhost clients**) too
    — those clients use an `http://localhost:<port>/callback` redirect that DCR
@@ -424,13 +426,18 @@ curl -i -H "Authorization: Bearer <OTHER_SERVER_TOKEN>" https://mcp.example.com/
 
 | Capability | **Path A — Access Managed OAuth** | **Path B — bearer** |
 |---|---|---|
-| Works in claude.ai **web browser** | ✅ (self-hosted-app recipe; #478 no longer reproduces) | ❌ (web can't send a bearer) |
+| Works in claude.ai **web browser** | ✅¹ (self-hosted-app recipe; #478 did not reproduce in local testing) | ❌ (web can't send a bearer) |
 | Works in Claude **mobile app** | ✅ (same self-hosted-app recipe as web) | ❌ (mobile can't send a bearer) |
 | Works in Claude **Code / Desktop (local config)** | ✅ (turn on **Allow loopback clients** on the Access app — see Step 3) | ✅ |
 | Works in Claude **Desktop remote connector** (account UI) | ✅ (cloud-dialed like web; same self-hosted-app recipe) | ❌ (cloud-dialed, no header) |
 | Auth mechanism | OAuth 2.1 + PKCE at the Access edge | mcpelevator `bearer` token |
 | Setup effort | Higher (tunnel **+** Access app + Managed OAuth) | Lower (tunnel only) |
-| Maturity today | Self-hosted-app recipe works today — the #478 failure no longer reproduces (exact cause unconfirmed); the separate MCP *portal* path still has an open report (#410) | Stable, fully supported by mcpelevator v1 |
+| Maturity today | Self-hosted-app recipe works today — the #478 failure did not reproduce in local testing (exact cause unconfirmed); the separate MCP *portal* path still has an open report (#410) | Stable, fully supported by mcpelevator v1 |
+
+¹ ✅ here means **verified once in local testing** (a self-hosted Access app with
+Managed OAuth completed `/authorize` and issued an OAuth code), not a
+generally-confirmed fix. #478 reports no upstream resolution, so treat this as
+"works in this configuration" and test with a throwaway server before relying on it.
 
 **Rule of thumb:** if you need the **browser or mobile** connector, take **Path A**
 using a **self-hosted Access application + Managed OAuth** (not the MCP portal), and
