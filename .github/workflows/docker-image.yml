@@ -193,6 +193,14 @@ jobs:
         if: always() && hashFiles('trivy-results.sarif') != ''
         with:
           sarif_file: trivy-results.sarif
+          # This workflow only fires on release:published, so GITHUB_REF is the
+          # tag (refs/tags/vX.Y.Z). Code-scanning alerts are tracked per-ref and
+          # only auto-close when a newer analysis on the SAME ref omits them —
+          # a tag scan can never clear an alert on main. Pin the upload to main
+          # (release commits are cut from main) so each release reconciles the
+          # default-branch alert set instead of piling up dead per-tag analyses.
+          ref: refs/heads/main
+          sha: ${{ github.sha }}
 
   summary:
     name: Build Summary
