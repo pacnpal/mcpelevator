@@ -5,20 +5,17 @@ name: Build and Push Docker Image
 # Runs on GitHub-hosted runners (ubuntu-latest). Docker and buildx are
 # pre-installed on GitHub-hosted runners, and arm64 layers are built via QEMU.
 #
-# Triggers: a published GitHub release (versioned tags), or a manual run from the
-# Actions tab (workflow_dispatch) which publishes a `dev`/input-named tag.
+# Trigger: ONLY a published GitHub release whose tag is a full semver (vX.Y.Z,
+# optionally -prerelease). There is deliberately no manual/workflow_dispatch path:
+# every published image is stamped with a real release version (APP_VERSION), so
+# the running instance reports e.g. `v1.2.3` — never `latest`/`dev`/a bare image
+# tag. A release tagged with anything that isn't full semver fails the build.
 #
 # No secrets required: GHCR auth uses the automatic GITHUB_TOKEN.
 
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to publish for a manual build (e.g. dev, 0.1.0-rc1)"
-        required: false
-        default: dev
 
 concurrency:
   group: ${{ github.workflow }}
@@ -86,16 +83,10 @@ jobs:
 
       - name: Resolve version
         id: version
-        env:
-          # Pass the manual input via the environment (never interpolated into the
-          # script text) so a crafted tag can't inject shell on the runner.
-          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION="$INPUT_TAG"
-          fi
+          # Only releases trigger this workflow, so the version is always the
+          # release tag with any leading `v` stripped (v1.2.3 -> 1.2.3).
+          VERSION="${GITHUB_REF_NAME#v}"
           # Reject anything outside a safe tag charset before it reaches later steps.
           case "$VERSION" in
             ''|*[!A-Za-z0-9_.-]*)
@@ -103,15 +94,19 @@ jobs:
               exit 1
               ;;
           esac
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          # Only a semver-shaped tag (X.Y.Z...) may move `latest` — a release tagged
-          # e.g. "docs-2026" must not retag latest for users tracking it.
-          IS_SEMVER=false
+          # Require a full semver (X.Y.Z, optionally -prerelease/+build). A release
+          # tagged with anything else (e.g. "docs-2026") must not publish an image:
+          # every image has to carry a real release version in APP_VERSION so the
+          # running instance reports the version, never a bare tag like "latest".
           case "$VERSION" in
-            [0-9]*.[0-9]*.[0-9]*) IS_SEMVER=true ;;
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "Refusing to build: release tag '$VERSION' is not a full semver (X.Y.Z)." >&2
+              exit 1
+              ;;
           esac
-          echo "is_semver=${IS_SEMVER}" >> "$GITHUB_OUTPUT"
-          echo "Building version: ${VERSION} (semver=${IS_SEMVER})"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${VERSION}"
 
       - name: Extract Docker metadata
         id: meta
@@ -119,15 +114,13 @@ jobs:
         with:
           images: ${{ env.GHCR_IMAGE }}
           tags: |
-            # Versioned tags from a release tag (vX.Y.Z)
+            # Versioned tags from the release tag (vX.Y.Z)
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
             # latest for a stable release, beta for a prerelease
-            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease && steps.version.outputs.is_semver == 'true' }}
-            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease }}
-            # the chosen tag for a manual (workflow_dispatch) build (validated output)
-            type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
+            type=raw,value=beta,enable=${{ github.event.release.prerelease }}
             # always a git short SHA tag
             type=sha,prefix=sha-,format=short
           labels: |
