@@ -27,8 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends nodejs \
     # Refresh npm to a build whose bundled deps carry the fixes Trivy flags in the
     # version Node ships (tar >=7.5.16, the patched brace-expansion via minimatch,
-    # and ip-address via the socks proxy chain).
-    && npm install -g npm@11.17.0 \
+    # ip-address via the socks proxy chain, and undici >=6.27.0 for the June 2026
+    # cookie/keep-alive/WebSocket advisories — CVE-2026-{12151,9679,11525,6733}).
+    && npm install -g npm@11.18.0 \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 
