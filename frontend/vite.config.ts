@@ -41,10 +41,6 @@ export default defineConfig({
 		include: ['src/**/*.{test,spec}.ts']
 	},
 	server: {
-		// Bind all interfaces (IPv4 + IPv6) so `localhost` resolves whether it
-		// maps to 127.0.0.1 or ::1, and so the dev UI is reachable from a phone
-		// on the LAN (this is a mobile-first project).
-		host: true,
 		port: 5173,
 		proxy: {
 			'/api': {
