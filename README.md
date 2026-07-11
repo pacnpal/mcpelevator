@@ -138,6 +138,9 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 > The guide has the exact `cloudflared`/Access steps, `curl` checks, and the
 > connector caveats to test before relying on web/mobile.
 
+> **Full threat model.** For the trust boundaries, attacker stories, and how
+> findings are triaged by severity, see [docs/security.md](docs/security.md).
+
 Two independent layers guard the system, and a request must pass both.
 
 **Host/Origin allowlist** (DNS-rebinding defense), enforced on every request in every mode. A loopback `Host` is trusted only when the request's **peer** actually connects from loopback, so an off-host bind can't spoof `Host: localhost`. `expose` mode adds the hosts you allowlist, and the host in `MCPE_PUBLIC_BASE_URL` is always trusted. Behind a local reverse proxy or Docker's bridge gateway (where the peer is the forwarder, not the real client), set `MCPE_TRUSTED_PROXIES` (CIDRs) to trust it. The default `docker-compose.yml` does this for the bridge range, which is safe only with a loopback-published port.
