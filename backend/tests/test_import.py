@@ -124,3 +124,12 @@ def test_import_docker_entry_normalizes_to_canonical_shape(session):
     assert gh.args == []
     assert gh.env == {"GITHUB_PERSONAL_ACCESS_TOKEN": "pat"}
     assert gh.enabled is False  # imported disabled — the root-equivalent gate bites on enable
+
+
+def test_import_podman_is_command_not_docker(session):
+    # A podman config must NOT be silently reclassified as the docker runner (which always
+    # execs `docker`); it falls through to `command` and runs verbatim.
+    data = {"mcpServers": {"p": {"command": "podman", "args": ["run", "--rm", "img"]}}}
+    created, skipped = service.import_mcp_servers(session, data)
+    assert skipped == []
+    assert created[0].runner == "command"

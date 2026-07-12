@@ -213,6 +213,9 @@ async def enable_server(server_id: str, request: Request, session: Session = Dep
         server = service.set_enabled(session, server_id, True)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
+    except ValueError as exc:
+        # e.g. enabling a docker server while the (root-equivalent) docker runner is off.
+        raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
     sup.nudge()
     return _summary(server, sup, session, _base_url(request))

@@ -267,6 +267,54 @@ def test_normalize_docker_warns_on_detach():
     assert any("detach" in w for w in warnings)
 
 
+def test_normalize_docker_scaffolds_bare_env_passthrough():
+    # A bare `-e SECRET` (host-env passthrough) with no value in the env object must be
+    # scaffolded as SECRET="" (so it's emitted + reviewable), not silently dropped.
+    image, args, env, warnings = service.normalize_docker("docker", ["run", "-e", "SECRET", "img"], {})
+    assert image == "img"
+    assert env == {"SECRET": ""}
+    assert any("SECRET" in w for w in warnings)
+
+
+def test_normalize_docker_warns_on_env_file():
+    _, _, _, warnings = service.normalize_docker("docker", ["run", "--env-file", "s.env", "img"], {})
+    assert any("env-file" in w for w in warnings)
+
+
+def test_normalize_docker_handles_windows_launcher_path():
+    # A Windows Claude-Desktop path must be recognized as the docker launcher on any OS.
+    image, args, env, _ = service.normalize_docker(
+        r"C:\Program Files\Docker\docker.exe", ["run", "--rm", "-e", "T", "img"], {"T": "v"}
+    )
+    assert image == "img" and env == {"T": "v"}
+
+
+def test_docker_rejects_env_key_with_equals(session):
+    # A key containing "=" would become `-e KEY=value` in argv (leaking the value). Reject it.
+    _enable_docker(session)
+    with pytest.raises(ValueError):
+        service.create_server(
+            session, name="d", runner="docker", command="img:1", args=[],
+            env={"FOO=leaked": ""}, enabled=False,
+        )
+
+
+def test_normalize_docker_does_not_classify_podman():
+    # `podman …` must NOT be parsed as a docker invocation (the runner always execs docker).
+    image, args, env, _ = service.normalize_docker("podman", ["run", "--rm", "img"], {})
+    assert image == "podman"  # treated as an image ref, not a launcher — i.e. not docker-parsed
+
+
+def test_docker_update_clears_stale_cwd(session):
+    _enable_docker(session)
+    s = service.create_server(
+        session, name="c", runner="command", command="/bin/x", args=[], cwd="/tmp"
+    )
+    assert s.cwd == "/tmp"
+    u = service.update_server(session, s.id, {"runner": "docker", "command": "img:1", "args": []})
+    assert u.runner == "docker" and u.cwd is None
+
+
 def test_normalize_docker_bare_image_ref_passthrough():
     image, args, env, _ = service.normalize_docker("myrepo/img", ["--verbose"], {"K": "v"})
     assert image == "myrepo/img" and args == ["--verbose"] and env == {"K": "v"}

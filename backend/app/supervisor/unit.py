@@ -26,7 +26,7 @@ from fastmcp import Client
 from app.config import get_settings
 from app.db.models import Server
 from app.runners import build_spec
-from app.runners.docker import DOCKER_BIN, container_name
+from app.runners.docker import DOCKER_BIN, server_label
 from app.supervisor.logbuffer import LogBuffer
 
 
@@ -56,10 +56,6 @@ class ServerUnit:
         self.config_hash = server.config_hash
         self.runner = server.runner
         self.spec = build_spec(server)
-        # Deterministic name of the container this unit launches (docker runner only), so
-        # stop() can reap it directly even when the docker CLI died before telling the
-        # daemon to remove it. Computed for every unit; only used when runner == "docker".
-        self.container_name = container_name(server)
         self.exposure = {"mcp_http": server.mcp_http, "rest_openapi": server.rest_openapi}
 
         self.host = get_settings().bridge_host
@@ -129,27 +125,45 @@ class ServerUnit:
         self.port = None
 
     async def _reap_container(self) -> None:
-        """Best-effort ``docker rm -f`` for this unit's container.
+        """Best-effort ``docker rm -f`` for every container this server launched.
 
         The graceful path already cleans up (SIGTERM to the group → docker CLI forwards it
         → container stops → ``--rm`` removes). This backstops the SIGKILL path, where the
         CLI was killed before it could tell the daemon to stop, leaving the container
-        running. Fire-and-forget with its OWN short timeout so a slow/wedged daemon can't
-        stall stop()/reconcile; every failure mode is ignored (the boot label-sweep is the
-        final backstop)."""
+        running. Reaping is by LABEL (not name), so it also covers the case where FastMCP
+        opened more than one upstream container for this server. Fire-and-forget with its
+        OWN short timeout so a slow/wedged daemon can't stall stop()/reconcile; every
+        failure mode is ignored (the boot label-sweep is the final backstop)."""
+        label = server_label(self.id)
         try:
-            proc = await asyncio.create_subprocess_exec(
-                DOCKER_BIN, "rm", "-f", self.container_name,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+            listed = await asyncio.create_subprocess_exec(
+                DOCKER_BIN, "ps", "-aq", "--filter", f"label={label}",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             )
         except (FileNotFoundError, OSError):
             return  # docker CLI not present — nothing we can do here
         try:
-            await asyncio.wait_for(proc.wait(), timeout=8)
+            out, _ = await asyncio.wait_for(listed.communicate(), timeout=8)
         except asyncio.TimeoutError:
             try:
-                proc.kill()
+                listed.kill()
+            except ProcessLookupError:
+                pass
+            return
+        ids = out.decode(errors="replace").split()
+        if not ids:
+            return
+        try:
+            rm = await asyncio.create_subprocess_exec(
+                DOCKER_BIN, "rm", "-f", *ids,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(rm.wait(), timeout=8)
+        except (FileNotFoundError, OSError):
+            return
+        except asyncio.TimeoutError:
+            try:
+                rm.kill()
             except ProcessLookupError:
                 pass
 

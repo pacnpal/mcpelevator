@@ -103,9 +103,10 @@ or an external OAuth/Access gate; it is dangerous if exposed directly to the int
 and `backend/app/bridge/host.py` turn stored specs into child processes. Local runners pass
 argv lists, not shell strings, and the supervisor executes the bridge module with
 `asyncio.create_subprocess_exec`. The **docker runner** is opt-in and root-equivalent: it is
-disabled by default behind the `docker_runner` setting, enforced at three layers (service
-create/enable, and supervisor reconcile refuses to start a docker unit while the setting is
-off). When enabled it stores the canonical image+args+env shape and synthesizes a hardened
+disabled by default behind the `docker_runner` setting, enforced at the service layer (a
+docker server can't be created-enabled or enabled while it's off) and again in the
+supervisor (reconcile refuses to start a docker unit while it's off). The catalog gate is
+separate — OCI installs are surfaced non-installable until the runner is enabled. When enabled it stores the canonical image+args+env shape and synthesizes a hardened
 `docker run` (`--rm --init --cap-drop ALL --security-opt no-new-privileges --pids-limit` +
 a memory cap). Secrets are passed by **name** (`-e KEY`), never `KEY=value`, so they never
 appear in `docker inspect`/`ps`; and the bridge gives a docker child a **minimal env** (only

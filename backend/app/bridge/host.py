@@ -94,7 +94,10 @@ def _child_env(spec: dict) -> dict[str, str]:
     server_env = dict(spec.get("env") or {})
     if spec.get("minimal_env"):
         base = {k: os.environ[k] for k in _DOCKER_ENV_ALLOWLIST if k in os.environ}
-        return {**base, **server_env}
+        # base (the bridge's PATH/HOME + DOCKER_* connection vars) WINS over server_env: a
+        # server-declared DOCKER_HOST must not retarget the docker CLI (which would break
+        # the dind-sidecar isolation), nor a PATH override stop `docker` from resolving.
+        return {**server_env, **base}
     return {**os.environ, **server_env}
 
 

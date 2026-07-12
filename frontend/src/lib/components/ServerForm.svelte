@@ -201,8 +201,11 @@
 
 	const isRemote = $derived(runner === 'remote');
 	const isDocker = $derived(runner === 'docker');
-	// Blocked from submitting a docker server while the runner is disabled (root-equivalent).
-	const dockerBlocked = $derived(isDocker && dockerEnabled === false);
+	// A docker server is only *started* when created with "Start after creating" on; editing
+	// or saving a disabled docker server is always allowed (the backend gates on enable, not
+	// on storing a disabled row) so an imported config can be reviewed first.
+	const dockerDisabled = $derived(isDocker && dockerEnabled === false);
+	const dockerBlocked = $derived(dockerDisabled && mode === 'create' && startAfter);
 	const nameValid = $derived(name.trim().length > 0);
 	const commandValid = $derived(command.trim().length > 0);
 
@@ -486,7 +489,7 @@
 		<!-- runner === docker: command = OCI image ref, args = the container's own args.
 		     The backend synthesizes the hardened `docker run …` (see dockerPreview). -->
 		<div class="flex flex-col gap-2">
-			{#if dockerBlocked}
+			{#if dockerDisabled}
 				<p
 					class="flex items-start gap-2 rounded-lg border px-3 py-2.5 text-xs leading-relaxed"
 					style="border-color: color-mix(in oklab, var(--color-state-failed) 30%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 8%, transparent); color: var(--color-ink-muted);"
@@ -496,9 +499,14 @@
 						<path d="M12 9v4M12 17h.01" />
 					</svg>
 					<span>
-						The Docker runner is disabled. It's root-equivalent — enable it on the
+						The Docker runner is disabled (it's root-equivalent). You can still
+						{mode === 'create' ? 'save this server disabled' : 'edit and save it'} for review — but
+						enable the runner on the
 						<a href="/settings" class="font-medium text-[var(--color-ink)] underline decoration-dotted underline-offset-2">Settings</a>
-						page before starting a Docker server.
+						page before starting it.
+						{#if dockerBlocked}
+							<span class="font-medium text-[var(--color-ink)]">Turn off “Start after creating” below to save it now.</span>
+						{/if}
 					</span>
 				</p>
 			{/if}

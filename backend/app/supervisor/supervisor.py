@@ -25,6 +25,10 @@ from app.runners.docker import DOCKER_BIN, LABEL_KEY
 from app.supervisor.ports import PortAllocator
 from app.supervisor.unit import ServerUnit
 
+# `docker ps` Go-template that prints "<container-id> <server-id-label>" per line, so the
+# boot sweep can keep only containers whose label value is a server in THIS instance's DB.
+_PS_FORMAT = '{{.ID}} {{.Label "' + LABEL_KEY + '"}}'
+
 
 class Supervisor:
     def __init__(self) -> None:
@@ -154,28 +158,40 @@ class Supervisor:
         to stopped so the API reflects reality; reconcile brings servers back."""
         with Session(get_engine()) as session:
             repo.reset_all_runtime(session)
-            docker_on = runtime_settings.docker_runner(session)
-        if docker_on:
-            self._reap_docker_orphans()
+            # The set of docker server ids THIS instance owns. Scoping the sweep to these
+            # is what keeps two mcpelevator instances sharing one host daemon from reaping
+            # each other's containers. Runs regardless of the docker_runner setting, so a
+            # container left running when the runner was turned off is still cleaned up.
+            docker_ids = {s.id for s in repo.list_servers(session) if s.runner == "docker"}
+        if docker_ids:
+            self._reap_docker_orphans(docker_ids)
 
-    def _reap_docker_orphans(self) -> None:
-        """Remove any containers a prior control-plane process left behind.
+    def _reap_docker_orphans(self, known_ids: set[str]) -> None:
+        """Remove containers a prior control-plane process left behind, for servers in
+        ``known_ids`` only.
 
         Graceful stop and the per-unit ``stop()`` reap cover the normal paths; this
         backstops a hard crash, where a container keeps running with no unit to stop it.
-        Keyed strictly on our own SSOT label so it never touches a foreign container.
-        Runs synchronously at boot (before the event loop starts) and is silent on any
-        failure — docker missing, no daemon reachable, etc."""
+        We list our own labelled containers with their server-id label value and remove
+        only those whose id is in ``known_ids`` — so a sibling instance sharing the daemon
+        (whose server ids live in a different DB) is never touched. Runs synchronously at
+        boot (before the event loop starts) and is silent on any failure (docker missing,
+        no daemon reachable, etc.)."""
         try:
             listed = subprocess.run(
-                [DOCKER_BIN, "ps", "-aq", "--filter", f"label={LABEL_KEY}"],
+                [DOCKER_BIN, "ps", "-a", "--filter", f"label={LABEL_KEY}", "--format", _PS_FORMAT],
                 capture_output=True, text=True, timeout=10,
             )
         except (FileNotFoundError, OSError, subprocess.SubprocessError):
             return
         if listed.returncode != 0:  # daemon unreachable / CLI error — nothing to reap
             return
-        ids = [line for line in listed.stdout.split() if line]
+        ids = []
+        for line in listed.stdout.splitlines():
+            parts = line.split()
+            # "<container-id> <server-id>"; keep only containers this instance owns.
+            if len(parts) == 2 and parts[1] in known_ids:
+                ids.append(parts[0])
         if not ids:
             return
         try:

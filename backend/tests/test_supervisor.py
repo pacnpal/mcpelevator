@@ -79,7 +79,8 @@ async def test_reconcile_skips_docker_when_runner_disabled():
         assert sid not in sup.units  # never started
         with Session(get_engine()) as session:
             rt = repo.get_runtime(session, sid)
-        assert rt is not None and rt.state == "failed"
+        assert rt is not None
+        assert rt.state == "failed"
         assert "disabled" in (rt.last_error or "")
     finally:
         sup.units.pop(sid, None)

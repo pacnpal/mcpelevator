@@ -7,7 +7,7 @@ Sits above the repo: generates identity (id/slug), computes the idempotency
 
 from __future__ import annotations
 
-import os
+import logging
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
@@ -19,6 +19,16 @@ from app.registry import settings as runtime_settings
 from app.runners import remote as remote_runner
 from app.runners.remote import canonical_transport
 from app.util import config_hash, new_id, slugify
+
+logger = logging.getLogger(__name__)
+
+
+def _launcher_basename(command: str) -> str:
+    """Basename of a launcher path, splitting on BOTH separators regardless of platform.
+
+    ``os.path.basename`` on POSIX leaves a Windows path (``C:\\…\\docker.exe``) intact, so a
+    Claude-Desktop-on-Windows config would miss the launcher tables. Normalize both slashes."""
+    return command.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
 
 
 # --- remote (HTTP/SSE upstream) normalization ----------------------------------
@@ -68,7 +78,11 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
 # mcpServers entry, though, gives a full `docker run …` invocation; normalize_docker is
 # the single place that parses that into the canonical shape so the row (and its
 # config_hash) is deterministic and the docker runner can synthesize its own hardened argv.
-_DOCKER_LAUNCHERS = {"docker", "docker.exe", "podman", "podman.exe"}
+# Only real docker launchers: the docker runner always execs `docker` (DOCKER_BIN), so we
+# must NOT silently reclassify a `podman …` config as this runner — it would run against a
+# different daemon (or fail). A podman config instead falls through to the `command` runner,
+# which launches it verbatim.
+_DOCKER_LAUNCHERS = {"docker", "docker.exe"}
 
 # `docker run` flags that CONSUME the next token as their value (so we skip both). Kept
 # reasonably complete for real MCP configs; an unknown value-taking flag is the accepted
@@ -98,19 +112,20 @@ def _capture_env(token: str, env: dict[str, str], warnings: list[str]) -> None:
     """Fold a ``-e`` argument into the env map.
 
     ``VAR=value`` provides a value (the explicit env map still wins, via setdefault).
-    A bare ``VAR`` (name-only passthrough) is only meaningful if the env map supplies its
-    value — the builder emits ``-e KEY`` for each env key and the value reaches the docker
-    CLI's minimal env from there. A name-only ``VAR`` with no value is dropped with a
-    warning rather than silently passing an empty variable."""
+    A bare ``VAR`` (name-only passthrough) relied on a host env var in the original config;
+    we can't read that, so we **scaffold** it as ``VAR=""`` and warn — this keeps the key
+    present (the builder emits ``-e VAR`` and it shows up in the review form to fill in),
+    rather than silently dropping a required secret so the server starts without it."""
     name, sep, val = token.partition("=")
     if not name:
         return
     if sep:
         env.setdefault(name, val)
     elif name not in env:
+        env[name] = ""  # scaffold for review; the operator fills the value before enabling
         warnings.append(
-            f"-e {name} references a variable with no value — add {name} under Environment "
-            f"so it is passed to the container."
+            f"-e {name} relied on a host environment variable — set {name}'s value under "
+            f"Environment before starting."
         )
 
 
@@ -127,7 +142,7 @@ def normalize_docker(
     env = dict(env or {})
     warnings: list[str] = []
     tokens = list(args or [])
-    base = os.path.basename((command or "").strip()).lower()
+    base = _launcher_basename(command or "")
 
     if base not in _DOCKER_LAUNCHERS:
         # Already an image ref; container args pass through unchanged.
@@ -177,6 +192,13 @@ def normalize_docker(
                 i += 1
                 continue
             if tok in _DOCKER_VALUE_FLAGS:
+                if tok == "--env-file":
+                    # We can't read the file; surface it like a bare -e so its vars aren't
+                    # silently lost (the server would otherwise start with no environment).
+                    warnings.append(
+                        "--env-file is not read — add its variables under Environment so "
+                        "they reach the container."
+                    )
                 i += 2  # skip the flag and its value
                 continue
             i += 1  # a boolean flag (-i, -t, -it, --rm, --init, …); skip it
@@ -189,6 +211,17 @@ def normalize_docker(
     if not image:
         raise ValueError("a docker server's args must include an image reference")
     return image, container_args, env, warnings
+
+
+def _validate_docker_env(env: dict[str, str]) -> None:
+    """Reject env names that would break the docker runner's no-values-in-argv guarantee.
+
+    The docker builder emits ``-e KEY`` (name only); a key containing ``=`` or whitespace
+    would become ``-e KEY=value`` in the argv (leaking the value into ``ps``/``inspect``) or
+    an invalid child-env name. Reject such keys at the boundary so they never persist."""
+    for key in env:
+        if "=" in key or any(c.isspace() for c in key):
+            raise ValueError(f"invalid environment variable name {key!r} for a docker server")
 
 
 def _require_docker_enabled(session: Session) -> None:
@@ -319,7 +352,11 @@ def create_server(
     # `docker run …` invocation is parsed down to it. The gate bites only when the server
     # is created already enabled — a disabled import stays reviewable.
     if runner == "docker":
-        command, args, env, _ = normalize_docker(command, args, env)
+        command, args, env, warnings = normalize_docker(command, args, env)
+        _validate_docker_env(env)
+        cwd = None  # a container has its own filesystem; a host cwd is meaningless
+        for w in warnings:  # the hardened parser altered the invocation — don't do it silently
+            logger.warning("docker server %r: %s", name, w)
         if enabled:
             _require_docker_enabled(session)
 
@@ -374,9 +411,15 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         # the stale working directory here (remote has no process) to keep the row canonical.
         server.cwd = None
     if server.runner == "docker":
-        server.command, server.args, server.env, _ = normalize_docker(
+        server.command, server.args, server.env, warnings = normalize_docker(
             server.command, server.args, server.env
         )
+        _validate_docker_env(server.env)
+        for w in warnings:
+            logger.warning("docker server %r: %s", server.name, w)
+        # Converting a local server (with a cwd) to docker: PATCH drops the form's cwd:null,
+        # so clear the now-meaningless working directory here to keep the row canonical.
+        server.cwd = None
         # Editing an enabled docker server (or converting one to docker while enabled)
         # requires the runner to be on — same gate as enable.
         if server.enabled:
@@ -436,7 +479,7 @@ _UVX_LAUNCHERS = {"uvx", "uv"}
 def _infer_runner(command: str) -> str:
     # Match on the basename so an absolute launcher path (e.g. "/usr/local/bin/docker",
     # as Claude Desktop configs commonly write) infers the right runner, not "command".
-    base = os.path.basename(command.strip()).lower()
+    base = _launcher_basename(command)
     if base in _NPX_LAUNCHERS:
         return "npx"
     if base in _UVX_LAUNCHERS:

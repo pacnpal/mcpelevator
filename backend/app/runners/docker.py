@@ -43,17 +43,18 @@ HARDENING = [
 ]
 DEFAULT_MEMORY = "1g"  # --memory; generous, but caps a runaway container from OOMing the host
 
-# The container name/label the supervisor's reaper keys off (see supervisor + unit).
+# The label every launched container carries, valued with the server's id. It is the SOLE
+# handle the supervisor/unit use to reap containers (`--filter label=mcpelevator.server=<id>`).
+# We deliberately DON'T set a fixed `--name`: a pure builder can't make a name unique per
+# launch, and FastMCP's fresh-session-per-request proxy can open more than one upstream for
+# the same server (readiness probe + a client, or a reconnect overlap), which would collide
+# on a fixed name. The label handles reaping without that constraint; Docker auto-names.
 LABEL_KEY = "mcpelevator.server"
 
 
-def container_name(server: Server) -> str:
-    """Deterministic, human-readable, collision-resistant container name.
-
-    Same (slug, id) always yields the same name, so ``docker rm -f`` on stop targets the
-    exact container this row launched. The id prefix keeps it unique even if two servers
-    share a slug transiently (a rename racing a create)."""
-    return f"mcpe-{server.slug}-{server.id[:8]}"
+def server_label(server_id: str) -> str:
+    """The `label=key=value` selector for a server's containers (SSOT for reaping)."""
+    return f"{LABEL_KEY}={server_id}"
 
 
 @register("docker")
@@ -63,18 +64,23 @@ def build(server: Server) -> ProcessSpec:
         *BASE_FLAGS,
         *HARDENING,
         "--memory", DEFAULT_MEMORY,
-        "--name", container_name(server),
-        "--label", f"{LABEL_KEY}={server.id}",
+        "--label", server_label(server.id),
     ]
     # Name-only passthrough: the value is read from the docker CLI's environment (which the
     # bridge host seeds from ``env`` under a minimal allowlist), never embedded in argv.
+    # Defensively skip a malformed key (``=``/whitespace) so a value can never enter argv —
+    # the service layer already rejects these, this guards a legacy/hand-edited row.
     for key in env:
+        if "=" in key or any(c.isspace() for c in key):
+            continue
         args += ["-e", key]
     args += [server.command, *(server.args or [])]  # image ref, then the container's args
     return ProcessSpec(
         command=DOCKER_BIN,
         args=args,
         env=env,
-        cwd=server.cwd,
+        # A container has its own filesystem — a host cwd is meaningless and a stale one
+        # (e.g. from converting a command server) could break `docker run`. Never pass it.
+        cwd=None,
         minimal_env=True,
     )
