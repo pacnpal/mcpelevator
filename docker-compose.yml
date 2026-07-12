@@ -88,9 +88,10 @@ services:
   # dind itself launches CAN reach the dind daemon on its own bridge gateway. A malicious
   # image could therefore commandeer the dind daemon (spawn privileged containers, read
   # co-tenant containers). Host blast radius stays confined to this sidecar, but treat images
-  # sharing one dind as mutually-trusting; for an untrusted image that doesn't need egress,
-  # set its server's args to include `--network none` (the runner leaves networking at
-  # Docker's default). For stronger isolation, front dind with TLS (2376) instead of 2375.
+  # sharing one dind as MUTUALLY-TRUSTING — the runner owns all `docker run` options (a
+  # server's args are the container's own args, not run flags), so there is no per-server
+  # `--network`/`--read-only` knob to isolate one image. For stronger isolation, front dind
+  # with TLS (2376) instead of 2375, or run a separate dind per trust domain.
   dind:
     image: docker:29-dind
     profiles: ["docker-dind"]

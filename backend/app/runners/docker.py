@@ -15,11 +15,14 @@ generous memory cap, and a deterministic ``--name``/``--label`` the supervisor u
 reap orphaned containers. Networking and the root filesystem are left at Docker's defaults
 (egress allowed, rootfs writable) — operators tighten per server.
 
-Secrets are passed by NAME (``-e KEY``), never ``-e KEY=value``, so values never appear in
-the container's argv, ``docker ps``, or ``docker inspect``. The values live in
-``ProcessSpec.env`` and reach the docker CLI's own environment via the bridge host, which
-for a docker spec passes a MINIMAL env (``minimal_env=True``) so ``-e KEY`` can only ever
-resolve the operator-declared vars — never the control plane's own environment.
+Secrets are passed by NAME (``-e KEY``), never ``-e KEY=value``, so a value never appears in
+mcpelevator's OWN process argv or ``ps`` output. (Docker still resolves the value into the
+container's environment, which anyone with access to the Docker daemon can read via
+``docker inspect`` — name-only passing narrows exposure to daemon-holders, it doesn't hide the
+value from them.) The values live in ``ProcessSpec.env`` and reach the docker CLI's own
+environment via the bridge host, which for a docker spec passes a MINIMAL env
+(``minimal_env=True``) so ``-e KEY`` can only ever resolve the operator-declared vars — never
+the control plane's own environment.
 
 Enabling this runner is opt-in and root-equivalent (it runs arbitrary images on a Docker
 daemon); the gate lives in the service/settings/supervisor layers, not here — this builder

@@ -383,6 +383,50 @@ def test_normalize_docker_global_flags_before_run():
     assert image == "img" and args == []
 
 
+def test_normalize_docker_container_run_longform():
+    # `docker container run …` is the canonical long form of `docker run …`.
+    image, args, _, _ = service.normalize_docker(
+        "docker", ["container", "run", "-i", "ghcr.io/x/y"], {}
+    )
+    assert image == "ghcr.io/x/y" and args == []
+
+
+def test_normalize_docker_attach_is_value_flag():
+    # `-a stdin -a stdout` take values; the image must not be mistaken for an attach target.
+    image, args, _, _ = service.normalize_docker(
+        "docker", ["run", "-a", "stdin", "-a", "stdout", "-i", "ghcr.io/x/y"], {}
+    )
+    assert image == "ghcr.io/x/y" and args == []
+
+
+def test_normalize_docker_warns_on_dropped_mount():
+    _, _, _, warnings = service.normalize_docker(
+        "docker", ["run", "-v", "/host/data:/data", "img"], {}
+    )
+    assert any("mount" in w for w in warnings)
+    # inline form too
+    _, _, _, w2 = service.normalize_docker("docker", ["run", "--volume=/a:/b", "img"], {})
+    assert any("mount" in w for w in w2)
+
+
+def test_normalize_docker_servers_migrates_global_flag_command_row(session):
+    # A legacy runner="command" row with a global flag before `run` must still migrate to docker.
+    _enable_docker(session)
+    s = service.create_server(
+        session, name="g", runner="command", command="/usr/local/bin/docker",
+        args=["--context", "prod", "run", "img"], env={},
+    )
+    # Force it back to the legacy command shape (create already reclassified it to docker).
+    row = repo.get_server(session, s.id)
+    row.runner = "command"
+    row.command, row.args = "/usr/local/bin/docker", ["--context", "prod", "run", "img"]
+    repo.save_server(session, row)
+
+    assert service.normalize_docker_servers(session) == 1
+    m = repo.get_server(session, s.id)
+    assert m.runner == "docker" and m.command == "img"
+
+
 def test_normalize_docker_warns_on_env_file():
     _, _, _, warnings = service.normalize_docker("docker", ["run", "--env-file", "s.env", "img"], {})
     assert any("env-file" in w for w in warnings)

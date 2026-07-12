@@ -90,6 +90,7 @@ _DOCKER_LAUNCHERS = {"docker", "docker.exe"}
 # edge (it'd be read as a boolean and its value mistaken for the image — rare in practice).
 _DOCKER_VALUE_FLAGS = frozenset({
     "-e", "--env", "--env-file",
+    "-a", "--attach",
     "-v", "--volume", "--mount", "--tmpfs",
     "-p", "--publish", "--expose",
     "-w", "--workdir",
@@ -117,6 +118,27 @@ _DOCKER_VALUE_FLAGS = frozenset({
 _ENV_FILE_WARNING = (
     "--env-file is not read — add its variables under Environment so they reach the container."
 )
+
+# Mount-family flags: dropped by the hardened runner (it doesn't bind host paths). Warn so a
+# config that depended on a mount isn't silently imported as a broken server.
+_DOCKER_MOUNT_FLAGS = frozenset({"-v", "--volume", "--mount", "--tmpfs"})
+
+
+def _docker_run_index(tokens: list[str]) -> Optional[int]:
+    """Index just AFTER the ``run`` subcommand in a docker arg list, or ``None`` if this isn't
+    a ``docker run`` invocation.
+
+    Recognizes ``docker run …``, the ``docker container run …`` long form, and a leading run of
+    global flags (``docker --context X run …``) — everything before ``run`` configures the
+    CLI/daemon, not the container, so it's dropped. Returns ``None`` (→ treat the command as a
+    bare image ref) when the first arg is a plain word that isn't ``run``/``container``, so an
+    image whose basename is "docker" with container args isn't misparsed as a launcher."""
+    if not tokens or "run" not in tokens:
+        return None
+    first = tokens[0]
+    if first == "run" or first == "container" or first.startswith("-"):
+        return tokens.index("run") + 1
+    return None
 
 
 def _capture_env(token: str, env: dict[str, str], warnings: list[str]) -> None:
@@ -156,25 +178,20 @@ def normalize_docker(
     base = _launcher_basename(command or "")
 
     # Treat this as a full `docker run …` invocation only when the command's basename is a
-    # docker launcher AND the args contain a `run` subcommand reached either directly
-    # (``docker run …``) or past leading global flags (``docker --context X run …``). If the
-    # first arg is a plain non-flag token that isn't `run`, the command IS an image ref whose
-    # basename merely happens to be "docker" (the official `docker` image, `ghcr.io/acme/docker`)
-    # with container args — preserve it rather than misparsing it as a launcher.
-    is_full_invocation = (
-        base in _DOCKER_LAUNCHERS
-        and "run" in tokens
-        and (tokens[0] == "run" or tokens[0].startswith("-"))
-    )
-    if not is_full_invocation:
+    # docker launcher AND the args are a recognized `run` invocation (see _docker_run_index:
+    # `docker run …`, `docker container run …`, or global flags before `run`). Otherwise the
+    # command IS an image ref whose basename merely happens to be "docker" (the official
+    # `docker` image, `ghcr.io/acme/docker`) with container args — preserve it.
+    run_idx = _docker_run_index(tokens) if base in _DOCKER_LAUNCHERS else None
+    if run_idx is None:
         image = (command or "").strip()
         if not image:
             raise ValueError("a docker server needs an image reference")
         return image, tokens, env, warnings
 
-    # Full invocation: start after the `run` subcommand (leading global flags are dropped —
-    # they configure the CLI/daemon, not the container), then token-walk the run flags.
-    i = tokens.index("run") + 1
+    # Full invocation: start after the `run` subcommand (leading global flags / `container` are
+    # dropped — they configure the CLI/daemon, not the container), then token-walk the run flags.
+    i = run_idx
 
     image: Optional[str] = None
     container_args: list[str] = []
@@ -201,6 +218,11 @@ def normalize_docker(
                     _capture_env(val, env, warnings)
                 elif name == "--env-file":
                     warnings.append(_ENV_FILE_WARNING)
+                elif name in _DOCKER_MOUNT_FLAGS:
+                    warnings.append(
+                        f"{name} (a host mount) is dropped — the docker runner doesn't bind host "
+                        f"paths; the server may miss files/data it expected."
+                    )
                 i += 1
                 continue
             if tok in ("-e", "--env"):
@@ -223,6 +245,13 @@ def normalize_docker(
                     # We can't read the file; surface it like a bare -e so its vars aren't
                     # silently lost (the server would otherwise start with no environment).
                     warnings.append(_ENV_FILE_WARNING)
+                elif tok in _DOCKER_MOUNT_FLAGS:
+                    # The hardened runner doesn't bind host paths; don't let a required mount
+                    # vanish without a trace.
+                    warnings.append(
+                        f"{tok} (a host mount) is dropped — the docker runner doesn't bind host "
+                        f"paths; the server may miss files/data it expected."
+                    )
                 i += 2  # skip the flag and its value
                 continue
             i += 1  # a boolean flag (-i, -t, -it, --rm, --init, …); skip it
@@ -337,7 +366,7 @@ def normalize_docker_servers(session: Session) -> int:
     for server in repo.list_servers(session):
         looks_docker_run = (
             _launcher_basename(server.command or "") in _DOCKER_LAUNCHERS
-            and list(server.args or [])[:1] == ["run"]
+            and _docker_run_index(list(server.args or [])) is not None
         )
         if server.runner == "docker":
             pass  # always re-normalize existing docker rows (idempotent for canonical ones)

@@ -108,8 +108,11 @@ docker server can't be created-enabled or enabled while it's off) and again in t
 supervisor (reconcile refuses to start a docker unit while it's off). The catalog gate is
 separate — OCI installs are surfaced non-installable until the runner is enabled. When enabled it stores the canonical image+args+env shape and synthesizes a hardened
 `docker run` (`--rm --init --cap-drop ALL --security-opt no-new-privileges --pids-limit` +
-a memory cap). Secrets are passed by **name** (`-e KEY`), never `KEY=value`, so they never
-appear in `docker inspect`/`ps`; and the bridge gives a docker child a **minimal env** (only
+a memory cap). Secrets are passed by **name** (`-e KEY`), never `KEY=value`, so a value never
+enters mcpelevator's own argv/`ps` (Docker still resolves it into the container config, which
+anyone with Docker daemon access can read via `docker inspect` — name-only passing narrows
+exposure to daemon-holders, it doesn't hide the value from them); and the bridge gives a
+docker child a **minimal env** (only
 `PATH/HOME/DOCKER_*` plus the server's declared vars), so a `-e KEY` passthrough can never
 reach the control plane's own secrets (`MCPE_ADMIN_TOKEN`, DB creds). Each container carries an
 `mcpelevator.server=<id>` label (Docker assigns the name) — that label is the sole cleanup
