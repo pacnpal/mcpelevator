@@ -206,6 +206,12 @@ class ServerUnit:
         if self.state == "starting":
             self.state = "failed"
             self.last_error = self.last_error or "readiness timeout"
+            # A docker unit that never became ready (bad env/args, dind not up) may have left
+            # a labelled container running while the bridge process stays alive — the M1
+            # reconciler won't restart a failed unit (config_hash unchanged), so nothing else
+            # would reap it. Best-effort reap here (idempotent with stop()).
+            if self.runner == "docker":
+                await self._reap_container()
 
     # --- helpers --------------------------------------------------------- #
 

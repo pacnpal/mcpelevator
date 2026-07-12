@@ -276,6 +276,43 @@ def test_normalize_docker_scaffolds_bare_env_passthrough():
     assert any("SECRET" in w for w in warnings)
 
 
+def test_normalize_docker_skips_network_alias_value():
+    # --network-alias takes a value; its value must not be mistaken for the image.
+    image, args, env, _ = service.normalize_docker(
+        "docker", ["run", "--network", "mynet", "--network-alias", "myalias", "img:1"], {}
+    )
+    assert image == "img:1" and args == []
+
+
+def test_normalize_docker_preserves_image_named_docker():
+    # A real image whose basename is "docker" (official image / ghcr.io/acme/docker) must
+    # not be parsed as a CLI launcher just because the args don't start with `run`.
+    img, args, _, _ = service.normalize_docker("docker", [], {})
+    assert img == "docker" and args == []
+    img2, args2, _, _ = service.normalize_docker("ghcr.io/acme/docker", ["--flag"], {})
+    assert img2 == "ghcr.io/acme/docker" and args2 == ["--flag"]
+
+
+def test_normalize_docker_servers_migrates_misclassified_command_row(session):
+    # A legacy import of `/usr/local/bin/docker run …` stored as runner="command" must be
+    # converted to the docker runner (so it's gated + hardened), with reserved env scrubbed.
+    _enable_docker(session)
+    s = service.create_server(
+        session, name="legacycmd", runner="command", command="/usr/local/bin/docker",
+        args=["run", "--rm", "-e", "T", "ghcr.io/x/y"], env={"T": "v"},
+    )
+    # Sneak a reserved key into the stored row (bypassing create validation via the repo).
+    row = repo.get_server(session, s.id)
+    row.env = {"T": "v", "DOCKER_HOST": "tcp://evil:2375"}
+    repo.save_server(session, row)
+
+    assert service.normalize_docker_servers(session) == 1
+    m = repo.get_server(session, s.id)
+    assert m.runner == "docker"
+    assert m.command == "ghcr.io/x/y" and m.args == []
+    assert m.env == {"T": "v"}  # reserved DOCKER_HOST scrubbed
+
+
 def test_normalize_docker_warns_on_env_file():
     _, _, _, warnings = service.normalize_docker("docker", ["run", "--env-file", "s.env", "img"], {})
     assert any("env-file" in w for w in warnings)

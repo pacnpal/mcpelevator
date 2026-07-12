@@ -94,18 +94,23 @@ _DOCKER_VALUE_FLAGS = frozenset({
     "-p", "--publish", "--expose",
     "-w", "--workdir",
     "--name", "--hostname", "-h",
-    "--network", "--net", "--ip", "--add-host", "--dns", "--dns-search",
+    "--network", "--net", "--network-alias", "--ip", "--ip6", "--link", "--link-local-ip",
+    "--add-host", "--dns", "--dns-search", "--dns-option", "--mac-address", "--domainname",
     "--label", "-l", "--label-file",
-    "-m", "--memory", "--memory-swap", "--memory-reservation",
-    "--cpus", "--cpuset-cpus", "--cpu-shares", "-c",
-    "-u", "--user", "--userns",
-    "--entrypoint",
-    "--platform", "--pull",
-    "--stop-timeout", "--stop-signal", "--restart",
-    "--device", "--ulimit", "--shm-size", "--pids-limit",
-    "--security-opt", "--cap-add", "--cap-drop",
+    "-m", "--memory", "--memory-swap", "--memory-reservation", "--memory-swappiness",
+    "--kernel-memory", "--cpus", "--cpuset-cpus", "--cpuset-mems", "--cpu-shares", "-c",
+    "--cpu-period", "--cpu-quota", "--cpu-rt-period", "--cpu-rt-runtime", "--blkio-weight",
+    "-u", "--user", "--userns", "--group-add", "--cgroup-parent", "--cgroupns",
+    "--entrypoint", "--workdir",
+    "--platform", "--pull", "--isolation", "--pid", "--ipc", "--uts", "--cidfile",
+    "--stop-timeout", "--stop-signal", "--restart", "--detach-keys",
+    "--device", "--device-cgroup-rule", "--device-read-bps", "--device-write-bps",
+    "--device-read-iops", "--device-write-iops", "--volumes-from", "--volume-driver",
+    "--ulimit", "--shm-size", "--pids-limit", "--sysctl", "--storage-opt", "--annotation",
+    "--security-opt", "--cap-add", "--cap-drop", "--oom-score-adj",
     "--health-cmd", "--health-interval", "--health-timeout", "--health-retries",
-    "--log-driver", "--log-opt", "--gpus", "--runtime", "--group-add",
+    "--health-start-period", "--health-start-interval",
+    "--log-driver", "--log-opt", "--gpus", "--runtime",
 })
 
 
@@ -145,19 +150,19 @@ def normalize_docker(
     tokens = list(args or [])
     base = _launcher_basename(command or "")
 
-    if base not in _DOCKER_LAUNCHERS:
-        # Already an image ref; container args pass through unchanged.
+    # Only treat this as a full `docker run …` invocation when the command's basename is a
+    # docker launcher AND the args actually start with the `run` subcommand. Otherwise the
+    # command IS the image ref — this preserves valid images whose own basename is "docker"
+    # (the official `docker` image, or `ghcr.io/acme/docker`), which would otherwise be
+    # misparsed as a launcher.
+    if not (base in _DOCKER_LAUNCHERS and tokens[:1] == ["run"]):
         image = (command or "").strip()
         if not image:
             raise ValueError("a docker server needs an image reference")
         return image, tokens, env, warnings
 
     # Full invocation: skip the leading `run` subcommand, then token-walk the flags.
-    i = 0
-    if tokens and tokens[0] == "run":
-        i = 1
-    elif "run" in tokens:
-        i = tokens.index("run") + 1
+    i = 1
 
     image: Optional[str] = None
     container_args: list[str] = []
@@ -276,25 +281,54 @@ def backfill_config_hashes(session: Session) -> int:
     return changed
 
 
-def normalize_docker_servers(session: Session) -> int:
-    """Canonicalize legacy docker rows so enabling one launches the right image.
+def _scrub_docker_env(env: dict[str, str]) -> dict[str, str]:
+    """Drop env keys that ``_validate_docker_env`` would reject (malformed names, or the
+    bridge's reserved DOCKER_*/PATH connection vars). Used by the boot migration, which
+    can't raise on a legacy row the way create/update can."""
+    return {
+        k: v for k, v in env.items()
+        if "=" not in k and not any(c.isspace() for c in k) and k not in DOCKER_ENV_ALLOWLIST
+    }
 
-    A prior release stored a docker import verbatim (``command="docker"``,
-    ``args=["run", …]``) because the runner only raised — never canonicalizing to the
-    (image, container_args, env) shape the new builder expects. Enabling such a row would
-    treat ``"docker"`` as the image. Re-run ``normalize_docker`` over every docker row: a
-    legacy row collapses to canonical (and rehashes), a row that's already canonical
-    re-normalizes to itself (no write). Idempotent. Returns the count changed. A row that
-    can't be parsed (no image) is left untouched — enabling it will surface the error."""
+
+def normalize_docker_servers(session: Session) -> int:
+    """Canonicalize legacy docker rows so enabling one is gated, hardened, and launches the
+    right image.
+
+    Two legacy shapes from a prior release (where the docker runner only raised):
+    (1) ``runner="docker"`` rows stored verbatim (``command="docker"``, ``args=["run", …]``);
+    (2) rows stored as ``runner="command"`` because the old ``_infer_runner`` matched only
+        the literal ``"docker"`` — so ``command="/usr/local/bin/docker"`` imports slipped
+        through as generic command servers that would bypass the docker gate + hardening.
+    Both are re-normalized to the canonical (image, container_args, env) shape, converted to
+    ``runner="docker"``, and have reserved/malformed env keys scrubbed. A row that's already
+    canonical re-normalizes to itself (no write). Idempotent. Returns the count changed. A
+    row that can't be parsed (no image) is left untouched — enabling it surfaces the error."""
     changed = 0
     for server in repo.list_servers(session):
-        if server.runner != "docker":
+        looks_docker_run = (
+            _launcher_basename(server.command or "") in _DOCKER_LAUNCHERS
+            and list(server.args or [])[:1] == ["run"]
+        )
+        if server.runner == "docker":
+            pass  # always re-normalize existing docker rows (idempotent for canonical ones)
+        elif server.runner == "command" and looks_docker_run:
+            pass  # a docker `run …` invocation misclassified as a command runner — convert it
+        else:
             continue
         try:
             image, args, env, _ = normalize_docker(server.command, server.args, server.env)
         except ValueError:
             continue
-        if image != server.command or args != list(server.args or []) or env != dict(server.env or {}):
+        env = _scrub_docker_env(env)
+        if (
+            server.runner != "docker"
+            or image != server.command
+            or args != list(server.args or [])
+            or env != dict(server.env or {})
+            or server.cwd is not None
+        ):
+            server.runner = "docker"
             server.command, server.args, server.env, server.cwd = image, args, env, None
             server.config_hash = compute_hash(server)
             repo.save_server(session, server)
