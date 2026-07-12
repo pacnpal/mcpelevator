@@ -459,3 +459,21 @@ def test_bearer_provider_rejects_control_token_on_data_plane():
         assert exc.value.status_code == 403
     finally:
         _reset()
+
+
+def test_inventory_health_requires_control_token_when_enforced():
+    """Inventory-bearing health endpoints must not disclose slugs or slug existence
+    without a control token when control-plane auth is enforced."""
+    with TestClient(app) as client:
+        try:
+            control = _mint("control")
+            with Session(get_engine()) as s:
+                runtime_settings.write(s, {"control_plane_auth": "always"})
+
+            assert client.get("/api/health/summary", headers=LOOPBACK).status_code == 401
+            assert client.get("/api/health/nonexistent-slug-xyz", headers=LOOPBACK).status_code == 401
+
+            assert client.get("/api/health/summary", headers=_bearer(control)).status_code == 200
+            assert client.get("/api/health/nonexistent-slug-xyz", headers=_bearer(control)).status_code == 404
+        finally:
+            _reset()
