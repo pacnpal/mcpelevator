@@ -1,0 +1,59 @@
+name: CI
+
+# Runs the backend and frontend test suites on pull requests (and pushes to main)
+# so branch checks exist for Renovate's automerge to gate on. Mirrors the local
+# commands from the Makefile / CLAUDE.md: backend `uv run pytest`, frontend
+# `npm run check` + `npm run test`.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.28"
+          python-version: "3.14"
+          enable-cache: true
+      - name: Sync dependencies (with dev extras)
+        run: uv sync --extra dev --frozen
+      - name: Run tests
+        run: uv run pytest -q
+
+  frontend:
+    name: Frontend (check + vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck (svelte-check)
+        run: npm run check
+      - name: Run tests
+        run: npm run test
