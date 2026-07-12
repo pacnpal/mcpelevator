@@ -467,6 +467,23 @@ def _validate_docker_image(image: str) -> None:
         raise ValueError("a docker image reference can't be empty or start with '-'")
 
 
+def _normalize_validate_docker(
+    command: str, args: Optional[list[str]], env: Optional[dict[str, str]], *, name: str
+) -> tuple[str, list[str], dict[str, str], list[str]]:
+    """Shared docker canonicalization for ``create_server`` / ``update_server``: parse a pasted
+    invocation to the canonical (image, container_args, env) shape, validate the image + env, and
+    log the dropped-flag warnings. Returns ``(command, args, env, warnings)``. The callers own the
+    parts that differ per path — the host-cwd reset, the ``warnings_sink`` surfacing (create), and
+    the enabled-transition gate (create vs. the rollback-on-deny convert gate in update) — so this
+    single seam keeps the two entry points from drifting on any future hardening check."""
+    command, args, env, warnings = normalize_docker(command, args, env)
+    _validate_docker_image(command)
+    _validate_docker_env(env)
+    for w in warnings:  # the hardened parser altered the invocation — surface it, don't do it silently
+        logger.warning("docker server %r: %s", name, w)
+    return command, args, env, warnings
+
+
 def _require_docker_enabled(session: Session) -> None:
     """Gate the root-equivalent docker runner behind the opt-in ``docker_runner`` setting.
 
@@ -664,12 +681,8 @@ def create_server(
     # `docker run …` invocation is parsed down to it. The gate bites only when the server
     # is created already enabled — a disabled import stays reviewable.
     if runner == "docker":
-        command, args, env, warnings = normalize_docker(command, args, env)
-        _validate_docker_image(command)
-        _validate_docker_env(env)
+        command, args, env, warnings = _normalize_validate_docker(command, args, env, name=name)
         cwd = None  # a container has its own filesystem; a host cwd is meaningless
-        for w in warnings:  # the hardened parser altered the invocation — don't do it silently
-            logger.warning("docker server %r: %s", name, w)
         if warnings_sink is not None:  # let callers (import) surface these to the operator, not just logs
             warnings_sink.extend(warnings)
         if enabled:
@@ -735,13 +748,9 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         # the stale working directory here (remote has no process) to keep the row canonical.
         server.cwd = None
     if server.runner == "docker":
-        server.command, server.args, server.env, warnings = normalize_docker(
-            server.command, server.args, server.env
+        server.command, server.args, server.env, _ = _normalize_validate_docker(
+            server.command, server.args, server.env, name=server.name
         )
-        _validate_docker_image(server.command)
-        _validate_docker_env(server.env)
-        for w in warnings:
-            logger.warning("docker server %r: %s", server.name, w)
         # Converting a local server (with a cwd) to docker: PATCH drops the form's cwd:null,
         # so clear the now-meaningless working directory here to keep the row canonical.
         server.cwd = None
