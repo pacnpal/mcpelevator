@@ -11,7 +11,7 @@
   "schedule": ["* 0-4 * * *"],
   "platformAutomerge": false,
   "prConcurrentLimit": 5,
-  "prHourlyLimit": 2,
+  "prHourlyLimit": 4,
   "labels": ["dependencies"],
   "minimumReleaseAge": "3 days",
   "internalChecksFilter": "strict",
