@@ -20,6 +20,11 @@ BASE_URL = "https://registry.modelcontextprotocol.io"
 _META_KEY = "io.modelcontextprotocol.registry/official"
 
 
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    """Return a dict value or an empty dict for malformed optional objects."""
+    return value if isinstance(value, dict) else {}
+
+
 def _unwrap(entry: dict[str, Any]) -> tuple[dict[str, Any], str]:
     """
     Extract the server document and status from a registry entry.
@@ -32,7 +37,7 @@ def _unwrap(entry: dict[str, Any]) -> tuple[dict[str, Any], str]:
     """
     if isinstance(entry.get("server"), dict):
         server = entry["server"]
-        official = (entry.get("_meta") or {}).get(_META_KEY) or {}
+        official = _dict_or_empty(_dict_or_empty(entry.get("_meta")).get(_META_KEY))
         return server, str(official.get("status") or "active")
     return entry, str(entry.get("status") or "active")
 
@@ -56,8 +61,8 @@ def dedupe_latest(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if existing is None:
             by_name[name] = entry
             continue
-        meta = (entry.get("_meta") or {}).get(_META_KEY) or {}
-        existing_meta = (existing.get("_meta") or {}).get(_META_KEY) or {}
+        meta = _dict_or_empty(_dict_or_empty(entry.get("_meta")).get(_META_KEY))
+        existing_meta = _dict_or_empty(_dict_or_empty(existing.get("_meta")).get(_META_KEY))
         # Upgrade to the isLatest row, but never downgrade away from one.
         if meta.get("isLatest") is True and existing_meta.get("isLatest") is not True:
             by_name[name] = entry
@@ -88,7 +93,8 @@ def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
         rtype = str(pkg.get("registryType") or "").lower()
         if rtype and rtype not in registry_types:
             registry_types.append(rtype)
-        transport_type = str((pkg.get("transport") or {}).get("type") or "stdio").lower()
+        transport = _dict_or_empty(pkg.get("transport"))
+        transport_type = str(transport.get("type") or "stdio").lower()
         if transport_type == "stdio" and rtype in mapping.RUNNER_BY_TYPE and pkg.get("identifier"):
             installable = True
 
@@ -119,7 +125,7 @@ def _list_item(entry: dict[str, Any]) -> dict[str, Any]:
         "status": status,
         "registry_types": registry_types,
         "installable": installable,
-        "repository_url": (server.get("repository") or {}).get("url"),
+        "repository_url": _dict_or_empty(server.get("repository")).get("url"),
         "web_url": server.get("websiteUrl"),
     }
 
@@ -167,7 +173,7 @@ def to_detail(entry: dict[str, Any]) -> dict[str, Any]:
             "description": server.get("description") or "",
             "version": None if version in (None, "") else str(version),
             "status": status,
-            "repository_url": (server.get("repository") or {}).get("url"),
+            "repository_url": _dict_or_empty(server.get("repository")).get("url"),
             "web_url": server.get("websiteUrl"),
         },
         "drafts": drafts,
@@ -244,7 +250,7 @@ class OfficialSource:
         servers = data.get("servers") if isinstance(data, dict) else None
         if not isinstance(servers, list):
             raise base.CatalogUpstreamError("unexpected list response from the MCP Registry")
-        metadata = data.get("metadata") or {}
+        metadata = _dict_or_empty(data.get("metadata"))
         entries = dedupe_latest([e for e in servers if isinstance(e, dict)])
         result = {
             "servers": [_list_item(e) for e in entries],
@@ -294,6 +300,6 @@ class OfficialSource:
             if v_str in seen:  # registry can return duplicate version rows
                 continue
             seen.add(v_str)
-            meta = (entry.get("_meta") or {}).get(_META_KEY) or {}
+            meta = _dict_or_empty(_dict_or_empty(entry.get("_meta")).get(_META_KEY))
             (latest if meta.get("isLatest") else rest).append(v_str)
         return latest + rest

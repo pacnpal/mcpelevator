@@ -302,6 +302,66 @@ def test_glama_versions_endpoint_is_empty():
         assert r.json()["versions"] == []
 
 
+def test_official_malformed_transport_and_repository_do_not_crash(monkeypatch):
+    malformed = {
+        "servers": [
+            {
+                "server": {
+                    "name": "io.example/bad",
+                    "version": "1.0.0",
+                    "repository": "not-an-object",
+                    "packages": [
+                        {
+                            "registryType": "npm",
+                            "identifier": "@me/bad",
+                            "version": "1.0.0",
+                            "transport": "not-an-object",
+                        }
+                    ],
+                },
+                "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+            }
+        ],
+        "metadata": "not-an-object",
+    }
+    _stub(monkeypatch, {"registry.modelcontextprotocol.io/v0.1/servers": malformed})
+
+    with TestClient(app) as c:
+        r = c.get("/api/catalog/servers", headers=LOOPBACK)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["next_cursor"] is None
+        assert body["servers"][0]["repository_url"] is None
+        assert body["servers"][0]["installable"] is True
+
+
+def test_official_detail_malformed_transport_and_repository_do_not_crash(monkeypatch):
+    malformed = {
+        "server": {
+            "name": "io.example/bad",
+            "version": "1.0.0",
+            "repository": "not-an-object",
+            "packages": [
+                {
+                    "registryType": "npm",
+                    "identifier": "@me/bad",
+                    "version": "1.0.0",
+                    "transport": "not-an-object",
+                }
+            ],
+        },
+        "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+    }
+    _stub(monkeypatch, {"/versions/": malformed})
+
+    with TestClient(app) as c:
+        r = c.get("/api/catalog/server", params={"id": "io.example/bad"}, headers=LOOPBACK)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["server"]["repository_url"] is None
+        assert body["drafts"][0]["installable"] is True
+        assert body["drafts"][0]["runner"] == "npx"
+
 def test_glama_list_passthrough(monkeypatch):
     calls = _stub(monkeypatch, {"glama.ai/api/mcp/v1/servers": _GLAMA_LIST})
     with TestClient(app) as c:
