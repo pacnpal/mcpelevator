@@ -49,6 +49,12 @@
       "matchUpdateTypes": ["major"],
       "automerge": false,
       "labels": ["dependencies", "major-update"]
+    },
+    {
+      "description": "Stay on TypeScript 6.x: the 7.x native-Go port has no stable programmatic API, so svelte-check / @sveltejs/kit (which embed the compiler) break under it. Revisit once the Svelte toolchain adopts the TS 7 API.",
+      "matchPackageNames": ["typescript"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
     }
   ]
 }

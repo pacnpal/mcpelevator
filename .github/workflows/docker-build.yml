@@ -14,6 +14,13 @@ on:
       - '.dockerignore'
       - 'docker-compose.yml'
       - '.github/workflows/docker-build.yml'
+      # Dependency manifests/lockfiles feed the image build (npm ci, uv sync),
+      # so validate the slim image for automerged npm/Python updates too — a dep
+      # can pass host CI yet fail to build in the slim runtime.
+      - 'frontend/package.json'
+      - 'frontend/package-lock.json'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
 
 concurrency:
   group: docker-build-${{ github.ref }}
