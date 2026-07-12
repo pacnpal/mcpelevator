@@ -17,7 +17,7 @@ from app.db import repo
 from app.db.models import RUNNERS, Server
 from app.registry import settings as runtime_settings
 from app.runners import remote as remote_runner
-from app.runners.docker import DOCKER_ENV_ALLOWLIST
+from app.runners.docker import is_reserved_docker_env
 from app.runners.remote import canonical_transport
 from app.util import config_hash, new_id, slugify
 
@@ -123,6 +123,20 @@ _ENV_FILE_WARNING = (
 # config that depended on a mount isn't silently imported as a broken server.
 _DOCKER_MOUNT_FLAGS = frozenset({"-v", "--volume", "--mount", "--tmpfs"})
 
+# --entrypoint is dropped too (the runner owns the invocation and can't override ENTRYPOINT),
+# so a config relying on a custom entrypoint would silently start the image's default process.
+_ENTRYPOINT_WARNING = (
+    "--entrypoint is dropped — the docker runner uses the image's default entrypoint, so the "
+    "server may start the wrong process."
+)
+
+
+def _mount_warning(flag: str) -> str:
+    return (
+        f"{flag} (a host mount) is dropped — the docker runner doesn't bind host paths; the "
+        f"server may miss files/data it expected."
+    )
+
 
 def _docker_run_index(tokens: list[str]) -> Optional[int]:
     """Index just AFTER the ``run`` subcommand in a docker arg list, or ``None`` if this isn't
@@ -219,10 +233,9 @@ def normalize_docker(
                 elif name == "--env-file":
                     warnings.append(_ENV_FILE_WARNING)
                 elif name in _DOCKER_MOUNT_FLAGS:
-                    warnings.append(
-                        f"{name} (a host mount) is dropped — the docker runner doesn't bind host "
-                        f"paths; the server may miss files/data it expected."
-                    )
+                    warnings.append(_mount_warning(name))
+                elif name == "--entrypoint":
+                    warnings.append(_ENTRYPOINT_WARNING)
                 i += 1
                 continue
             if tok in ("-e", "--env"):
@@ -246,12 +259,9 @@ def normalize_docker(
                     # silently lost (the server would otherwise start with no environment).
                     warnings.append(_ENV_FILE_WARNING)
                 elif tok in _DOCKER_MOUNT_FLAGS:
-                    # The hardened runner doesn't bind host paths; don't let a required mount
-                    # vanish without a trace.
-                    warnings.append(
-                        f"{tok} (a host mount) is dropped — the docker runner doesn't bind host "
-                        f"paths; the server may miss files/data it expected."
-                    )
+                    warnings.append(_mount_warning(tok))
+                elif tok == "--entrypoint":
+                    warnings.append(_ENTRYPOINT_WARNING)
                 i += 2  # skip the flag and its value
                 continue
             i += 1  # a boolean flag (-i, -t, -it, --rm, --init, …); skip it
@@ -278,7 +288,7 @@ def _validate_docker_env(env: dict[str, str]) -> None:
     for key in env:
         if "=" in key or any(c.isspace() for c in key):
             raise ValueError(f"invalid environment variable name {key!r} for a docker server")
-        if key in DOCKER_ENV_ALLOWLIST:
+        if is_reserved_docker_env(key):
             raise ValueError(
                 f"{key!r} is reserved for the docker runner and can't be a container env var"
             )
@@ -345,7 +355,7 @@ def _scrub_docker_env(env: dict[str, str]) -> dict[str, str]:
     can't raise on a legacy row the way create/update can."""
     return {
         k: v for k, v in env.items()
-        if "=" not in k and not any(c.isspace() for c in k) and k not in DOCKER_ENV_ALLOWLIST
+        if "=" not in k and not any(c.isspace() for c in k) and not is_reserved_docker_env(k)
     }
 
 

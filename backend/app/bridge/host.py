@@ -73,11 +73,9 @@ async def _forward_roots(context) -> list[Root]:
         return []
 
 
-# Environment keys a docker CLI child genuinely needs from the control plane's env when
-# ``minimal_env`` is set. Everything else (MCPE_ADMIN_TOKEN, DB creds, unrelated API keys)
-# is deliberately withheld so a container's ``-e KEY`` passthrough can't reach it. SSOT lives
-# in the docker runner (the service layer also rejects these as container env vars).
-from app.runners.docker import DOCKER_ENV_ALLOWLIST as _DOCKER_ENV_ALLOWLIST  # noqa: E402
+# SSOT for which env keys the docker CLI itself consumes lives in the docker runner (the
+# service layer also rejects these as container env vars).
+from app.runners.docker import is_reserved_docker_env as _is_reserved_docker_env  # noqa: E402
 
 
 def _child_env(spec: dict) -> dict[str, str]:
@@ -85,17 +83,23 @@ def _child_env(spec: dict) -> dict[str, str]:
 
     Default: merge the bridge's own environment (PATH, HOME, caches) with the
     server-specific vars so npx/uvx/etc. resolve; server vars win. When the spec sets
-    ``minimal_env`` (the docker runner), pass ONLY a small allowlist of the bridge's env
-    plus the server vars — never the full ``os.environ`` — so the elevator's own secrets
-    can't leak into a container via a ``-e KEY`` passthrough.
+    ``minimal_env`` (the docker runner), pass ONLY the bridge's docker-CLI env (PATH/HOME +
+    the operator's ``DOCKER_*`` config) plus the server's NON-reserved vars — never the full
+    ``os.environ`` — so the elevator's own secrets can't leak into a container via a ``-e KEY``
+    passthrough.
     """
     server_env = dict(spec.get("env") or {})
     if spec.get("minimal_env"):
-        base = {k: os.environ[k] for k in _DOCKER_ENV_ALLOWLIST if k in os.environ}
-        # base (the bridge's PATH/HOME + DOCKER_* connection vars) WINS over server_env: a
-        # server-declared DOCKER_HOST must not retarget the docker CLI (which would break
-        # the dind-sidecar isolation), nor a PATH override stop `docker` from resolving.
-        return {**server_env, **base}
+        # The CLI's own env from the bridge: PATH/HOME + ALL the operator's DOCKER_* config
+        # (DOCKER_HOST to reach dind, DOCKER_API_VERSION, DOCKER_CONFIG, …) so the runner CLI
+        # behaves like the control plane's.
+        base = {k: v for k, v in os.environ.items() if _is_reserved_docker_env(k)}
+        # Strip reserved keys from the server's env: a server-declared DOCKER_HOST /
+        # DOCKER_API_VERSION / PATH must never retarget or alter the docker CLI (breaking dind
+        # isolation or the daemon request) nor reach the container. `base` (the bridge's copies)
+        # wins. The service layer already rejects these; this is defense in depth for a legacy row.
+        safe = {k: v for k, v in server_env.items() if not _is_reserved_docker_env(k)}
+        return {**safe, **base}
     return {**os.environ, **server_env}
 
 

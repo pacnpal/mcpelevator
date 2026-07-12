@@ -65,6 +65,16 @@ DOCKER_ENV_ALLOWLIST = (
 )
 
 
+def is_reserved_docker_env(key: str) -> bool:
+    """True for an env name the docker CLI itself consumes, so a container must not set it.
+
+    Covers the connection/exec allowlist (``PATH``/``HOME``/``DOCKER_HOST``…) AND every other
+    ``DOCKER_*`` CLI variable (``DOCKER_API_VERSION``, ``DOCKER_DEFAULT_PLATFORM``,
+    ``DOCKER_CUSTOM_HEADERS``, …). SSOT reused by the service (rejects/scrubs these as container
+    env), the builder (defensive skip), and the bridge (keeps them out of the container)."""
+    return key in DOCKER_ENV_ALLOWLIST or key.startswith("DOCKER_")
+
+
 def server_label(server_id: str) -> str:
     """The `label=key=value` selector for a server's containers (SSOT for reaping)."""
     return f"{LABEL_KEY}={server_id}"
@@ -81,11 +91,12 @@ def build(server: Server) -> ProcessSpec:
     ]
     # Name-only passthrough: the value is read from the docker CLI's environment (which the
     # bridge host seeds from ``env`` under a minimal allowlist), never embedded in argv.
-    # Defensively skip a malformed key (``=``/whitespace) or a reserved bridge/connection key
-    # so a value can never enter argv and a container can't receive DOCKER_HOST — the service
-    # layer already rejects these, this guards a legacy/hand-edited row.
+    # Defensively skip a malformed key (``=``/whitespace) or any reserved CLI key (the
+    # PATH/HOME/DOCKER_* allowlist, or any other ``DOCKER_*`` CLI var) so a value can't enter
+    # argv and a container can't receive/alter the CLI's own vars — the service layer already
+    # rejects these, this guards a legacy/hand-edited row.
     for key in env:
-        if "=" in key or any(c.isspace() for c in key) or key in DOCKER_ENV_ALLOWLIST:
+        if "=" in key or any(c.isspace() for c in key) or is_reserved_docker_env(key):
             continue
         args += ["-e", key]
     # ``--`` terminates flag parsing: everything after it is positional (image, then the

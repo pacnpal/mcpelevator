@@ -460,6 +460,25 @@ def test_docker_rejects_reserved_env_key(session):
         )
 
 
+def test_docker_rejects_any_docker_cli_env_key(session):
+    # Not just the allowlist — every DOCKER_* CLI var (API version, platform, custom headers)
+    # is reserved: it would alter/break the control-plane's docker request.
+    _enable_docker(session)
+    for bad in ("DOCKER_API_VERSION", "DOCKER_DEFAULT_PLATFORM", "DOCKER_CUSTOM_HEADERS"):
+        with pytest.raises(ValueError):
+            service.create_server(
+                session, name="d", runner="docker", command="img:1", args=[],
+                env={bad: "x"}, enabled=False,
+            )
+
+
+def test_normalize_docker_warns_on_dropped_entrypoint():
+    _, _, _, warnings = service.normalize_docker(
+        "docker", ["run", "--entrypoint", "/srv", "img"], {}
+    )
+    assert any("entrypoint" in w for w in warnings)
+
+
 def test_normalize_docker_servers_migrates_legacy_rows(session):
     # Simulate a legacy row (stored verbatim by the old runner-that-raised): command="docker".
     _enable_docker(session)

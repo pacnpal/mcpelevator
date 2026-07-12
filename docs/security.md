@@ -114,7 +114,13 @@ anyone with Docker daemon access can read via `docker inspect` — name-only pas
 exposure to daemon-holders, it doesn't hide the value from them); and the bridge gives a
 docker child a **minimal env** (only
 `PATH/HOME/DOCKER_*` plus the server's declared vars), so a `-e KEY` passthrough can never
-reach the control plane's own secrets (`MCPE_ADMIN_TOKEN`, DB creds). Each container carries an
+reach the control plane's own secrets (`MCPE_ADMIN_TOKEN`, DB creds); a container also can't
+set a `DOCKER_*`/reserved env name (rejected at create and stripped at launch) that would
+retarget or alter the CLI's own daemon request. (Caveat: if the operator configures a Docker
+CLI **config with `proxies`** in the mcpelevator container — e.g. a corporate proxy — Docker
+injects those proxy vars into every launched container; that's a Docker CLI behavior outside
+mcpelevator's env handling. Avoid putting proxy config in the container if launched images are
+untrusted.) Each container carries an
 `mcpelevator.server=<id>` label (Docker assigns the name) — that label is the sole cleanup
 handle: the unit reaps its containers by label on stop (fire-and-forget `docker rm -f`, outside
 the stop grace) and the supervisor sweeps labelled orphans (scoped to this instance's server
