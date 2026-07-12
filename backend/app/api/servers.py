@@ -18,6 +18,7 @@ from starlette.responses import Response, StreamingResponse
 from app.api.schemas import (
     ImportResult,
     ImportSkipped,
+    ImportWarning,
     ServerClone,
     ServerCreate,
     ServerDetail,
@@ -241,7 +242,7 @@ async def import_servers(
     """Bulk-create from a standard mcpServers JSON config. Imported servers are
     disabled by default — the user reviews, then enables."""
     try:
-        created, skipped = service.import_mcp_servers(session, payload)
+        created, skipped, warnings = service.import_mcp_servers(session, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
@@ -249,6 +250,7 @@ async def import_servers(
     return ImportResult(
         created=[_summary(s, sup, session, base) for s in created],
         skipped=[ImportSkipped(**s) for s in skipped],
+        warnings=[ImportWarning(**w) for w in warnings],
     )
 
 

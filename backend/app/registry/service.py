@@ -224,22 +224,45 @@ def _dropped_flag_warning(flag: str) -> Optional[str]:
     return None
 
 
+# Global docker flags (BEFORE the subcommand) that consume the NEXT token as their value. Walking
+# these by arity is what lets us find the real `run` subcommand even when a flag's value is itself
+# the word "run" (e.g. a one-off context named "run": `docker --context run run img`).
+_DOCKER_GLOBAL_VALUE_FLAGS = frozenset({
+    "-H", "--host", "-l", "--log-level", "--context", "--config",
+    "--tlscacert", "--tlscert", "--tlskey",
+})
+
+
 def _docker_run_index(tokens: list[str]) -> Optional[int]:
     """Index just AFTER the ``run`` subcommand in a docker arg list, or ``None`` if this isn't
     a ``docker run`` invocation.
 
-    Recognizes ``docker run …``, the ``docker container run …`` long form, and a leading run of
-    global flags (``docker --context X run …``) — everything before ``run`` configures the
-    CLI/daemon, not the container, so it's dropped. Returns ``None`` (→ treat the command as a
-    bare image ref) when the first arg is a plain word that isn't ``run``/``container``, so an
+    Recognizes ``docker run …``, the ``docker container run …`` long form, and leading global
+    flags (``docker --context X run …``) — everything before ``run`` configures the CLI/daemon,
+    not the container, so it's dropped. The pre-subcommand global flags are walked by VALUE ARITY
+    (not a naive ``tokens.index("run")``) so a flag whose value is literally ``run`` — e.g. a
+    context named ``run`` — isn't mistaken for the subcommand. Returns ``None`` (→ treat the
+    command as a bare image ref) when the first non-flag token isn't ``run``/``container``, so an
     image whose basename is "docker" with container args isn't misparsed as a launcher."""
-    if not tokens or "run" not in tokens:
-        return None
-    first = tokens[0]
-    # ``first`` may be a non-string if a hand-edited/legacy row stored a bad JSON arg — guard the
-    # ``startswith`` so the boot migration (which calls this outside its try/except) can't crash.
-    if first == "run" or first == "container" or (isinstance(first, str) and first.startswith("-")):
-        return tokens.index("run") + 1
+    i, n = 0, len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if not isinstance(tok, str):
+            return None  # malformed token — caller treats command as a bare image ref
+        if tok.startswith("-"):
+            # A leading GLOBAL flag: skip it, plus its value when it takes one in the separated
+            # form (inline ``--flag=value`` carries its own value, so it never eats the next token).
+            if "=" not in tok and tok in _DOCKER_GLOBAL_VALUE_FLAGS:
+                i += 2
+            else:
+                i += 1
+            continue
+        # First non-flag token is the subcommand.
+        if tok == "container" and i + 1 < n and tokens[i + 1] == "run":
+            return i + 2
+        if tok == "run":
+            return i + 1
+        return None  # a plain word that isn't run/container — not a `docker run` (bare image ref)
     return None
 
 
@@ -596,6 +619,7 @@ def create_server(
     auth_provider: str = "inherit",
     enabled: bool = False,
     source: str = "manual",
+    warnings_sink: Optional[list[str]] = None,
 ) -> Server:
     if runner not in RUNNERS:
         raise ValueError(f"unknown runner {runner!r}; must be one of {RUNNERS}")
@@ -623,6 +647,8 @@ def create_server(
         cwd = None  # a container has its own filesystem; a host cwd is meaningless
         for w in warnings:  # the hardened parser altered the invocation — don't do it silently
             logger.warning("docker server %r: %s", name, w)
+        if warnings_sink is not None:  # let callers (import) surface these to the operator, not just logs
+            warnings_sink.extend(warnings)
         if enabled:
             _require_docker_enabled(session)
 
@@ -776,7 +802,9 @@ def _infer_runner(command: str) -> str:
     return "command"
 
 
-def import_mcp_servers(session: Session, data: dict) -> tuple[list[Server], list[dict]]:
+def import_mcp_servers(
+    session: Session, data: dict
+) -> tuple[list[Server], list[dict], list[dict]]:
     """Create servers from the standard Claude-Desktop ``mcpServers`` JSON shape.
 
     Accepts either ``{"mcpServers": {...}}`` or a bare ``{name: {...}}`` map.
@@ -784,6 +812,12 @@ def import_mcp_servers(session: Session, data: dict) -> tuple[list[Server], list
     entries (``url`` / ``type: sse|streamable-http|http``) become ``remote`` servers
     that proxy the upstream URL. All are stored verbatim and disabled (the user
     reviews, then enables).
+
+    Returns ``(created, skipped, warnings)``. ``warnings`` is a list of
+    ``{"name", "warnings": [...]}`` — non-fatal notes for a created (disabled) server the
+    operator should see BEFORE enabling, chiefly a docker ``run`` option the hardened runner
+    dropped (mount, ``--network none``, ``--env-file``, …). These are also logged, but the
+    import response surfaces them so the reviewer isn't blind to the transformation.
     """
     servers_map = data.get("mcpServers") if isinstance(data, dict) and "mcpServers" in data else data
     if not isinstance(servers_map, dict):
@@ -791,6 +825,7 @@ def import_mcp_servers(session: Session, data: dict) -> tuple[list[Server], list
 
     created: list[Server] = []
     skipped: list[dict] = []
+    warnings: list[dict] = []
     for name, entry in servers_map.items():
         if not isinstance(entry, dict):
             skipped.append({"name": str(name), "reason": "entry is not an object"})
@@ -832,6 +867,7 @@ def import_mcp_servers(session: Session, data: dict) -> tuple[list[Server], list
         if not command:
             skipped.append({"name": str(name), "reason": "no command to launch"})
             continue
+        sink: list[str] = []
         try:
             created.append(
                 create_server(
@@ -843,8 +879,11 @@ def import_mcp_servers(session: Session, data: dict) -> tuple[list[Server], list
                     env=dict(entry.get("env") or {}),
                     source="import",
                     enabled=False,
+                    warnings_sink=sink,
                 )
             )
+            if sink:  # a docker paste whose dropped run-options the operator must know about
+                warnings.append({"name": str(name), "warnings": sink})
         except (ValueError, TypeError) as exc:
             skipped.append({"name": str(name), "reason": str(exc)})
-    return created, skipped
+    return created, skipped, warnings

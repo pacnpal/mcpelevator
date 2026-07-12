@@ -18,6 +18,30 @@ def session():
         yield s
 
 
+def test_import_surfaces_docker_dropped_flag_warnings(session):
+    # Codex: a pasted docker config whose run-options the hardened runner drops (mount, network
+    # isolation, …) must surface those warnings in the import result — not only in the logs — so
+    # the operator reviewing the disabled server sees the transformation before enabling.
+    data = {"mcpServers": {"gh": {
+        "command": "docker",
+        "args": ["run", "-i", "--rm", "--network", "none", "-v", "/data:/data", "ghcr.io/x/y"],
+        "env": {},
+    }}}
+    created, skipped, warnings = service.import_mcp_servers(session, data)
+    assert len(created) == 1 and created[0].runner == "docker"
+    assert warnings and warnings[0]["name"] == "gh"
+    joined = " ".join(warnings[0]["warnings"])
+    assert "network" in joined and "mount" in joined
+
+
+def test_import_no_warnings_for_plain_stdio(session):
+    # A normal npx import produces no warnings entry (the field stays empty).
+    _, _, warnings = service.import_mcp_servers(
+        session, {"mcpServers": {"m": {"command": "npx", "args": ["-y", "pkg"]}}}
+    )
+    assert warnings == []
+
+
 def test_import_creates_stdio_and_remote(session):
     data = {
         "mcpServers": {
@@ -31,7 +55,7 @@ def test_import_creates_stdio_and_remote(session):
             "nocmd": {"foo": "bar"},
         }
     }
-    created, skipped = service.import_mcp_servers(session, data)
+    created, skipped, _warn = service.import_mcp_servers(session, data)
 
     by_name = {c.name: c for c in created}
     assert set(by_name) == {"memory", "time", "remote"}
@@ -57,7 +81,7 @@ def test_import_remote_honors_transport_field_alias(session):
     # An entry may spell the transport as `transport` instead of `type`; an SSE-only
     # upstream must not be silently imported as streamable-http.
     data = {"mcpServers": {"r": {"url": "https://up.example/sse", "transport": "sse"}}}
-    created, skipped = service.import_mcp_servers(session, data)
+    created, skipped, _warn = service.import_mcp_servers(session, data)
     assert skipped == []
     assert created[0].runner == "remote"
     assert created[0].args == ["sse"]
@@ -66,7 +90,7 @@ def test_import_remote_honors_transport_field_alias(session):
 def test_import_remote_honors_gemini_http_url(session):
     # Gemini CLI (and our own install snippets) use `httpUrl` for Streamable HTTP.
     data = {"mcpServers": {"r": {"httpUrl": "https://up.example/mcp"}}}
-    created, skipped = service.import_mcp_servers(session, data)
+    created, skipped, _warn = service.import_mcp_servers(session, data)
     assert skipped == []
     assert created[0].runner == "remote"
     assert created[0].command == "https://up.example/mcp"
@@ -83,13 +107,13 @@ def test_import_skips_malformed_entries_without_crashing(session):
             "badenv": {"command": "npx", "env": "nope"},
         }
     }
-    created, skipped = service.import_mcp_servers(session, data)
+    created, skipped, _warn = service.import_mcp_servers(session, data)
     assert {c.name for c in created} == {"ok"}
     assert {s["name"] for s in skipped} == {"badheaders", "badenv"}
 
 
 def test_import_accepts_bare_map(session):
-    created, skipped = service.import_mcp_servers(session, {"m": {"command": "npx", "args": []}})
+    created, skipped, _warn = service.import_mcp_servers(session, {"m": {"command": "npx", "args": []}})
     assert len(created) == 1 and created[0].runner == "npx"
     assert skipped == []
 
@@ -116,7 +140,7 @@ def test_import_docker_entry_normalizes_to_canonical_shape(session):
             }
         }
     }
-    created, skipped = service.import_mcp_servers(session, data)
+    created, skipped, _warn = service.import_mcp_servers(session, data)
     assert skipped == []
     gh = created[0]
     assert gh.runner == "docker"  # inferred from the absolute docker path (basename)
@@ -130,6 +154,6 @@ def test_import_podman_is_command_not_docker(session):
     # A podman config must NOT be silently reclassified as the docker runner (which always
     # execs `docker`); it falls through to `command` and runs verbatim.
     data = {"mcpServers": {"p": {"command": "podman", "args": ["run", "--rm", "img"]}}}
-    created, skipped = service.import_mcp_servers(session, data)
+    created, skipped, _warn = service.import_mcp_servers(session, data)
     assert skipped == []
     assert created[0].runner == "command"

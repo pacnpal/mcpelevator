@@ -4,6 +4,7 @@
 	import { canonicalRemoteTransport } from '$lib/remote';
 	import type {
 		ImportResult,
+		ImportWarning,
 		McpServerEntry,
 		ServerCreate
 	} from '$lib/types';
@@ -51,6 +52,9 @@
 
 	let importText = $state('');
 	let importing = $state(false);
+	// Populated after an import that dropped docker run-options; keeps the operator on this page
+	// to read the warnings before enabling. Cleared on the next import attempt.
+	let importWarnings = $state<ImportWarning[]>([]);
 
 	type PreviewEntry = {
 		name: string;
@@ -171,10 +175,18 @@
 		if (importing) return;
 		if (!('ok' in parsed) || !parsed.ok) return;
 		importing = true;
+		importWarnings = [];
 		try {
 			const result: ImportResult = await importServers(parsed.payload);
 			summarizeImport(result);
-			await goto('/');
+			if (result.warnings && result.warnings.length > 0) {
+				// The hardened runner dropped some pasted docker options. Stay on the page and
+				// show them so the operator reads them BEFORE going off to enable the server.
+				importWarnings = result.warnings;
+				importing = false;
+			} else {
+				await goto('/');
+			}
 		} catch (err) {
 			flashToast(errorMessage(err), 'error');
 			importing = false;
@@ -377,6 +389,42 @@
 					<code class="font-mono">url</code> (remote servers) are imported as proxied
 					remote endpoints; only malformed entries are skipped.
 				</p>
+			{/if}
+
+			<!-- Post-import warnings: docker run-options the hardened runner dropped. Shown here
+			     (instead of navigating away) so the operator reviews them before enabling. -->
+			{#if importWarnings.length > 0}
+				<div
+					role="alert"
+					class="rounded-lg border px-3.5 py-3 text-xs"
+					style="border-color: color-mix(in oklab, var(--color-state-unhealthy) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-unhealthy) 8%, transparent);"
+				>
+					<p class="font-semibold text-[var(--color-ink)]">
+						Imported — but some Docker options were dropped by the hardened runner. Review
+						before enabling:
+					</p>
+					<ul class="mt-2 flex flex-col gap-2">
+						{#each importWarnings as w (w.name)}
+							<li>
+								<span class="font-mono text-[var(--color-ink)]">{w.name}</span>
+								<ul class="mt-1 list-disc pl-5 text-[var(--color-ink-muted)]">
+									{#each w.warnings as line}
+										<li>{line}</li>
+									{/each}
+								</ul>
+							</li>
+						{/each}
+					</ul>
+					<div class="mt-3 flex justify-end">
+						<button
+							type="button"
+							onclick={() => goto('/')}
+							class="rounded-lg bg-[var(--color-accent)] px-3.5 py-1.5 text-xs font-semibold text-[var(--color-accent-ink)] transition hover:bg-[var(--color-accent-strong)]"
+						>
+							Go to servers
+						</button>
+					</div>
+				</div>
 			{/if}
 
 			<!-- Actions -->

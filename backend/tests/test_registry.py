@@ -661,6 +661,18 @@ def test_normalize_docker_servers_gates_non_run_docker_launcher(session):
     assert repo.get_server(session, s.id).runner == "docker"  # now gated by the supervisor
 
 
+def test_normalize_docker_finds_run_when_global_flag_value_is_run():
+    # Codex: a global flag whose VALUE is literally "run" (e.g. a context named "run") must not be
+    # mistaken for the `run` subcommand. Walk global flags by arity, then the real subcommand.
+    image, args, _, _ = service.normalize_docker(
+        "docker", ["--context", "run", "run", "ghcr.io/x/y"], {}
+    )
+    assert image == "ghcr.io/x/y" and args == []
+    # inline global flag form: `docker --context=run run img`
+    image2, _, _, _ = service.normalize_docker("docker", ["--context=run", "run", "img"], {})
+    assert image2 == "img"
+
+
 def test_normalize_docker_rejects_non_string_arg_tokens():
     # Codex: a pasted/legacy JSON config can carry a non-string arg (e.g. ["run", 123, "img"]).
     # The parser must raise ValueError (callers skip/leave-untouched) rather than AttributeError.

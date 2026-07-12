@@ -92,9 +92,17 @@ class ImportSkipped(BaseModel):
     reason: str
 
 
+class ImportWarning(BaseModel):
+    # Non-fatal notes for a created (disabled) server the operator should see before enabling —
+    # e.g. a docker `run` option the hardened runner dropped (mount, --network none, --env-file).
+    name: str
+    warnings: list[str]
+
+
 class ImportResult(BaseModel):
     created: list[ServerSummary]
     skipped: list[ImportSkipped]
+    warnings: list[ImportWarning] = []
 
 
 ControlPlaneAuthMode = Literal["auto", "always"]
