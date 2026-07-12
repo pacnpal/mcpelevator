@@ -26,6 +26,11 @@ DEFAULTS: dict[str, Any] = {
     # domain, not a private-IP literal). Counts as "reachable off-host" so 'auto'
     # control-plane auth turns on when it's enabled — see app.auth.control_plane.
     "allow_private_lan": False,
+    # Enable the docker runner (launch MCP servers packaged as Docker/OCI images). OFF by
+    # default and ROOT-EQUIVALENT: it runs arbitrary images on the mounted Docker daemon
+    # (sibling containers on the host, or an isolated dind sidecar via DOCKER_HOST). The
+    # service/supervisor refuse to enable or start a docker server while this is off.
+    "docker_runner": False,
 }
 
 
@@ -74,6 +79,8 @@ def write(
             raise ValueError(f"invalid control_plane_auth: {value!r}")
         if key == "allow_private_lan" and not isinstance(value, bool):
             raise ValueError(f"invalid allow_private_lan: {value!r}")
+        if key == "docker_runner" and not isinstance(value, bool):
+            raise ValueError(f"invalid docker_runner: {value!r}")
         if key == "allowed_hosts":
             value = _normalize_hosts(value)
         pending[key] = value
@@ -99,3 +106,7 @@ def control_plane_auth(session: Session) -> str:
 
 def allow_private_lan(session: Session) -> bool:
     return repo.setting_get(session, "allow_private_lan", DEFAULTS["allow_private_lan"])
+
+
+def docker_runner(session: Session) -> bool:
+    return repo.setting_get(session, "docker_runner", DEFAULTS["docker_runner"])

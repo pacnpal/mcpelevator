@@ -33,6 +33,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 
+# docker CLI ONLY (docker-ce-cli, not the daemon) from Docker's official apt repo, so the
+# opt-in `docker` runner can launch image-packaged MCP servers against a mounted daemon —
+# either the host's socket (sibling containers) or an isolated dind sidecar via DOCKER_HOST.
+# CLI only: the daemon is never run in-image. The runner stays root-equivalent and disabled
+# by default (see the docker_runner setting), so shipping the CLI is inert until enabled.
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && arch="$(dpkg --print-architecture)" \
+    && echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
+
 # uv + uvx (Python MCP servers) from the official image
 COPY --from=uv /uv /uvx /bin/
 

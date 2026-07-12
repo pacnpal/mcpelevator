@@ -18,6 +18,7 @@ from starlette.responses import Response, StreamingResponse
 from app.api.schemas import (
     ImportResult,
     ImportSkipped,
+    ImportWarning,
     ServerClone,
     ServerCreate,
     ServerDetail,
@@ -213,6 +214,9 @@ async def enable_server(server_id: str, request: Request, session: Session = Dep
         server = service.set_enabled(session, server_id, True)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
+    except ValueError as exc:
+        # e.g. enabling a docker server while the (root-equivalent) docker runner is off.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     sup = request.app.state.supervisor
     sup.nudge()
     return _summary(server, sup, session, _base_url(request))
@@ -238,7 +242,7 @@ async def import_servers(
     """Bulk-create from a standard mcpServers JSON config. Imported servers are
     disabled by default — the user reviews, then enables."""
     try:
-        created, skipped = service.import_mcp_servers(session, payload)
+        created, skipped, warnings = service.import_mcp_servers(session, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
@@ -246,6 +250,7 @@ async def import_servers(
     return ImportResult(
         created=[_summary(s, sup, session, base) for s in created],
         skipped=[ImportSkipped(**s) for s in skipped],
+        warnings=[ImportWarning(**w) for w in warnings],
     )
 
 

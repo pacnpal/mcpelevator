@@ -94,10 +94,18 @@ export interface ImportSkipped {
 	reason: string;
 }
 
+/** Non-fatal notes for a created (disabled) server — e.g. docker run options the hardened
+ *  runner dropped (mount, --network none, --env-file) the operator should see before enabling. */
+export interface ImportWarning {
+	name: string;
+	warnings: string[];
+}
+
 /** Result of POST /api/servers/import. */
 export interface ImportResult {
 	created: ServerSummary[];
 	skipped: ImportSkipped[];
+	warnings?: ImportWarning[];
 }
 
 /** Shape of one entry in a standard `mcpServers` map. */
@@ -226,6 +234,10 @@ export interface SettingsInfo {
 	/** Allow private-IP-literal Hosts from a LAN peer (self-hosted box access).
 	 * Rebinding-safe; turns control-plane `auto` enforcement on while enabled. */
 	allow_private_lan: boolean;
+	/** Enable the docker runner (launch MCP servers packaged as Docker/OCI images).
+	 * OFF by default and root-equivalent — it runs arbitrary images on the mounted
+	 * Docker daemon. Gates docker-server enable/start and OCI catalog installs. */
+	docker_runner: boolean;
 }
 
 /** Shape of GET /api/auth/status — the SPA polls this to decide whether to show login. */

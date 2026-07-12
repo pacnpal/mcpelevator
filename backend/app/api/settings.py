@@ -39,6 +39,12 @@ async def update_settings(
     try:
         # Invariants (enum settings + the host allowlist) are enforced in the SSOT
         # writer; the guard runs under its write lock. Surface ValueError as a 400.
-        return SettingsInfo(**runtime_settings.write(session, changes, guard=guard))
+        result = SettingsInfo(**runtime_settings.write(session, changes, guard=guard))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Toggling the root-equivalent docker runner is a gate change — nudge the reconciler so it
+    # applies at once (stop running docker units when turned off) instead of waiting for the
+    # next poll interval, which an operator may have lengthened.
+    if "docker_runner" in changes:
+        request.app.state.supervisor.nudge()
+    return result

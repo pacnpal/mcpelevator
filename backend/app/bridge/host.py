@@ -73,6 +73,43 @@ async def _forward_roots(context) -> list[Root]:
         return []
 
 
+# SSOT for which env keys the docker CLI itself consumes lives in the docker runner (the
+# service layer also rejects these as container env vars). ``is_reserved_docker_env`` is the
+# NARROW set we inherit from the operator's env into the CLI; ``is_forbidden_container_env`` is
+# the broader "a container must not supply this" set (adds Go proxy vars).
+from app.runners.docker import (  # noqa: E402
+    is_forbidden_container_env as _is_forbidden_container_env,
+    is_reserved_docker_env as _is_reserved_docker_env,
+)
+
+
+def _child_env(spec: dict) -> dict[str, str]:
+    """Environment for a stdio child.
+
+    Default: merge the bridge's own environment (PATH, HOME, caches) with the
+    server-specific vars so npx/uvx/etc. resolve; server vars win. When the spec sets
+    ``minimal_env`` (the docker runner), pass ONLY the bridge's docker-CLI env (PATH/HOME +
+    the operator's ``DOCKER_*`` config) plus the server's NON-reserved vars — never the full
+    ``os.environ`` — so the elevator's own secrets can't leak into a container via a ``-e KEY``
+    passthrough.
+    """
+    server_env = dict(spec.get("env") or {})
+    if spec.get("minimal_env"):
+        # The CLI's own env from the bridge: PATH/HOME + ALL the operator's DOCKER_* config
+        # (DOCKER_HOST to reach dind, DOCKER_API_VERSION, DOCKER_CONFIG, …) so the runner CLI
+        # behaves like the control plane's.
+        base = {k: v for k, v in os.environ.items() if _is_reserved_docker_env(k)}
+        # Strip forbidden keys from the server's env: a server-declared DOCKER_HOST /
+        # DOCKER_API_VERSION / PATH must never retarget or alter the docker CLI (breaking dind
+        # isolation or the daemon request), and a proxy var (HTTP_PROXY/…) must never land in the
+        # CLI's env where it could reroute the control-plane's own daemon request on a TCP
+        # DOCKER_HOST. `base` (the bridge's copies) wins. The service layer already rejects these;
+        # this is defense in depth for a legacy row.
+        safe = {k: v for k, v in server_env.items() if not _is_forbidden_container_env(k)}
+        return {**safe, **base}
+    return {**os.environ, **server_env}
+
+
 def _build_transport(spec: dict):
     """Pick the upstream transport from the spec's ``transport`` discriminator.
 
@@ -89,9 +126,7 @@ def _build_transport(spec: dict):
     return StdioTransport(
         command=spec["command"],
         args=list(spec.get("args") or []),
-        # Merge the child's own environment (PATH, HOME, caches) with the
-        # server-specific vars so npx/uvx/etc. resolve; server vars win.
-        env={**os.environ, **(spec.get("env") or {})},
+        env=_child_env(spec),
         cwd=spec.get("cwd") or None,
     )
 

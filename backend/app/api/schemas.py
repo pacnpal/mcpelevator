@@ -92,9 +92,17 @@ class ImportSkipped(BaseModel):
     reason: str
 
 
+class ImportWarning(BaseModel):
+    # Non-fatal notes for a created (disabled) server the operator should see before enabling —
+    # e.g. a docker `run` option the hardened runner dropped (mount, --network none, --env-file).
+    name: str
+    warnings: list[str]
+
+
 class ImportResult(BaseModel):
     created: list[ServerSummary]
     skipped: list[ImportSkipped]
+    warnings: list[ImportWarning] = []
 
 
 ControlPlaneAuthMode = Literal["auto", "always"]
@@ -126,6 +134,7 @@ class SettingsInfo(BaseModel):
     default_auth_provider: str
     control_plane_auth: ControlPlaneAuthMode = "auto"
     allow_private_lan: bool = False
+    docker_runner: bool = False
 
 
 class SettingsUpdate(BaseModel):
@@ -137,6 +146,9 @@ class SettingsUpdate(BaseModel):
     # API boundary, so the registry's isinstance(bool) invariant would never fire for an
     # API caller. Strict keeps the bool-only contract end to end (the SPA sends a JSON bool).
     allow_private_lan: Optional[StrictBool] = None
+    # StrictBool for the same reason — the docker runner is root-equivalent, so a coerced
+    # truthy value must never flip it on.
+    docker_runner: Optional[StrictBool] = None
 
 
 class AuthStatus(BaseModel):
