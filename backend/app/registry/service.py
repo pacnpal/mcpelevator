@@ -166,6 +166,48 @@ def _mount_warning(flag: str) -> str:
     )
 
 
+# More host-side `docker run` flags the hardened runner owns (and therefore drops on import).
+# Each silently changes behavior the operator likely intended, so surface a review warning
+# rather than importing a quietly-wrong server.
+_WORKDIR_FLAGS = frozenset({"-w", "--workdir"})
+_NETWORK_FLAGS = frozenset({"--network", "--net"})
+_WORKDIR_WARNING = (
+    "-w/--workdir is dropped — the docker runner uses the image's own WORKDIR, so a relative "
+    "command/entrypoint may run from the wrong directory."
+)
+_NETWORK_WARNING = (
+    "--network is dropped — the docker runner uses Docker's default bridge (egress ON), so a "
+    "config that set --network none (isolation) or a custom/attached network no longer has it."
+)
+_PLATFORM_WARNING = (
+    "--platform is dropped — the docker runner uses the host architecture, so a config pinning a "
+    "platform (e.g. linux/amd64 on arm64) may pull the wrong image or fail with exec-format."
+)
+
+
+def _dropped_flag_warning(flag: str) -> Optional[str]:
+    """Review warning for a ``docker run`` flag the hardened runner drops on import, or ``None``.
+
+    The runner owns the whole invocation (it stores only image + container args), so every
+    host-side run flag in a pasted config is dropped. Most are benign — they duplicate a
+    hardening default or are meaningless under stdio — but a handful silently change intended
+    behavior (a host mount, a custom entrypoint, an env-file, a workdir, network isolation, a
+    pinned platform); surface those so the imported server isn't quietly broken."""
+    if flag in _DOCKER_MOUNT_FLAGS:
+        return _mount_warning(flag)
+    if flag == "--entrypoint":
+        return _ENTRYPOINT_WARNING
+    if flag == "--env-file":
+        return _ENV_FILE_WARNING
+    if flag in _WORKDIR_FLAGS:
+        return _WORKDIR_WARNING
+    if flag in _NETWORK_FLAGS:
+        return _NETWORK_WARNING
+    if flag == "--platform":
+        return _PLATFORM_WARNING
+    return None
+
+
 def _docker_run_index(tokens: list[str]) -> Optional[int]:
     """Index just AFTER the ``run`` subcommand in a docker arg list, or ``None`` if this isn't
     a ``docker run`` invocation.
@@ -253,16 +295,14 @@ def normalize_docker(
                 _capture_env(tok[2:], env, warnings)
                 i += 1
                 continue
-            if "=" in tok:  # inline value form, e.g. --env=VAR / -e=VAR / --env-file=… / --memory=1g
+            if "=" in tok:  # inline value form, e.g. --env=VAR / --network=none / --memory=1g
                 name, _, val = tok.partition("=")
                 if name in ("-e", "--env"):
                     _capture_env(val, env, warnings)
-                elif name == "--env-file":
-                    warnings.append(_ENV_FILE_WARNING)
-                elif name in _DOCKER_MOUNT_FLAGS:
-                    warnings.append(_mount_warning(name))
-                elif name == "--entrypoint":
-                    warnings.append(_ENTRYPOINT_WARNING)
+                else:
+                    warn = _dropped_flag_warning(name)
+                    if warn:
+                        warnings.append(warn)
                 i += 1
                 continue
             if tok in ("-e", "--env"):
@@ -281,15 +321,12 @@ def normalize_docker(
                 i += 1
                 continue
             if tok in _DOCKER_VALUE_FLAGS:
-                if tok == "--env-file":
-                    # We can't read the file; surface it like a bare -e so its vars aren't
-                    # silently lost (the server would otherwise start with no environment).
-                    warnings.append(_ENV_FILE_WARNING)
-                elif tok in _DOCKER_MOUNT_FLAGS:
-                    warnings.append(_mount_warning(tok))
-                elif tok == "--entrypoint":
-                    warnings.append(_ENTRYPOINT_WARNING)
-                i += 2  # skip the flag and its value
+                # Skip the flag and its value; warn for the ones whose loss silently changes
+                # behavior (mount, entrypoint, env-file, workdir, network, platform).
+                warn = _dropped_flag_warning(tok)
+                if warn:
+                    warnings.append(warn)
+                i += 2
                 continue
             i += 1  # a boolean flag (-i, -t, -it, --rm, --init, …); skip it
             continue

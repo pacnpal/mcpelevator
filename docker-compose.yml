@@ -83,15 +83,18 @@ services:
   # so docker-runner containers never touch the HOST daemon. `privileged: true` is required
   # by dind (its own risk, but confined to this sidecar).
   #
-  # SECURITY NOTE: 2375 is plaintext + unauthenticated. It's unpublished (internal network
-  # only), so no compose PEER or off-host client can reach it — but the MCP container images
-  # dind itself launches CAN reach the dind daemon on its own bridge gateway. A malicious
-  # image could therefore commandeer the dind daemon (spawn privileged containers, read
-  # co-tenant containers). Host blast radius stays confined to this sidecar, but treat images
-  # sharing one dind as MUTUALLY-TRUSTING — the runner owns all `docker run` options (a
-  # server's args are the container's own args, not run flags), so there is no per-server
-  # `--network`/`--read-only` knob to isolate one image. For stronger isolation, front dind
-  # with TLS (2376) instead of 2375, or run a separate dind per trust domain.
+  # SECURITY NOTE: 2375 is plaintext + unauthenticated. It's unpublished (no host port), so no
+  # OFF-HOST client can reach it — but it is NOT isolated within the project: ANY container on
+  # the `mcpe` network can reach `tcp://dind:2375` (Compose resolves `dind` by service name),
+  # which is exactly how the mcpelevator service connects. That includes any sidecar you attach
+  # to this network AND the MCP container images dind itself launches (via its bridge gateway).
+  # So do NOT put an untrusted sidecar on `mcpe` believing dind is walled off. A malicious image
+  # could commandeer the dind daemon (spawn privileged containers, read co-tenant containers).
+  # Host blast radius stays confined to this sidecar, but treat images sharing one dind as
+  # MUTUALLY-TRUSTING — the runner owns all `docker run` options (a server's args are the
+  # container's own args, not run flags), so there is no per-server `--network`/`--read-only`
+  # knob to isolate one image. For stronger isolation, front dind with TLS (2376) instead of
+  # 2375, or run a separate dind per trust domain.
   dind:
     image: docker:29-dind
     profiles: ["docker-dind"]

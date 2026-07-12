@@ -575,6 +575,22 @@ def test_docker_enable_allowed_when_setting_on(session):
     assert enabled.enabled is True
 
 
+def test_normalize_docker_warns_on_dropped_workdir_network_platform():
+    # Codex: the hardened runner owns the invocation and drops these host-side run flags. Each
+    # silently changes intended behavior, so importing must surface a review warning (both the
+    # separated `--flag value` and the inline `--flag=value` spellings).
+    for flag, needle in (("-w", "workdir"), ("--workdir", "workdir"),
+                         ("--network", "network"), ("--net", "network"),
+                         ("--platform", "platform")):
+        _, _, _, warnings = service.normalize_docker(
+            "docker", ["run", flag, "val", "img"], {}
+        )
+        assert any(needle in w for w in warnings), (flag, warnings)
+    # inline form
+    _, _, _, w2 = service.normalize_docker("docker", ["run", "--network=none", "img"], {})
+    assert any("network" in w for w in w2)
+
+
 def test_is_docker_launcher_distinguishes_launcher_from_image():
     # Codex: only a GENUINE docker CLI invocation (bare name or a filesystem path to it) is a
     # launcher. An OCI image ref whose final path segment is literally "docker" merely shares
