@@ -96,6 +96,12 @@ services:
     image: docker:29-dind
     profiles: ["docker-dind"]
     privileged: true
+    # The dind entrypoint auto-generates TLS certs and forces the daemon onto 2376 whenever
+    # DOCKER_TLS_CERTDIR is non-empty (it defaults to /certs in modern images). Clear it so the
+    # plaintext 2375 endpoint below is the ONLY listener — otherwise DOCKER_HOST=tcp://dind:2375
+    # would hit a daemon that never bound 2375.
+    environment:
+      - DOCKER_TLS_CERTDIR=
     command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--tls=false"]
     networks:
       - mcpe

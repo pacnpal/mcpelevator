@@ -575,6 +575,67 @@ def test_docker_enable_allowed_when_setting_on(session):
     assert enabled.enabled is True
 
 
+def test_is_docker_launcher_distinguishes_launcher_from_image():
+    # Codex: only a GENUINE docker CLI invocation (bare name or a filesystem path to it) is a
+    # launcher. An OCI image ref whose final path segment is literally "docker" merely shares
+    # the basename and must NOT be treated as the CLI.
+    ok = service._is_docker_launcher
+    assert ok("docker")
+    assert ok("docker.exe")
+    assert ok("/usr/local/bin/docker")
+    assert ok("./docker")
+    assert ok("~/bin/docker")
+    assert ok(r"C:\Program Files\Docker\docker.exe")
+    assert not ok("ghcr.io/acme/docker")
+    assert not ok("docker.io/library/docker")
+    assert not ok("npx")
+
+
+def test_normalize_docker_image_named_docker_with_run_arg_not_misparsed():
+    # Codex: an image ref whose basename is "docker" and whose OWN first arg happens to be
+    # "run" must NOT be parsed as a `docker run` launcher — that would drop the real image and
+    # mistake "run"'s next token for the image. A registry ref is preserved verbatim.
+    img, args, _, _ = service.normalize_docker("ghcr.io/acme/docker", ["run", "serve"], {})
+    assert img == "ghcr.io/acme/docker" and args == ["run", "serve"]
+    img2, args2, _, _ = service.normalize_docker("docker.io/library/docker", ["run"], {})
+    assert img2 == "docker.io/library/docker" and args2 == ["run"]
+
+
+def test_command_runner_with_image_named_docker_not_reclassified(session):
+    # A `command` runner whose command is an IMAGE ref ending in /docker (not the CLI) must NOT
+    # be reclassified to the docker runner — only a genuine launcher is reclassified.
+    s = service.create_server(
+        session, name="img", runner="command", command="ghcr.io/acme/docker",
+        args=["run"], env={}, enabled=False,
+    )
+    assert s.runner == "command" and s.command == "ghcr.io/acme/docker"
+
+
+def test_normalize_docker_servers_migrates_npx_and_uvx_docker_rows(session):
+    # Codex: an upgraded ENABLED row stored under runner="npx"/"uvx" with its command pointed
+    # at the docker CLI must be canonicalized to the docker runner — otherwise reconcile's
+    # `sv.runner == "docker"` gate never fires and it launches ungated with the full control
+    # plane env even while the docker_runner setting is off.
+    _enable_docker(session)
+    ids = []
+    for rn in ("npx", "uvx"):
+        s = service.create_server(
+            session, name=f"leg{rn}", runner="command", command="img:1", args=[], env={},
+        )
+        # Force the legacy passthrough shape directly via the repo (create would reclassify).
+        row = repo.get_server(session, s.id)
+        row.runner = rn
+        row.command, row.args = "/usr/bin/docker", ["run", "--rm", "ghcr.io/x/y"]
+        row.env = {}
+        repo.save_server(session, row)
+        ids.append(s.id)
+
+    assert service.normalize_docker_servers(session) == 2
+    for sid in ids:
+        m = repo.get_server(session, sid)
+        assert m.runner == "docker" and m.command == "ghcr.io/x/y"
+
+
 def test_auth_provider_change_does_not_restart(session):
     """auth_provider is proxy-layer; changing it must NOT change config_hash
     (otherwise the reconciler would needlessly bounce the bridge)."""

@@ -91,6 +91,28 @@ _DOCKER_LAUNCHERS = {"docker", "docker.exe"}
 # control plane's full environment. (``remote`` is excluded: its command is a URL.)
 _LOCAL_EXEC_RUNNERS = {"npx", "uvx", "command"}
 
+
+def _is_docker_launcher(command: str) -> bool:
+    """True only when ``command`` invokes the docker CLI itself.
+
+    A launcher is a bare ``docker``/``docker.exe`` or a filesystem path to it
+    (``/usr/local/bin/docker``, ``./docker``, ``~/bin/docker``,
+    ``C:\\Program Files\\Docker\\docker.exe``). An OCI image reference whose final path
+    segment is literally ``docker`` (the official ``docker`` image, ``docker.io/library/docker``,
+    ``ghcr.io/acme/docker``) ALSO has basename ``docker`` but is NOT a launcher — reclassifying it
+    or parsing it as a full ``docker run`` invocation would drop the real image and misread the
+    container's own args. A registry ref is distinguished from a path because it is neither
+    absolute, relative, home-anchored, nor a Windows drive path."""
+    c = command.strip()
+    if _launcher_basename(c) not in _DOCKER_LAUNCHERS:
+        return False
+    norm = c.replace("\\", "/")
+    if "/" not in norm:
+        return True  # a bare launcher name (no path separator) is the CLI
+    # A path to the CLI: absolute/relative/home-anchored (POSIX), or a Windows drive path.
+    return norm[0] in "/.~" or (len(c) >= 2 and c[1] == ":")
+
+
 # `docker run` flags that CONSUME the next token as their value (so we skip both). Kept
 # reasonably complete for real MCP configs; an unknown value-taking flag is the accepted
 # edge (it'd be read as a boolean and its value mistaken for the image — rare in practice).
@@ -195,14 +217,13 @@ def normalize_docker(
     env = dict(env or {})
     warnings: list[str] = []
     tokens = list(args or [])
-    base = _launcher_basename(command or "")
 
-    # Treat this as a full `docker run …` invocation only when the command's basename is a
-    # docker launcher AND the args are a recognized `run` invocation (see _docker_run_index:
-    # `docker run …`, `docker container run …`, or global flags before `run`). Otherwise the
-    # command IS an image ref whose basename merely happens to be "docker" (the official
-    # `docker` image, `ghcr.io/acme/docker`) with container args — preserve it.
-    run_idx = _docker_run_index(tokens) if base in _DOCKER_LAUNCHERS else None
+    # Treat this as a full `docker run …` invocation only when the command actually invokes the
+    # docker CLI (bare name or a filesystem path — see _is_docker_launcher) AND the args are a
+    # recognized `run` invocation (see _docker_run_index). Otherwise the command IS an image ref
+    # whose basename merely happens to be "docker" (the official `docker` image,
+    # `ghcr.io/acme/docker`) with container args — preserve it rather than dropping it.
+    run_idx = _docker_run_index(tokens) if _is_docker_launcher(command or "") else None
     if run_idx is None:
         image = (command or "").strip()
         if not image:
@@ -371,9 +392,11 @@ def normalize_docker_servers(session: Session) -> int:
 
     Two legacy shapes from a prior release (where the docker runner only raised):
     (1) ``runner="docker"`` rows stored verbatim (``command="docker"``, ``args=["run", …]``);
-    (2) rows stored as ``runner="command"`` because the old ``_infer_runner`` matched only
-        the literal ``"docker"`` — so ``command="/usr/local/bin/docker"`` imports slipped
-        through as generic command servers that would bypass the docker gate + hardening.
+    (2) rows stored under a local-exec runner (``command``/``npx``/``uvx``) because the old
+        ``_infer_runner`` matched only the literal ``"docker"`` — so ``command="/usr/local/bin/docker"``
+        imports slipped through as generic passthrough servers that would bypass the docker gate +
+        hardening. An enabled ``runner="npx"`` row with ``command="/usr/bin/docker"`` would otherwise
+        never hit the ``sv.runner == "docker"`` reconcile gate and launch ungated with the full env.
     Both are re-normalized to the canonical (image, container_args, env) shape, converted to
     ``runner="docker"``, and have reserved/malformed env keys scrubbed. A row that's already
     canonical re-normalizes to itself (no write). Idempotent. Returns the count changed. A
@@ -381,13 +404,13 @@ def normalize_docker_servers(session: Session) -> int:
     changed = 0
     for server in repo.list_servers(session):
         looks_docker_run = (
-            _launcher_basename(server.command or "") in _DOCKER_LAUNCHERS
+            _is_docker_launcher(server.command or "")
             and _docker_run_index(list(server.args or [])) is not None
         )
         if server.runner == "docker":
             pass  # always re-normalize existing docker rows (idempotent for canonical ones)
-        elif server.runner == "command" and looks_docker_run:
-            pass  # a docker `run …` invocation misclassified as a command runner — convert it
+        elif server.runner in _LOCAL_EXEC_RUNNERS and looks_docker_run:
+            pass  # a docker `run …` invocation misclassified as a passthrough runner — convert it
         else:
             continue
         try:
@@ -488,7 +511,7 @@ def create_server(
     # route it through the docker machinery (normalize + validate + gate + hardening +
     # minimal_env) so it can't launch containers ungated/unhardened with the full control-plane
     # env (choosing a different runner string must not sidestep the root-equivalent gate).
-    if runner in _LOCAL_EXEC_RUNNERS and _launcher_basename(command) in _DOCKER_LAUNCHERS:
+    if runner in _LOCAL_EXEC_RUNNERS and _is_docker_launcher(command):
         runner = "docker"
     # A remote server reuses command/args for the upstream URL + transport; canonicalize
     # them up front so the persisted row (and config_hash) is deterministic. There is no
@@ -556,7 +579,7 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         raise ValueError(f"unknown runner {server.runner!r}")
     # A local-exec runner (npx/uvx/command) pointed at the docker CLI IS the docker runner (see
     # create) — reclassify so it can't launch containers ungated/unhardened via passthrough.
-    if server.runner in _LOCAL_EXEC_RUNNERS and _launcher_basename(server.command) in _DOCKER_LAUNCHERS:
+    if server.runner in _LOCAL_EXEC_RUNNERS and _is_docker_launcher(server.command):
         server.runner = "docker"
     if server.runner == "remote":
         server.command, server.args = normalize_remote(server.command, server.args)
@@ -637,7 +660,7 @@ def _infer_runner(command: str) -> str:
         return "npx"
     if base in _UVX_LAUNCHERS:
         return "uvx"
-    if base in _DOCKER_LAUNCHERS:
+    if _is_docker_launcher(command):
         return "docker"
     return "command"
 

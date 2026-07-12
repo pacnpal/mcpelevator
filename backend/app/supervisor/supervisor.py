@@ -115,65 +115,91 @@ class Supervisor:
     # --- reconcile ------------------------------------------------------- #
 
     async def reconcile_once(self) -> None:
+        # Snapshot desired state under a short-lived session, then RELEASE it before the slow
+        # start/stop/reap I/O below. A single docker ``_stop`` can spend tens of seconds
+        # reaping containers off a wedged daemon; holding this session open across the whole
+        # sweep would pin a pooled connection (and, mid-transaction, the SQLite write lock) for
+        # that entire time and stall API writers. Each runtime write below opens its own tiny
+        # session (``_write_runtime``) so a lock is only ever held for the duration of one row.
         with Session(get_engine()) as session:
             docker_on = runtime_settings.docker_runner(session)
-            desired: dict[str, object] = {}
-            for sv in repo.list_servers(session):
-                if not sv.enabled:
-                    continue
-                # The docker runner is root-equivalent and opt-in: if it's off, an enabled
-                # docker server must not run. Stop any live unit and surface why, rather
-                # than silently converging it — this also catches the setting being turned
-                # off while a docker server is running (within one reconcile interval).
-                if sv.runner == "docker" and not docker_on:
-                    if sv.id in self.units:
-                        await self._stop(sv.id)
-                    repo.upsert_runtime(
-                        session, sv.id, state="failed", pid=None, port=None,
-                        last_error="Docker runner is disabled (enable it in Settings)", tools=[],
-                    )
-                    continue
-                desired[sv.id] = sv
+            servers = list(repo.list_servers(session))
 
-            # stop anything running that is no longer desired
-            for server_id in list(self.units):
-                if server_id not in desired:
-                    await self._stop(server_id)
-                    repo.upsert_runtime(
-                        session, server_id, state="stopped", pid=None, port=None,
-                        last_error=None, tools=[],
-                    )
+        desired: dict[str, object] = {}
+        disabled_docker: list = []
+        for sv in servers:
+            if not sv.enabled:
+                continue
+            # The docker runner is root-equivalent and opt-in: if it's off, an enabled docker
+            # server must not run — collect it for a stop pass below (this also catches the
+            # setting being turned off while a docker server is running, within one interval).
+            if sv.runner == "docker" and not docker_on:
+                disabled_docker.append(sv)
+                continue
+            desired[sv.id] = sv
 
-            # start / restart desired
-            for server_id, server in desired.items():
-                unit = self.units.get(server_id)
-                if unit is None:
-                    await self._try_start(session, server)
-                elif unit.config_hash != server.config_hash:
-                    await self._stop(server_id)
-                    await self._try_start(session, server)
+        # gate: stop any docker unit the runner-off setting now forbids, and surface why
+        for sv in disabled_docker:
+            if sv.id in self.units:
+                await self._stop(sv.id)
+            self._write_runtime(
+                sv.id, state="failed", pid=None, port=None,
+                last_error="Docker runner is disabled (enable it in Settings)", tools=[],
+            )
 
-                unit = self.units.get(server_id)
-                if unit is not None:
-                    # Converge the routing key from fresh desired state. slug is
-                    # excluded from config_hash (a rename must not bounce the bridge),
-                    # so the branches above never re-derive the unit on a rename. The
-                    # in-place ``rename_slug`` fast-path can also miss a rename that
-                    # races this loop (the unit didn't exist yet when it ran, then got
-                    # started here from a pre-rename snapshot). Re-reading the slug each
-                    # pass guarantees ``endpoint(<new>)`` resolves within one interval.
-                    unit.slug = server.slug
-                    repo.upsert_runtime(
-                        session, server_id,
-                        state=unit.state, pid=unit.pid, port=unit.port,
-                        last_error=unit.last_error, tools=unit.tools,
-                    )
+        # stop anything running that is no longer desired
+        for server_id in list(self.units):
+            if server_id not in desired:
+                await self._stop(server_id)
+                self._write_runtime(
+                    server_id, state="stopped", pid=None, port=None,
+                    last_error=None, tools=[],
+                )
 
-    async def _try_start(self, session: Session, server) -> None:
+        # start / restart desired
+        for server_id, server in desired.items():
+            unit = self.units.get(server_id)
+            start_error: Optional[str] = None
+            if unit is None:
+                start_error = await self._try_start(server)
+            elif unit.config_hash != server.config_hash:
+                await self._stop(server_id)
+                start_error = await self._try_start(server)
+
+            unit = self.units.get(server_id)
+            if unit is not None:
+                # Converge the routing key from fresh desired state. slug is
+                # excluded from config_hash (a rename must not bounce the bridge),
+                # so the branches above never re-derive the unit on a rename. The
+                # in-place ``rename_slug`` fast-path can also miss a rename that
+                # races this loop (the unit didn't exist yet when it ran, then got
+                # started here from a pre-rename snapshot). Re-reading the slug each
+                # pass guarantees ``endpoint(<new>)`` resolves within one interval.
+                unit.slug = server.slug
+                self._write_runtime(
+                    server_id,
+                    state=unit.state, pid=unit.pid, port=unit.port,
+                    last_error=unit.last_error, tools=unit.tools,
+                )
+            elif start_error is not None:
+                # _start raised before creating a unit (port exhaustion / max_running).
+                self._write_runtime(server_id, state="failed", last_error=start_error)
+
+    def _write_runtime(self, server_id: str, **fields) -> None:
+        """Persist one runtime row in its own short-lived session/transaction, so a slow
+        reconcile never holds the SQLite write lock across an ``await`` on docker I/O."""
+        with Session(get_engine()) as session:
+            repo.upsert_runtime(session, server_id, **fields)
+
+    async def _try_start(self, server) -> Optional[str]:
+        """Start a unit; return a truncated error string on failure (the caller persists it),
+        or ``None`` on success. Kept free of any DB session so the slow spawn stays off the
+        reconcile write lock."""
         try:
             await self._start(server)
+            return None
         except Exception as exc:  # port exhaustion, max_running, spawn failure
-            repo.upsert_runtime(session, server.id, state="failed", last_error=str(exc)[:300])
+            return str(exc)[:300]
 
     # --- loop ------------------------------------------------------------ #
 
