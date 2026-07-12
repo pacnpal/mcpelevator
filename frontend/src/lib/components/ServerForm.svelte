@@ -192,11 +192,13 @@
 
 	const resolvedArgs = $derived(splitLines(argsText));
 
+	// Quote a preview token only if it contains whitespace (shared by both previews below).
+	function quoteIfNeeded(p: string): string {
+		return /\s/.test(p) ? `"${p}"` : p;
+	}
+
 	const previewCommand = $derived(
-		[command, ...resolvedArgs]
-			.filter((p) => p.length > 0)
-			.map((p) => (/\s/.test(p) ? `"${p}"` : p))
-			.join(' ')
+		[command, ...resolvedArgs].filter((p) => p.length > 0).map(quoteIfNeeded).join(' ')
 	);
 
 	const isRemote = $derived(runner === 'remote');
@@ -216,9 +218,7 @@
 			// static prefix (kept verbatim — it isn't user input), then the user-provided
 			// image + args, each quoted only if it contains whitespace.
 			'docker run -i --rm --init […]',
-			...[command.trim() || '<image>', ...resolvedArgs]
-				.filter((p) => p.length > 0)
-				.map((p) => (/\s/.test(p) ? `"${p}"` : p))
+			...[command.trim() || '<image>', ...resolvedArgs].filter((p) => p.length > 0).map(quoteIfNeeded)
 		].join(' ')
 	);
 	// A remote server's "command" is an upstream URL. Parse it (rather than regex) so the

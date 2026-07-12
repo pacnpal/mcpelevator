@@ -92,7 +92,7 @@ services:
   # set its server's args to include `--network none` (the runner leaves networking at
   # Docker's default). For stronger isolation, front dind with TLS (2376) instead of 2375.
   dind:
-    image: docker:27-dind
+    image: docker:29-dind
     profiles: ["docker-dind"]
     privileged: true
     command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--tls=false"]

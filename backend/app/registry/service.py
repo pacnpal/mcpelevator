@@ -101,7 +101,7 @@ _DOCKER_VALUE_FLAGS = frozenset({
     "--kernel-memory", "--cpus", "--cpuset-cpus", "--cpuset-mems", "--cpu-shares", "-c",
     "--cpu-period", "--cpu-quota", "--cpu-rt-period", "--cpu-rt-runtime", "--blkio-weight",
     "-u", "--user", "--userns", "--group-add", "--cgroup-parent", "--cgroupns",
-    "--entrypoint", "--workdir",
+    "--entrypoint",
     "--platform", "--pull", "--isolation", "--pid", "--ipc", "--uts", "--cidfile",
     "--stop-timeout", "--stop-signal", "--restart", "--detach-keys",
     "--device", "--device-cgroup-rule", "--device-read-bps", "--device-write-bps",

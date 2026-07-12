@@ -13,7 +13,7 @@ state. Health probing + restart budgets land in M2.
 from __future__ import annotations
 
 import asyncio
-import subprocess
+import contextlib
 from typing import Optional
 
 from sqlmodel import Session
@@ -28,6 +28,30 @@ from app.supervisor.unit import ServerUnit
 # `docker ps` Go-template that prints "<container-id> <server-id-label>" per line, so the
 # boot sweep can keep only containers whose label value is a server in THIS instance's DB.
 _PS_FORMAT = '{{.ID}} {{.Label "' + LABEL_KEY + '"}}'
+
+
+async def _run_docker_capture(argv: list[str], *, timeout: float) -> Optional[str]:
+    """Run a docker CLI command and return its stdout (decoded), or ``None`` on any failure.
+
+    Best-effort and non-blocking (async subprocess, not ``subprocess.run``) so a slow/wedged
+    daemon can't stall the caller. On timeout the child is killed AND awaited (no zombie).
+    Returns ``None`` for a missing CLI, unreachable daemon, non-zero exit, or timeout."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+        return None
+    if proc.returncode != 0:
+        return None
+    return out.decode(errors="replace")
 
 
 class Supervisor:
@@ -153,7 +177,7 @@ class Supervisor:
 
     # --- loop ------------------------------------------------------------ #
 
-    def boot_reset(self) -> None:
+    async def boot_reset(self) -> None:
         """Observed runtime from a previous process is stale on startup. Reset it
         to stopped so the API reflects reality; reconcile brings servers back."""
         with Session(get_engine()) as session:
@@ -164,9 +188,9 @@ class Supervisor:
             # container left running when the runner was turned off is still cleaned up.
             docker_ids = {s.id for s in repo.list_servers(session) if s.runner == "docker"}
         if docker_ids:
-            self._reap_docker_orphans(docker_ids)
+            await self._reap_docker_orphans(docker_ids)
 
-    def _reap_docker_orphans(self, known_ids: set[str]) -> None:
+    async def _reap_docker_orphans(self, known_ids: set[str]) -> None:
         """Remove containers a prior control-plane process left behind, for servers in
         ``known_ids`` only.
 
@@ -174,30 +198,25 @@ class Supervisor:
         backstops a hard crash, where a container keeps running with no unit to stop it.
         We list our own labelled containers with their server-id label value and remove
         only those whose id is in ``known_ids`` — so a sibling instance sharing the daemon
-        (whose server ids live in a different DB) is never touched. Runs synchronously at
-        boot (before the event loop starts) and is silent on any failure (docker missing,
-        no daemon reachable, etc.)."""
-        try:
-            listed = subprocess.run(
-                [DOCKER_BIN, "ps", "-a", "--filter", f"label={LABEL_KEY}", "--format", _PS_FORMAT],
-                capture_output=True, text=True, timeout=10,
-            )
-        except (FileNotFoundError, OSError, subprocess.SubprocessError):
-            return
-        if listed.returncode != 0:  # daemon unreachable / CLI error — nothing to reap
-            return
+        (whose server ids live in a different DB) is never touched. Runs on the event loop at
+        startup — uses async subprocess (never a blocking ``subprocess.run``) so a slow/wedged
+        docker daemon can't stall the whole app's boot — and is silent on any failure (docker
+        missing, no daemon reachable, etc.)."""
+        out = await _run_docker_capture(
+            [DOCKER_BIN, "ps", "-a", "--filter", f"label={LABEL_KEY}", "--format", _PS_FORMAT],
+            timeout=8,
+        )
+        if out is None:
+            return  # daemon unreachable / CLI error / timeout — nothing to reap
         ids = []
-        for line in listed.stdout.splitlines():
+        for line in out.splitlines():
             parts = line.split()
             # "<container-id> <server-id>"; keep only containers this instance owns.
             if len(parts) == 2 and parts[1] in known_ids:
                 ids.append(parts[0])
         if not ids:
             return
-        try:
-            subprocess.run([DOCKER_BIN, "rm", "-f", *ids], capture_output=True, timeout=30)
-        except (FileNotFoundError, OSError, subprocess.SubprocessError):
-            pass
+        await _run_docker_capture([DOCKER_BIN, "rm", "-f", *ids], timeout=20)
 
     async def run_forever(self) -> None:
         while not self._stopping:

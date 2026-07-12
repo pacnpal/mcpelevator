@@ -15,6 +15,7 @@ npx/uvx package cache, so the first real client call is fast.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -145,10 +146,9 @@ class ServerUnit:
         try:
             out, _ = await asyncio.wait_for(listed.communicate(), timeout=8)
         except asyncio.TimeoutError:
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 listed.kill()
-            except ProcessLookupError:
-                pass
+            await listed.wait()  # reap the killed child so it can't linger as a zombie
             return
         ids = out.decode(errors="replace").split()
         if not ids:
@@ -162,10 +162,9 @@ class ServerUnit:
         except (FileNotFoundError, OSError):
             return
         except asyncio.TimeoutError:
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 rm.kill()
-            except ProcessLookupError:
-                pass
+            await rm.wait()  # reap the killed child
 
     # --- background tasks ------------------------------------------------ #
 

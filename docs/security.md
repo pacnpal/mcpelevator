@@ -111,10 +111,11 @@ separate — OCI installs are surfaced non-installable until the runner is enabl
 a memory cap). Secrets are passed by **name** (`-e KEY`), never `KEY=value`, so they never
 appear in `docker inspect`/`ps`; and the bridge gives a docker child a **minimal env** (only
 `PATH/HOME/DOCKER_*` plus the server's declared vars), so a `-e KEY` passthrough can never
-reach the control plane's own secrets (`MCPE_ADMIN_TOKEN`, DB creds). Containers carry a
-deterministic name and an `mcpelevator.server` label; the unit reaps its container on stop
-(fire-and-forget `docker rm -f`, outside the stop grace) and the supervisor sweeps labelled
-orphans on boot — the residual gap is a container left by a hard control-plane crash with a
+reach the control plane's own secrets (`MCPE_ADMIN_TOKEN`, DB creds). Each container carries an
+`mcpelevator.server=<id>` label (Docker assigns the name) — that label is the sole cleanup
+handle: the unit reaps its containers by label on stop (fire-and-forget `docker rm -f`, outside
+the stop grace) and the supervisor sweeps labelled orphans (scoped to this instance's server
+ids) on boot — the residual gap is a container left by a hard control-plane crash with a
 wedged daemon. Isolation is a deployment choice (sibling host socket vs. an isolated dind
 sidecar via `DOCKER_HOST`); the sibling model hands the host daemon to containers and is
 inherently root-equivalent, which is why the runner is opt-in. Imports create disabled

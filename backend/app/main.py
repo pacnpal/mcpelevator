@@ -139,7 +139,7 @@ async def lifespan(app: FastAPI):
     _bootstrap_control_plane_auth()
     app.state.http = httpx.AsyncClient(timeout=None)  # no timeout: long-lived SSE streams
     supervisor = Supervisor()
-    supervisor.boot_reset()  # observed runtime from a prior process is stale
+    await supervisor.boot_reset()  # observed runtime from a prior process is stale
     app.state.supervisor = supervisor
     reconciler = asyncio.create_task(supervisor.run_forever())
     try:
