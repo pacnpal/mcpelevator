@@ -236,7 +236,9 @@ def _docker_run_index(tokens: list[str]) -> Optional[int]:
     if not tokens or "run" not in tokens:
         return None
     first = tokens[0]
-    if first == "run" or first == "container" or first.startswith("-"):
+    # ``first`` may be a non-string if a hand-edited/legacy row stored a bad JSON arg — guard the
+    # ``startswith`` so the boot migration (which calls this outside its try/except) can't crash.
+    if first == "run" or first == "container" or (isinstance(first, str) and first.startswith("-")):
         return tokens.index("run") + 1
     return None
 
@@ -292,6 +294,12 @@ def normalize_docker(
     env = dict(env or {})
     warnings: list[str] = []
     tokens = list(args or [])
+    # ``args`` can carry non-string items from a pasted/legacy JSON config (e.g. ["run", 123, …]);
+    # the token-walk below calls string methods, so reject a malformed list as a ValueError rather
+    # than letting an AttributeError escape. Callers treat ValueError as "skip/leave untouched" —
+    # importantly the boot migration, so one bad stored row can't abort startup.
+    if any(not isinstance(t, str) for t in tokens):
+        raise ValueError("a docker server's args must all be strings")
 
     # Treat this as a full `docker run …` invocation only when the command actually invokes the
     # docker CLI (bare name or a filesystem path — see _is_docker_launcher) AND the args are a
@@ -690,7 +698,14 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         # ungated (fix a broken image/env offline); enabling a disabled row is gated in
         # set_enabled; creating enabled is gated in create_server.
         if server.enabled and not was_docker:
-            _require_docker_enabled(session)
+            try:
+                _require_docker_enabled(session)
+            except ValueError:
+                # The tracked ORM row is already mutated (reclassified/canonicalized) above. Roll
+                # back so the DENIED conversion can't be flushed by a later commit on this same
+                # session, which would persist runner=docker on a still-enabled row.
+                session.rollback()
+                raise
     server.config_hash = compute_hash(server)  # recompute -> drives idempotent reconcile
     return repo.save_server(session, server)
 

@@ -630,6 +630,44 @@ def test_update_enabled_conversion_to_docker_is_gated(session):
     assert updated.runner == "docker" and updated.enabled is True
 
 
+def test_update_denied_conversion_leaves_no_dirty_state(session):
+    # Codex: the gate raises AFTER the tracked ORM row was reclassified/canonicalized, so a later
+    # commit on the same session could flush the DENIED conversion. update_server rolls back on
+    # denial — re-reading the row (same session) must still show the original runner.
+    s = service.create_server(
+        session, name="conv3", runner="command", command="echo", args=["hi"], enabled=True,
+    )
+    with pytest.raises(ValueError):
+        service.update_server(session, s.id, {"runner": "docker", "command": "img:1", "args": []})
+    reloaded = repo.get_server(session, s.id)
+    assert reloaded.runner == "command" and reloaded.command == "echo"
+    # A subsequent commit on the same session must not resurrect the denied conversion.
+    session.commit()
+    assert repo.get_server(session, s.id).runner == "command"
+
+
+def test_normalize_docker_rejects_non_string_arg_tokens():
+    # Codex: a pasted/legacy JSON config can carry a non-string arg (e.g. ["run", 123, "img"]).
+    # The parser must raise ValueError (callers skip/leave-untouched) rather than AttributeError.
+    with pytest.raises(ValueError):
+        service.normalize_docker("docker", ["run", 123, "img"], {})
+
+
+def test_normalize_docker_servers_skips_row_with_bad_arg_token(session):
+    # A single legacy docker row with a non-string arg must NOT abort the boot migration — it is
+    # left untouched (ValueError swallowed), and other rows still migrate.
+    _enable_docker(session)
+    bad = service.create_server(
+        session, name="bad", runner="docker", command="img:1", args=[], env={}, enabled=False,
+    )
+    row = repo.get_server(session, bad.id)
+    row.command, row.args = "docker", ["run", 123, "img"]  # non-string token
+    repo.save_server(session, row)
+    # Must not raise (no AttributeError); the malformed row is simply skipped.
+    service.normalize_docker_servers(session)
+    assert repo.get_server(session, bad.id).command == "docker"  # untouched
+
+
 def test_update_disabled_conversion_to_docker_not_gated(session):
     # A DISABLED server can be converted to docker while the runner is off (reviewable); the gate
     # bites on enable, not on the edit.

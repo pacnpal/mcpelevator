@@ -182,8 +182,14 @@ class Supervisor:
                     last_error=unit.last_error, tools=unit.tools,
                 )
             elif start_error is not None:
-                # _start raised before creating a unit (port exhaustion / max_running).
-                self._write_runtime(server_id, state="failed", last_error=start_error)
+                # _start raised before creating a unit (port exhaustion / max_running). On the
+                # restart path _stop() doesn't write runtime, so the row still carries the prior
+                # RUNNING pid/port — clear them here (matching the other failure writes) so a
+                # failed server never advertises a pid/port it no longer owns.
+                self._write_runtime(
+                    server_id, state="failed", pid=None, port=None,
+                    last_error=start_error, tools=[],
+                )
 
     def _write_runtime(self, server_id: str, **fields) -> None:
         """Persist one runtime row in its own short-lived session/transaction, so a slow
