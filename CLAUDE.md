@@ -29,7 +29,10 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   a loopback port hosting a FastMCP proxy of the stdio command (or an upstream HTTP/SSE URL),
   fault-isolated with a real PID and logs.
 - **Runners** (`runners/`): `npx`, `uvx`, `command`, `remote` (proxy an already-remote MCP URL),
-  and `docker` (opt-in, root-equivalent, milestone M7).
+  and `docker` (image-packaged servers — opt-in + root-equivalent behind the `docker_runner`
+  setting). Each runner is a pure `Server -> ProcessSpec` builder; `docker` stores the canonical
+  image+container-args+env shape and synthesizes a hardened `docker run` (the bridge scrubs the
+  child env for docker units so a `-e KEY` passthrough can't reach the control plane's secrets).
 - **Auth** (`auth/`): two independent layers per request — a Host/Origin allowlist middleware
   (DNS-rebinding defense) plus pluggable per-server bearer auth on `/s` and control-plane bearer
   auth that gates the sensitive `/api` routers only when enforcement is on (default `auto`: when

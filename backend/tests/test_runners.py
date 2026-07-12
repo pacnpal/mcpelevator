@@ -38,9 +38,55 @@ def test_known_runners_build(runner):
     assert spec.command == "x"
 
 
-def test_docker_runner_is_gated():
-    with pytest.raises(NotImplementedError):
-        build_spec(_server(runner="docker", command="some/image"))
+def test_docker_runner_builds_hardened_spec():
+    s = _server(
+        runner="docker",
+        command="ghcr.io/github/github-mcp-server",  # image ref
+        args=[],  # container args
+        env={"GITHUB_PERSONAL_ACCESS_TOKEN": "x"},
+    )
+    spec = build_spec(s)
+    assert spec.command == "docker"
+    assert spec.minimal_env is True  # docker child gets a scrubbed env (no elevator secrets)
+    assert spec.env == {"GITHUB_PERSONAL_ACCESS_TOKEN": "x"}
+    a = spec.args
+    # hardened, cleanup, and reaping flags are present
+    for flag in ("run", "-i", "--rm", "--init", "--cap-drop", "--security-opt", "--pids-limit"):
+        assert flag in a
+    assert "no-new-privileges" in a
+    # secret passed by NAME only — never as KEY=value (keeps it out of argv/ps/inspect)
+    assert ["-e", "GITHUB_PERSONAL_ACCESS_TOKEN"] == a[a.index("-e"):a.index("-e") + 2]
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN=x" not in a
+    # image is last (before any container args), the container gets no args here
+    assert a[-1] == "ghcr.io/github/github-mcp-server"
+    # deterministic
+    assert build_spec(s).args == a
+
+
+def test_docker_runner_appends_container_args_after_image():
+    s = _server(runner="docker", command="img:1", args=["--transport", "stdio"], env={})
+    a = build_spec(s).args
+    assert a[-3:] == ["img:1", "--transport", "stdio"]
+
+
+def test_docker_child_env_strips_proxy_and_reserved_vars(monkeypatch):
+    # The docker CLI child gets: operator DOCKER_* + PATH/HOME from the bridge env, plus the
+    # server's NON-reserved vars — but NOT a server-declared proxy var (it would reroute the
+    # control-plane's own daemon request on a TCP DOCKER_HOST) nor a server DOCKER_* override.
+    from app.bridge.host import _child_env
+
+    monkeypatch.setenv("DOCKER_HOST", "tcp://dind:2375")
+    monkeypatch.setenv("HTTP_PROXY", "http://operator-proxy:3128")  # operator's own — must NOT leak to CLI
+    monkeypatch.setenv("MCPE_ADMIN_TOKEN", "secret")  # elevator secret — must never reach the child
+    spec = {
+        "minimal_env": True,
+        "env": {"GITHUB_TOKEN": "x", "HTTP_PROXY": "http://evil:3128", "DOCKER_HOST": "tcp://evil"},
+    }
+    child = _child_env(spec)
+    assert child["GITHUB_TOKEN"] == "x"          # normal server var kept
+    assert child["DOCKER_HOST"] == "tcp://dind:2375"  # operator's DOCKER_HOST wins, not the server's
+    assert "HTTP_PROXY" not in child             # neither the server's NOR the operator's proxy reaches the CLI
+    assert "MCPE_ADMIN_TOKEN" not in child       # elevator secret never leaks
 
 
 def test_remote_runner_maps_url_transport_headers():

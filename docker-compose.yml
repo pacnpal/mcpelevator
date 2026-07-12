@@ -33,9 +33,20 @@ services:
       - mcpe
     volumes:
       - mcpe-data:/data
-      # Opt-in sibling Docker (runner=docker, M7). This is ROOT-EQUIVALENT on the
-      # host — enable only deliberately:
+      # --- Docker runner (opt-in) ------------------------------------------------------
+      # The `docker` runner launches MCP servers packaged as images. It is OFF by default
+      # (Settings → "Docker runner", or MCPE_DOCKER_RUNNER=true below) and the CLI is inert
+      # until enabled. Pick ONE isolation model:
+      #
+      # (A) SIBLING containers (simplest) — mount the host's Docker socket. This is
+      #     ROOT-EQUIVALENT on the host (anything that can talk to the socket is host root),
+      #     so enable it only deliberately. Uncomment:
       # - /var/run/docker.sock:/var/run/docker.sock
+      #
+      # (B) ISOLATED dind sidecar — leave the socket UNMOUNTED and instead run the `dind`
+      #     service below (`docker compose --profile docker-dind up`), which points this
+      #     container at a private daemon via DOCKER_HOST. Stronger host isolation, at the
+      #     cost of a privileged sidecar and no host image-cache sharing.
     environment:
       - MCPE_HOST=0.0.0.0
       # The container binds 0.0.0.0, so a host-loopback request reaches it from the
@@ -51,6 +62,60 @@ services:
       # - MCPE_ALLOW_PRIVATE_LAN=true
       # Absolute URL clients use to reach this instance (behind a tunnel/proxy):
       # - MCPE_PUBLIC_BASE_URL=https://mcp.example.com
+      # Enable the (root-equivalent) docker runner on first boot without the UI. Pair with
+      # ONE of the isolation models above.
+      # - MCPE_DOCKER_RUNNER=true
+      # Isolation model (B): target the dind sidecar's daemon instead of a host socket.
+      # Uncomment together with the `dind` service below and run `--profile docker-dind`.
+      # - DOCKER_HOST=tcp://dind:2375
+    # Wait for the dind daemon to be accepting connections before this app reconciles, so an
+    # already-enabled docker server doesn't fail its first start against a not-yet-ready
+    # daemon (a failed unit isn't auto-retried). Only takes effect with the docker-dind profile
+    # (dind doesn't exist otherwise); harmless in the default single-service setup.
+    depends_on:
+      dind:
+        condition: service_healthy
+        required: false
+    restart: unless-stopped
+
+  # --- Isolated Docker-in-Docker sidecar (isolation model B) -----------------------------
+  # Only starts with `docker compose --profile docker-dind up`. Runs a private Docker daemon
+  # so docker-runner containers never touch the HOST daemon. `privileged: true` is required
+  # by dind (its own risk, but confined to this sidecar).
+  #
+  # SECURITY NOTE: 2375 is plaintext + unauthenticated. It's unpublished (no host port), so no
+  # OFF-HOST client can reach it — but it is NOT isolated within the project: ANY container on
+  # the `mcpe` network can reach `tcp://dind:2375` (Compose resolves `dind` by service name),
+  # which is exactly how the mcpelevator service connects. That includes any sidecar you attach
+  # to this network AND the MCP container images dind itself launches (via its bridge gateway).
+  # So do NOT put an untrusted sidecar on `mcpe` believing dind is walled off. A malicious image
+  # could commandeer the dind daemon (spawn privileged containers, read co-tenant containers).
+  # Host blast radius stays confined to this sidecar, but treat images sharing one dind as
+  # MUTUALLY-TRUSTING — the runner owns all `docker run` options (a server's args are the
+  # container's own args, not run flags), so there is no per-server `--network`/`--read-only`
+  # knob to isolate one image. For stronger isolation, front dind with TLS (2376) instead of
+  # 2375, or run a separate dind per trust domain.
+  dind:
+    image: docker:29-dind
+    profiles: ["docker-dind"]
+    privileged: true
+    # The dind entrypoint auto-generates TLS certs and forces the daemon onto 2376 whenever
+    # DOCKER_TLS_CERTDIR is non-empty (it defaults to /certs in modern images). Clear it so the
+    # plaintext 2375 endpoint below is the ONLY listener — otherwise DOCKER_HOST=tcp://dind:2375
+    # would hit a daemon that never bound 2375.
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--tls=false"]
+    networks:
+      - mcpe
+    volumes:
+      - mcpe-dind:/var/lib/docker
+    healthcheck:
+      test: ["CMD", "docker", "-H", "tcp://127.0.0.1:2375", "info"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
 
 networks:
@@ -65,3 +130,4 @@ networks:
 
 volumes:
   mcpe-data:
+  mcpe-dind:  # dind sidecar's image/layer store (isolation model B only)

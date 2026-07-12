@@ -229,6 +229,46 @@ def test_official_detail_resolves_drafts(monkeypatch):
         assert draft["args"] == ["-y", "@me/memory@1.0.0"]
 
 
+_OCI_DETAIL = {
+    "server": {
+        "name": "io.example/gh",
+        "title": "GH",
+        "version": "1.0.0",
+        "packages": [
+            {"registryType": "oci", "identifier": "ghcr.io/x/y", "version": "1.0.0",
+             "transport": {"type": "stdio"}}
+        ],
+    },
+    "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+}
+
+
+def test_official_detail_oci_gated_off_by_default(monkeypatch):
+    # OCI maps to the docker runner, but the runner is opt-in + root-equivalent: with the
+    # setting off (default), the draft is surfaced non-installable with a Settings pointer.
+    _stub(monkeypatch, {"/versions/": _OCI_DETAIL})
+    with TestClient(app) as c:
+        body = c.get("/api/catalog/server", params={"id": "io.example/gh"}, headers=LOOPBACK).json()
+        draft = body["drafts"][0]
+        assert draft["runner"] == "docker"
+        assert draft["command"] == "ghcr.io/x/y:1.0.0"
+        assert draft["installable"] is False
+        assert "Settings" in (draft["reason"] or "")
+
+
+def test_official_detail_oci_installable_when_docker_enabled(monkeypatch):
+    _stub(monkeypatch, {"/versions/": _OCI_DETAIL})
+    with TestClient(app) as c:
+        assert c.patch("/api/settings", json={"docker_runner": True}, headers=LOOPBACK).status_code == 200
+        try:
+            body = c.get("/api/catalog/server", params={"id": "io.example/gh"}, headers=LOOPBACK).json()
+            draft = body["drafts"][0]
+            assert draft["runner"] == "docker"
+            assert draft["installable"] is True
+        finally:
+            c.patch("/api/settings", json={"docker_runner": False}, headers=LOOPBACK)
+
+
 _OFFICIAL_VERSIONS = {
     "servers": [
         {"server": {"name": "io.x/srv", "version": "1.0.1"},

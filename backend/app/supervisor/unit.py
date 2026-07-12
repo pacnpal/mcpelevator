@@ -15,6 +15,7 @@ npx/uvx package cache, so the first real client call is fast.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -26,6 +27,7 @@ from fastmcp import Client
 from app.config import get_settings
 from app.db.models import Server
 from app.runners import build_spec
+from app.runners.docker import DOCKER_BIN, server_label
 from app.supervisor.logbuffer import LogBuffer
 
 
@@ -53,6 +55,7 @@ class ServerUnit:
         self.slug = server.slug
         self.name = server.name
         self.config_hash = server.config_hash
+        self.runner = server.runner
         self.spec = build_spec(server)
         self.exposure = {"mcp_http": server.mcp_http, "rest_openapi": server.rest_openapi}
 
@@ -79,6 +82,7 @@ class ServerUnit:
             "env": self.spec.env,
             "cwd": self.spec.cwd,
             "transport": self.spec.transport,
+            "minimal_env": self.spec.minimal_env,
             "name": self.name,
             **self.exposure,
         }
@@ -116,8 +120,51 @@ class ServerUnit:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
+        if self.runner == "docker":
+            await self._reap_container()
         self.state = "stopped"
         self.port = None
+
+    async def _reap_container(self) -> None:
+        """Best-effort ``docker rm -f`` for every container this server launched.
+
+        The graceful path already cleans up (SIGTERM to the group → docker CLI forwards it
+        → container stops → ``--rm`` removes). This backstops the SIGKILL path, where the
+        CLI was killed before it could tell the daemon to stop, leaving the container
+        running. Reaping is by LABEL (not name), so it also covers the case where FastMCP
+        opened more than one upstream container for this server. Fire-and-forget with its
+        OWN short timeout so a slow/wedged daemon can't stall stop()/reconcile; every
+        failure mode is ignored (the boot label-sweep is the final backstop)."""
+        label = server_label(self.id)
+        try:
+            listed = await asyncio.create_subprocess_exec(
+                DOCKER_BIN, "ps", "-aq", "--filter", f"label={label}",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, OSError):
+            return  # docker CLI not present — nothing we can do here
+        try:
+            out, _ = await asyncio.wait_for(listed.communicate(), timeout=8)
+        except asyncio.TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                listed.kill()
+            await listed.wait()  # reap the killed child so it can't linger as a zombie
+            return
+        ids = out.decode(errors="replace").split()
+        if not ids:
+            return
+        try:
+            rm = await asyncio.create_subprocess_exec(
+                DOCKER_BIN, "rm", "-f", *ids,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(rm.wait(), timeout=8)
+        except (FileNotFoundError, OSError):
+            return
+        except asyncio.TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                rm.kill()
+            await rm.wait()  # reap the killed child
 
     # --- background tasks ------------------------------------------------ #
 
@@ -134,6 +181,11 @@ class ServerUnit:
         elif self.state == "starting":
             self.state = "failed"
             self.last_error = f"bridge exited rc={rc}"
+        # A docker bridge that crashed may have left a container running (a stdio child the
+        # bridge's death didn't take down); the M1 reconciler won't restart a failed/unhealthy
+        # unit (config_hash unchanged), so reap here — nothing else would until stop()/delete.
+        if self.runner == "docker" and self.state in ("failed", "unhealthy"):
+            await self._reap_container()
 
     async def _await_ready(self) -> None:
         settings = get_settings()
@@ -158,6 +210,12 @@ class ServerUnit:
         if self.state == "starting":
             self.state = "failed"
             self.last_error = self.last_error or "readiness timeout"
+            # A docker unit that never became ready (bad env/args, dind not up) may have left
+            # a labelled container running while the bridge process stays alive — the M1
+            # reconciler won't restart a failed unit (config_hash unchanged), so nothing else
+            # would reap it. Best-effort reap here (idempotent with stop()).
+            if self.runner == "docker":
+                await self._reap_container()
 
     # --- helpers --------------------------------------------------------- #
 
