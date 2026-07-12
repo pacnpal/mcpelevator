@@ -17,6 +17,7 @@ from app.db import repo
 from app.db.models import RUNNERS, Server
 from app.registry import settings as runtime_settings
 from app.runners import remote as remote_runner
+from app.runners.docker import DOCKER_ENV_ALLOWLIST
 from app.runners.remote import canonical_transport
 from app.util import config_hash, new_id, slugify
 
@@ -218,10 +219,17 @@ def _validate_docker_env(env: dict[str, str]) -> None:
 
     The docker builder emits ``-e KEY`` (name only); a key containing ``=`` or whitespace
     would become ``-e KEY=value`` in the argv (leaking the value into ``ps``/``inspect``) or
-    an invalid child-env name. Reject such keys at the boundary so they never persist."""
+    an invalid child-env name. A key that collides with the bridge's reserved docker
+    connection vars (``DOCKER_HOST`` etc.) would pass the CONTROL daemon endpoint into the
+    untrusted container (name-only ``-e`` reads it from the CLI's own env). Reject both at
+    the boundary so they never persist."""
     for key in env:
         if "=" in key or any(c.isspace() for c in key):
             raise ValueError(f"invalid environment variable name {key!r} for a docker server")
+        if key in DOCKER_ENV_ALLOWLIST:
+            raise ValueError(
+                f"{key!r} is reserved for the docker runner and can't be a container env var"
+            )
 
 
 def _require_docker_enabled(session: Session) -> None:
@@ -264,6 +272,32 @@ def backfill_config_hashes(session: Session) -> int:
         new_hash = compute_hash(server)
         if new_hash != server.config_hash:
             repo.set_config_hash(session, server.id, new_hash)
+            changed += 1
+    return changed
+
+
+def normalize_docker_servers(session: Session) -> int:
+    """Canonicalize legacy docker rows so enabling one launches the right image.
+
+    A prior release stored a docker import verbatim (``command="docker"``,
+    ``args=["run", …]``) because the runner only raised — never canonicalizing to the
+    (image, container_args, env) shape the new builder expects. Enabling such a row would
+    treat ``"docker"`` as the image. Re-run ``normalize_docker`` over every docker row: a
+    legacy row collapses to canonical (and rehashes), a row that's already canonical
+    re-normalizes to itself (no write). Idempotent. Returns the count changed. A row that
+    can't be parsed (no image) is left untouched — enabling it will surface the error."""
+    changed = 0
+    for server in repo.list_servers(session):
+        if server.runner != "docker":
+            continue
+        try:
+            image, args, env, _ = normalize_docker(server.command, server.args, server.env)
+        except ValueError:
+            continue
+        if image != server.command or args != list(server.args or []) or env != dict(server.env or {}):
+            server.command, server.args, server.env, server.cwd = image, args, env, None
+            server.config_hash = compute_hash(server)
+            repo.save_server(session, server)
             changed += 1
     return changed
 

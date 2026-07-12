@@ -132,6 +132,7 @@ async def lifespan(app: FastAPI):
     init_db()
     with Session(get_engine()) as session:
         service.normalize_auth_providers(session)  # canonicalize legacy auth_provider values
+        service.normalize_docker_servers(session)  # canonicalize legacy docker rows before enable
         service.backfill_config_hashes(session)  # rehash upgraded rows -> no spurious restarts
     _bootstrap_private_lan()  # seed LAN access from env before deciding auth enforcement
     _bootstrap_docker_runner()  # seed docker-runner enable from env (headless)

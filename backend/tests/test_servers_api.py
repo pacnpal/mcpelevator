@@ -33,19 +33,12 @@ def test_enable_docker_server_gated_returns_400():
         assert imported.status_code == 201, imported.text
         server_id = imported.json()["created"][0]["id"]
 
-        # Enabling while docker is off must be a 400 with a useful message — not a 500.
-        resp = c.post(f"/api/servers/{server_id}/enable", headers=LOOPBACK)
-        assert resp.status_code == 400, resp.text
-        assert "disabled" in resp.json()["detail"].lower()
-
-        # Turning the runner on lets the same enable succeed.
-        c.patch("/api/settings", json={"docker_runner": True}, headers=LOOPBACK)
         try:
-            ok = c.post(f"/api/servers/{server_id}/enable", headers=LOOPBACK)
-            assert ok.status_code == 200, ok.text
-            assert ok.json()["enabled"] is True
+            # Enabling while docker is off must be a 400 with a useful message — not a 500.
+            # (The docker-on enable path is covered at the service level in test_registry;
+            # we avoid it here so the reconciler never attempts a real container spawn.)
+            resp = c.post(f"/api/servers/{server_id}/enable", headers=LOOPBACK)
+            assert resp.status_code == 400, resp.text
+            assert "disabled" in resp.json()["detail"].lower()
         finally:
-            # Leave global state clean for other tests sharing the app/engine.
-            c.post(f"/api/servers/{server_id}/disable", headers=LOOPBACK)
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
-            c.patch("/api/settings", json={"docker_runner": False}, headers=LOOPBACK)

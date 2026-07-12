@@ -299,6 +299,38 @@ def test_docker_rejects_env_key_with_equals(session):
         )
 
 
+def test_docker_rejects_reserved_env_key(session):
+    # DOCKER_HOST as a container env var would leak the control daemon endpoint — reject it.
+    _enable_docker(session)
+    with pytest.raises(ValueError):
+        service.create_server(
+            session, name="d", runner="docker", command="img:1", args=[],
+            env={"DOCKER_HOST": "tcp://evil:2375"}, enabled=False,
+        )
+
+
+def test_normalize_docker_servers_migrates_legacy_rows(session):
+    # Simulate a legacy row (stored verbatim by the old runner-that-raised): command="docker".
+    _enable_docker(session)
+    s = service.create_server(
+        session, name="legacy", runner="docker", command="img:1", args=[], env={}, enabled=False
+    )
+    # Force the row back into the legacy (non-canonical) shape directly via the repo.
+    row = repo.get_server(session, s.id)
+    row.command, row.args = "docker", ["run", "--rm", "-e", "T", "ghcr.io/x/y"]
+    row.env = {"T": "v"}
+    repo.save_server(session, row)
+
+    changed = service.normalize_docker_servers(session)
+    assert changed == 1
+    migrated = repo.get_server(session, s.id)
+    assert migrated.command == "ghcr.io/x/y"
+    assert migrated.args == []
+    assert migrated.env == {"T": "v"}
+    # Idempotent: a second pass makes no further change.
+    assert service.normalize_docker_servers(session) == 0
+
+
 def test_normalize_docker_does_not_classify_podman():
     # `podman …` must NOT be parsed as a docker invocation (the runner always execs docker).
     image, args, env, _ = service.normalize_docker("podman", ["run", "--rm", "img"], {})

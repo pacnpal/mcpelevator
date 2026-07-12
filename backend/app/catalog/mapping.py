@@ -52,8 +52,12 @@ def pin_identifier(registry_type: str, identifier: str, version: str | None) -> 
     if registry_type == "pypi":
         return f"{identifier}=={version}"
     if registry_type == "oci":
-        # An OCI image is pinned by tag (a digest would use "@sha256:…", but the registry
-        # exposes a version string, so tag it). The docker runner launches "image:tag".
+        # An OCI image is pinned by tag; the docker runner launches "image:tag". If the
+        # identifier already carries a tag (a ":" in the last path segment) or a digest
+        # ("@sha256:…"), it's a complete reference — don't double-tag it into "img:1:1".
+        last_segment = identifier.rsplit("/", 1)[-1]
+        if "@" in identifier or ":" in last_segment:
+            return identifier
         return f"{identifier}:{version}"
     return identifier
 

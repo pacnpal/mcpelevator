@@ -216,6 +216,15 @@ def test_oci_pins_by_tag():
     assert oci["command"] == "ghcr.io/x/y:1.2"
 
 
+def test_oci_does_not_double_tag_already_pinned_identifier():
+    # identifier already carries a tag → don't append version into "img:1.2.3:9".
+    tagged = mapping.package_draft(0, _pkg(registryType="oci", identifier="ghcr.io/x/y:1.2.3", version="9"))
+    assert tagged["command"] == "ghcr.io/x/y:1.2.3"
+    # digest reference is complete too.
+    digest = mapping.package_draft(0, _pkg(registryType="oci", identifier="ghcr.io/x/y@sha256:abc", version="9"))
+    assert digest["command"] == "ghcr.io/x/y@sha256:abc"
+
+
 def test_nuget_not_installable_with_reason():
     nuget = mapping.package_draft(1, _pkg(registryType="nuget", identifier="X.Y"))
     assert nuget["installable"] is False and nuget["reason"]

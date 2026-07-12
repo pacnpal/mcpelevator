@@ -51,6 +51,16 @@ DEFAULT_MEMORY = "1g"  # --memory; generous, but caps a runaway container from O
 # on a fixed name. The label handles reaping without that constraint; Docker auto-names.
 LABEL_KEY = "mcpelevator.server"
 
+# Env vars the bridge controls for a docker child: its own executable resolution (PATH/HOME)
+# and the docker daemon connection (DOCKER_*). SSOT, reused by the bridge (keeps these
+# authoritative for the CLI) and the service layer (rejects them as *container* env — a
+# `-e DOCKER_HOST` would otherwise leak the control daemon endpoint into an untrusted
+# container, and passing PATH/HOME by name is meaningless).
+DOCKER_ENV_ALLOWLIST = (
+    "PATH", "HOME",
+    "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_CONTEXT", "DOCKER_CONFIG",
+)
+
 
 def server_label(server_id: str) -> str:
     """The `label=key=value` selector for a server's containers (SSOT for reaping)."""

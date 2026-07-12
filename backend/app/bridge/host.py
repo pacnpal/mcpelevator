@@ -75,11 +75,9 @@ async def _forward_roots(context) -> list[Root]:
 
 # Environment keys a docker CLI child genuinely needs from the control plane's env when
 # ``minimal_env`` is set. Everything else (MCPE_ADMIN_TOKEN, DB creds, unrelated API keys)
-# is deliberately withheld so a container's ``-e KEY`` passthrough can't reach it.
-_DOCKER_ENV_ALLOWLIST = (
-    "PATH", "HOME",
-    "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_CONTEXT", "DOCKER_CONFIG",
-)
+# is deliberately withheld so a container's ``-e KEY`` passthrough can't reach it. SSOT lives
+# in the docker runner (the service layer also rejects these as container env vars).
+from app.runners.docker import DOCKER_ENV_ALLOWLIST as _DOCKER_ENV_ALLOWLIST  # noqa: E402
 
 
 def _child_env(spec: dict) -> dict[str, str]:
