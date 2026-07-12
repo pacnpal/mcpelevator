@@ -17,7 +17,7 @@ from app.db import repo
 from app.db.models import RUNNERS, Server
 from app.registry import settings as runtime_settings
 from app.runners import remote as remote_runner
-from app.runners.docker import is_reserved_docker_env
+from app.runners.docker import is_forbidden_container_env, is_reserved_docker_env
 from app.runners.remote import canonical_transport
 from app.util import config_hash, new_id, slugify
 
@@ -184,6 +184,10 @@ _PLATFORM_WARNING = (
     "--platform is dropped — the docker runner uses the host architecture, so a config pinning a "
     "platform (e.g. linux/amd64 on arm64) may pull the wrong image or fail with exec-format."
 )
+_PULL_WARNING = (
+    "--pull is dropped — the docker runner uses Docker's default pull policy, so a config that set "
+    "--pull always (refreshed tag) or --pull never (offline/reproducible) no longer applies."
+)
 _USER_WARNING = (
     "-u/--user is dropped — the docker runner runs as the image's default user, so a config that "
     "pinned a UID/GID (least-privilege or file permissions) no longer applies."
@@ -203,8 +207,8 @@ def _dropped_flag_warning(flag: str) -> Optional[str]:
     host-side run flag in a pasted config is dropped. Most are benign — they duplicate a
     hardening default or are meaningless under stdio — but a handful silently change intended
     behavior (a host mount, a custom entrypoint, an env-file, a workdir, network isolation, a
-    pinned platform, a pinned user, a read-only rootfs); surface those so the imported server
-    isn't quietly broken or silently weakened."""
+    pinned platform, a pull policy, a pinned user, a read-only rootfs); surface those so the
+    imported server isn't quietly broken or silently weakened."""
     if flag in _DOCKER_MOUNT_FLAGS:
         return _mount_warning(flag)
     if flag == "--entrypoint":
@@ -217,6 +221,8 @@ def _dropped_flag_warning(flag: str) -> Optional[str]:
         return _NETWORK_WARNING
     if flag == "--platform":
         return _PLATFORM_WARNING
+    if flag == "--pull":
+        return _PULL_WARNING
     if flag in _USER_FLAGS:
         return _USER_WARNING
     if flag == "--read-only":
@@ -228,7 +234,7 @@ def _dropped_flag_warning(flag: str) -> Optional[str]:
 # these by arity is what lets us find the real `run` subcommand even when a flag's value is itself
 # the word "run" (e.g. a one-off context named "run": `docker --context run run img`).
 _DOCKER_GLOBAL_VALUE_FLAGS = frozenset({
-    "-H", "--host", "-l", "--log-level", "--context", "--config",
+    "-H", "--host", "-l", "--log-level", "-c", "--context", "--config",
     "--tlscacert", "--tlscert", "--tlskey",
 })
 
@@ -269,18 +275,26 @@ def _docker_run_index(tokens: list[str]) -> Optional[int]:
 # Global CLI flags (before `run`) that RETARGET which Docker daemon the command talks to. The
 # runner always uses mcpelevator's own configured daemon (DOCKER_HOST), so these are dropped —
 # but silently switching daemons is exactly the kind of change to surface for review.
-_DAEMON_SELECT_FLAGS = frozenset({"-H", "--host", "--context"})
+_DAEMON_SELECT_FLAGS = frozenset({"-H", "--host", "-c", "--context"})
 _DAEMON_WARNING = (
-    "a daemon-selection flag (--context/-H/--host) before `run` is dropped — the docker runner "
+    "a daemon-selection flag (--context/-c/-H/--host) before `run` is dropped — the docker runner "
     "always targets mcpelevator's own configured Docker daemon (DOCKER_HOST), so the server may "
     "run on a different daemon than the pasted config selected."
 )
+# --config selects the CLI config DIRECTORY (which can hold registry credentials); dropping it
+# means a private-image pull falls back to mcpelevator's own docker config and may fail.
+_CONFIG_SELECT_FLAGS = frozenset({"--config"})
+_CONFIG_WARNING = (
+    "--config (a docker CLI config dir) before `run` is dropped — the docker runner uses "
+    "mcpelevator's own docker config, so registry credentials in that config aren't used and a "
+    "private-image pull may fail."
+)
 
 
-def _has_daemon_select_flag(pre_run_tokens: list[str]) -> bool:
-    """True if the tokens before ``run`` include a daemon/context selection flag (exact
-    ``--context prod`` / ``-H tcp://…`` or inline ``--context=prod`` / ``--host=…``)."""
-    return any(tok.split("=", 1)[0] in _DAEMON_SELECT_FLAGS for tok in pre_run_tokens)
+def _pre_run_flag_present(pre_run_tokens: list[str], flags: frozenset[str]) -> bool:
+    """True if the tokens before ``run`` include any of ``flags`` (exact ``--context prod`` /
+    ``-H tcp://…`` or inline ``--context=prod`` / ``--config=…``)."""
+    return any(tok.split("=", 1)[0] in flags for tok in pre_run_tokens)
 
 
 def _capture_env(token: str, env: dict[str, str], warnings: list[str]) -> None:
@@ -337,10 +351,14 @@ def normalize_docker(
         return image, tokens, env, warnings
 
     # Leading global flags (before `run`) are dropped — they configure the CLI/daemon, not the
-    # container. Most are inert, but a daemon/context selector (--context/-H/--host) silently
-    # switches which daemon the server runs on, so warn: the runner always uses our own daemon.
-    if _has_daemon_select_flag(tokens[: run_idx - 1]):
+    # container. Most are inert, but a daemon/context selector (--context/-c/-H/--host) or a
+    # config-dir selector (--config, which can carry registry creds) silently changes behavior,
+    # so warn: the runner always uses mcpelevator's own daemon + docker config.
+    pre_run = tokens[: run_idx - 1]
+    if _pre_run_flag_present(pre_run, _DAEMON_SELECT_FLAGS):
         warnings.append(_DAEMON_WARNING)
+    if _pre_run_flag_present(pre_run, _CONFIG_SELECT_FLAGS):
+        warnings.append(_CONFIG_WARNING)
 
     # Full invocation: start after the `run` subcommand (leading global flags / `container` are
     # dropped — they configure the CLI/daemon, not the container), then token-walk the run flags.
@@ -431,6 +449,11 @@ def _validate_docker_env(env: dict[str, str]) -> None:
             raise ValueError(
                 f"{key!r} is reserved for the docker runner and can't be a container env var"
             )
+        if is_forbidden_container_env(key):  # a Go proxy var (is_reserved handled just above)
+            raise ValueError(
+                f"{key!r} can't be a docker container env var: it would alter the docker CLI's own "
+                f"HTTP proxy — use the docker CLI's `proxies` config to proxy launched containers"
+            )
 
 
 def _validate_docker_image(image: str) -> None:
@@ -489,12 +512,12 @@ def backfill_config_hashes(session: Session) -> int:
 
 
 def _scrub_docker_env(env: dict[str, str]) -> dict[str, str]:
-    """Drop env keys that ``_validate_docker_env`` would reject (malformed names, or the
-    bridge's reserved DOCKER_*/PATH connection vars). Used by the boot migration, which
-    can't raise on a legacy row the way create/update can."""
+    """Drop env keys that ``_validate_docker_env`` would reject (malformed names, the bridge's
+    reserved DOCKER_*/PATH connection vars, or a Go proxy var). Used by the boot migration,
+    which can't raise on a legacy row the way create/update can."""
     return {
         k: v for k, v in env.items()
-        if "=" not in k and not any(c.isspace() for c in k) and not is_reserved_docker_env(k)
+        if "=" not in k and not any(c.isspace() for c in k) and not is_forbidden_container_env(k)
     }
 
 

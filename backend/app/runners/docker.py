@@ -71,8 +71,28 @@ def is_reserved_docker_env(key: str) -> bool:
     Covers the connection/exec allowlist (``PATH``/``HOME``/``DOCKER_HOST``…) AND every other
     ``DOCKER_*`` CLI variable (``DOCKER_API_VERSION``, ``DOCKER_DEFAULT_PLATFORM``,
     ``DOCKER_CUSTOM_HEADERS``, …). SSOT reused by the service (rejects/scrubs these as container
-    env), the builder (defensive skip), and the bridge (keeps them out of the container)."""
+    env), the builder (defensive skip), and the bridge (keeps them out of the container).
+
+    This is the NARROW set the bridge INHERITS from the operator's env into the CLI. The broader
+    "a container must not set this" set is :func:`is_forbidden_container_env` (adds proxy vars)."""
     return key in DOCKER_ENV_ALLOWLIST or key.startswith("DOCKER_")
+
+
+# Go proxy vars (either case) the docker CLI itself honors for ITS OWN HTTP requests. With a TCP
+# ``DOCKER_HOST`` (a dind sidecar), a container-declared ``HTTP_PROXY`` etc. landing in the CLI's
+# environment could reroute/break the control-plane's own daemon API call. So a container must not
+# set them, and — unlike ``DOCKER_*`` — they are NOT inherited from the operator's env into the CLI
+# either (that could break the CLI→dind connection). Proxy a container via the docker CLI's own
+# ``proxies`` config instead (see docs/security.md).
+_DOCKER_PROXY_ENV = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "FTP_PROXY"})
+
+
+def is_forbidden_container_env(key: str) -> bool:
+    """True for an env name a docker CONTAINER must not set because the docker CLI would consume
+    it. Superset of :func:`is_reserved_docker_env` that also covers the Go proxy vars
+    (case-insensitive). Used to REJECT (service), SKIP (builder ``-e``), and STRIP (bridge) these
+    keys from anything a container config supplies."""
+    return is_reserved_docker_env(key) or key.upper() in _DOCKER_PROXY_ENV
 
 
 def server_label(server_id: str) -> str:
@@ -96,7 +116,7 @@ def build(server: Server) -> ProcessSpec:
     # argv and a container can't receive/alter the CLI's own vars — the service layer already
     # rejects these, this guards a legacy/hand-edited row.
     for key in env:
-        if "=" in key or any(c.isspace() for c in key) or is_reserved_docker_env(key):
+        if "=" in key or any(c.isspace() for c in key) or is_forbidden_container_env(key):
             continue
         args += ["-e", key]
     # ``--`` terminates flag parsing: everything after it is positional (image, then the

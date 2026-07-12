@@ -69,6 +69,26 @@ def test_docker_runner_appends_container_args_after_image():
     assert a[-3:] == ["img:1", "--transport", "stdio"]
 
 
+def test_docker_child_env_strips_proxy_and_reserved_vars(monkeypatch):
+    # The docker CLI child gets: operator DOCKER_* + PATH/HOME from the bridge env, plus the
+    # server's NON-reserved vars — but NOT a server-declared proxy var (it would reroute the
+    # control-plane's own daemon request on a TCP DOCKER_HOST) nor a server DOCKER_* override.
+    from app.bridge.host import _child_env
+
+    monkeypatch.setenv("DOCKER_HOST", "tcp://dind:2375")
+    monkeypatch.setenv("HTTP_PROXY", "http://operator-proxy:3128")  # operator's own — must NOT leak to CLI
+    monkeypatch.setenv("MCPE_ADMIN_TOKEN", "secret")  # elevator secret — must never reach the child
+    spec = {
+        "minimal_env": True,
+        "env": {"GITHUB_TOKEN": "x", "HTTP_PROXY": "http://evil:3128", "DOCKER_HOST": "tcp://evil"},
+    }
+    child = _child_env(spec)
+    assert child["GITHUB_TOKEN"] == "x"          # normal server var kept
+    assert child["DOCKER_HOST"] == "tcp://dind:2375"  # operator's DOCKER_HOST wins, not the server's
+    assert "HTTP_PROXY" not in child             # neither the server's NOR the operator's proxy reaches the CLI
+    assert "MCPE_ADMIN_TOKEN" not in child       # elevator secret never leaks
+
+
 def test_remote_runner_maps_url_transport_headers():
     s = _server(
         runner="remote",

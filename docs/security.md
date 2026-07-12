@@ -115,12 +115,14 @@ exposure to daemon-holders, it doesn't hide the value from them); and the bridge
 docker child a **minimal env** (only
 `PATH/HOME/DOCKER_*` plus the server's declared vars), so a `-e KEY` passthrough can never
 reach the control plane's own secrets (`MCPE_ADMIN_TOKEN`, DB creds); a container also can't
-set a `DOCKER_*`/reserved env name (rejected at create and stripped at launch) that would
-retarget or alter the CLI's own daemon request. (Caveat: if the operator configures a Docker
-CLI **config with `proxies`** in the mcpelevator container — e.g. a corporate proxy — Docker
-injects those proxy vars into every launched container; that's a Docker CLI behavior outside
-mcpelevator's env handling. Avoid putting proxy config in the container if launched images are
-untrusted.) Each container carries an
+set a `DOCKER_*`/reserved env name — nor a **Go proxy var** (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`/…)
+— as a container env (rejected at create and stripped at launch): either would retarget or alter
+the CLI's own daemon request (a proxy var would reroute the control-plane's daemon API call on a
+TCP `DOCKER_HOST`/dind). Those proxy vars are also NOT inherited from the operator's env into the
+CLI, so an operator `HTTP_PROXY` (set for npm/uv) can't break the CLI→dind connection. (To proxy a
+launched container, use the Docker CLI **config with `proxies`** in the mcpelevator container — a
+Docker CLI behavior outside mcpelevator's env handling; avoid it if launched images are untrusted,
+since Docker injects those proxy vars into every launched container.) Each container carries an
 `mcpelevator.server=<id>` label (Docker assigns the name) — that label is the sole cleanup
 handle: the unit reaps its containers by label on stop (fire-and-forget `docker rm -f`, outside
 the stop grace) and the supervisor sweeps labelled orphans (scoped to this instance's server

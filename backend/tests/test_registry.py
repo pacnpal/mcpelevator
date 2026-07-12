@@ -661,6 +661,37 @@ def test_normalize_docker_servers_gates_non_run_docker_launcher(session):
     assert repo.get_server(session, s.id).runner == "docker"  # now gated by the supervisor
 
 
+def test_normalize_docker_parses_short_context_flag_before_run():
+    # Codex: `-c` is the short form of the global `--context`; it must be walked as a global value
+    # flag so the real `run` subcommand (and image) is found, and it warns (daemon selection).
+    image, args, _, warnings = service.normalize_docker(
+        "docker", ["-c", "prod", "run", "ghcr.io/x/y"], {}
+    )
+    assert image == "ghcr.io/x/y" and args == []
+    assert any("daemon" in w for w in warnings)
+
+
+def test_normalize_docker_warns_on_dropped_config_and_pull():
+    # Codex: --config (registry-cred config dir, pre-run) and --pull (pull policy) are dropped;
+    # both silently change behavior, so both must surface a review warning.
+    _, _, _, w1 = service.normalize_docker("docker", ["--config", "/run/auth", "run", "img"], {})
+    assert any("config" in w for w in w1)
+    _, _, _, w2 = service.normalize_docker("docker", ["run", "--pull", "always", "img"], {})
+    assert any("pull" in w for w in w2)
+
+
+def test_docker_rejects_proxy_env_key(session):
+    # Codex: a container-declared proxy var would land in the docker CLI's own env and could
+    # reroute the control-plane's daemon request on a TCP DOCKER_HOST — reject it (both cases).
+    _enable_docker(session)
+    for bad in ("HTTP_PROXY", "https_proxy", "NO_PROXY", "ALL_PROXY"):
+        with pytest.raises(ValueError):
+            service.create_server(
+                session, name="d", runner="docker", command="img:1", args=[],
+                env={bad: "http://evil:3128"}, enabled=False,
+            )
+
+
 def test_normalize_docker_finds_run_when_global_flag_value_is_run():
     # Codex: a global flag whose VALUE is literally "run" (e.g. a context named "run") must not be
     # mistaken for the `run` subcommand. Walk global flags by arity, then the real subcommand.
