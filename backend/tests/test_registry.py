@@ -592,6 +592,20 @@ def test_normalize_docker_warns_on_dropped_workdir_network_platform():
     assert any("network" in w for w in w2)
 
 
+def test_normalize_docker_warns_on_dropped_daemon_selection():
+    # Codex: a daemon/context selector before `run` (--context/-H/--host) is dropped — the runner
+    # always targets mcpelevator's own daemon — so enabling would run on a different daemon than
+    # the pasted config chose. Warn (both separated and inline spellings).
+    for pre in (["--context", "prod"], ["-H", "tcp://daemon:2375"], ["--host", "tcp://d"]):
+        _, _, _, warnings = service.normalize_docker("docker", [*pre, "run", "img"], {})
+        assert any("daemon" in w for w in warnings), (pre, warnings)
+    _, _, _, w2 = service.normalize_docker("docker", ["--context=prod", "run", "img"], {})
+    assert any("daemon" in w for w in w2)
+    # A normal invocation with no daemon selector must NOT warn about daemons.
+    _, _, _, w3 = service.normalize_docker("docker", ["run", "--rm", "img"], {})
+    assert not any("daemon" in w for w in w3)
+
+
 def test_normalize_docker_warns_on_dropped_read_only():
     # --read-only is a BOOLEAN flag (no value) taken in the boolean-skip path; dropping it
     # silently weakens a config that hardened the rootfs, so it must still warn.

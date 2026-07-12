@@ -241,6 +241,23 @@ def _docker_run_index(tokens: list[str]) -> Optional[int]:
     return None
 
 
+# Global CLI flags (before `run`) that RETARGET which Docker daemon the command talks to. The
+# runner always uses mcpelevator's own configured daemon (DOCKER_HOST), so these are dropped —
+# but silently switching daemons is exactly the kind of change to surface for review.
+_DAEMON_SELECT_FLAGS = frozenset({"-H", "--host", "--context"})
+_DAEMON_WARNING = (
+    "a daemon-selection flag (--context/-H/--host) before `run` is dropped — the docker runner "
+    "always targets mcpelevator's own configured Docker daemon (DOCKER_HOST), so the server may "
+    "run on a different daemon than the pasted config selected."
+)
+
+
+def _has_daemon_select_flag(pre_run_tokens: list[str]) -> bool:
+    """True if the tokens before ``run`` include a daemon/context selection flag (exact
+    ``--context prod`` / ``-H tcp://…`` or inline ``--context=prod`` / ``--host=…``)."""
+    return any(tok.split("=", 1)[0] in _DAEMON_SELECT_FLAGS for tok in pre_run_tokens)
+
+
 def _capture_env(token: str, env: dict[str, str], warnings: list[str]) -> None:
     """Fold a ``-e`` argument into the env map.
 
@@ -287,6 +304,12 @@ def normalize_docker(
         if not image:
             raise ValueError("a docker server needs an image reference")
         return image, tokens, env, warnings
+
+    # Leading global flags (before `run`) are dropped — they configure the CLI/daemon, not the
+    # container. Most are inert, but a daemon/context selector (--context/-H/--host) silently
+    # switches which daemon the server runs on, so warn: the runner always uses our own daemon.
+    if _has_daemon_select_flag(tokens[: run_idx - 1]):
+        warnings.append(_DAEMON_WARNING)
 
     # Full invocation: start after the `run` subcommand (leading global flags / `container` are
     # dropped — they configure the CLI/daemon, not the container), then token-walk the run flags.
