@@ -581,7 +581,8 @@ def test_normalize_docker_warns_on_dropped_workdir_network_platform():
     # separated `--flag value` and the inline `--flag=value` spellings).
     for flag, needle in (("-w", "workdir"), ("--workdir", "workdir"),
                          ("--network", "network"), ("--net", "network"),
-                         ("--platform", "platform")):
+                         ("--platform", "platform"),
+                         ("-u", "user"), ("--user", "user")):
         _, _, _, warnings = service.normalize_docker(
             "docker", ["run", flag, "val", "img"], {}
         )
@@ -589,6 +590,55 @@ def test_normalize_docker_warns_on_dropped_workdir_network_platform():
     # inline form
     _, _, _, w2 = service.normalize_docker("docker", ["run", "--network=none", "img"], {})
     assert any("network" in w for w in w2)
+
+
+def test_normalize_docker_warns_on_dropped_read_only():
+    # --read-only is a BOOLEAN flag (no value) taken in the boolean-skip path; dropping it
+    # silently weakens a config that hardened the rootfs, so it must still warn.
+    _, _, _, warnings = service.normalize_docker("docker", ["run", "--read-only", "img"], {})
+    assert any("read-only" in w for w in warnings)
+
+
+def test_update_enabled_conversion_to_docker_is_gated(session):
+    # Codex: converting an already-ENABLED non-docker server to docker while the runner is off
+    # must be refused — PATCH can't disable the row, so it would otherwise start unreviewed the
+    # moment the global docker_runner setting is toggled on.
+    s = service.create_server(
+        session, name="conv", runner="command", command="echo", args=["hi"], enabled=True,
+    )
+    with pytest.raises(ValueError):
+        service.update_server(session, s.id, {"runner": "docker", "command": "img:1", "args": []})
+    # With the runner enabled, the same conversion is allowed.
+    _enable_docker(session)
+    updated = service.update_server(
+        session, s.id, {"runner": "docker", "command": "img:1", "args": []}
+    )
+    assert updated.runner == "docker" and updated.enabled is True
+
+
+def test_update_disabled_conversion_to_docker_not_gated(session):
+    # A DISABLED server can be converted to docker while the runner is off (reviewable); the gate
+    # bites on enable, not on the edit.
+    s = service.create_server(
+        session, name="conv2", runner="command", command="echo", args=["hi"], enabled=False,
+    )
+    updated = service.update_server(session, s.id, {"runner": "docker", "command": "img:1"})
+    assert updated.runner == "docker" and updated.enabled is False
+
+
+def test_update_already_docker_enabled_edit_not_gated(session):
+    # Editing a row that is ALREADY docker + enabled stays ungated even while the runner is off
+    # (fix a broken image/env offline) — only a non-docker -> docker conversion is gated.
+    from app.registry import settings as runtime_settings
+
+    _enable_docker(session)
+    s = service.create_server(
+        session, name="dk", runner="docker", command="img:1", args=[], enabled=False,
+    )
+    service.set_enabled(session, s.id, True)
+    runtime_settings.write(session, {"docker_runner": False})  # turn the runner off
+    updated = service.update_server(session, s.id, {"command": "img:2"})
+    assert updated.command == "img:2" and updated.enabled is True
 
 
 def test_is_docker_launcher_distinguishes_launcher_from_image():

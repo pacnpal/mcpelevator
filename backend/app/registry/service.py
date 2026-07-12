@@ -171,6 +171,7 @@ def _mount_warning(flag: str) -> str:
 # rather than importing a quietly-wrong server.
 _WORKDIR_FLAGS = frozenset({"-w", "--workdir"})
 _NETWORK_FLAGS = frozenset({"--network", "--net"})
+_USER_FLAGS = frozenset({"-u", "--user"})
 _WORKDIR_WARNING = (
     "-w/--workdir is dropped — the docker runner uses the image's own WORKDIR, so a relative "
     "command/entrypoint may run from the wrong directory."
@@ -183,6 +184,16 @@ _PLATFORM_WARNING = (
     "--platform is dropped — the docker runner uses the host architecture, so a config pinning a "
     "platform (e.g. linux/amd64 on arm64) may pull the wrong image or fail with exec-format."
 )
+_USER_WARNING = (
+    "-u/--user is dropped — the docker runner runs as the image's default user, so a config that "
+    "pinned a UID/GID (least-privilege or file permissions) no longer applies."
+)
+# --read-only is a BOOLEAN flag (no value), so it's caught in the boolean-skip path, not the
+# value-flag branch — but dropping it silently weakens a config that hardened the rootfs.
+_READ_ONLY_WARNING = (
+    "--read-only is dropped — the hardened runner leaves the container root filesystem writable "
+    "(Docker's default), so a config that made it read-only no longer does."
+)
 
 
 def _dropped_flag_warning(flag: str) -> Optional[str]:
@@ -192,7 +203,8 @@ def _dropped_flag_warning(flag: str) -> Optional[str]:
     host-side run flag in a pasted config is dropped. Most are benign — they duplicate a
     hardening default or are meaningless under stdio — but a handful silently change intended
     behavior (a host mount, a custom entrypoint, an env-file, a workdir, network isolation, a
-    pinned platform); surface those so the imported server isn't quietly broken."""
+    pinned platform, a pinned user, a read-only rootfs); surface those so the imported server
+    isn't quietly broken or silently weakened."""
     if flag in _DOCKER_MOUNT_FLAGS:
         return _mount_warning(flag)
     if flag == "--entrypoint":
@@ -205,6 +217,10 @@ def _dropped_flag_warning(flag: str) -> Optional[str]:
         return _NETWORK_WARNING
     if flag == "--platform":
         return _PLATFORM_WARNING
+    if flag in _USER_FLAGS:
+        return _USER_WARNING
+    if flag == "--read-only":
+        return _READ_ONLY_WARNING
     return None
 
 
@@ -328,7 +344,12 @@ def normalize_docker(
                     warnings.append(warn)
                 i += 2
                 continue
-            i += 1  # a boolean flag (-i, -t, -it, --rm, --init, …); skip it
+            # A boolean flag (-i, -t, -it, --rm, --init, …); skip it. A few booleans still warn
+            # when dropped changes intended behavior (e.g. --read-only weakens the rootfs).
+            warn = _dropped_flag_warning(tok)
+            if warn:
+                warnings.append(warn)
+            i += 1
             continue
         # First non-flag token is the image; everything after it is the container's args.
         image = tok
@@ -605,6 +626,11 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     server = repo.get_server(session, server_id)
     if server is None:
         raise KeyError(server_id)
+    # Pre-edit runner: converting a NON-docker server INTO a docker one newly grants the
+    # root-equivalent runner, so it must be gated like create/enable. Merely editing a row that
+    # was ALREADY docker is not gated (so a broken image/env can be fixed while the runner is
+    # off). Captured before the mutation/reclassify below changes server.runner.
+    was_docker = server.runner == "docker"
     # slug is identity/routing, not launch config: validated separately and excluded
     # from config_hash, so a rename re-routes the proxy without bouncing the bridge.
     if "slug" in changes:
@@ -634,9 +660,14 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         # Converting a local server (with a cwd) to docker: PATCH drops the form's cwd:null,
         # so clear the now-meaningless working directory here to keep the row canonical.
         server.cwd = None
-        # NB: no enabled-gate here. An already-enabled docker server can be edited even while
-        # the runner is off (so a broken image/env can be fixed) — the supervisor reconcile is
-        # the gate that keeps it from actually running. Enabling is gated in set_enabled.
+        # Gate a non-docker -> docker CONVERSION on an already-ENABLED row. PATCH can't set
+        # enabled=false, so the row stays enabled; without this gate it would start unreviewed
+        # the moment the global docker_runner setting is toggled on (the supervisor marks it
+        # failed only while the setting is off). Editing a row that was already docker stays
+        # ungated (fix a broken image/env offline); enabling a disabled row is gated in
+        # set_enabled; creating enabled is gated in create_server.
+        if server.enabled and not was_docker:
+            _require_docker_enabled(session)
     server.config_hash = compute_hash(server)  # recompute -> drives idempotent reconcile
     return repo.save_server(session, server)
 
