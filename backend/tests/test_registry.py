@@ -335,6 +335,19 @@ def test_docker_build_emits_end_of_options_before_image():
     assert argv[argv.index("--") + 1] == "ghcr.io/x/y"
 
 
+def test_any_local_runner_named_docker_is_gated(session):
+    # A passthrough runner (npx/uvx/command) pointed at the docker CLI must be routed through
+    # the gated docker runner — choosing a different runner string must NOT sidestep the gate,
+    # hardening, or minimal_env. (docker_runner is off by default here.)
+    for rn in ("npx", "uvx", "command"):
+        with pytest.raises(ValueError):
+            service.create_server(
+                session, name=f"x{rn}", runner=rn, command="docker",
+                args=["run", "--privileged", "-v", "/:/host", "alpine"],
+                env={"MCPE_ADMIN_TOKEN": ""}, enabled=True,
+            )
+
+
 def test_command_runner_named_docker_reclassifies_to_docker(session):
     # A `command` runner whose launcher is docker must be routed through the docker runner
     # (gated + hardened), not launched ungated via passthrough.

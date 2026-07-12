@@ -85,6 +85,12 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
 # which launches it verbatim.
 _DOCKER_LAUNCHERS = {"docker", "docker.exe"}
 
+# Runners that execute ``command`` verbatim as a local process (passthrough, no hardening,
+# full env). If any of these is pointed straight at the docker CLI it IS the docker runner and
+# must be routed through it — otherwise it would launch containers ungated/unhardened with the
+# control plane's full environment. (``remote`` is excluded: its command is a URL.)
+_LOCAL_EXEC_RUNNERS = {"npx", "uvx", "command"}
+
 # `docker run` flags that CONSUME the next token as their value (so we skip both). Kept
 # reasonably complete for real MCP configs; an unknown value-taking flag is the accepted
 # edge (it'd be read as a boolean and its value mistaken for the image — rare in practice).
@@ -478,10 +484,11 @@ def create_server(
         raise ValueError(f"unknown runner {runner!r}; must be one of {RUNNERS}")
     if not command.strip():
         raise ValueError("command is required")
-    # A `command` runner whose launcher is actually docker/podman IS the docker runner — route
-    # it through the docker machinery (normalize + validate + gate + hardening + minimal_env)
-    # so it can't launch containers ungated/unhardened with the full control-plane env.
-    if runner == "command" and _launcher_basename(command) in _DOCKER_LAUNCHERS:
+    # A local-exec runner (npx/uvx/command) pointed at the docker CLI IS the docker runner —
+    # route it through the docker machinery (normalize + validate + gate + hardening +
+    # minimal_env) so it can't launch containers ungated/unhardened with the full control-plane
+    # env (choosing a different runner string must not sidestep the root-equivalent gate).
+    if runner in _LOCAL_EXEC_RUNNERS and _launcher_basename(command) in _DOCKER_LAUNCHERS:
         runner = "docker"
     # A remote server reuses command/args for the upstream URL + transport; canonicalize
     # them up front so the persisted row (and config_hash) is deterministic. There is no
@@ -547,9 +554,9 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
             setattr(server, key, value)
     if server.runner not in RUNNERS:
         raise ValueError(f"unknown runner {server.runner!r}")
-    # A `command` runner whose launcher is docker/podman IS the docker runner (see create) —
-    # reclassify so it can't launch containers ungated/unhardened via passthrough.
-    if server.runner == "command" and _launcher_basename(server.command) in _DOCKER_LAUNCHERS:
+    # A local-exec runner (npx/uvx/command) pointed at the docker CLI IS the docker runner (see
+    # create) — reclassify so it can't launch containers ungated/unhardened via passthrough.
+    if server.runner in _LOCAL_EXEC_RUNNERS and _launcher_basename(server.command) in _DOCKER_LAUNCHERS:
         server.runner = "docker"
     if server.runner == "remote":
         server.command, server.args = normalize_remote(server.command, server.args)

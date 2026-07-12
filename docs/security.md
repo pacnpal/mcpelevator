@@ -129,7 +129,12 @@ wedged daemon. Isolation is a deployment choice (sibling host socket vs. an isol
 sidecar via `DOCKER_HOST`); the sibling model hands the host daemon to containers and is
 inherently root-equivalent, which is why the runner is opt-in. Imports create disabled
 servers by default; catalog installs (including OCI) are reviewable drafts gated by the same
-setting. `max_running`, bounded port allocation, process groups, readiness probes, and log
+setting. Resource note: `max_running` bounds concurrent server *units*, not containers — the
+proxy opens a fresh upstream per client session, so a single docker server can spawn one
+memory-capped (`--memory`) container per concurrent session. This is the same fresh-session
+model every runner uses (docker just makes each spawn a heavier container); bound it by
+requiring `bearer` auth on docker servers so only authorized clients can open sessions, and
+by not exposing untrusted images to unauthenticated `/s` traffic. `max_running`, bounded port allocation, process groups, readiness probes, and log
 buffers improve robustness. Remaining risks are expected admin power and supply-chain risk:
 malicious MCP packages inherit the bridge environment and can access container files/network,
 so `MCPE_ADMIN_TOKEN` and upstream secrets should not be left broadly available.
