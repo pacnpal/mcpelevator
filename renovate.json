@@ -9,6 +9,7 @@
   ],
   "timezone": "Etc/UTC",
   "schedule": ["* 0-4 * * *"],
+  "platformAutomerge": false,
   "prConcurrentLimit": 5,
   "prHourlyLimit": 2,
   "labels": ["dependencies"],

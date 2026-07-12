@@ -33,7 +33,9 @@ jobs:
           python-version: "3.14"
           enable-cache: true
       - name: Sync dependencies (with dev extras)
-        run: uv sync --extra dev --frozen
+        # --locked asserts uv.lock is in sync with pyproject.toml (fails on a
+        # stale lockfile), enforcing the repo's lockfile-driven convention.
+        run: uv sync --extra dev --locked
       - name: Run tests
         run: uv run pytest -q
 
@@ -57,3 +59,5 @@ jobs:
         run: npm run check
       - name: Run tests
         run: npm run test
+      - name: Production build
+        run: npm run build
