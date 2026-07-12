@@ -486,20 +486,25 @@ def normalize_docker_servers(session: Session) -> int:
         imports slipped through as generic passthrough servers that would bypass the docker gate +
         hardening. An enabled ``runner="npx"`` row with ``command="/usr/bin/docker"`` would otherwise
         never hit the ``sv.runner == "docker"`` reconcile gate and launch ungated with the full env.
+    ANY local-exec row whose command is the docker CLI is converted — not only a recognized
+    ``docker run`` (matching create/update, which reclassify on the launcher alone). A row like
+    ``command="/usr/bin/docker", args=["compose", "run", …]`` isn't a supported ``docker run``, but
+    leaving it as a ``command`` runner would let it talk to the daemon with the full environment
+    while the gate is off; converting it to ``runner="docker"`` gates it (it then fails to launch a
+    real image, which is correct — that shape was never a working MCP server).
     Both are re-normalized to the canonical (image, container_args, env) shape, converted to
     ``runner="docker"``, and have reserved/malformed env keys scrubbed. A row that's already
     canonical re-normalizes to itself (no write). Idempotent. Returns the count changed. A
     row that can't be parsed (no image) is left untouched — enabling it surfaces the error."""
     changed = 0
     for server in repo.list_servers(session):
-        looks_docker_run = (
-            _is_docker_launcher(server.command or "")
-            and _docker_run_index(list(server.args or [])) is not None
-        )
+        # Gate on the LAUNCHER alone (not a recognized `docker run`): a docker-CLI command with
+        # any args must be routed through the gated runner, else it runs ungated as passthrough.
+        is_docker_cmd = _is_docker_launcher(server.command or "")
         if server.runner == "docker":
             pass  # always re-normalize existing docker rows (idempotent for canonical ones)
-        elif server.runner in _LOCAL_EXEC_RUNNERS and looks_docker_run:
-            pass  # a docker `run …` invocation misclassified as a passthrough runner — convert it
+        elif server.runner in _LOCAL_EXEC_RUNNERS and is_docker_cmd:
+            pass  # a docker-CLI command misclassified as a passthrough runner — convert + gate it
         else:
             continue
         try:

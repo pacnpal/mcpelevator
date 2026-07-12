@@ -646,6 +646,21 @@ def test_update_denied_conversion_leaves_no_dirty_state(session):
     assert repo.get_server(session, s.id).runner == "command"
 
 
+def test_normalize_docker_servers_gates_non_run_docker_launcher(session):
+    # Codex: a legacy local-exec row whose command is the docker CLI but whose args are NOT a
+    # recognized `docker run` (e.g. `docker compose run`) must still be converted to the gated
+    # docker runner — leaving it as a `command` runner would let it talk to the daemon with the
+    # full environment while docker_runner is off.
+    s = service.create_server(
+        session, name="dc", runner="command", command="echo", args=["hi"], enabled=True,
+    )
+    row = repo.get_server(session, s.id)
+    row.command, row.args = "/usr/bin/docker", ["compose", "run", "mcp"]
+    repo.save_server(session, row)
+    assert service.normalize_docker_servers(session) == 1
+    assert repo.get_server(session, s.id).runner == "docker"  # now gated by the supervisor
+
+
 def test_normalize_docker_rejects_non_string_arg_tokens():
     # Codex: a pasted/legacy JSON config can carry a non-string arg (e.g. ["run", 123, "img"]).
     # The parser must raise ValueError (callers skip/leave-untouched) rather than AttributeError.
