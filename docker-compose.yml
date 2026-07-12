@@ -68,13 +68,29 @@ services:
       # Isolation model (B): target the dind sidecar's daemon instead of a host socket.
       # Uncomment together with the `dind` service below and run `--profile docker-dind`.
       # - DOCKER_HOST=tcp://dind:2375
+    # Wait for the dind daemon to be accepting connections before this app reconciles, so an
+    # already-enabled docker server doesn't fail its first start against a not-yet-ready
+    # daemon (a failed unit isn't auto-retried). Only takes effect with the docker-dind profile
+    # (dind doesn't exist otherwise); harmless in the default single-service setup.
+    depends_on:
+      dind:
+        condition: service_healthy
+        required: false
     restart: unless-stopped
 
   # --- Isolated Docker-in-Docker sidecar (isolation model B) -----------------------------
   # Only starts with `docker compose --profile docker-dind up`. Runs a private Docker daemon
   # so docker-runner containers never touch the HOST daemon. `privileged: true` is required
-  # by dind (its own risk, but confined to this sidecar). Insecure-port 2375 is safe only
-  # because it's reachable solely on the internal compose network below; do NOT publish it.
+  # by dind (its own risk, but confined to this sidecar).
+  #
+  # SECURITY NOTE: 2375 is plaintext + unauthenticated. It's unpublished (internal network
+  # only), so no compose PEER or off-host client can reach it — but the MCP container images
+  # dind itself launches CAN reach the dind daemon on its own bridge gateway. A malicious
+  # image could therefore commandeer the dind daemon (spawn privileged containers, read
+  # co-tenant containers). Host blast radius stays confined to this sidecar, but treat images
+  # sharing one dind as mutually-trusting; for an untrusted image that doesn't need egress,
+  # set its server's args to include `--network none` (the runner leaves networking at
+  # Docker's default). For stronger isolation, front dind with TLS (2376) instead of 2375.
   dind:
     image: docker:27-dind
     profiles: ["docker-dind"]
@@ -84,6 +100,12 @@ services:
       - mcpe
     volumes:
       - mcpe-dind:/var/lib/docker
+    healthcheck:
+      test: ["CMD", "docker", "-H", "tcp://127.0.0.1:2375", "info"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
 
 networks:

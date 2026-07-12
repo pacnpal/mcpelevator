@@ -114,6 +114,11 @@ _DOCKER_VALUE_FLAGS = frozenset({
 })
 
 
+_ENV_FILE_WARNING = (
+    "--env-file is not read — add its variables under Environment so they reach the container."
+)
+
+
 def _capture_env(token: str, env: dict[str, str], warnings: list[str]) -> None:
     """Fold a ``-e`` argument into the env map.
 
@@ -150,19 +155,26 @@ def normalize_docker(
     tokens = list(args or [])
     base = _launcher_basename(command or "")
 
-    # Only treat this as a full `docker run …` invocation when the command's basename is a
-    # docker launcher AND the args actually start with the `run` subcommand. Otherwise the
-    # command IS the image ref — this preserves valid images whose own basename is "docker"
-    # (the official `docker` image, or `ghcr.io/acme/docker`), which would otherwise be
-    # misparsed as a launcher.
-    if not (base in _DOCKER_LAUNCHERS and tokens[:1] == ["run"]):
+    # Treat this as a full `docker run …` invocation only when the command's basename is a
+    # docker launcher AND the args contain a `run` subcommand reached either directly
+    # (``docker run …``) or past leading global flags (``docker --context X run …``). If the
+    # first arg is a plain non-flag token that isn't `run`, the command IS an image ref whose
+    # basename merely happens to be "docker" (the official `docker` image, `ghcr.io/acme/docker`)
+    # with container args — preserve it rather than misparsing it as a launcher.
+    is_full_invocation = (
+        base in _DOCKER_LAUNCHERS
+        and "run" in tokens
+        and (tokens[0] == "run" or tokens[0].startswith("-"))
+    )
+    if not is_full_invocation:
         image = (command or "").strip()
         if not image:
             raise ValueError("a docker server needs an image reference")
         return image, tokens, env, warnings
 
-    # Full invocation: skip the leading `run` subcommand, then token-walk the flags.
-    i = 1
+    # Full invocation: start after the `run` subcommand (leading global flags are dropped —
+    # they configure the CLI/daemon, not the container), then token-walk the run flags.
+    i = tokens.index("run") + 1
 
     image: Optional[str] = None
     container_args: list[str] = []
@@ -176,10 +188,19 @@ def normalize_docker(
                 container_args = tokens[i + 1:]
             break
         if tok.startswith("-"):
-            if "=" in tok:  # inline value form, e.g. --env=VAR / --memory=1g
+            # Attached short form: `-eNAME` / `-eNAME=val` (docker allows `-e` with no space,
+            # and reads `-eNAME` as `-e NAME`). Handle before the generic flag branches so the
+            # variable isn't dropped. `-e` alone and `-e=…` fall through to the branches below.
+            if tok.startswith("-e") and not tok.startswith(("--", "-e=")) and tok != "-e":
+                _capture_env(tok[2:], env, warnings)
+                i += 1
+                continue
+            if "=" in tok:  # inline value form, e.g. --env=VAR / -e=VAR / --env-file=… / --memory=1g
                 name, _, val = tok.partition("=")
                 if name in ("-e", "--env"):
                     _capture_env(val, env, warnings)
+                elif name == "--env-file":
+                    warnings.append(_ENV_FILE_WARNING)
                 i += 1
                 continue
             if tok in ("-e", "--env"):
@@ -201,10 +222,7 @@ def normalize_docker(
                 if tok == "--env-file":
                     # We can't read the file; surface it like a bare -e so its vars aren't
                     # silently lost (the server would otherwise start with no environment).
-                    warnings.append(
-                        "--env-file is not read — add its variables under Environment so "
-                        "they reach the container."
-                    )
+                    warnings.append(_ENV_FILE_WARNING)
                 i += 2  # skip the flag and its value
                 continue
             i += 1  # a boolean flag (-i, -t, -it, --rm, --init, …); skip it
@@ -235,6 +253,17 @@ def _validate_docker_env(env: dict[str, str]) -> None:
             raise ValueError(
                 f"{key!r} is reserved for the docker runner and can't be a container env var"
             )
+
+
+def _validate_docker_image(image: str) -> None:
+    """Reject an image reference that could inject `docker run` options.
+
+    ``build()`` emits the image as a positional after ``--`` (which neutralizes it), but a
+    leading-dash image is invalid anyway and, on a legacy row without the ``--`` guard, would
+    be parsed by docker as an extra option (``--volume=/:/host``, ``--privileged``, …) —
+    bypassing every hardening flag. Reject it at the boundary so it can never persist."""
+    if not image or image.startswith("-"):
+        raise ValueError("a docker image reference can't be empty or start with '-'")
 
 
 def _require_docker_enabled(session: Session) -> None:
@@ -410,6 +439,11 @@ def create_server(
         raise ValueError(f"unknown runner {runner!r}; must be one of {RUNNERS}")
     if not command.strip():
         raise ValueError("command is required")
+    # A `command` runner whose launcher is actually docker/podman IS the docker runner — route
+    # it through the docker machinery (normalize + validate + gate + hardening + minimal_env)
+    # so it can't launch containers ungated/unhardened with the full control-plane env.
+    if runner == "command" and _launcher_basename(command) in _DOCKER_LAUNCHERS:
+        runner = "docker"
     # A remote server reuses command/args for the upstream URL + transport; canonicalize
     # them up front so the persisted row (and config_hash) is deterministic. There is no
     # local process, so a working directory is meaningless — drop it.
@@ -421,6 +455,7 @@ def create_server(
     # is created already enabled — a disabled import stays reviewable.
     if runner == "docker":
         command, args, env, warnings = normalize_docker(command, args, env)
+        _validate_docker_image(command)
         _validate_docker_env(env)
         cwd = None  # a container has its own filesystem; a host cwd is meaningless
         for w in warnings:  # the hardened parser altered the invocation — don't do it silently
@@ -473,6 +508,10 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
             setattr(server, key, value)
     if server.runner not in RUNNERS:
         raise ValueError(f"unknown runner {server.runner!r}")
+    # A `command` runner whose launcher is docker/podman IS the docker runner (see create) —
+    # reclassify so it can't launch containers ungated/unhardened via passthrough.
+    if server.runner == "command" and _launcher_basename(server.command) in _DOCKER_LAUNCHERS:
+        server.runner = "docker"
     if server.runner == "remote":
         server.command, server.args = normalize_remote(server.command, server.args)
         # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
@@ -482,16 +521,16 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         server.command, server.args, server.env, warnings = normalize_docker(
             server.command, server.args, server.env
         )
+        _validate_docker_image(server.command)
         _validate_docker_env(server.env)
         for w in warnings:
             logger.warning("docker server %r: %s", server.name, w)
         # Converting a local server (with a cwd) to docker: PATCH drops the form's cwd:null,
         # so clear the now-meaningless working directory here to keep the row canonical.
         server.cwd = None
-        # Editing an enabled docker server (or converting one to docker while enabled)
-        # requires the runner to be on — same gate as enable.
-        if server.enabled:
-            _require_docker_enabled(session)
+        # NB: no enabled-gate here. An already-enabled docker server can be edited even while
+        # the runner is off (so a broken image/env can be fixed) — the supervisor reconcile is
+        # the gate that keeps it from actually running. Enabling is gated in set_enabled.
     server.config_hash = compute_hash(server)  # recompute -> drives idempotent reconcile
     return repo.save_server(session, server)
 

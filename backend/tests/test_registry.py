@@ -313,6 +313,76 @@ def test_normalize_docker_servers_migrates_misclassified_command_row(session):
     assert m.env == {"T": "v"}  # reserved DOCKER_HOST scrubbed
 
 
+def test_docker_rejects_leading_dash_image(session):
+    # A `command` (image) starting with "-" would inject a docker run flag (host mount /
+    # --privileged) — reject it at create so it can never persist.
+    _enable_docker(session)
+    with pytest.raises(ValueError):
+        service.create_server(
+            session, name="d", runner="docker", command="--volume=/:/host",
+            args=["alpine"], env={}, enabled=False,
+        )
+
+
+def test_docker_build_emits_end_of_options_before_image():
+    from app.db.models import Server
+    from app.runners.docker import build
+    from app.util import new_id
+    s = Server(id=new_id(), slug="x", name="x", runner="docker", command="ghcr.io/x/y",
+               args=["a"], env={})
+    argv = build(s).args
+    # `--` immediately precedes the image so a leading-dash image can't be parsed as a flag.
+    assert argv[argv.index("--") + 1] == "ghcr.io/x/y"
+
+
+def test_command_runner_named_docker_reclassifies_to_docker(session):
+    # A `command` runner whose launcher is docker must be routed through the docker runner
+    # (gated + hardened), not launched ungated via passthrough.
+    s = service.create_server(
+        session, name="c", runner="command", command="/usr/local/bin/docker",
+        args=["run", "--rm", "-e", "T", "img:1"], env={"T": "v"}, enabled=False,
+    )
+    assert s.runner == "docker"
+    assert s.command == "img:1" and s.env == {"T": "v"}
+    # And it's now gated: enabling while the runner is off is refused.
+    with pytest.raises(ValueError):
+        service.set_enabled(session, s.id, True)
+
+
+def test_edit_enabled_docker_server_allowed_while_runner_off(session):
+    # An already-enabled docker server can be edited while the runner is off (fix a bad
+    # image/env); the reconcile gate — not update — keeps it from running.
+    _enable_docker(session)
+    s = service.create_server(
+        session, name="d", runner="docker", command="img:1", args=[], env={}, enabled=True
+    )
+    from app.registry import settings as runtime_settings
+    runtime_settings.write(session, {"docker_runner": False})
+    # Should NOT raise (previously a 400/ValueError).
+    updated = service.update_server(session, s.id, {"command": "img:2"})
+    assert updated.command == "img:2" and updated.enabled is True
+
+
+def test_normalize_docker_attached_short_env():
+    _, _, env, warnings = service.normalize_docker("docker", ["run", "-eGITHUB_TOKEN", "img"], {})
+    assert env == {"GITHUB_TOKEN": ""} and any("GITHUB_TOKEN" in w for w in warnings)
+    _, _, env2, _ = service.normalize_docker("docker", ["run", "-eFOO=bar", "img"], {})
+    assert env2 == {"FOO": "bar"}
+
+
+def test_normalize_docker_inline_env_file_warns():
+    _, _, _, warnings = service.normalize_docker("docker", ["run", "--env-file=/a.env", "img"], {})
+    assert any("env-file" in w for w in warnings)
+
+
+def test_normalize_docker_global_flags_before_run():
+    # `docker --context X run --rm img` — a global flag before the subcommand must still parse.
+    image, args, _, _ = service.normalize_docker(
+        "docker", ["--context", "x", "run", "--rm", "img"], {}
+    )
+    assert image == "img" and args == []
+
+
 def test_normalize_docker_warns_on_env_file():
     _, _, _, warnings = service.normalize_docker("docker", ["run", "--env-file", "s.env", "img"], {})
     assert any("env-file" in w for w in warnings)

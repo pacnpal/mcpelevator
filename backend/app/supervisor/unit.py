@@ -182,6 +182,11 @@ class ServerUnit:
         elif self.state == "starting":
             self.state = "failed"
             self.last_error = f"bridge exited rc={rc}"
+        # A docker bridge that crashed may have left a container running (a stdio child the
+        # bridge's death didn't take down); the M1 reconciler won't restart a failed/unhealthy
+        # unit (config_hash unchanged), so reap here — nothing else would until stop()/delete.
+        if self.runner == "docker" and self.state in ("failed", "unhealthy"):
+            await self._reap_container()
 
     async def _await_ready(self) -> None:
         settings = get_settings()

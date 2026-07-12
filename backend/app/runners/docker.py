@@ -78,13 +78,19 @@ def build(server: Server) -> ProcessSpec:
     ]
     # Name-only passthrough: the value is read from the docker CLI's environment (which the
     # bridge host seeds from ``env`` under a minimal allowlist), never embedded in argv.
-    # Defensively skip a malformed key (``=``/whitespace) so a value can never enter argv —
-    # the service layer already rejects these, this guards a legacy/hand-edited row.
+    # Defensively skip a malformed key (``=``/whitespace) or a reserved bridge/connection key
+    # so a value can never enter argv and a container can't receive DOCKER_HOST — the service
+    # layer already rejects these, this guards a legacy/hand-edited row.
     for key in env:
-        if "=" in key or any(c.isspace() for c in key):
+        if "=" in key or any(c.isspace() for c in key) or key in DOCKER_ENV_ALLOWLIST:
             continue
         args += ["-e", key]
-    args += [server.command, *(server.args or [])]  # image ref, then the container's args
+    # ``--`` terminates flag parsing: everything after it is positional (image, then the
+    # container's args). Without it a ``command`` like ``--volume=/:/host`` or ``--privileged``
+    # would be parsed by docker as an extra run OPTION (host mount / host namespace), bypassing
+    # every hardening flag above. The service layer also rejects a leading-dash image, so this
+    # is defense in depth for a legacy/hand-edited row.
+    args += ["--", server.command, *(server.args or [])]  # image ref, then the container's args
     return ProcessSpec(
         command=DOCKER_BIN,
         args=args,
