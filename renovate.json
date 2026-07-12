@@ -17,7 +17,7 @@
   "internalChecksFilter": "strict",
   "lockFileMaintenance": {
     "enabled": true,
-    "automerge": true,
+    "automerge": false,
     "schedule": ["* 0-4 * * 1"]
   },
   "packageRules": [
@@ -39,10 +39,16 @@
       "automerge": true
     },
     {
-      "description": "Automerge Docker digest and non-major image updates",
+      "description": "Automerge Docker digest and patch updates only. Minor is excluded: in docker versioning a language feature-line bump (e.g. python:3.14-slim -> 3.15-slim) is a 'minor', but the docker-build check only assembles the image while host CI pins Python 3.14 — so a runtime minor must be reviewed manually, not automerged untested.",
       "matchManagers": ["dockerfile", "docker-compose"],
-      "matchUpdateTypes": ["digest", "pin", "pinDigest", "patch", "minor"],
+      "matchUpdateTypes": ["digest", "pin", "pinDigest", "patch"],
       "automerge": true
+    },
+    {
+      "description": "GHCR does not expose release timestamps, so under Renovate 42 the minimumReleaseAge check can never pass and internalChecksFilter=strict would stop these branches from ever being created (e.g. ghcr.io/astral-sh/uv). Exempt GHCR images from the age gate so they keep updating; they remain digest-pinned and CI-gated.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ghcr.io/**"],
+      "minimumReleaseAge": null
     },
     {
       "description": "Require manual review for all major updates",
