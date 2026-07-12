@@ -173,6 +173,8 @@ class Supervisor:
             )
         except (FileNotFoundError, OSError, subprocess.SubprocessError):
             return
+        if listed.returncode != 0:  # daemon unreachable / CLI error — nothing to reap
+            return
         ids = [line for line in listed.stdout.split() if line]
         if not ids:
             return

@@ -210,13 +210,13 @@
 	// honest preview; the exact hardening flags are elided as […]).
 	const dockerPreview = $derived(
 		[
+			// static prefix (kept verbatim — it isn't user input), then the user-provided
+			// image + args, each quoted only if it contains whitespace.
 			'docker run -i --rm --init […]',
-			command.trim() || '<image>',
-			...resolvedArgs
-		]
-			.filter((p) => p.length > 0)
-			.map((p) => (/\s/.test(p) && !p.includes('[') ? `"${p}"` : p))
-			.join(' ')
+			...[command.trim() || '<image>', ...resolvedArgs]
+				.filter((p) => p.length > 0)
+				.map((p) => (/\s/.test(p) ? `"${p}"` : p))
+		].join(' ')
 	);
 	// A remote server's "command" is an upstream URL. Parse it (rather than regex) so the
 	// client-side rule matches the backend's normalize_remote: http(s) scheme + a real
