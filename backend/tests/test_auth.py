@@ -41,6 +41,7 @@ def test_settings_defaults_and_write(session):
         "default_auth_provider": "none",
         "control_plane_auth": "auto",
         "allow_private_lan": False,
+        "docker_runner": False,
     }
     runtime_settings.write(
         session,

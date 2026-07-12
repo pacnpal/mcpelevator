@@ -11,12 +11,51 @@ from __future__ import annotations
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
+from sqlmodel import Session
 
 from app.api.schemas import CatalogDetail, CatalogList, CatalogSource, CatalogVersions
 from app.catalog import registry
 from app.catalog.base import CatalogUpstreamError, Source
+from app.db import get_engine
+from app.registry import settings as runtime_settings
 
 router = APIRouter()
+
+# Shown on an OCI draft when the (root-equivalent, opt-in) docker runner is off. The
+# mapping is pure and always maps oci→docker; this gate lives here, where a DB session is
+# available, so browse/install honor the setting without threading it through every Source.
+_DOCKER_DISABLED_REASON = (
+    "Enable the Docker runner in Settings to install OCI/Docker images (it is root-equivalent)."
+)
+
+
+def _docker_enabled() -> bool:
+    with Session(get_engine()) as session:
+        return runtime_settings.docker_runner(session)
+
+
+def _gate_detail_docker(detail: CatalogDetail) -> CatalogDetail:
+    """When the docker runner is off, mark oci drafts non-installable with a clear reason."""
+    if _docker_enabled():
+        return detail
+    for draft in detail.drafts:
+        if draft.runner == "docker" and draft.installable:
+            draft.installable = False
+            if not draft.reason:
+                draft.reason = _DOCKER_DISABLED_REASON
+    return detail
+
+
+def _gate_list_docker(data: CatalogList) -> CatalogList:
+    """When the docker runner is off, clear the installable badge on servers whose ONLY
+    installable path is an OCI image (leave rows that also offer npm/pypi/remote)."""
+    if _docker_enabled():
+        return data
+    for server in data.servers:
+        types = set(server.registry_types)
+        if server.installable and "oci" in types and not (types & {"npm", "pypi", "remote"}):
+            server.installable = False
+    return data
 
 
 def _source(source_id: str) -> Source:
@@ -80,7 +119,9 @@ async def list_catalog_servers(
         raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable")
     except CatalogUpstreamError as exc:
         raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable: {exc}")
-    return CatalogList(source=source, servers=data["servers"], next_cursor=data["next_cursor"])
+    return _gate_list_docker(
+        CatalogList(source=source, servers=data["servers"], next_cursor=data["next_cursor"])
+    )
 
 
 @router.get("/catalog/server/versions", response_model=CatalogVersions)
@@ -123,10 +164,13 @@ async def get_catalog_server(
     """
     src = _source(source)
     try:
-        return await src.get_detail(request.app.state.http, id=id, version=version)
+        detail = await src.get_detail(request.app.state.http, id=id, version=version)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise HTTPException(status_code=404, detail="server not found in catalog")
         raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable")
     except CatalogUpstreamError as exc:
         raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable: {exc}")
+    # Build the model here (rather than leaning on FastAPI's response_model coercion) so the
+    # docker gate can read/adjust typed drafts before returning.
+    return _gate_detail_docker(CatalogDetail(**detail))

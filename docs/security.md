@@ -102,13 +102,26 @@ or an external OAuth/Access gate; it is dangerous if exposed directly to the int
 `backend/app/registry/service.py`, `backend/app/runners/`, `backend/app/supervisor/unit.py`,
 and `backend/app/bridge/host.py` turn stored specs into child processes. Local runners pass
 argv lists, not shell strings, and the supervisor executes the bridge module with
-`asyncio.create_subprocess_exec`; Docker runner is registered but raises
-`NotImplementedError`. Imports create disabled servers by default; catalog installs are
-reviewable drafts. `max_running`, bounded port allocation, process groups, readiness probes,
-and log buffers improve robustness. Remaining risks are expected admin power and
-supply-chain risk: malicious MCP packages inherit the bridge environment and can access
-container files/network, so `MCPE_ADMIN_TOKEN` and upstream secrets should not be left
-broadly available.
+`asyncio.create_subprocess_exec`. The **docker runner** is opt-in and root-equivalent: it is
+disabled by default behind the `docker_runner` setting, enforced at three layers (service
+create/enable, and supervisor reconcile refuses to start a docker unit while the setting is
+off). When enabled it stores the canonical image+args+env shape and synthesizes a hardened
+`docker run` (`--rm --init --cap-drop ALL --security-opt no-new-privileges --pids-limit` +
+a memory cap). Secrets are passed by **name** (`-e KEY`), never `KEY=value`, so they never
+appear in `docker inspect`/`ps`; and the bridge gives a docker child a **minimal env** (only
+`PATH/HOME/DOCKER_*` plus the server's declared vars), so a `-e KEY` passthrough can never
+reach the control plane's own secrets (`MCPE_ADMIN_TOKEN`, DB creds). Containers carry a
+deterministic name and an `mcpelevator.server` label; the unit reaps its container on stop
+(fire-and-forget `docker rm -f`, outside the stop grace) and the supervisor sweeps labelled
+orphans on boot — the residual gap is a container left by a hard control-plane crash with a
+wedged daemon. Isolation is a deployment choice (sibling host socket vs. an isolated dind
+sidecar via `DOCKER_HOST`); the sibling model hands the host daemon to containers and is
+inherently root-equivalent, which is why the runner is opt-in. Imports create disabled
+servers by default; catalog installs (including OCI) are reviewable drafts gated by the same
+setting. `max_running`, bounded port allocation, process groups, readiness probes, and log
+buffers improve robustness. Remaining risks are expected admin power and supply-chain risk:
+malicious MCP packages inherit the bridge environment and can access container files/network,
+so `MCPE_ADMIN_TOKEN` and upstream secrets should not be left broadly available.
 
 **Remote runner and catalog.** Remote server URLs are validated as `http(s)` with a
 hostname and canonical transport, but there is no egress allowlist or metadata-IP block.

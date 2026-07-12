@@ -200,12 +200,25 @@ def test_environment_variables_become_env_with_warnings():
     assert any("API_KEY" in w and "secret" in w for w in draft["warnings"])
 
 
-def test_oci_and_nuget_not_installable_with_reason():
-    oci = mapping.package_draft(0, _pkg(registryType="oci", identifier="ghcr.io/x/y"))
-    nuget = mapping.package_draft(1, _pkg(registryType="nuget", identifier="X.Y"))
-    assert oci["installable"] is False and oci["reason"]
-    assert nuget["installable"] is False and nuget["reason"]
+def test_oci_maps_to_docker_runner():
+    # OCI packages map to the docker runner: command = image ref, args = container args.
+    # (Whether it's actually installable is gated at the API layer by the docker_runner
+    # setting; the pure mapping stays settings-free and marks the draft installable.)
+    oci = mapping.package_draft(0, _pkg(registryType="oci", identifier="ghcr.io/x/y", version="latest"))
+    assert oci["runner"] == "docker"
+    assert oci["command"] == "ghcr.io/x/y"  # "latest" is not pinned into the ref
+    assert oci["installable"] is True
     assert oci["registry_type"] == "oci"
+
+
+def test_oci_pins_by_tag():
+    oci = mapping.package_draft(0, _pkg(registryType="oci", identifier="ghcr.io/x/y", version="1.2"))
+    assert oci["command"] == "ghcr.io/x/y:1.2"
+
+
+def test_nuget_not_installable_with_reason():
+    nuget = mapping.package_draft(1, _pkg(registryType="nuget", identifier="X.Y"))
+    assert nuget["installable"] is False and nuget["reason"]
 
 
 def test_non_stdio_transport_not_installable():

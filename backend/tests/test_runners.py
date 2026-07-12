@@ -38,9 +38,35 @@ def test_known_runners_build(runner):
     assert spec.command == "x"
 
 
-def test_docker_runner_is_gated():
-    with pytest.raises(NotImplementedError):
-        build_spec(_server(runner="docker", command="some/image"))
+def test_docker_runner_builds_hardened_spec():
+    s = _server(
+        runner="docker",
+        command="ghcr.io/github/github-mcp-server",  # image ref
+        args=[],  # container args
+        env={"GITHUB_PERSONAL_ACCESS_TOKEN": "x"},
+    )
+    spec = build_spec(s)
+    assert spec.command == "docker"
+    assert spec.minimal_env is True  # docker child gets a scrubbed env (no elevator secrets)
+    assert spec.env == {"GITHUB_PERSONAL_ACCESS_TOKEN": "x"}
+    a = spec.args
+    # hardened, cleanup, and reaping flags are present
+    for flag in ("run", "-i", "--rm", "--init", "--cap-drop", "--security-opt", "--pids-limit"):
+        assert flag in a
+    assert "no-new-privileges" in a
+    # secret passed by NAME only — never as KEY=value (keeps it out of argv/ps/inspect)
+    assert ["-e", "GITHUB_PERSONAL_ACCESS_TOKEN"] == a[a.index("-e"):a.index("-e") + 2]
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN=x" not in a
+    # image is last (before any container args), the container gets no args here
+    assert a[-1] == "ghcr.io/github/github-mcp-server"
+    # deterministic
+    assert build_spec(s).args == a
+
+
+def test_docker_runner_appends_container_args_after_image():
+    s = _server(runner="docker", command="img:1", args=["--transport", "stdio"], env={})
+    a = build_spec(s).args
+    assert a[-3:] == ["img:1", "--transport", "stdio"]
 
 
 def test_remote_runner_maps_url_transport_headers():

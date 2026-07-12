@@ -230,6 +230,88 @@ def test_clone_unknown_server(session):
         service.clone_server(session, "nope")
 
 
+# --- docker runner: normalization + the opt-in root-equivalent gate ------------
+
+
+def _enable_docker(session):
+    from app.registry import settings as runtime_settings
+
+    runtime_settings.write(session, {"docker_runner": True})
+
+
+def test_normalize_docker_parses_full_invocation():
+    image, args, env, warnings = service.normalize_docker(
+        "/usr/local/bin/docker",
+        ["run", "-i", "--rm", "-e", "TOKEN", "ghcr.io/x/y", "--flag"],
+        {"TOKEN": "v"},
+    )
+    assert image == "ghcr.io/x/y"
+    assert args == ["--flag"]  # container args, after the image
+    assert env == {"TOKEN": "v"}
+    assert warnings == []
+
+
+def test_normalize_docker_merges_inline_env_and_skips_value_flags():
+    image, args, env, _ = service.normalize_docker(
+        "docker",
+        ["run", "-v", "/a:/b", "-e", "FOO=bar", "--network", "host", "img:1", "sub"],
+        {},
+    )
+    assert image == "img:1"
+    assert args == ["sub"]
+    assert env == {"FOO": "bar"}  # inline -e VAR=val folded into the env map
+
+
+def test_normalize_docker_warns_on_detach():
+    _, _, _, warnings = service.normalize_docker("docker", ["run", "-d", "img"], {})
+    assert any("detach" in w for w in warnings)
+
+
+def test_normalize_docker_bare_image_ref_passthrough():
+    image, args, env, _ = service.normalize_docker("myrepo/img", ["--verbose"], {"K": "v"})
+    assert image == "myrepo/img" and args == ["--verbose"] and env == {"K": "v"}
+
+
+def test_normalize_docker_requires_image():
+    with pytest.raises(ValueError):
+        service.normalize_docker("docker", ["run", "-i", "--rm"], {})
+
+
+def test_docker_create_disabled_allowed_and_stored_canonical(session):
+    # Creating a DISABLED docker server is always allowed (review-before-enable) and stores
+    # the canonical (image, container_args, env) shape even from a full invocation.
+    s = service.create_server(
+        session, name="gh", runner="docker",
+        command="docker", args=["run", "--rm", "-e", "T", "img:1"], env={"T": "v"},
+        enabled=False,
+    )
+    assert s.command == "img:1" and s.args == [] and s.env == {"T": "v"}
+
+
+def test_docker_enable_gated_when_setting_off(session):
+    s = service.create_server(
+        session, name="gh", runner="docker", command="img:1", args=[], env={}, enabled=False
+    )
+    with pytest.raises(ValueError):
+        service.set_enabled(session, s.id, True)
+
+
+def test_docker_create_enabled_gated_when_setting_off(session):
+    with pytest.raises(ValueError):
+        service.create_server(
+            session, name="gh", runner="docker", command="img:1", args=[], env={}, enabled=True
+        )
+
+
+def test_docker_enable_allowed_when_setting_on(session):
+    _enable_docker(session)
+    s = service.create_server(
+        session, name="gh", runner="docker", command="img:1", args=[], env={}, enabled=False
+    )
+    enabled = service.set_enabled(session, s.id, True)
+    assert enabled.enabled is True
+
+
 def test_auth_provider_change_does_not_restart(session):
     """auth_provider is proxy-layer; changing it must NOT change config_hash
     (otherwise the reconciler would needlessly bounce the bridge)."""

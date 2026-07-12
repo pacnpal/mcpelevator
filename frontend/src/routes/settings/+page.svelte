@@ -320,6 +320,25 @@
 		patchSettings({ allow_private_lan: false }, 'allow_private_lan');
 	}
 
+	// docker_runner: root-equivalent — enabling it lets servers run arbitrary Docker
+	// images on the mounted daemon. Confirm before turning ON; turning off is always safe.
+	let confirmEnableDocker = $state(false);
+
+	function setDockerRunner(value: boolean, el: HTMLInputElement) {
+		if (!settings || settings.docker_runner === value) return;
+		if (value) {
+			confirmEnableDocker = true;
+			el.checked = settings.docker_runner; // keep it off until confirmed
+			return;
+		}
+		patchSettings({ docker_runner: false }, 'docker_runner');
+	}
+
+	function confirmEnableDockerRunner() {
+		confirmEnableDocker = false;
+		patchSettings({ docker_runner: true }, 'docker_runner');
+	}
+
 	// ---- Allowed hosts editor -------------------------------------------------
 	let newHost = $state('');
 
@@ -805,6 +824,68 @@
 							<button
 								type="button"
 								onclick={() => (confirmDisableLan = false)}
+								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+							>
+								Cancel
+							</button>
+						</div>
+					</div>
+				{/if}
+			</fieldset>
+
+			<!-- Docker runner (root-equivalent, opt-in) -->
+			<fieldset class="flex flex-col gap-2 border-0 p-0">
+				<legend class="text-sm font-medium text-[var(--color-ink)]">Docker runner</legend>
+				<label
+					class="flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+					style={settings.docker_runner
+						? 'border-color: color-mix(in oklab, var(--color-state-failed) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 7%, transparent);'
+						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+				>
+					<input
+						type="checkbox"
+						checked={settings.docker_runner}
+						onchange={(e) => setDockerRunner(e.currentTarget.checked, e.currentTarget)}
+						disabled={savingField === 'docker_runner'}
+						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+					/>
+					<span class="flex flex-col gap-0.5">
+						<span class="text-sm font-medium text-[var(--color-ink)]">
+							Enable running MCP servers packaged as Docker images
+						</span>
+						<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+							<span class="font-semibold text-[var(--color-state-failed)]">Root-equivalent.</span>
+							Launches arbitrary images on the mounted Docker daemon (a sibling container on
+							the host, or an isolated dind sidecar). Only enable it if you trust every image
+							you run and understand it can affect the host. Requires the Docker socket to be
+							mounted into this container.
+						</span>
+					</span>
+				</label>
+				{#if confirmEnableDocker}
+					<div
+						role="alert"
+						class="flex flex-col gap-2.5 rounded-lg border p-3"
+						style="border-color: color-mix(in oklab, var(--color-state-failed) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 8%, transparent);"
+					>
+						<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+							The docker runner is <span class="font-semibold text-[var(--color-ink)]">root-equivalent</span>:
+							a server you run can execute any image on the host's Docker daemon. Enable it only
+							if you trust the images you'll run.
+						</p>
+						<div class="flex items-center gap-1.5">
+							<button
+								type="button"
+								onclick={confirmEnableDockerRunner}
+								disabled={savingField !== null}
+								class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+								style="background-color: var(--color-state-failed);"
+							>
+								Enable anyway
+							</button>
+							<button
+								type="button"
+								onclick={() => (confirmEnableDocker = false)}
 								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
 							>
 								Cancel

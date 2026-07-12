@@ -17,16 +17,17 @@ from __future__ import annotations
 
 from typing import Any
 
-# registryType → mcpelevator runner. The only two we can launch today (SSOT for the map).
-RUNNER_BY_TYPE = {"npm": "npx", "pypi": "uvx"}
+# registryType → mcpelevator runner (SSOT for the map). oci maps to the docker runner;
+# whether an oci draft is actually installable is gated at the API layer by the opt-in,
+# root-equivalent `docker_runner` setting (this mapping stays pure/settings-free).
+RUNNER_BY_TYPE = {"npm": "npx", "pypi": "uvx", "oci": "docker"}
 
 # runtimeHint values each runner can honor. A package asking for a different runtime
-# (node, bun, dnx, …) wouldn't actually launch via npx/uvx, so it's treated as manual.
-_ACCEPTED_HINTS = {"npx": {"npx"}, "uvx": {"uvx", "uv"}}
+# (node, bun, dnx, …) wouldn't actually launch via that runner, so it's treated as manual.
+_ACCEPTED_HINTS = {"npx": {"npx"}, "uvx": {"uvx", "uv"}, "docker": {"docker"}}
 
-# Why a given registry type can't be auto-installed yet (shown in the UI).
+# Why a given registry type can't be auto-installed (shown in the UI).
 UNSUPPORTED_REASON = {
-    "oci": "Docker/OCI packages aren't installable yet (the docker runner is not enabled).",
     "nuget": "NuGet packages aren't supported yet.",
     "mcpb": "MCPB bundles aren't supported yet.",
 }
@@ -50,6 +51,10 @@ def pin_identifier(registry_type: str, identifier: str, version: str | None) -> 
         return f"{identifier}@{version}"
     if registry_type == "pypi":
         return f"{identifier}=={version}"
+    if registry_type == "oci":
+        # An OCI image is pinned by tag (a digest would use "@sha256:…", but the registry
+        # exposes a version string, so tag it). The docker runner launches "image:tag".
+        return f"{identifier}:{version}"
     return identifier
 
 
@@ -246,9 +251,14 @@ def package_draft(index: int, pkg: dict[str, Any]) -> dict[str, Any]:
     if runner == "npx":
         draft["command"] = "npx"
         draft["args"] = ["-y", *runtime_args, pinned, *pkg_args]
-    else:  # uvx
+    elif runner == "uvx":
         draft["command"] = "uvx"
         draft["args"] = [*runtime_args, pinned, *pkg_args]
+    else:  # docker — canonical shape is command=image ref, args=the container's own args.
+        # The docker runner synthesizes all `docker run` flags itself, so registry-declared
+        # runtimeArguments (docker flags) are NOT stored; the tail check below flags that.
+        draft["command"] = pinned
+        draft["args"] = pkg_args
 
     draft["runner"] = runner
     draft["env"] = env

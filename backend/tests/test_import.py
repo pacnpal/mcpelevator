@@ -97,3 +97,30 @@ def test_import_accepts_bare_map(session):
 def test_import_rejects_non_mapping(session):
     with pytest.raises(ValueError):
         service.import_mcp_servers(session, {"mcpServers": []})
+
+
+def test_import_docker_entry_normalizes_to_canonical_shape(session):
+    # The flagship github-mcp-server config: an absolute docker path + a full `run …`
+    # invocation must import as a disabled docker server stored in canonical shape
+    # (command = image, args = container args, env = the token).
+    data = {
+        "mcpServers": {
+            "github": {
+                "command": "/usr/local/bin/docker",
+                "args": [
+                    "run", "-i", "--rm",
+                    "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+                    "ghcr.io/github/github-mcp-server",
+                ],
+                "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "pat"},
+            }
+        }
+    }
+    created, skipped = service.import_mcp_servers(session, data)
+    assert skipped == []
+    gh = created[0]
+    assert gh.runner == "docker"  # inferred from the absolute docker path (basename)
+    assert gh.command == "ghcr.io/github/github-mcp-server"
+    assert gh.args == []
+    assert gh.env == {"GITHUB_PERSONAL_ACCESS_TOKEN": "pat"}
+    assert gh.enabled is False  # imported disabled — the root-equivalent gate bites on enable

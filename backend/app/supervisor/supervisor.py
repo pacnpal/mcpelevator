@@ -13,12 +13,15 @@ state. Health probing + restart budgets land in M2.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from typing import Optional
 
 from sqlmodel import Session
 
 from app.config import get_settings
 from app.db import get_engine, repo
+from app.registry import settings as runtime_settings
+from app.runners.docker import DOCKER_BIN, LABEL_KEY
 from app.supervisor.ports import PortAllocator
 from app.supervisor.unit import ServerUnit
 
@@ -85,7 +88,24 @@ class Supervisor:
 
     async def reconcile_once(self) -> None:
         with Session(get_engine()) as session:
-            desired = {sv.id: sv for sv in repo.list_servers(session) if sv.enabled}
+            docker_on = runtime_settings.docker_runner(session)
+            desired: dict[str, object] = {}
+            for sv in repo.list_servers(session):
+                if not sv.enabled:
+                    continue
+                # The docker runner is root-equivalent and opt-in: if it's off, an enabled
+                # docker server must not run. Stop any live unit and surface why, rather
+                # than silently converging it — this also catches the setting being turned
+                # off while a docker server is running (within one reconcile interval).
+                if sv.runner == "docker" and not docker_on:
+                    if sv.id in self.units:
+                        await self._stop(sv.id)
+                    repo.upsert_runtime(
+                        session, sv.id, state="failed", pid=None, port=None,
+                        last_error="Docker runner is disabled (enable it in Settings)", tools=[],
+                    )
+                    continue
+                desired[sv.id] = sv
 
             # stop anything running that is no longer desired
             for server_id in list(self.units):
@@ -134,6 +154,32 @@ class Supervisor:
         to stopped so the API reflects reality; reconcile brings servers back."""
         with Session(get_engine()) as session:
             repo.reset_all_runtime(session)
+            docker_on = runtime_settings.docker_runner(session)
+        if docker_on:
+            self._reap_docker_orphans()
+
+    def _reap_docker_orphans(self) -> None:
+        """Remove any containers a prior control-plane process left behind.
+
+        Graceful stop and the per-unit ``stop()`` reap cover the normal paths; this
+        backstops a hard crash, where a container keeps running with no unit to stop it.
+        Keyed strictly on our own SSOT label so it never touches a foreign container.
+        Runs synchronously at boot (before the event loop starts) and is silent on any
+        failure — docker missing, no daemon reachable, etc."""
+        try:
+            listed = subprocess.run(
+                [DOCKER_BIN, "ps", "-aq", "--filter", f"label={LABEL_KEY}"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            return
+        ids = [line for line in listed.stdout.split() if line]
+        if not ids:
+            return
+        try:
+            subprocess.run([DOCKER_BIN, "rm", "-f", *ids], capture_output=True, timeout=30)
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            pass
 
     async def run_forever(self) -> None:
         while not self._stopping:

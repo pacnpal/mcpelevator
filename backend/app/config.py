@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # mints an admin token and prints it to the logs. Seeds only when the setting has
     # never been written; the Settings UI is authoritative afterwards.
     allow_private_lan: bool = False
+    # First-boot seed for the `docker_runner` runtime setting (root-equivalent — see
+    # registry.settings). Lets a headless box enable the docker runner declaratively via
+    # MCPE_DOCKER_RUNNER=true. Seeds only when the setting has never been written; the
+    # Settings UI is authoritative afterwards.
+    docker_runner: bool = False
 
     # --- data / persistence ---
     data_dir: Path = Path("./data")

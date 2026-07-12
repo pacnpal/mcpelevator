@@ -35,6 +35,12 @@ class ProcessSpec:
     env: dict[str, str] = field(default_factory=dict)  # server-specific vars / headers
     cwd: str | None = None
     transport: str = "stdio"  # stdio | streamable-http | sse
+    # When True the bridge host does NOT merge the control plane's full os.environ into
+    # the child; it passes only a minimal allowlist (PATH/HOME/DOCKER_*) plus ``env``.
+    # The docker runner sets this so a container's ``-e KEY`` passthrough can only ever
+    # reach the operator-declared vars, never the elevator's own secrets (admin token,
+    # DB creds). Harmless for other stdio runners, so it stays a plain opt-in flag.
+    minimal_env: bool = False
 
 
 Builder = Callable[[Server], ProcessSpec]

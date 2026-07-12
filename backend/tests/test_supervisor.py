@@ -59,6 +59,35 @@ def _fake_unit(server) -> SimpleNamespace:
     )
 
 
+async def test_reconcile_skips_docker_when_runner_disabled():
+    """An enabled docker server must not be started while the docker runner is off (e.g.
+    the setting was turned off after it was enabled). Reconcile leaves no unit and records
+    a clear failed state — never a silent spawn of a root-equivalent container."""
+    from app.registry import settings as runtime_settings
+
+    sup = Supervisor()
+    with Session(get_engine()) as session:
+        runtime_settings.write(session, {"docker_runner": True})
+        server = service.create_server(
+            session, name="Dk", runner="docker", command="img:1", args=[], env={}, enabled=True
+        )
+        sid = server.id
+        # Now turn the runner off — the enabled docker row must be refused, not started.
+        runtime_settings.write(session, {"docker_runner": False})
+    try:
+        await sup.reconcile_once()
+        assert sid not in sup.units  # never started
+        with Session(get_engine()) as session:
+            rt = repo.get_runtime(session, sid)
+        assert rt is not None and rt.state == "failed"
+        assert "disabled" in (rt.last_error or "")
+    finally:
+        sup.units.pop(sid, None)
+        with Session(get_engine()) as session:
+            runtime_settings.write(session, {"docker_runner": False})
+            repo.delete_server(session, sid)
+
+
 async def test_reconcile_converges_renamed_slug_onto_live_unit():
     sup = Supervisor()
     with Session(get_engine()) as session:

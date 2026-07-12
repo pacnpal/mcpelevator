@@ -1,6 +1,7 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
+	import { getSettings } from '$lib/api';
 	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '$lib/remote';
 	import type { Runner, ServerAuthProvider, ServerCreate } from '$lib/types';
 
@@ -39,15 +40,25 @@
 		oncancel?: () => void;
 	} = $props();
 
-	// npx / uvx / command / remote are offered in the friendly UI. `docker` is a
-	// valid backend runner but out of scope for this form; an imported docker
-	// server can still be edited via the raw command/args fields.
+	// The runners offered in the form. For `docker` the stored shape is the OCI image ref
+	// (command) + the container's own args; the backend synthesizes the hardened
+	// `docker run …`. The docker runner is opt-in + root-equivalent — gated below.
 	const RUNNERS: { value: Runner; label: string; hint: string }[] = [
 		{ value: 'npx', label: 'npx', hint: 'Node package (npm)' },
 		{ value: 'uvx', label: 'uvx', hint: 'Python package (uv)' },
 		{ value: 'command', label: 'command', hint: 'Any local binary' },
+		{ value: 'docker', label: 'docker', hint: 'Docker / OCI image' },
 		{ value: 'remote', label: 'remote', hint: 'Remote HTTP/SSE URL' }
 	];
+
+	// Whether the (root-equivalent, opt-in) docker runner is enabled. Fetched once; when
+	// off we surface a banner and block submitting a docker server. `null` = not yet known.
+	let dockerEnabled = $state<boolean | null>(null);
+	onMount(() => {
+		getSettings()
+			.then((s) => (dockerEnabled = s.docker_runner))
+			.catch(() => (dockerEnabled = null));
+	});
 
 
 	// ---- Form state -----------------------------------------------------------
@@ -162,8 +173,8 @@
 
 	function onRunnerChange() {
 		// Re-derive raw config for the newly selected runner.
-		if (runner === 'command') {
-			// Leave whatever the user had; nothing to derive.
+		if (runner === 'command' || runner === 'docker') {
+			// command/docker edit command + args directly; nothing to derive.
 		} else {
 			syncFromFriendly();
 		}
@@ -189,8 +200,24 @@
 	);
 
 	const isRemote = $derived(runner === 'remote');
+	const isDocker = $derived(runner === 'docker');
+	// Blocked from submitting a docker server while the runner is disabled (root-equivalent).
+	const dockerBlocked = $derived(isDocker && dockerEnabled === false);
 	const nameValid = $derived(name.trim().length > 0);
 	const commandValid = $derived(command.trim().length > 0);
+
+	// The hardened `docker run …` the backend will synthesize from the image + args (an
+	// honest preview; the exact hardening flags are elided as […]).
+	const dockerPreview = $derived(
+		[
+			'docker run -i --rm --init […]',
+			command.trim() || '<image>',
+			...resolvedArgs
+		]
+			.filter((p) => p.length > 0)
+			.map((p) => (/\s/.test(p) && !p.includes('[') ? `"${p}"` : p))
+			.join(' ')
+	);
 	// A remote server's "command" is an upstream URL. Parse it (rather than regex) so the
 	// client-side rule matches the backend's normalize_remote: http(s) scheme + a real
 	// hostname, no whitespace. This rejects hostless values like "https://:443/mcp" that
@@ -221,7 +248,9 @@
 	const normalizedSlug = $derived(slugify(slug));
 	const slugChanged = $derived(mode === 'edit' && normalizedSlug !== originalSlug);
 
-	const canSubmit = $derived(nameValid && commandValid && remoteUrlValid && !busy);
+	const canSubmit = $derived(
+		nameValid && commandValid && remoteUrlValid && !dockerBlocked && !busy
+	);
 
 	function buildEnv(): Record<string, string> {
 		const out: Record<string, string> = {};
@@ -240,9 +269,10 @@
 			runner,
 			command: command.trim(),
 			// remote stores [transport] in args; there's no local process, so no cwd.
+			// docker stores command=image + args=container args, and cwd is meaningless.
 			args: isRemote ? [transport] : resolvedArgs,
 			env: buildEnv(),
-			cwd: isRemote ? null : cwd.trim() ? cwd.trim() : null,
+			cwd: isRemote || isDocker ? null : cwd.trim() ? cwd.trim() : null,
 			mcp_http: mcpHttp,
 			rest_openapi: restOpenapi,
 			auth_provider: authProvider
@@ -452,6 +482,55 @@
 				upstream auth as <span class="font-medium">Headers</span> below.
 			</p>
 		</div>
+	{:else if isDocker}
+		<!-- runner === docker: command = OCI image ref, args = the container's own args.
+		     The backend synthesizes the hardened `docker run …` (see dockerPreview). -->
+		<div class="flex flex-col gap-2">
+			{#if dockerBlocked}
+				<p
+					class="flex items-start gap-2 rounded-lg border px-3 py-2.5 text-xs leading-relaxed"
+					style="border-color: color-mix(in oklab, var(--color-state-failed) 30%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 8%, transparent); color: var(--color-ink-muted);"
+				>
+					<svg class="mt-0.5 size-4 shrink-0 text-[var(--color-state-failed)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+						<path d="M12 9v4M12 17h.01" />
+					</svg>
+					<span>
+						The Docker runner is disabled. It's root-equivalent — enable it on the
+						<a href="/settings" class="font-medium text-[var(--color-ink)] underline decoration-dotted underline-offset-2">Settings</a>
+						page before starting a Docker server.
+					</span>
+				</p>
+			{/if}
+			<label for="srv-image" class="text-sm font-medium text-[var(--color-ink)]">
+				Image
+			</label>
+			<input
+				id="srv-image"
+				type="text"
+				bind:value={command}
+				autocomplete="off"
+				spellcheck="false"
+				placeholder="ghcr.io/github/github-mcp-server"
+				class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+			/>
+			<label for="srv-docker-args" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
+				Container arguments <span class="text-[var(--color-ink-dim)]">(optional, one per line)</span>
+			</label>
+			<textarea
+				id="srv-docker-args"
+				bind:value={argsText}
+				rows="2"
+				spellcheck="false"
+				placeholder="--toolsets&#10;repos"
+				class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+			></textarea>
+			<p class="text-xs text-[var(--color-ink-dim)]">
+				mcpelevator adds the hardening, cleanup and secret-passing flags. Put env/API keys
+				under <span class="font-medium">Environment</span> below — they're passed to the
+				container by name (never embedded in the command).
+			</p>
+		</div>
 	{:else}
 		<!-- runner === command: command + args are the friendly fields -->
 		<div class="flex flex-col gap-2">
@@ -499,6 +578,16 @@
 				{:else}
 					<code class="font-mono text-xs text-[var(--color-ink-dim)]">(URL not set)</code>
 				{/if}
+			</div>
+		</div>
+	{:else if isDocker}
+		<!-- Docker: show the hardened `docker run …` the backend synthesizes. -->
+		<div class="flex flex-col gap-1.5">
+			<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
+			<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
+				<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
+					{dockerPreview}
+				</code>
 			</div>
 		</div>
 	{:else}
@@ -676,8 +765,8 @@
 		{/if}
 	</fieldset>
 
-	<!-- Working directory (not applicable to a remote upstream) -->
-	{#if !isRemote}
+	<!-- Working directory (not applicable to a remote upstream or a docker container) -->
+	{#if !isRemote && !isDocker}
 		<div class="flex flex-col gap-2">
 			<label for="srv-cwd" class="text-sm font-medium text-[var(--color-ink)]">
 				Working directory <span class="font-normal text-[var(--color-ink-dim)]">(optional)</span>

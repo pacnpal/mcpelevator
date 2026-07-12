@@ -7,6 +7,7 @@ Sits above the repo: generates identity (id/slug), computes the idempotency
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
@@ -14,6 +15,7 @@ from sqlmodel import Session
 
 from app.db import repo
 from app.db.models import RUNNERS, Server
+from app.registry import settings as runtime_settings
 from app.runners import remote as remote_runner
 from app.runners.remote import canonical_transport
 from app.util import config_hash, new_id, slugify
@@ -58,6 +60,147 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
             f"(got {args[0]!r})"
         )
     return url, [transport]
+
+
+# --- docker (OCI image) normalization ------------------------------------------
+# The canonical stored shape for a docker server is minimal (SSOT): command = image
+# reference, args = the CONTAINER's own arguments, env = the env map. A pasted
+# mcpServers entry, though, gives a full `docker run …` invocation; normalize_docker is
+# the single place that parses that into the canonical shape so the row (and its
+# config_hash) is deterministic and the docker runner can synthesize its own hardened argv.
+_DOCKER_LAUNCHERS = {"docker", "docker.exe", "podman", "podman.exe"}
+
+# `docker run` flags that CONSUME the next token as their value (so we skip both). Kept
+# reasonably complete for real MCP configs; an unknown value-taking flag is the accepted
+# edge (it'd be read as a boolean and its value mistaken for the image — rare in practice).
+_DOCKER_VALUE_FLAGS = frozenset({
+    "-e", "--env", "--env-file",
+    "-v", "--volume", "--mount", "--tmpfs",
+    "-p", "--publish", "--expose",
+    "-w", "--workdir",
+    "--name", "--hostname", "-h",
+    "--network", "--net", "--ip", "--add-host", "--dns", "--dns-search",
+    "--label", "-l", "--label-file",
+    "-m", "--memory", "--memory-swap", "--memory-reservation",
+    "--cpus", "--cpuset-cpus", "--cpu-shares", "-c",
+    "-u", "--user", "--userns",
+    "--entrypoint",
+    "--platform", "--pull",
+    "--stop-timeout", "--stop-signal", "--restart",
+    "--device", "--ulimit", "--shm-size", "--pids-limit",
+    "--security-opt", "--cap-add", "--cap-drop",
+    "--health-cmd", "--health-interval", "--health-timeout", "--health-retries",
+    "--log-driver", "--log-opt", "--gpus", "--runtime", "--group-add",
+})
+
+
+def _capture_env(token: str, env: dict[str, str], warnings: list[str]) -> None:
+    """Fold a ``-e`` argument into the env map.
+
+    ``VAR=value`` provides a value (the explicit env map still wins, via setdefault).
+    A bare ``VAR`` (name-only passthrough) is only meaningful if the env map supplies its
+    value — the builder emits ``-e KEY`` for each env key and the value reaches the docker
+    CLI's minimal env from there. A name-only ``VAR`` with no value is dropped with a
+    warning rather than silently passing an empty variable."""
+    name, sep, val = token.partition("=")
+    if not name:
+        return
+    if sep:
+        env.setdefault(name, val)
+    elif name not in env:
+        warnings.append(
+            f"-e {name} references a variable with no value — add {name} under Environment "
+            f"so it is passed to the container."
+        )
+
+
+def normalize_docker(
+    command: str, args: Optional[list[str]], env: Optional[dict[str, str]]
+) -> tuple[str, list[str], dict[str, str], list[str]]:
+    """Normalize a docker server to the canonical (image, container_args, env) shape.
+
+    Accepts either a full invocation (``command`` basename in docker/podman, ``args`` the
+    ``run …`` line) or an already-bare image ref (``command`` = image, ``args`` = container
+    args). Returns ``(image, container_args, env, warnings)``. Raises ``ValueError`` when no
+    image can be found. Pure and deterministic — the same input always yields the same shape.
+    """
+    env = dict(env or {})
+    warnings: list[str] = []
+    tokens = list(args or [])
+    base = os.path.basename((command or "").strip()).lower()
+
+    if base not in _DOCKER_LAUNCHERS:
+        # Already an image ref; container args pass through unchanged.
+        image = (command or "").strip()
+        if not image:
+            raise ValueError("a docker server needs an image reference")
+        return image, tokens, env, warnings
+
+    # Full invocation: skip the leading `run` subcommand, then token-walk the flags.
+    i = 0
+    if tokens and tokens[0] == "run":
+        i = 1
+    elif "run" in tokens:
+        i = tokens.index("run") + 1
+
+    image: Optional[str] = None
+    container_args: list[str] = []
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok == "--":  # explicit end of options: next token is the image
+            i += 1
+            if i < n:
+                image = tokens[i]
+                container_args = tokens[i + 1:]
+            break
+        if tok.startswith("-"):
+            if "=" in tok:  # inline value form, e.g. --env=VAR / --memory=1g
+                name, _, val = tok.partition("=")
+                if name in ("-e", "--env"):
+                    _capture_env(val, env, warnings)
+                i += 1
+                continue
+            if tok in ("-e", "--env"):
+                if i + 1 < n:
+                    _capture_env(tokens[i + 1], env, warnings)
+                    i += 2
+                else:
+                    i += 1
+                continue
+            if tok in ("-d", "--detach"):
+                warnings.append("-d/--detach is incompatible with stdio and is ignored.")
+                i += 1
+                continue
+            if tok in ("--privileged",):
+                warnings.append("--privileged is dropped by the hardened docker runner.")
+                i += 1
+                continue
+            if tok in _DOCKER_VALUE_FLAGS:
+                i += 2  # skip the flag and its value
+                continue
+            i += 1  # a boolean flag (-i, -t, -it, --rm, --init, …); skip it
+            continue
+        # First non-flag token is the image; everything after it is the container's args.
+        image = tok
+        container_args = tokens[i + 1:]
+        break
+
+    if not image:
+        raise ValueError("a docker server's args must include an image reference")
+    return image, container_args, env, warnings
+
+
+def _require_docker_enabled(session: Session) -> None:
+    """Gate the root-equivalent docker runner behind the opt-in ``docker_runner`` setting.
+
+    Raised as ``ValueError`` so the API surfaces a 400. Enforced on the transition to
+    *enabled* (create-with-enabled, enable, update-while-enabled); importing/creating a
+    disabled docker server is always allowed so a paste can be reviewed first."""
+    if not runtime_settings.docker_runner(session):
+        raise ValueError(
+            "Docker runner is disabled — enable it in Settings first (it is root-equivalent)."
+        )
 
 
 def compute_hash(server: Server) -> str:
@@ -172,6 +315,13 @@ def create_server(
     if runner == "remote":
         command, args = normalize_remote(command, args)
         cwd = None
+    # A docker server is stored in canonical (image, container_args, env) shape; a pasted
+    # `docker run …` invocation is parsed down to it. The gate bites only when the server
+    # is created already enabled — a disabled import stays reviewable.
+    if runner == "docker":
+        command, args, env, _ = normalize_docker(command, args, env)
+        if enabled:
+            _require_docker_enabled(session)
 
     server = Server(
         id=new_id(),
@@ -223,6 +373,14 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
         # the stale working directory here (remote has no process) to keep the row canonical.
         server.cwd = None
+    if server.runner == "docker":
+        server.command, server.args, server.env, _ = normalize_docker(
+            server.command, server.args, server.env
+        )
+        # Editing an enabled docker server (or converting one to docker while enabled)
+        # requires the runner to be on — same gate as enable.
+        if server.enabled:
+            _require_docker_enabled(session)
     server.config_hash = compute_hash(server)  # recompute -> drives idempotent reconcile
     return repo.save_server(session, server)
 
@@ -261,6 +419,10 @@ def set_enabled(session: Session, server_id: str, enabled: bool) -> Server:
     server = repo.get_server(session, server_id)
     if server is None:
         raise KeyError(server_id)
+    # Enabling a docker server is the point the root-equivalent gate bites (import/create
+    # left it disabled and reviewable).
+    if enabled and server.runner == "docker":
+        _require_docker_enabled(session)
     server.enabled = enabled
     return repo.save_server(session, server)
 
@@ -272,12 +434,14 @@ _UVX_LAUNCHERS = {"uvx", "uv"}
 
 
 def _infer_runner(command: str) -> str:
-    base = command.strip().lower()
+    # Match on the basename so an absolute launcher path (e.g. "/usr/local/bin/docker",
+    # as Claude Desktop configs commonly write) infers the right runner, not "command".
+    base = os.path.basename(command.strip()).lower()
     if base in _NPX_LAUNCHERS:
         return "npx"
     if base in _UVX_LAUNCHERS:
         return "uvx"
-    if base == "docker":
+    if base in _DOCKER_LAUNCHERS:
         return "docker"
     return "command"
 

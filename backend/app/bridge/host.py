@@ -73,6 +73,31 @@ async def _forward_roots(context) -> list[Root]:
         return []
 
 
+# Environment keys a docker CLI child genuinely needs from the control plane's env when
+# ``minimal_env`` is set. Everything else (MCPE_ADMIN_TOKEN, DB creds, unrelated API keys)
+# is deliberately withheld so a container's ``-e KEY`` passthrough can't reach it.
+_DOCKER_ENV_ALLOWLIST = (
+    "PATH", "HOME",
+    "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_CONTEXT", "DOCKER_CONFIG",
+)
+
+
+def _child_env(spec: dict) -> dict[str, str]:
+    """Environment for a stdio child.
+
+    Default: merge the bridge's own environment (PATH, HOME, caches) with the
+    server-specific vars so npx/uvx/etc. resolve; server vars win. When the spec sets
+    ``minimal_env`` (the docker runner), pass ONLY a small allowlist of the bridge's env
+    plus the server vars — never the full ``os.environ`` — so the elevator's own secrets
+    can't leak into a container via a ``-e KEY`` passthrough.
+    """
+    server_env = dict(spec.get("env") or {})
+    if spec.get("minimal_env"):
+        base = {k: os.environ[k] for k in _DOCKER_ENV_ALLOWLIST if k in os.environ}
+        return {**base, **server_env}
+    return {**os.environ, **server_env}
+
+
 def _build_transport(spec: dict):
     """Pick the upstream transport from the spec's ``transport`` discriminator.
 
@@ -89,9 +114,7 @@ def _build_transport(spec: dict):
     return StdioTransport(
         command=spec["command"],
         args=list(spec.get("args") or []),
-        # Merge the child's own environment (PATH, HOME, caches) with the
-        # server-specific vars so npx/uvx/etc. resolve; server vars win.
-        env={**os.environ, **(spec.get("env") or {})},
+        env=_child_env(spec),
         cwd=spec.get("cwd") or None,
     )
 

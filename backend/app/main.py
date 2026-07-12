@@ -71,6 +71,22 @@ def _bootstrap_private_lan() -> None:
             )
 
 
+def _bootstrap_docker_runner() -> None:
+    """Seed the ``docker_runner`` runtime setting from ``MCPE_DOCKER_RUNNER`` on first boot,
+    so a headless box can enable the (root-equivalent) docker runner declaratively. Seeds
+    only when the setting has never been written; a later UI toggle stays authoritative."""
+    if not get_settings().docker_runner:
+        return
+    with Session(get_engine()) as session:
+        if repo.setting_get(session, "docker_runner", _UNSET) is _UNSET:
+            runtime_settings.write(session, {"docker_runner": True})
+            print(
+                "[mcpelevator] MCPE_DOCKER_RUNNER set — docker runner enabled "
+                "(root-equivalent; runs images on the mounted Docker daemon).",
+                flush=True,
+            )
+
+
 def _bootstrap_control_plane_auth() -> None:
     """On boot, if control-plane auth is enforced, make sure the operator has a usable
     admin credential and is told how to get it — so a headless/compose deployment is
@@ -118,6 +134,7 @@ async def lifespan(app: FastAPI):
         service.normalize_auth_providers(session)  # canonicalize legacy auth_provider values
         service.backfill_config_hashes(session)  # rehash upgraded rows -> no spurious restarts
     _bootstrap_private_lan()  # seed LAN access from env before deciding auth enforcement
+    _bootstrap_docker_runner()  # seed docker-runner enable from env (headless)
     _bootstrap_control_plane_auth()
     app.state.http = httpx.AsyncClient(timeout=None)  # no timeout: long-lived SSE streams
     supervisor = Supervisor()
