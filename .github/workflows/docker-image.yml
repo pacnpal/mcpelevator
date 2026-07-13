@@ -40,16 +40,19 @@ on:
           - beta
 
 concurrency:
-  # Releases serialize among themselves (a newer release supersedes an in-flight
-  # build), and manual builds serialize per channel — keyed on the channel, not
-  # the free-typed version, so `v1.2.3` and `1.2.3` dispatches can't race the
-  # same image tag from different groups. Release and manual runs never cancel
-  # each other. Manual runs QUEUE rather than cancel (dispatching dev-1.2.4
-  # must not kill an in-flight dev-1.2.3 build, which publishes a different
-  # tag); only releases supersede, where the newest one is the only image the
-  # floating tags should reflect.
+  # Releases and manual builds live in disjoint groups, and manual builds
+  # serialize per channel — keyed on the channel, not the free-typed version,
+  # so `v1.2.3` and `1.2.3` dispatches can't race the same image tag from
+  # different groups. Runs within a group queue FIFO instead of canceling:
+  # dispatching dev-1.2.4 must not kill an in-flight dev-1.2.3 (each publishes
+  # a distinct tag), and queue: max keeps every queued dispatch, where the
+  # default single-slot queue would silently replace a pending run. FIFO also
+  # keeps releases correct without cancel-in-progress (which queue: max
+  # forbids anyway): back-to-back releases apply their floating tags in
+  # order, so the newest release's tags still win — the superseded build is
+  # just no longer skipped.
   group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.channel) || 'release' }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  queue: max
 
 env:
   GHCR_IMAGE: ghcr.io/${{ github.repository }}
