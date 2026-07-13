@@ -248,7 +248,10 @@ async def delete_server(server_id: str, request: Request, session: Session = Dep
     await sup.stop(server_id)  # tear down the process before removing desired state
     if not repo.delete_server(session, server_id):
         raise HTTPException(status_code=404, detail="server not found")
-    # Drop any stored upstream OAuth credentials for this (now-deleted) server.
+    # Cancel any in-flight authorization and drop stored upstream OAuth credentials for this
+    # (now-deleted) server — otherwise a late callback could re-promote tokens and leave an
+    # orphan credential file on disk for a server that no longer exists.
+    oauth_flow.cancel_pending(server_id)
     ServerTokenStorage(server_id).clear()
     return Response(status_code=204)
 

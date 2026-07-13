@@ -125,7 +125,7 @@ def _build_oauth_auth(oauth: dict):
     """
     from app.auth.oauth_store import ServerTokenStorage  # local import: keeps bridge import light
 
-    from mcp.client.auth import OAuthClientProvider
+    from mcp.client.auth import OAuthClientProvider, TokenStorage
     from mcp.shared.auth import OAuthClientMetadata
     from pydantic import AnyHttpUrl
 
@@ -133,6 +133,30 @@ def _build_oauth_auth(oauth: dict):
         raise RuntimeError(
             "this upstream needs OAuth sign-in — re-authenticate it from the mcpelevator UI"
         )
+
+    class _RefreshOnlyStorage(TokenStorage):
+        """Bridge-side storage: reads tokens/client info and writes back REFRESHED tokens,
+        but never persists a client REGISTRATION. Client registration is the control
+        plane's interactive job; without this, an enabled OAuth server with no tokens (just
+        after create/Disconnect/config-edit) would drive the SDK's 401→DCR path on the
+        readiness probe and write a client_info for the bridge's dummy loopback redirect —
+        recreating a cleared token file and burning registration quota — before
+        ``_no_interactive`` raises."""
+
+        def __init__(self, inner: ServerTokenStorage):
+            self._inner = inner
+
+        async def get_tokens(self):
+            return await self._inner.get_tokens()
+
+        async def set_tokens(self, tokens) -> None:
+            await self._inner.set_tokens(tokens)  # a real refresh must persist
+
+        async def get_client_info(self):
+            return await self._inner.get_client_info()
+
+        async def set_client_info(self, client_info) -> None:
+            return  # no-op: the bridge never registers a client
 
     url = oauth["url"]
     storage = ServerTokenStorage(oauth["server_id"])
@@ -148,7 +172,7 @@ def _build_oauth_auth(oauth: dict):
     provider = OAuthClientProvider(
         server_url=url,
         client_metadata=client_metadata,
-        storage=storage,
+        storage=_RefreshOnlyStorage(storage),
         redirect_handler=_no_interactive,
         callback_handler=_no_interactive,
     )

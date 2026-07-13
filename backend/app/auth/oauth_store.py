@@ -145,11 +145,20 @@ class ServerTokenStorage(TokenStorage):
     async def set_tokens(self, tokens: OAuthToken) -> None:
         with self._locked():
             data = self._read()
-            dumped = tokens.model_dump(mode="json", exclude_none=True)
             # A refresh response frequently OMITS ``refresh_token`` (the provider isn't
             # rotating it). Carry the previous one forward so the next refresh still has a
             # credential — otherwise the token silently becomes single-use and the bridge
-            # falls into the non-interactive failure path at the next expiry.
+            # falls into the non-interactive failure path at the next expiry. MUTATE the
+            # token object (not just the serialized dict) so the SDK provider's in-memory
+            # ``context.current_tokens`` — the same object it passes here — stays consistent.
+            if not tokens.refresh_token:
+                prev = (data.get("tokens") or {}).get("refresh_token")
+                if prev:
+                    try:
+                        tokens.refresh_token = prev
+                    except Exception:  # noqa: BLE001 — frozen model: fall back to fixing the JSON only
+                        pass
+            dumped = tokens.model_dump(mode="json", exclude_none=True)
             if not dumped.get("refresh_token"):
                 prev = (data.get("tokens") or {}).get("refresh_token")
                 if prev:

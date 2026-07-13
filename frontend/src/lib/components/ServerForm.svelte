@@ -157,6 +157,9 @@
 	// Open the client-credentials disclosure when there's already an id or a stored secret.
 	// Initial capture only (uncontrolled form), so untrack the prop read.
 	let oauthClientOpen = $state(untrack(() => !!seed.oauthClientId || oauthHasSecret));
+	// Edit mode only: explicitly remove a stored (write-only) secret while keeping the client id
+	// — e.g. switching a confidential client to a public one. Blank alone means "keep".
+	let oauthRemoveSecret = $state(false);
 
 	let cwd = $state(seed.cwd);
 	let mcpHttp = $state(seed.mcpHttp);
@@ -296,7 +299,9 @@
 		if (!oauthClientId.trim()) return null;
 		const typed = oauthClientSecret.trim();
 		if (typed) return typed;
-		return mode === 'edit' && oauthHasSecret ? undefined : null;
+		// Blank: keep the stored secret in edit mode unless the operator explicitly removes it.
+		if (mode === 'edit' && oauthHasSecret && !oauthRemoveSecret) return undefined;
+		return null;
 	}
 
 	function handleSubmit(e: SubmitEvent) {
@@ -637,6 +642,7 @@
 									type="password"
 									aria-label="OAuth client secret"
 									bind:value={oauthClientSecret}
+									disabled={mode === 'edit' && oauthHasSecret && oauthRemoveSecret}
 									autocomplete="off"
 									spellcheck="false"
 									placeholder={oauthHasSecret ? 'Set — leave blank to keep current' : 'Client secret — optional'}
@@ -646,6 +652,12 @@
 									Leave blank to register automatically (Dynamic Client Registration). Fill these
 									in only if the provider issued you a pre-registered client.
 								</p>
+								{#if mode === 'edit' && oauthHasSecret}
+									<label class="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+										<input type="checkbox" bind:checked={oauthRemoveSecret} />
+										Remove the stored client secret (switch to a public client)
+									</label>
+								{/if}
 							</div>
 						{/if}
 					</div>
