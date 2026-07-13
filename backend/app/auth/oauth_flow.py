@@ -115,9 +115,20 @@ class _MemoryTokenStorage(TokenStorage):
     a static-client grant skips Dynamic Client Registration. Also forces the probe to
     401 (no tokens here), which is what triggers the browser redirect."""
 
-    def __init__(self, client_info: Optional[OAuthClientInformationFull] = None):
+    def __init__(
+        self,
+        client_info: Optional[OAuthClientInformationFull] = None,
+        *,
+        persist_registration_to: Optional[ServerTokenStorage] = None,
+    ):
         self._tokens: Optional[OAuthToken] = None
         self._client_info = client_info
+        # When set, a client the SDK newly REGISTERS mid-flow is written straight through to
+        # the shared store (client_info only, never tokens). Wired up by begin_authorization
+        # solely in the DCR path when the real store holds no tokens, so an abandoned or failed
+        # browser step doesn't discard the registration and force the next sign-in to register
+        # again (burning the provider's registration quota).
+        self._persist_registration_to = persist_registration_to
 
     async def get_tokens(self) -> Optional[OAuthToken]:
         return self._tokens
@@ -130,6 +141,11 @@ class _MemoryTokenStorage(TokenStorage):
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         self._client_info = client_info
+        if self._persist_registration_to is not None:
+            # set_client_info touches only the client_info key of the file, leaving any tokens
+            # untouched — and this is only wired when there were no tokens to begin with, so it
+            # can never rebind a client that a live credential's refresh depends on.
+            await self._persist_registration_to.set_client_info(client_info)
 
 
 class _Pending:
@@ -320,8 +336,17 @@ async def begin_authorization(server, *, callback_url: str) -> str:
 
     # Drive the grant against an EPHEMERAL store (no tokens → the probe 401s → the browser
     # redirect fires). The shared store is written only if the grant succeeds (_drive), so a
-    # failed or cancelled re-auth can't wipe a still-working credential.
-    mem = _MemoryTokenStorage(client_info=seed_client_info)
+    # failed or cancelled re-auth can't wipe a still-working credential. The one exception is a
+    # freshly DCR-registered client when no seed and no stored tokens exist: persist that
+    # registration straight through, so an abandoned browser step doesn't force a re-register
+    # next time (quota). Guarded on "no tokens" so it can never rebind a client a live token
+    # depends on.
+    persist_registration_to = (
+        real if seed_client_info is None and (await real.get_tokens()) is None else None
+    )
+    mem = _MemoryTokenStorage(
+        client_info=seed_client_info, persist_registration_to=persist_registration_to
+    )
 
     client_metadata = OAuthClientMetadata(
         client_name=CLIENT_NAME,

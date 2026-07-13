@@ -138,17 +138,20 @@ to sign in; on return the tokens are stored and, if the server is enabled, its b
 restarts to pick them up. The server page then shows the connection status with
 **Re-authenticate** / **Disconnect** controls. The OAuth handshake runs in the control
 plane (it needs a browser); the per-server bridge only reads and refreshes the stored
-tokens. Credentials live in `<data_dir>/oauth/<server-id>.json` (created `0600`), never
-in the database, so authenticating never restarts the bridge on its own.
+tokens. The OAuth **tokens** live in `<data_dir>/oauth/<server-id>.json` (created `0600`),
+never in the database, so authenticating never restarts the bridge on its own.
 
-> **⚠️ Stored unencrypted at rest.** OAuth tokens (and any static `oauth_client_secret`)
-> are written to `<data_dir>/oauth/<server-id>.json` in the clear — protected by file
-> permissions and control of the data directory, **not** encryption, because the bridge
-> subprocess has to read and refresh them. Anyone who can read the data directory (host
-> root, an unprotected volume mount, a backup) can read the credentials. Keep `<data_dir>`
-> and its backups on encrypted, access-controlled storage, and revoke a leaked grant at the
-> provider (or via **Disconnect**) rather than relying on on-disk secrecy. Full rationale:
-> [docs/security.md](docs/security.md) § *Credentials at rest*.
+> **⚠️ Stored unencrypted at rest.** OAuth access/refresh tokens live in
+> `<data_dir>/oauth/<server-id>.json`; a static `oauth_client_secret` you supply is stored
+> in the **SQLite database** (the `server` row, like any `env`/header secret) and, after a
+> successful sign-in, is also copied into the client registration in that same JSON file.
+> All of it is stored **in the clear** — protected by file permissions and control of the
+> data directory, **not** encryption, because the bridge subprocess has to read and refresh
+> it. Anyone who can read the data directory *or a database backup* (host root, an
+> unprotected volume mount, a copied backup) can read these credentials. Keep `<data_dir>`,
+> the SQLite file, and any backups on encrypted, access-controlled storage, and revoke a
+> leaked grant at the provider (or via **Disconnect**) rather than relying on on-disk
+> secrecy. Full rationale: [docs/security.md](docs/security.md) § *Credentials at rest*.
 
 ## Install from a registry (catalog)
 

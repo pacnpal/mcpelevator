@@ -111,11 +111,14 @@ is not itself a vulnerability when the operator intentionally relies on loopback
 or an external OAuth/Access gate; it is dangerous if exposed directly to the internet.
 
 **Credentials at rest.** Upstream credentials are stored **unencrypted** on the
-control-plane host. Upstream OAuth access/refresh tokens, the discovered client
-registration, and any static `oauth_client_secret` live in the per-server
-`<data_dir>/oauth/<server-id>.json` files (created `0600`, atomic replace); upstream
-header/`env` secrets live in the SQLite row. mcpelevator does **not** encrypt these at
-rest — it relies on operating-system file permissions and control of the data directory.
+control-plane host. Upstream OAuth access/refresh tokens and the discovered client
+registration live in the per-server `<data_dir>/oauth/<server-id>.json` files (created
+`0600`, atomic replace). A static `oauth_client_secret` the operator supplies is stored in
+the SQLite `server` row alongside upstream header/`env` secrets — so **SQLite backups
+contain OAuth client secrets**, not just data-plane config — and, once a sign-in completes,
+that secret is also copied into the client registration in the JSON file. mcpelevator does
+**not** encrypt any of these at rest — it relies on operating-system file permissions and
+control of the data directory.
 The one exception is data-plane and admin **bearer tokens**, which are SHA-256-hashed and
 never stored in the clear (§ Data plane). Consequently, anyone who can read the data
 directory — host root, a compromised control-plane process, an unprotected volume mount,
@@ -216,7 +219,8 @@ token attempts despite high entropy.
 `none` auth on an exposed server); UI lockout or confusing copy URLs; dependency/CI issues that do
 not permit runtime auth bypass; token hashes using unsalted SHA-256 for high-entropy generated
 tokens, which is acceptable but should not be reused for human passwords; upstream credentials
-(OAuth tokens/refresh tokens, static client secrets, header/`env` secrets) stored unencrypted at
-rest, protected by `0600` file permissions and data-directory control rather than encryption — a
+(OAuth tokens/refresh tokens in the `0600` token files; static client secrets and header/`env`
+secrets in the SQLite row) stored unencrypted at rest, protected by filesystem permissions and
+data-directory control rather than encryption — a
 deliberate tradeoff and the reason the CodeQL `py/clear-text-storage-sensitive-data` alert is a
 known, accepted finding (§3 *Credentials at rest*).

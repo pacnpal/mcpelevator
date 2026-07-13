@@ -136,12 +136,13 @@ def _build_oauth_auth(oauth: dict):
 
     class _RefreshOnlyStorage(TokenStorage):
         """Bridge-side storage: reads tokens/client info and writes back REFRESHED tokens,
-        but never persists a client REGISTRATION. Client registration is the control
-        plane's interactive job; without this, an enabled OAuth server with no tokens (just
-        after create/Disconnect/config-edit) would drive the SDK's 401→DCR path on the
-        readiness probe and write a client_info for the bridge's dummy loopback redirect —
-        recreating a cleared token file and burning registration quota — before
-        ``_no_interactive`` raises."""
+        but never persists a client REGISTRATION. Client registration is the control plane's
+        interactive job. The primary guard against a probe-time DCR is the no-tokens early
+        return in ``_build_oauth_auth`` (an unauthenticated server gets no provider at all);
+        this no-op ``set_client_info`` is defense in depth for the residual case where tokens
+        exist but a refresh has failed, so the SDK re-enters the 401 path — we still refuse to
+        write a bridge-side registration (which would recreate a cleared file for the dummy
+        loopback redirect)."""
 
         def __init__(self, inner: ServerTokenStorage):
             self._inner = inner
@@ -160,6 +161,17 @@ def _build_oauth_auth(oauth: dict):
 
     url = oauth["url"]
     storage = ServerTokenStorage(oauth["server_id"])
+    if not storage.status().get("authenticated"):
+        # No stored access token yet (fresh create / post-Disconnect / lapsed refresh). Do
+        # NOT attach an OAuth provider at all: with no stored client_info the SDK's 401 path
+        # performs Dynamic Client Registration against the UPSTREAM on every readiness probe —
+        # creating a throwaway client and burning the provider's registration quota — before
+        # ``_no_interactive`` can stop it. (The no-op ``set_client_info`` below only blocks
+        # LOCAL persistence of that registration, not the upstream call.) Returning ``None``
+        # means the probe just gets a clean 401 with no OAuth requests at all, and the server
+        # surfaces as needing sign-in. Re-authenticating from the UI restarts the bridge, which
+        # rebuilds this with tokens present and a real refresh-capable provider.
+        return None
     client_metadata = OAuthClientMetadata(
         client_name="mcpelevator",
         # Never used for refresh, but the model requires a redirect URI; a loopback

@@ -327,6 +327,29 @@ def test_promote_carries_forward_metadata_when_absent():
         store.clear()
 
 
+async def test_memory_store_persists_dcr_registration_without_tokens():
+    # A client the SDK registers mid-flow (no seed, no stored tokens) is written straight to the
+    # real store so an abandoned/failed browser step doesn't discard the registration and force a
+    # re-register next time. It must persist ONLY the client_info — never fabricate tokens.
+    from mcp.shared.auth import OAuthClientInformationFull
+    from pydantic import AnyHttpUrl
+
+    real = ServerTokenStorage("srv-dcr-persist")
+    real.clear()
+    try:
+        mem = oauth_flow._MemoryTokenStorage(persist_registration_to=real)
+        ci = OAuthClientInformationFull(
+            client_id="dcr-123",
+            redirect_uris=[AnyHttpUrl("https://mcpe.example/api/oauth/callback")],
+        )
+        await mem.set_client_info(ci)
+        got = await real.get_client_info()
+        assert got is not None and got.client_id == "dcr-123"
+        assert real.status()["authenticated"] is False  # no tokens fabricated
+    finally:
+        real.clear()
+
+
 def test_merge_scopes_unions_and_dedupes():
     assert oauth_flow._merge_scopes("read write", None, "write admin", "") == "read write admin"
     assert oauth_flow._merge_scopes("", None) is None
@@ -510,20 +533,49 @@ def test_disconnect_clears_tokens():
 
 
 def test_bridge_builds_oauth_auth_and_preloads_metadata():
+    import anyio
     from mcp.client.auth import OAuthClientProvider
 
     from app.bridge import host
 
-    oauth = {"server_id": "srv-bridge-1", "url": "https://up.example/mcp", "scopes": "read"}
-    auth = host._build_oauth_auth(oauth)
-    assert isinstance(auth, OAuthClientProvider)
-    # No stored metadata yet -> context.oauth_metadata stays unset.
-    assert getattr(auth.context, "oauth_metadata", None) is None
+    store = ServerTokenStorage("srv-bridge-1")
+    store.clear()
+    try:
+        # A provider is built only once tokens exist (see below); seed one first.
+        anyio.run(store.set_tokens, OAuthToken(access_token="AT", token_type="Bearer"))
+        oauth = {"server_id": "srv-bridge-1", "url": "https://up.example/mcp", "scopes": "read"}
+        auth = host._build_oauth_auth(oauth)
+        assert isinstance(auth, OAuthClientProvider)
+        # No stored metadata yet -> context.oauth_metadata stays unset.
+        assert getattr(auth.context, "oauth_metadata", None) is None
+    finally:
+        store.clear()
+
+
+def test_bridge_no_oauth_auth_until_tokens_exist():
+    # An unauthenticated OAuth server (empty token file) must NOT get an OAuth provider:
+    # otherwise the SDK's 401 path would Dynamic-Client-Register against the upstream on every
+    # readiness probe, burning registration quota. The bridge attaches no auth so the probe
+    # just 401s cleanly and the server surfaces as needing sign-in.
+    from app.bridge import host
+
+    store = ServerTokenStorage("srv-bridge-noauth")
+    store.clear()
+    try:
+        oauth = {"server_id": "srv-bridge-noauth", "url": "https://up.example/mcp", "scopes": ""}
+        assert host._build_oauth_auth(oauth) is None
+    finally:
+        store.clear()
 
 
 def test_bridge_transport_passes_oauth_auth(monkeypatch):
+    import anyio
+
     from app.bridge import host
 
+    store = ServerTokenStorage("srv-bridge-2")
+    store.clear()
+    anyio.run(store.set_tokens, OAuthToken(access_token="AT", token_type="Bearer"))
     captured = {}
 
     class _FakeSHTTP:
@@ -538,10 +590,13 @@ def test_bridge_transport_passes_oauth_auth(monkeypatch):
         "env": {},
         "oauth": {"server_id": "srv-bridge-2", "url": "https://up.example/mcp", "scopes": ""},
     }
-    host._build_transport(spec)
-    from mcp.client.auth import OAuthClientProvider
+    try:
+        host._build_transport(spec)
+        from mcp.client.auth import OAuthClientProvider
 
-    assert isinstance(captured["auth"], OAuthClientProvider)
+        assert isinstance(captured["auth"], OAuthClientProvider)
+    finally:
+        store.clear()
 
 
 def test_bridge_transport_without_oauth_has_no_auth(monkeypatch):
