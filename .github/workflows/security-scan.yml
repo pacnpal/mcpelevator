@@ -16,9 +16,9 @@ name: Scheduled Security Scan
 # main's current .trivyignore.yaml, scans the image users are actually pulling,
 # and re-reconciles the main alert set.
 #
-# This is a scan-only workflow — it never builds or publishes an image, so it
-# does not conflict with docker-image.yml's deliberate "no manual publish path"
-# stance.
+# This is a scan-only workflow — it never builds or publishes an image. It
+# scans :latest, which only a published stable release moves; docker-image.yml's
+# manual dev/beta builds publish channel-prefixed tags this scan never sees.
 
 on:
   schedule:
