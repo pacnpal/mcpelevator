@@ -13,8 +13,9 @@ name: Build and Push Docker Image
 #     commit must match the `v<version>` git tag — dispatch on that tag (the
 #     Run-workflow ref picker has a Tags tab; `gh workflow run --ref vX.Y.Z`
 #     also works) or on a branch whose head is the tagged commit. The floating
-#     tags (X.Y, X, latest/beta) only move when the `floating_tags` checkbox is
-#     ticked, so rebuilding an old version can't yank them backwards.
+#     tags (X.Y, X, beta) only move when the `floating_tags` checkbox is ticked,
+#     so rebuilding an old version can't yank them backwards. `latest` is never
+#     pushed by a manual run — only a published stable release moves it.
 #
 # In both cases every published image is stamped with a real release version
 # (APP_VERSION), so the running instance reports e.g. `v1.2.3` — never
@@ -32,7 +33,7 @@ on:
         required: true
         type: string
       floating_tags:
-        description: "Also move the floating tags (X.Y, X, and latest/beta) to this build"
+        description: "Also move the floating tags (X.Y, X, and beta) to this build. `latest` never moves on a manual run."
         required: false
         default: false
         type: boolean
@@ -174,11 +175,12 @@ jobs:
             type=semver,pattern={{version}},value=v${{ steps.version.outputs.version }}
             # Floating tags: a release always moves them; a manual rebuild only
             # when the floating_tags checkbox is ticked (rebuilding an old
-            # version must not yank X.Y/X/latest back to it). latest tracks
-            # stable versions and beta prereleases, matching release semantics.
+            # version must not yank X.Y/X back to it). latest is exclusive to
+            # published stable releases — a manual run never pushes it, so a
+            # rebuild can't move the tag most deployments track.
             type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' || inputs.floating_tags == true }}
             type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }},enable=${{ (github.event_name == 'release' || inputs.floating_tags == true) && !startsWith(steps.version.outputs.version, '0.') }}
-            type=raw,value=latest,enable=${{ (github.event_name == 'release' && !github.event.release.prerelease) || (github.event_name == 'workflow_dispatch' && inputs.floating_tags && !contains(steps.version.outputs.version, '-')) }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
             type=raw,value=beta,enable=${{ (github.event_name == 'release' && github.event.release.prerelease) || (github.event_name == 'workflow_dispatch' && inputs.floating_tags && contains(steps.version.outputs.version, '-')) }}
             # always a git short SHA tag
             type=sha,prefix=sha-,format=short
