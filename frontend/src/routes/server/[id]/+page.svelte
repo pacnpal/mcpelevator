@@ -218,7 +218,20 @@
 			.map((p) => (/\s/.test(p) ? `"${p}"` : p))
 			.join(' ')
 	);
+
+	// Browser tab title: reflect the server being viewed (the layout otherwise leaves it a
+	// constant "mcpelevator" on every server page). Surface an OAuth server that still needs
+	// authenticating so the tab flags it even before you scroll to the banner.
+	const pageTitle = $derived(
+		server
+			? `${oauthState?.needs_auth ? '⚠ ' : ''}${server.name} · mcpelevator`
+			: 'mcpelevator'
+	);
 </script>
+
+<svelte:head>
+	<title>{pageTitle}</title>
+</svelte:head>
 
 <section class="mx-auto flex w-full max-w-3xl flex-col gap-6">
 	<!-- Back -->
