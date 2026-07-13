@@ -298,6 +298,10 @@ async def disconnect_oauth(
     server = repo.get_server(session, server_id)
     if server is None:
         raise HTTPException(status_code=404, detail="server not found")
+    # Cancel any in-flight authorization first: otherwise a callback for that parked flow
+    # could land after this clear and re-promote tokens, silently re-authenticating the
+    # server the operator just disconnected.
+    oauth_flow.cancel_pending(server_id)
     ServerTokenStorage(server_id).clear()
     sup = request.app.state.supervisor
     # Bounce a running bridge so it can no longer use the (now-cleared) in-memory token.

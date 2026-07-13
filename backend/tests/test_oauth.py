@@ -164,7 +164,7 @@ class _FakeAsyncClient:
     async def __aexit__(self, *exc):
         return False
 
-    async def post(self, _url, **_kwargs):
+    async def _handshake(self):
         ctx = self._provider.context
         # 1) provider hands us the authorization URL -> control plane returns it to the browser
         await ctx.redirect_handler(f"https://auth.example/authorize?state={self.STATE}&code_challenge=x")
@@ -176,6 +176,20 @@ class _FakeAsyncClient:
             OAuthToken(access_token=f"AT-{code}", token_type="Bearer", refresh_token="RT", expires_in=3600)
         )
         return httpx.Response(200)
+
+    def stream(self, _method, _url, **_kwargs):
+        # _drive uses client.stream(...) as an async context manager; drive the handshake
+        # on entry so the flow completes exactly as with a real streaming response.
+        handshake = self._handshake
+
+        class _Ctx:
+            async def __aenter__(_self):
+                return await handshake()
+
+            async def __aexit__(_self, *exc):
+                return False
+
+        return _Ctx()
 
 
 async def test_flow_begin_and_complete(monkeypatch):

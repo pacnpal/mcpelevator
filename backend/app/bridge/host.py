@@ -183,12 +183,18 @@ def _build_transport(spec: dict):
     kind = spec.get("transport") or "stdio"
     oauth = spec.get("oauth")
     auth = _build_oauth_auth(oauth) if oauth else None
+    headers = dict(spec.get("env") or {})
+    if oauth:
+        # OAuth owns the Authorization header. Drop any static one left over from a
+        # Headers→OAuth switch: when there's no/expired OAuth token (startup, post-
+        # disconnect, lapsed refresh) the auth object adds no bearer, and a stale static
+        # token would otherwise still authenticate the upstream despite the UI saying
+        # the server needs to re-authenticate.
+        headers = {k: v for k, v in headers.items() if k.strip().lower() != "authorization"}
     if kind in ("streamable-http", "http"):
-        return StreamableHttpTransport(
-            url=spec["command"], headers=dict(spec.get("env") or {}), auth=auth
-        )
+        return StreamableHttpTransport(url=spec["command"], headers=headers, auth=auth)
     if kind == "sse":
-        return SSETransport(url=spec["command"], headers=dict(spec.get("env") or {}), auth=auth)
+        return SSETransport(url=spec["command"], headers=headers, auth=auth)
     return StdioTransport(
         command=spec["command"],
         args=list(spec.get("args") or []),

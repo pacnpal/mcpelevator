@@ -289,6 +289,11 @@
 	// otherwise null (no secret).
 	function oauthSecretPayload(): string | null | undefined {
 		if (!(isRemote && oauth)) return null;
+		// A secret is only meaningful with a client id. If the id is cleared (switching a
+		// static client back to Dynamic Client Registration), clear the secret too —
+		// otherwise the PATCH would omit it, the backend would keep the old secret, and it
+		// would reject the update as a secret-without-id.
+		if (!oauthClientId.trim()) return null;
 		const typed = oauthClientSecret.trim();
 		if (typed) return typed;
 		return mode === 'edit' && oauthHasSecret ? undefined : null;

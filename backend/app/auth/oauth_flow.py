@@ -186,15 +186,18 @@ async def _drive(
     # 401/auth challenge here instead of failing before the redirect.
     transport = canonical_transport((server.args or [None])[0]) or DEFAULT_TRANSPORT
     headers = _probe_headers(server)
+    method, kwargs = ("GET", {}) if transport == "sse" else ("POST", {"json": _INIT_BODY})
     inner_error: Optional[BaseException] = None
     try:
         async with httpx.AsyncClient(
             auth=provider, timeout=httpx.Timeout(30.0), follow_redirects=True
         ) as client:
-            if transport == "sse":
-                await client.get(mcp_url, headers=headers)
-            else:
-                await client.post(mcp_url, json=_INIT_BODY, headers=headers)
+            # STREAM (don't read the body): the OAuth handshake runs to completion before this
+            # final response is returned, so the body is irrelevant — and an SSE upstream keeps
+            # its ``text/event-stream`` response open (heartbeats), which a body-reading
+            # ``get()`` would block on forever, hanging the flow past its timeout.
+            async with client.stream(method, mcp_url, headers=headers, **kwargs):
+                pass
     except asyncio.CancelledError:
         raise
     except BaseException as exc:  # noqa: BLE001 — tolerate; success is decided by whether tokens landed
@@ -210,6 +213,11 @@ async def _drive(
         # metadata the bridge preloads so refresh targets the right endpoint + resource.
         client_info = await mem.get_client_info()
         try:
+            # A fresh interactive grant REPLACES any prior credentials — drop the old tokens
+            # first so ``set_tokens``' refresh-token carry-forward (meant for the bridge's
+            # refresh path) can't graft a previous account's refresh token onto this grant
+            # when its code-exchange response omits one.
+            real.clear_tokens()
             # Write client info + discovered metadata FIRST, then the tokens LAST. status()
             # keys off the token blob, so tokens-last means a metadata write that raises never
             # leaves the store looking authenticated with a half-promoted grant.
@@ -261,7 +269,13 @@ async def begin_authorization(server, *, callback_url: str) -> str:
             scope=server.oauth_scopes or None,
         )
     else:
-        seed_client_info = await real.get_client_info()
+        # Reuse a prior DCR registration only if it was registered for THIS callback URL.
+        # If mcpelevator is now reached via a different base URL (localhost vs LAN, or a
+        # changed MCPE_PUBLIC_BASE_URL), the old registration's redirect_uris no longer
+        # match and a strict provider would reject the flow — so force re-registration.
+        existing = await real.get_client_info()
+        registered = {str(u) for u in (getattr(existing, "redirect_uris", None) or [])}
+        seed_client_info = existing if (existing is not None and callback_url in registered) else None
 
     # Drive the grant against an EPHEMERAL store (no tokens → the probe 401s → the browser
     # redirect fires). The shared store is written only if the grant succeeds (_drive), so a
