@@ -8,16 +8,14 @@ name: Build and Push Docker Image
 # Triggers:
 #   - A published GitHub release whose tag is a full semver (vX.Y.Z, optionally
 #     -prerelease). The release tag is the image version.
-#   - Manual workflow_dispatch, which requires an explicit full-semver `version`
-#     input (e.g. to rebuild a release image on a patched base). The checked-out
-#     commit must match the `v<version>` git tag — dispatch on that tag (the
-#     Run-workflow ref picker has a Tags tab; `gh workflow run --ref vX.Y.Z`
-#     also works) or on a branch whose head is the tagged commit. The floating
-#     tags (X.Y, X, beta) only move when the `floating_tags` checkbox is ticked,
-#     so rebuilding an old version can't yank them backwards. `latest` is never
-#     pushed by a manual run — only a published stable release moves it.
+#   - Manual workflow_dispatch, for dev/beta builds of any branch, tag, or
+#     commit: requires a full-semver `version` input and a `channel` (dev or
+#     beta). The image is published ONLY under channel-prefixed tags
+#     (<channel>-<version> plus <channel>-sha-<short>) — the release namespace
+#     (X.Y.Z, X.Y, X, latest, beta) is never created or moved by a manual run,
+#     so a manual build can't clobber or impersonate a release.
 #
-# In both cases every published image is stamped with a real release version
+# In both cases every published image is stamped with a real semver version
 # (APP_VERSION), so the running instance reports e.g. `v1.2.3` — never
 # `latest`/`dev`/a bare image tag. Anything that isn't full semver fails the build.
 #
@@ -32,16 +30,19 @@ on:
         description: "Image version to build (full semver, e.g. 1.2.3 or v1.2.3-rc.1)"
         required: true
         type: string
-      floating_tags:
-        description: "Also move the floating tags (X.Y, X, and beta) to this build. `latest` never moves on a manual run."
-        required: false
-        default: false
-        type: boolean
+      channel:
+        description: "Publish channel: the image is tagged <channel>-<version>; release tags are never touched"
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - beta
 
 concurrency:
   # Releases serialize among themselves (a newer release supersedes an in-flight
-  # build), but manual rebuilds get their own per-version group so a routine
-  # rebuild can't cancel a release publish (or vice versa).
+  # build), but manual builds get their own per-version group so a dev/beta
+  # build can't cancel a release publish (or vice versa).
   group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.version) || 'release' }}
   cancel-in-progress: true
 
@@ -79,6 +80,7 @@ jobs:
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
       version: ${{ steps.version.outputs.version }}
+      image-tag: ${{ steps.version.outputs.image_tag }}
 
     steps:
       - name: Checkout
@@ -109,6 +111,7 @@ jobs:
         id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
         run: |
           # Release: the version is the release tag. Manual dispatch: the version
           # is the required `version` input. Either way any leading `v` is
@@ -132,30 +135,21 @@ jobs:
           case "$VERSION" in
             [0-9]*.[0-9]*.[0-9]*) ;;
             *)
-              echo "Refusing to build: release tag '$VERSION' is not a full semver (X.Y.Z)." >&2
+              echo "Refusing to build: version '$VERSION' is not a full semver (X.Y.Z)." >&2
               exit 1
               ;;
           esac
-          # On a manual run the version is free-typed, so tie it to the code we
-          # actually checked out: the v<version> git tag must point at HEAD.
-          # Dispatching on the tag itself satisfies this directly; a branch ref
-          # only passes if its head is the tagged commit. This keeps the stamped
-          # APP_VERSION truthful — you can't publish :1.2.3 from unrelated source.
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$GITHUB_REF" != "refs/tags/v${VERSION}" ]; then
-            if ! git fetch --no-tags --depth=1 origin "refs/tags/v${VERSION}"; then
-              echo "Refusing to build: no git tag v${VERSION} exists to validate the requested version against." >&2
-              exit 1
-            fi
-            TAG_COMMIT="$(git rev-parse 'FETCH_HEAD^{commit}')"
-            HEAD_COMMIT="$(git rev-parse 'HEAD^{commit}')"
-            if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
-              echo "Refusing to build: tag v${VERSION} points at ${TAG_COMMIT}, but the dispatched ref (${GITHUB_REF}) checked out ${HEAD_COMMIT}." >&2
-              echo "Dispatch the workflow on the v${VERSION} tag to rebuild that release." >&2
-              exit 1
-            fi
+          # A manual build may be of any ref, so its image tag is namespaced by
+          # the required channel (dev-1.2.3 / beta-1.2.3): it can never collide
+          # with — or impersonate — a release's version tag.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            IMAGE_TAG="${INPUT_CHANNEL}-${VERSION}"
+          else
+            IMAGE_TAG="${VERSION}"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Building version: ${VERSION}"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Building version ${VERSION} (image tag: ${IMAGE_TAG})"
 
       - name: Extract Docker metadata
         id: meta
@@ -169,21 +163,19 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            # The exact version tag, from the resolved version (release tag or
-            # the workflow_dispatch `version` input) — the ref isn't a tag on a
-            # manual run, so pass the version explicitly instead of relying on it.
-            type=semver,pattern={{version}},value=v${{ steps.version.outputs.version }}
-            # Floating tags: a release always moves them; a manual rebuild only
-            # when the floating_tags checkbox is ticked (rebuilding an old
-            # version must not yank X.Y/X back to it). latest is exclusive to
-            # published stable releases — a manual run never pushes it, so a
-            # rebuild can't move the tag most deployments track.
-            type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' || inputs.floating_tags == true }}
-            type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }},enable=${{ (github.event_name == 'release' || inputs.floating_tags == true) && !startsWith(steps.version.outputs.version, '0.') }}
+            # The primary tag: the bare version on a release (1.2.3), the
+            # channel-prefixed version on a manual run (dev-1.2.3 / beta-1.2.3).
+            type=raw,value=${{ steps.version.outputs.image_tag }}
+            # The release namespace — floating X.Y/X plus latest (stable) and
+            # beta (prerelease) — moves ONLY on a published release; a manual
+            # build never creates or moves any of these.
+            type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' }}
+            type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' && !startsWith(steps.version.outputs.version, '0.') }}
             type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
-            type=raw,value=beta,enable=${{ (github.event_name == 'release' && github.event.release.prerelease) || (github.event_name == 'workflow_dispatch' && inputs.floating_tags && contains(steps.version.outputs.version, '-')) }}
-            # always a git short SHA tag
-            type=sha,prefix=sha-,format=short
+            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease }}
+            # always a git short SHA tag, channel-prefixed on manual runs so a
+            # dev build of a released commit can't overwrite the release's sha tag
+            type=sha,prefix=${{ github.event_name == 'workflow_dispatch' && format('{0}-sha-', inputs.channel) || 'sha-' }},format=short
           labels: |
             org.opencontainers.image.title=mcpelevator
             org.opencontainers.image.description=Elevate stdio MCP servers into authenticated HTTP endpoints
@@ -255,16 +247,19 @@ jobs:
 
       - name: Upload Trivy results to the Security tab
         uses: github/codeql-action/upload-sarif@ab28d5ce09b08e4700b2296d39d684a7ac71d1e7 # v4
-        if: always() && hashFiles('trivy-results.sarif') != ''
+        # Releases only: manual dev/beta builds may be of any ref (possibly far
+        # behind main), and pinning their stale results to main below would
+        # corrupt the default-branch alert set. Their scan still runs above —
+        # the results just stay in the job log instead of code scanning.
+        if: always() && github.event_name == 'release' && hashFiles('trivy-results.sarif') != ''
         with:
           sarif_file: trivy-results.sarif
-          # GITHUB_REF here is usually a tag (refs/tags/vX.Y.Z on a release, or
-          # a manual dispatch run against a tag). Code-scanning alerts are
-          # tracked per-ref and only auto-close when a newer analysis on the
-          # SAME ref omits them — a tag scan can never clear an alert on main.
-          # Pin the upload to main (release commits are cut from main) so each
-          # scan reconciles the default-branch alert set instead of piling up
-          # dead per-tag analyses.
+          # On a release, GITHUB_REF is the tag (refs/tags/vX.Y.Z). Code-scanning
+          # alerts are tracked per-ref and only auto-close when a newer analysis
+          # on the SAME ref omits them — a tag scan can never clear an alert on
+          # main. Pin the upload to main (release commits are cut from main) so
+          # each release reconciles the default-branch alert set instead of
+          # piling up dead per-tag analyses.
           ref: refs/heads/main
           sha: ${{ github.sha }}
 
@@ -286,5 +281,5 @@ jobs:
             echo "- **Digest:** \`${{ needs.build.outputs.image-digest }}\`"
             echo "- **Platforms:** \`${{ env.PLATFORMS }}\`"
             echo ""
-            echo "Pull: \`docker pull ${{ env.GHCR_IMAGE }}:${{ needs.build.outputs.version }}\`"
+            echo "Pull: \`docker pull ${{ env.GHCR_IMAGE }}:${{ needs.build.outputs.image-tag }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
