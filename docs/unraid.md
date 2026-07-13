@@ -92,12 +92,46 @@ container, add the variable, restart):
 3. For anything reachable off-host, put a **bearer token** on the server (Auth →
    `bearer`) so the endpoint isn't open to everyone on your network.
 
+## Docker runner (opt-in, root-equivalent)
+
+mcpelevator can also run MCP servers packaged as **Docker images** (e.g.
+`ghcr.io/github/github-mcp-server`). This is **OFF by default and root-equivalent**: it
+launches images on a Docker daemon, and anything that can reach the Docker socket is
+effectively root on the host. Only enable it if you trust every image you run.
+
+To turn it on in the template (both steps are required):
+
+1. Set **Docker Runner (root-equivalent)** (`MCPE_DOCKER_RUNNER`) to `true`. This seeds the
+   `docker_runner` setting on first boot; the Settings toggle is authoritative afterwards.
+2. Add the **Docker socket mount** manually — in the container's edit page click **Add another
+   Path, Port, Variable, Label or Device**, choose **Path**, and set both **Container Path** and
+   **Host Path** to `/var/run/docker.sock`. This is the *sibling-container* model: launched
+   images talk to Unraid's own Docker daemon. (The template deliberately doesn't ship this mount —
+   an empty socket path would generate an invalid bind and fail the container for everyone.)
+
+Once enabled, paste an `mcpServers` docker config (e.g. `docker run … <image>`) or install
+an **OCI** catalog entry, then start it like any other server. mcpelevator stores the
+canonical shape and synthesizes a **hardened** `docker run` (`--rm --init --cap-drop ALL
+--security-opt no-new-privileges --pids-limit` + a memory cap, secrets passed by name, and a
+label it uses to reap orphaned containers). Import surfaces a warning for any `docker run`
+option it drops (host mounts, `--network`, `--env-file`, `--platform`, …).
+
+**Stronger isolation:** instead of the host socket, run a separate `docker:dind` daemon and
+point mcpelevator at it with `DOCKER_HOST` — launched images then never touch Unraid's own
+daemon. **Security:** a plaintext `tcp://…:2375` endpoint is *unauthenticated* — anyone who can
+reach it controls that daemon (root-equivalent). Only use `2375` on a strictly private,
+non-routable Docker network shared by just these two containers, and **never publish or
+port-forward it**. For anything less contained, front dind with **TLS on `2376`**
+(`DOCKER_HOST=tcp://<dind-host>:2376` + `DOCKER_TLS_VERIFY=1` and certs). See the project's
+`docker-compose.yml` and [docs/security.md](security.md) for the full model and both isolation
+options.
+
 ## Updating
 
 The template tracks `ghcr.io/pacnpal/mcpelevator:latest`. Unraid's built-in update check
 (**Docker → Check for Updates**) picks up new releases; apply the update and the
 reconciler restarts your enabled servers automatically. Pin a specific version by
-changing the repository tag (e.g. `ghcr.io/pacnpal/mcpelevator:0.1.0`) — published tags
+changing the repository tag (e.g. `ghcr.io/pacnpal/mcpelevator:1.1.0`) — published tags
 are listed on the [GHCR package page](https://github.com/pacnpal/mcpelevator/pkgs/container/mcpelevator).
 
 ## Backup
@@ -134,6 +168,7 @@ mcpelevator's built-in bearer auth for Claude Code / locally-configured Desktop)
 | `MCPE_MINT_ADMIN_TOKEN` | `false` | Mint + print a fresh admin token on boot (recovery); unset after use |
 | `MCPE_PUBLIC_BASE_URL` | _(unset)_ | Absolute URL clients use when the box sits behind a tunnel/reverse proxy |
 | `MCPE_ALLOWED_HOSTS` | _(unset)_ | Extra hostnames the Host/Origin guard trusts (e.g. a reverse-proxy hostname) |
+| `MCPE_DOCKER_RUNNER` | `false` | **Root-equivalent, opt-in.** First-boot seed for the docker runner (launch image-packaged MCP servers). Needs a Docker endpoint — either the host socket mounted (sibling model) or a `DOCKER_HOST` pointing at a separate dind daemon — see [Docker runner](#docker-runner-opt-in-root-equivalent) |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrently running MCP servers |
 | `MCPE_START_TIMEOUT_S` | `120` | Readiness timeout (covers npx/uvx cold-start installs) |
 
