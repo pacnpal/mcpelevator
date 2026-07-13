@@ -9,9 +9,12 @@ name: Build and Push Docker Image
 #   - A published GitHub release whose tag is a full semver (vX.Y.Z, optionally
 #     -prerelease). The release tag is the image version.
 #   - Manual workflow_dispatch, which requires an explicit full-semver `version`
-#     input (e.g. to rebuild a release image on a patched base). Pick the matching
-#     tag as the ref when rebuilding an old version. `latest` is only pushed when
-#     the `latest` checkbox is ticked.
+#     input (e.g. to rebuild a release image on a patched base). The checked-out
+#     commit must match the `v<version>` git tag — dispatch on that tag (the
+#     Run-workflow ref picker has a Tags tab; `gh workflow run --ref vX.Y.Z`
+#     also works) or on a branch whose head is the tagged commit. The floating
+#     tags (X.Y, X, latest/beta) only move when the `floating_tags` checkbox is
+#     ticked, so rebuilding an old version can't yank them backwards.
 #
 # In both cases every published image is stamped with a real release version
 # (APP_VERSION), so the running instance reports e.g. `v1.2.3` — never
@@ -28,14 +31,17 @@ on:
         description: "Image version to build (full semver, e.g. 1.2.3 or v1.2.3-rc.1)"
         required: true
         type: string
-      latest:
-        description: "Also push the `latest` tag"
+      floating_tags:
+        description: "Also move the floating tags (X.Y, X, and latest/beta) to this build"
         required: false
         default: false
         type: boolean
 
 concurrency:
-  group: ${{ github.workflow }}
+  # Releases serialize among themselves (a newer release supersedes an in-flight
+  # build), but manual rebuilds get their own per-version group so a routine
+  # rebuild can't cancel a release publish (or vice versa).
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.version) || 'release' }}
   cancel-in-progress: true
 
 env:
@@ -129,6 +135,24 @@ jobs:
               exit 1
               ;;
           esac
+          # On a manual run the version is free-typed, so tie it to the code we
+          # actually checked out: the v<version> git tag must point at HEAD.
+          # Dispatching on the tag itself satisfies this directly; a branch ref
+          # only passes if its head is the tagged commit. This keeps the stamped
+          # APP_VERSION truthful — you can't publish :1.2.3 from unrelated source.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$GITHUB_REF" != "refs/tags/v${VERSION}" ]; then
+            if ! git fetch --no-tags --depth=1 origin "refs/tags/v${VERSION}"; then
+              echo "Refusing to build: no git tag v${VERSION} exists to validate the requested version against." >&2
+              exit 1
+            fi
+            TAG_COMMIT="$(git rev-parse 'FETCH_HEAD^{commit}')"
+            HEAD_COMMIT="$(git rev-parse 'HEAD^{commit}')"
+            if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+              echo "Refusing to build: tag v${VERSION} points at ${TAG_COMMIT}, but the dispatched ref (${GITHUB_REF}) checked out ${HEAD_COMMIT}." >&2
+              echo "Dispatch the workflow on the v${VERSION} tag to rebuild that release." >&2
+              exit 1
+            fi
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building version: ${VERSION}"
 
@@ -137,17 +161,25 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.GHCR_IMAGE }}
+          # latest is managed explicitly below — flavor `auto` would silently
+          # re-add it for any stable semver build, including manual rebuilds of
+          # old versions where moving `latest` backwards is exactly what the
+          # floating_tags gate exists to prevent.
+          flavor: |
+            latest=false
           tags: |
-            # Versioned tags from the resolved version (release tag or the
-            # workflow_dispatch `version` input) — the ref isn't a tag on a
+            # The exact version tag, from the resolved version (release tag or
+            # the workflow_dispatch `version` input) — the ref isn't a tag on a
             # manual run, so pass the version explicitly instead of relying on it.
             type=semver,pattern={{version}},value=v${{ steps.version.outputs.version }}
-            type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.version }}
-            type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }},enable=${{ !startsWith(steps.version.outputs.version, '0.') }}
-            # latest for a stable release (or when explicitly requested on a
-            # manual run), beta for a prerelease
-            type=raw,value=latest,enable=${{ (github.event_name == 'release' && !github.event.release.prerelease) || (github.event_name == 'workflow_dispatch' && inputs.latest) }}
-            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease }}
+            # Floating tags: a release always moves them; a manual rebuild only
+            # when the floating_tags checkbox is ticked (rebuilding an old
+            # version must not yank X.Y/X/latest back to it). latest tracks
+            # stable versions and beta prereleases, matching release semantics.
+            type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' || inputs.floating_tags == true }}
+            type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }},enable=${{ (github.event_name == 'release' || inputs.floating_tags == true) && !startsWith(steps.version.outputs.version, '0.') }}
+            type=raw,value=latest,enable=${{ (github.event_name == 'release' && !github.event.release.prerelease) || (github.event_name == 'workflow_dispatch' && inputs.floating_tags && !contains(steps.version.outputs.version, '-')) }}
+            type=raw,value=beta,enable=${{ (github.event_name == 'release' && github.event.release.prerelease) || (github.event_name == 'workflow_dispatch' && inputs.floating_tags && contains(steps.version.outputs.version, '-')) }}
             # always a git short SHA tag
             type=sha,prefix=sha-,format=short
           labels: |
