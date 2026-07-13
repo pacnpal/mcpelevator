@@ -44,9 +44,12 @@ concurrency:
   # build), and manual builds serialize per channel — keyed on the channel, not
   # the free-typed version, so `v1.2.3` and `1.2.3` dispatches can't race the
   # same image tag from different groups. Release and manual runs never cancel
-  # each other.
+  # each other. Manual runs QUEUE rather than cancel (dispatching dev-1.2.4
+  # must not kill an in-flight dev-1.2.3 build, which publishes a different
+  # tag); only releases supersede, where the newest one is the only image the
+  # floating tags should reflect.
   group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.channel) || 'release' }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 env:
   GHCR_IMAGE: ghcr.io/${{ github.repository }}
@@ -130,14 +133,17 @@ jobs:
               exit 1
               ;;
           esac
-          # Require a strict full semver (X.Y.Z, optionally -prerelease). A loose
-          # glob is not enough now that the free-typed manual input feeds the
-          # image tag directly: 1.2.3.4 or 1.2.3foo must not publish. +build
-          # metadata is rejected too ('+' can't appear in a docker tag; the
-          # charset check above already refuses it). Every image has to carry a
-          # real version in APP_VERSION so the running instance reports the
-          # version, never a bare tag like "latest".
-          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+          # Require a strict full semver (X.Y.Z, optionally -prerelease), using
+          # the official SemVer grammar for the prerelease part (non-empty
+          # dot-separated identifiers; numeric identifiers can't have leading
+          # zeroes — 1.2.3-01 and 1.2.3-. are invalid). A loose pattern is not
+          # enough now that the free-typed manual input feeds the image tag
+          # directly: 1.2.3.4 or 1.2.3foo must not publish. +build metadata is
+          # rejected too ('+' can't appear in a docker tag; the charset check
+          # above already refuses it). Every image has to carry a real version
+          # in APP_VERSION so the running instance reports the version, never a
+          # bare tag like "latest".
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
           if ! printf '%s' "$VERSION" | grep -Eq "$SEMVER_RE"; then
             echo "Refusing to build: version '$VERSION' is not a full semver (X.Y.Z[-prerelease])." >&2
             exit 1
