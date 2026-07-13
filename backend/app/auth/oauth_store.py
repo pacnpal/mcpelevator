@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import logging
 import os
 import re
 import tempfile
@@ -44,6 +45,8 @@ from mcp.shared.auth import (
 )
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 # Server ids are opaque ``new_id()`` hex tokens; constrain hard so a value that ever
 # reached here from a request path (``/servers/{server_id}/oauth/...``) can never
@@ -157,7 +160,10 @@ class ServerTokenStorage(TokenStorage):
                     try:
                         tokens.refresh_token = prev
                     except Exception:  # noqa: BLE001 — frozen model: fall back to fixing the JSON only
-                        pass
+                        logger.debug(
+                            "could not set refresh_token on the token object; patching JSON only",
+                            exc_info=True,
+                        )
             dumped = tokens.model_dump(mode="json", exclude_none=True)
             if not dumped.get("refresh_token"):
                 prev = (data.get("tokens") or {}).get("refresh_token")
@@ -230,6 +236,38 @@ class ServerTokenStorage(TokenStorage):
         with self._locked():
             data = self._read()
             data["protected_resource_metadata"] = prm.model_dump(mode="json", exclude_none=True)
+            self._write(data)
+
+    def promote(
+        self,
+        *,
+        tokens: OAuthToken,
+        client_info: Optional[OAuthClientInformationFull] = None,
+        metadata: Optional[OAuthMetadata] = None,
+        protected_resource_metadata: Optional[ProtectedResourceMetadata] = None,
+    ) -> None:
+        """Atomically install a freshly-obtained interactive grant, fully REPLACING any
+        prior credentials in a SINGLE locked write.
+
+        Used by the control-plane flow to commit a completed sign-in. Because it's one
+        write built entirely in memory first, a failure (e.g. a bad model_dump) leaves the
+        existing file — and thus a still-working credential — untouched: no destructive
+        pre-clear. It also does NOT carry forward a previous refresh token (that's only for
+        the bridge's refresh path); a new grant brings its own, so grafting the old one
+        could bind the wrong account."""
+        data: dict = {}
+        if client_info is not None:
+            data["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
+        if metadata is not None:
+            data["metadata"] = metadata.model_dump(mode="json", exclude_none=True)
+        if protected_resource_metadata is not None:
+            data["protected_resource_metadata"] = protected_resource_metadata.model_dump(
+                mode="json", exclude_none=True
+            )
+        data["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+        if tokens.expires_in is not None:
+            data["expires_at"] = time.time() + int(tokens.expires_in)
+        with self._locked():
             self._write(data)
 
     # --- sync status helpers (used by the API) --------------------------- #

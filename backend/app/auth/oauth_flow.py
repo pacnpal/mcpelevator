@@ -208,28 +208,20 @@ async def _drive(
     # success on whether tokens actually landed in the ephemeral store.
     tokens = await mem.get_tokens()
     if tokens is not None:
-        # Promote the freshly-obtained credentials to the shared store the bridge reads:
-        # client info first (so a refresh has it), then tokens, then the discovered
-        # metadata the bridge preloads so refresh targets the right endpoint + resource.
-        client_info = await mem.get_client_info()
+        # Promote the freshly-obtained credentials to the shared store the bridge reads, in
+        # ONE atomic write that fully replaces any prior state. Building it in memory first
+        # means a failure leaves the previous (still-working) credential intact — no
+        # destructive pre-clear — and it doesn't carry forward an old refresh token (a new
+        # grant brings its own; the carry-forward is only for the bridge's refresh path).
         try:
-            # A fresh interactive grant REPLACES any prior credentials — drop the old tokens
-            # first so ``set_tokens``' refresh-token carry-forward (meant for the bridge's
-            # refresh path) can't graft a previous account's refresh token onto this grant
-            # when its code-exchange response omits one.
-            real.clear_tokens()
-            # Write client info + discovered metadata FIRST, then the tokens LAST. status()
-            # keys off the token blob, so tokens-last means a metadata write that raises never
-            # leaves the store looking authenticated with a half-promoted grant.
-            if client_info is not None:
-                await real.set_client_info(client_info)
-            meta = getattr(provider.context, "oauth_metadata", None)
-            if meta is not None:
-                real.set_metadata(meta)
-            prm = getattr(provider.context, "protected_resource_metadata", None)
-            if prm is not None:
-                real.set_protected_resource_metadata(prm)
-            await real.set_tokens(tokens)
+            real.promote(
+                tokens=tokens,
+                client_info=await mem.get_client_info(),
+                metadata=getattr(provider.context, "oauth_metadata", None),
+                protected_resource_metadata=getattr(
+                    provider.context, "protected_resource_metadata", None
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 — persistence failure = the grant didn't stick
             inner_error = exc
         else:
