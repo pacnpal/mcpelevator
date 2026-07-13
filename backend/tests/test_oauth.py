@@ -500,6 +500,22 @@ def test_bridge_transport_without_oauth_has_no_auth(monkeypatch):
     assert captured["auth"] is None
 
 
+def test_disconnect_non_oauth_server_is_400():
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/servers",
+            json={"name": "plain", "runner": "remote", "command": "https://up.example/mcp"},
+            headers=LOOPBACK,
+        )
+        sid = r.json()["id"]
+        try:
+            resp = c.post(f"/api/servers/{sid}/oauth/disconnect", headers=LOOPBACK)
+            assert resp.status_code == 400
+            assert "oauth" in resp.json()["detail"].lower()
+        finally:
+            c.delete(f"/api/servers/{sid}", headers=LOOPBACK)
+
+
 def test_delete_server_clears_oauth_tokens():
     with TestClient(app) as c:
         sid = _create_oauth_server(c)

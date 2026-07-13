@@ -301,18 +301,25 @@ async def disconnect_oauth(
     server = repo.get_server(session, server_id)
     if server is None:
         raise HTTPException(status_code=404, detail="server not found")
+    # Only a remote OAuth server has anything to disconnect; reject others so a stale UI
+    # action or stray API call can't bounce an unrelated running server.
+    if server.runner != "remote" or not server.oauth:
+        raise HTTPException(status_code=400, detail="this server does not use OAuth")
+    sup = request.app.state.supervisor
     # Cancel any in-flight authorization first: otherwise a callback for that parked flow
-    # could land after this clear and re-promote tokens, silently re-authenticating the
+    # could land after the clear and re-promote tokens, silently re-authenticating the
     # server the operator just disconnected.
     oauth_flow.cancel_pending(server_id)
+    # STOP the bridge before clearing: a running bridge may have an in-flight refresh whose
+    # set_tokens() would otherwise recreate the file after clear(), and the nudge would then
+    # restart the server with fresh credentials despite the UI reporting it disconnected.
+    if server.enabled:
+        await sup.stop(server_id)
     ServerTokenStorage(server_id).clear()
-    sup = request.app.state.supervisor
-    # Bounce a running bridge so it can no longer use the (now-cleared) in-memory token.
     # The server stays enabled, so the reconciler restarts it; with no tokens it can't
     # authenticate upstream and surfaces as needing re-auth — the intended "disconnected"
     # state (matches the connect path, which also restarts to pick up fresh tokens).
     if server.enabled:
-        await sup.stop(server_id)
         sup.nudge()
     return _detail(server, sup, session, _base_url(request))
 
