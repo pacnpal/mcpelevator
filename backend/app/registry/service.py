@@ -8,18 +8,23 @@ Sits above the repo: generates identity (id/slug), computes the idempotency
 from __future__ import annotations
 
 import logging
+import os
+import secrets
+import tempfile
+from functools import lru_cache
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from sqlmodel import Session
 
+from app.config import get_settings
 from app.db import repo
 from app.db.models import RUNNERS, Server
 from app.registry import settings as runtime_settings
 from app.runners import remote as remote_runner
 from app.runners.docker import is_forbidden_container_env, is_reserved_docker_env
 from app.runners.remote import canonical_transport
-from app.util import config_hash, new_id, slugify
+from app.util import config_hash, config_hash_tag, new_id, slugify
 
 logger = logging.getLogger(__name__)
 
@@ -526,31 +531,60 @@ def _require_docker_enabled(session: Session) -> None:
         )
 
 
+@lru_cache
+def _config_hash_salt() -> bytes:
+    """Random per-install salt keying ``config_hash``, persisted 0600 in the data dir
+    (like the OAuth token store: secret material lives off the DB). Without this file a
+    leaked anchor can't be dictionary-attacked for config secrets at all. Losing the
+    file is harmless — the boot backfill just rehashes every row once under a fresh salt."""
+    path = get_settings().data_dir / "config_hash.salt"
+    try:
+        salt = path.read_bytes()
+        if len(salt) >= 16:
+            return salt
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    salt = secrets.token_bytes(32)
+    # Atomic + 0600 from birth (mkstemp), same idiom as the OAuth token store.
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix="config_hash.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(salt)
+    except BaseException:
+        os.unlink(tmp_name)
+        raise
+    os.replace(tmp_name, path)
+    return salt
+
+
+def _hash_payload(server: Server) -> dict[str, Any]:
+    return {
+        "runner": server.runner,
+        "command": server.command,
+        "args": server.args,
+        "env": server.env,
+        "cwd": server.cwd,
+        "mcp_http": server.mcp_http,
+        "rest_openapi": server.rest_openapi,
+        # OAuth config drives how the bridge authenticates upstream, so it IS part
+        # of the launch spec — a change must restart the bridge. (The tokens live in
+        # a file store, not the row, so *authenticating* leaves the hash untouched.)
+        # The client SECRET is deliberately NOT read here: it's a credential that
+        # doesn't belong in the anchor at all, and the bridge doesn't consume it from the
+        # spec anyway (it reads the DCR/static client_info from the token store, and a
+        # secret change re-runs auth via the API which clears the tokens). The static
+        # client is already tracked by the non-sensitive client_id below.
+        "oauth": server.oauth,
+        "oauth_scopes": server.oauth_scopes,
+        "oauth_client_id": server.oauth_client_id,
+        # auth_provider is intentionally excluded: it's enforced at the proxy
+        # per-request, so changing it must NOT restart the bridge process.
+    }
+
+
 def compute_hash(server: Server) -> str:
-    return config_hash(
-        {
-            "runner": server.runner,
-            "command": server.command,
-            "args": server.args,
-            "env": server.env,
-            "cwd": server.cwd,
-            "mcp_http": server.mcp_http,
-            "rest_openapi": server.rest_openapi,
-            # OAuth config drives how the bridge authenticates upstream, so it IS part
-            # of the launch spec — a change must restart the bridge. (The tokens live in
-            # a file store, not the row, so *authenticating* leaves the hash untouched.)
-            # The client SECRET is deliberately NOT read here: it's a credential that
-            # doesn't belong in the anchor at all, and the bridge doesn't consume it from the
-            # spec anyway (it reads the DCR/static client_info from the token store, and a
-            # secret change re-runs auth via the API which clears the tokens). The static
-            # client is already tracked by the non-sensitive client_id below.
-            "oauth": server.oauth,
-            "oauth_scopes": server.oauth_scopes,
-            "oauth_client_id": server.oauth_client_id,
-            # auth_provider is intentionally excluded: it's enforced at the proxy
-            # per-request, so changing it must NOT restart the bridge process.
-        }
-    )
+    return config_hash(_hash_payload(server), salt=_config_hash_salt())
 
 
 def backfill_config_hashes(session: Session) -> int:
@@ -559,9 +593,18 @@ def backfill_config_hashes(session: Session) -> int:
     included) are rehashed to the current shape. Without this, the first
     non-hash-affecting PATCH on an upgraded server would change the stored hash and
     trigger a spurious bridge restart. Idempotent — only writes rows whose hash
-    actually changed. Returns how many were updated."""
+    actually changed. Returns how many were updated.
+
+    Rows already carrying the current scheme tag (see ``config_hash_tag``) are
+    trusted as-is — every config write recomputes the hash, so a current-scheme row
+    can't be stale — which keeps steady-state boots from paying one scrypt
+    derivation per stored server."""
     changed = 0
+    salt = _config_hash_salt()
     for server in repo.list_servers(session):
+        tag = config_hash_tag(_hash_payload(server), salt=salt)
+        if server.config_hash.startswith(f"{tag}."):
+            continue
         new_hash = compute_hash(server)
         if new_hash != server.config_hash:
             repo.set_config_hash(session, server.id, new_hash)

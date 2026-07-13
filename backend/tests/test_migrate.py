@@ -67,6 +67,48 @@ def test_backfill_config_hashes_rehashes_stale_rows():
         assert service.backfill_config_hashes(s) == 0  # idempotent — no further writes
 
 
+def test_backfill_skips_current_scheme_rows_without_rehashing(monkeypatch):
+    """Rows already tagged with the current hash scheme must not pay a scrypt
+    derivation on every boot — backfill trusts the tag and skips them."""
+    from sqlmodel import Session
+
+    from app.registry import service
+
+    eng = create_engine("sqlite://")
+    SQLModel.metadata.create_all(eng)
+    with Session(eng) as s:
+        service.create_server(s, name="x", runner="npx", command="npx")
+        calls = []
+        monkeypatch.setattr(
+            service, "compute_hash", lambda srv: calls.append(srv.id) or "should-not-run"
+        )
+        assert service.backfill_config_hashes(s) == 0
+        assert calls == []  # skipped via the cheap scheme tag, no derivation ran
+
+
+def test_config_hash_salt_is_persisted_and_stable(tmp_path, monkeypatch):
+    """The per-install salt is minted once (0600, off the DB) and reused, so hashes
+    stay deterministic across boots."""
+    import os
+
+    from app.registry import service
+
+    class _S:
+        data_dir = tmp_path
+
+    monkeypatch.setattr(service, "get_settings", lambda: _S())
+    service._config_hash_salt.cache_clear()
+    try:
+        first = service._config_hash_salt()
+        path = tmp_path / "config_hash.salt"
+        assert path.read_bytes() == first
+        assert os.stat(path).st_mode & 0o777 == 0o600
+        service._config_hash_salt.cache_clear()
+        assert service._config_hash_salt() == first  # re-read, not re-minted
+    finally:
+        service._config_hash_salt.cache_clear()
+
+
 def test_normalize_auth_providers_canonicalizes_legacy():
     from sqlalchemy import text
     from sqlmodel import Session
