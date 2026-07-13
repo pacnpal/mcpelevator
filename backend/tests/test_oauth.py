@@ -410,6 +410,20 @@ def test_repair_authorization_url_rejoins_double_question_mark():
     assert oauth_flow._extract_state(fixed) == "xyz"
 
 
+def test_repair_authorization_url_preserves_endpoint_own_question_marks():
+    # RFC 3986 permits raw '?' inside a query, so the endpoint's own query may contain
+    # them. Only the LAST '?' can be the SDK's separator (urlencode never emits a raw
+    # '?'), so everything before it must survive byte-for-byte.
+    broken = (
+        "https://as.example/auth?resource=https://api.example/mcp?tenant=a"
+        "?response_type=code&state=s"
+    )
+    assert oauth_flow._repair_authorization_url(broken) == (
+        "https://as.example/auth?resource=https://api.example/mcp?tenant=a"
+        "&response_type=code&state=s"
+    )
+
+
 def test_repair_authorization_url_leaves_wellformed_urls_alone():
     ok = "https://auth.example.com/authorize?response_type=code&state=s1"
     assert oauth_flow._repair_authorization_url(ok) == ok

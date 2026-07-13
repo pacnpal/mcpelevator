@@ -217,12 +217,15 @@ def _repair_authorization_url(url: str) -> str:
     (Railway: ``/oauth/auth?resource=https%3A%2F%2Fbackboard.railway.com``). The blind join
     yields a second raw ``?``, and everything after it — ``response_type=code`` first —
     is swallowed into the preceding parameter's value, so the provider rejects the request.
-    A raw ``?`` inside a query is always this bug (a literal one would be ``%3F``), so
-    re-joining the extra segments with ``&`` is safe and restores every parameter."""
-    base, sep, query = url.partition("?")
-    if not sep or "?" not in query:
-        return url
-    return f"{base}?{query.replace('?', '&')}"
+
+    RFC 3986 permits raw ``?`` inside a query, so the endpoint's own query may legally
+    contain more of them — but ``urlencode`` percent-encodes ``?``, so in the joined URL
+    the LAST raw ``?`` is always the separator the SDK added. Re-join only that one with
+    ``&``, leaving the endpoint's own query byte-for-byte intact."""
+    base, sep, params = url.rpartition("?")
+    if not sep or "?" not in base:
+        return url  # zero or one '?' — already well-formed
+    return f"{base}&{params}"
 
 
 def _extract_state(url: str) -> Optional[str]:

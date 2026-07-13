@@ -1,114 +1,137 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { forwardOauthResultToOpener, listenForOauthResult, openOauthPopup } from './oauthPopup';
+import { completeOauthPopup, listenForOauthResult, openOauthPopup } from './oauthPopup';
 
 const ORIGIN = window.location.origin;
+const MARKER = 'mcpelevator:oauth-popup';
 
-function fakeOpener() {
-	return { closed: false, postMessage: vi.fn() };
+/** Deterministic in-test BroadcastChannel: delivers to every other open instance with
+ * the same name, synchronously (jsdom doesn't implement the real one). */
+class FakeBroadcastChannel {
+	static instances: FakeBroadcastChannel[] = [];
+	onmessage: ((event: MessageEvent) => void) | null = null;
+	closed = false;
+	constructor(public name: string) {
+		FakeBroadcastChannel.instances.push(this);
+	}
+	postMessage(data: unknown) {
+		for (const other of FakeBroadcastChannel.instances) {
+			if (other === this || other.closed || other.name !== this.name) continue;
+			other.onmessage?.(new MessageEvent('message', { data }));
+		}
+	}
+	close() {
+		this.closed = true;
+	}
 }
 
-afterEach(() => {
-	vi.restoreAllMocks();
-	Object.defineProperty(window, 'opener', { value: null, writable: true, configurable: true });
+beforeEach(() => {
+	FakeBroadcastChannel.instances = [];
+	vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel);
 });
 
-describe('forwardOauthResultToOpener', () => {
-	it('posts the result to a same-origin opener and closes the popup', () => {
-		const opener = fakeOpener();
-		Object.defineProperty(window, 'opener', { value: opener, configurable: true });
+afterEach(() => {
+	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
+	sessionStorage.clear();
+});
+
+describe('completeOauthPopup', () => {
+	it('broadcasts the result, consumes the marker, and closes the popup', () => {
+		sessionStorage.setItem(MARKER, '1');
 		const close = vi.spyOn(window, 'close').mockImplementation(() => {});
+		const seen: unknown[] = [];
+		const stop = listenForOauthResult((result) => seen.push(result));
 
-		forwardOauthResultToOpener(new URL(`${ORIGIN}/server/abc?oauth=connected`));
+		completeOauthPopup(new URL(`${ORIGIN}/server/abc?oauth=connected`));
 
-		expect(opener.postMessage).toHaveBeenCalledWith(
-			{ type: 'mcpelevator:oauth', result: 'connected', reason: null },
-			ORIGIN
-		);
+		expect(seen).toEqual([{ result: 'connected', reason: null }]);
 		expect(close).toHaveBeenCalled();
+		expect(sessionStorage.getItem(MARKER)).toBeNull(); // one-shot marker
+		stop();
 	});
 
-	it('forwards the error result with its reason', () => {
-		const opener = fakeOpener();
-		Object.defineProperty(window, 'opener', { value: opener, configurable: true });
+	it('broadcasts the error result with its reason', () => {
+		sessionStorage.setItem(MARKER, '1');
 		vi.spyOn(window, 'close').mockImplementation(() => {});
+		const seen: unknown[] = [];
+		const stop = listenForOauthResult((result) => seen.push(result));
 
-		forwardOauthResultToOpener(new URL(`${ORIGIN}/?oauth=error&reason=denied`));
+		completeOauthPopup(new URL(`${ORIGIN}/?oauth=error&reason=denied`));
 
-		expect(opener.postMessage).toHaveBeenCalledWith(
-			{ type: 'mcpelevator:oauth', result: 'error', reason: 'denied' },
-			ORIGIN
-		);
+		expect(seen).toEqual([{ result: 'error', reason: 'denied' }]);
+		stop();
 	});
 
-	it('does nothing without an oauth result or without an opener', () => {
-		const opener = fakeOpener();
-		Object.defineProperty(window, 'opener', { value: opener, configurable: true });
+	it('leaves regular tabs alone: no marker means no broadcast and no close', () => {
+		const close = vi.spyOn(window, 'close').mockImplementation(() => {});
+		const seen: unknown[] = [];
+		const stop = listenForOauthResult((result) => seen.push(result));
+
+		completeOauthPopup(new URL(`${ORIGIN}/server/abc?oauth=connected`));
+
+		expect(seen).toEqual([]);
+		expect(close).not.toHaveBeenCalled();
+		stop();
+	});
+
+	it('does nothing without an oauth result in the URL', () => {
+		sessionStorage.setItem(MARKER, '1');
 		const close = vi.spyOn(window, 'close').mockImplementation(() => {});
 
-		forwardOauthResultToOpener(new URL(`${ORIGIN}/server/abc`)); // no ?oauth=
-		forwardOauthResultToOpener(new URL(`${ORIGIN}/server/abc?oauth=bogus`)); // unknown value
-		expect(opener.postMessage).not.toHaveBeenCalled();
+		completeOauthPopup(new URL(`${ORIGIN}/server/abc`)); // no ?oauth=
+		completeOauthPopup(new URL(`${ORIGIN}/server/abc?oauth=bogus`)); // unknown value
 
-		Object.defineProperty(window, 'opener', { value: null, configurable: true });
-		forwardOauthResultToOpener(new URL(`${ORIGIN}/server/abc?oauth=connected`));
 		expect(close).not.toHaveBeenCalled();
+		expect(sessionStorage.getItem(MARKER)).toBe('1'); // marker not consumed
 	});
 });
 
 describe('listenForOauthResult', () => {
-	it('delivers same-origin oauth messages and ignores everything else', () => {
+	it('ignores malformed broadcasts and stops after unsubscribe', () => {
 		const seen: unknown[] = [];
 		const stop = listenForOauthResult((result) => seen.push(result));
+		const sender = new BroadcastChannel('mcpelevator:oauth');
 
-		// Wrong origin — ignored.
-		window.dispatchEvent(
-			new MessageEvent('message', {
-				origin: 'https://evil.example',
-				data: { type: 'mcpelevator:oauth', result: 'connected', reason: null }
-			})
-		);
-		// Unrelated message shapes — ignored.
-		window.dispatchEvent(new MessageEvent('message', { origin: ORIGIN, data: 'hello' }));
-		window.dispatchEvent(
-			new MessageEvent('message', { origin: ORIGIN, data: { type: 'other', result: 'connected' } })
-		);
-		window.dispatchEvent(
-			new MessageEvent('message', {
-				origin: ORIGIN,
-				data: { type: 'mcpelevator:oauth', result: 'bogus' }
-			})
-		);
+		sender.postMessage('hello');
+		sender.postMessage({ result: 'bogus' });
 		expect(seen).toEqual([]);
 
-		window.dispatchEvent(
-			new MessageEvent('message', {
-				origin: ORIGIN,
-				data: { type: 'mcpelevator:oauth', result: 'error', reason: 'denied' }
-			})
-		);
-		expect(seen).toEqual([{ result: 'error', reason: 'denied' }]);
+		sender.postMessage({ result: 'connected', reason: 42 }); // non-string reason → null
+		expect(seen).toEqual([{ result: 'connected', reason: null }]);
 
 		stop();
-		window.dispatchEvent(
-			new MessageEvent('message', {
-				origin: ORIGIN,
-				data: { type: 'mcpelevator:oauth', result: 'connected', reason: null }
-			})
-		);
+		sender.postMessage({ result: 'error', reason: null });
 		expect(seen).toHaveLength(1); // unsubscribed — no further deliveries
 	});
 });
 
 describe('openOauthPopup', () => {
-	it('opens a named popup and returns null when blocked', () => {
-		const open = vi.spyOn(window, 'open').mockReturnValue(null);
-		expect(openOauthPopup()).toBeNull();
+	function fakePopup() {
+		return {
+			closed: false,
+			opener: {} as unknown,
+			sessionStorage: { setItem: vi.fn() }
+		};
+	}
+
+	it('opens a named popup, disowns its opener, and marks it', () => {
+		const popup = fakePopup();
+		const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+
+		expect(openOauthPopup()).toBe(popup);
 		expect(open).toHaveBeenCalledWith(
 			'about:blank',
 			'mcpelevator-oauth',
 			expect.stringContaining('popup=yes')
 		);
+		expect(popup.opener).toBeNull(); // reverse-tabnabbing guard
+		expect(popup.sessionStorage.setItem).toHaveBeenCalledWith(MARKER, '1');
+	});
+
+	it('returns null when blocked', () => {
+		vi.spyOn(window, 'open').mockReturnValue(null);
+		expect(openOauthPopup()).toBeNull();
 	});
 
 	it('treats a throwing window.open as blocked (sandboxed/strict environments)', () => {

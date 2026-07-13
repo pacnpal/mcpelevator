@@ -139,7 +139,7 @@
 		// Open the popup synchronously in the click gesture — popup blockers only allow
 		// window.open there — and point it at the provider once the URL arrives. The
 		// provider redirects back to /api/oauth/callback inside the popup; the root
-		// layout forwards the result here via postMessage and closes it.
+		// layout broadcasts the result here (same-origin channel) and closes it.
 		const popup = openOauthPopup();
 		try {
 			const { authorize_url } = await startOauth(server.id);
@@ -162,7 +162,7 @@
 		}
 	}
 
-	// Receive the sign-in result forwarded from the popup by the root layout.
+	// Receive the sign-in result broadcast from the popup by the root layout.
 	$effect(() => {
 		const stop = listenForOauthResult(({ result, reason }) => {
 			clearInterval(oauthPopupWatch);
