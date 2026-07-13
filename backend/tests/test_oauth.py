@@ -123,21 +123,24 @@ def test_normalize_oauth_secret_without_id_rejected():
         service.normalize_oauth("remote", True, "", None, "secret-without-id")
 
 
-def test_config_hash_excludes_raw_client_secret():
-    # The config fingerprint must not embed the raw client secret (it's a credential, and
-    # the bridge doesn't consume it from the spec). Rotating the value leaves the hash
-    # unchanged; adding/removing a secret (presence) still changes it → a restart.
+def test_config_hash_excludes_client_secret():
+    # The config fingerprint must never read the client secret (it's a credential and the
+    # bridge doesn't consume it from the spec) — neither its value nor its presence affects
+    # the hash. The static client is tracked via the non-sensitive client_id, so changing
+    # that DOES change the hash.
     from app.db.models import Server
 
-    def mk(secret):
+    def mk(client_id, secret):
         return Server(
             id="x", slug="x", name="x", runner="remote",
             command="https://up.example/mcp", args=["streamable-http"], env={},
-            oauth=True, oauth_client_id="cid", oauth_client_secret=secret,
+            oauth=True, oauth_client_id=client_id, oauth_client_secret=secret,
         )
 
-    assert service.compute_hash(mk("secret-A")) == service.compute_hash(mk("secret-B"))
-    assert service.compute_hash(mk("secret-A")) != service.compute_hash(mk(None))
+    base = service.compute_hash(mk("cid", None))
+    assert service.compute_hash(mk("cid", "secret-A")) == base  # secret value: ignored
+    assert service.compute_hash(mk("cid", "secret-B")) == base  # rotating it: ignored
+    assert service.compute_hash(mk(None, None)) != base  # client_id change: restarts
 
 
 # --------------------------------------------------------------------------- #
