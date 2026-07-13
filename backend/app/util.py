@@ -20,15 +20,40 @@ def slugify(name: str) -> str:
     return s or "server"
 
 
-def config_hash(payload: dict[str, Any]) -> str:
+# Bump when the derivation (algorithm/params) or the *value canonicalization* of the
+# payload changes without changing its key set — key-set changes roll the tag on
+# their own. A stale stored tag is what tells the boot backfill to rehash a row.
+_CONFIG_HASH_SCHEME = "scrypt.v1"
+
+
+def config_hash_tag(payload: dict[str, Any], *, salt: bytes) -> str:
+    """Cheap fingerprint of the hash *scheme*: the payload's key set, the derivation
+    id, and the install salt — everything that changes a row's hash other than the
+    config values themselves. Prefixed to ``config_hash`` output so the boot backfill
+    can recognize rows already written by the current scheme and skip them without
+    paying a scrypt derivation per server per boot. Keys only — no secret material."""
+    material = "|".join(sorted(payload)) + "|" + _CONFIG_HASH_SCHEME
+    return hashlib.sha256(material.encode("utf-8") + salt).hexdigest()[:4]
+
+
+def config_hash(payload: dict[str, Any], *, salt: bytes) -> str:
     """Stable short hash of a server's launch+exposure config.
 
     The idempotency anchor: the reconciler restarts a server only when this
     changes. Uses canonical JSON (sorted keys) so the same logical config always
     hashes identically.
+
+    The payload carries operator-supplied credentials (``env`` values / upstream
+    headers), and the result is persisted and served by the API — so it is derived
+    with scrypt, a memory-hard KDF, keyed with a random per-install ``salt`` kept
+    off the DB (see ``registry.service``): recovering config secrets from a leaked
+    anchor needs the salt file too, and even with it each guess costs a full
+    derivation. The salt must be stable across boots — same logical config, same
+    hash, or the reconciler would bounce every bridge on every boot.
     """
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.scrypt(blob.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=8)
+    return f"{config_hash_tag(payload, salt=salt)}.{digest.hex()}"
 
 
 def new_token() -> str:

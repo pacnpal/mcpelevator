@@ -12,6 +12,7 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from sqlmodel import Session
 from starlette.responses import Response, StreamingResponse
 
@@ -174,7 +175,9 @@ async def create_server(
     else:
         fields["source"] = "manual"
     try:
-        server = service.create_server(session, **fields)
+        # Threadpool: the config write derives config_hash with scrypt (memory-hard by
+        # design) — keep that off the event loop so /s proxy traffic isn't stalled.
+        server = await run_in_threadpool(service.create_server, session, **fields)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
@@ -213,7 +216,8 @@ async def update_server(
     before = _oauth_signature(existing) if existing is not None else None
 
     try:
-        server = service.update_server(session, server_id, changes)
+        # Threadpool: see create_server — the recomputed config_hash is a scrypt derivation.
+        server = await run_in_threadpool(service.update_server, session, server_id, changes)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
@@ -250,7 +254,10 @@ async def update_server(
 async def delete_server(server_id: str, request: Request, session: Session = Depends(get_session)):
     sup = request.app.state.supervisor
     await sup.stop(server_id)  # tear down the process before removing desired state
-    if not repo.delete_server(session, server_id):
+    # Threadpool + service (not repo): the delete must queue behind the registry write
+    # lock — racing a threaded update that already loaded this row would blow up that
+    # update's commit — and waiting for the lock must not sit on the event loop.
+    if not await run_in_threadpool(service.delete_server, session, server_id):
         raise HTTPException(status_code=404, detail="server not found")
     # Cancel any in-flight authorization and drop stored upstream OAuth credentials for this
     # (now-deleted) server — otherwise a late callback could re-promote tokens and leave an
@@ -339,7 +346,8 @@ async def clone_server(
     """Duplicate a server's config into a new, disabled server (a fresh id + unique
     slug). The operator reviews/edits the copy, then enables it."""
     try:
-        server = service.clone_server(session, server_id, name=payload.name)
+        # Threadpool: see create_server — the clone's config_hash is a scrypt derivation.
+        server = await run_in_threadpool(service.clone_server, session, server_id, name=payload.name)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
@@ -351,7 +359,9 @@ async def clone_server(
 @router.post("/servers/{server_id}/enable", response_model=ServerSummary)
 async def enable_server(server_id: str, request: Request, session: Session = Depends(get_session)):
     try:
-        server = service.set_enabled(session, server_id, True)
+        # Threadpool: set_enabled takes the registry write lock, and an import in a worker
+        # can hold that lock across many derivations — don't wait for it on the event loop.
+        server = await run_in_threadpool(service.set_enabled, session, server_id, True)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
@@ -365,7 +375,8 @@ async def enable_server(server_id: str, request: Request, session: Session = Dep
 @router.post("/servers/{server_id}/disable", response_model=ServerSummary)
 async def disable_server(server_id: str, request: Request, session: Session = Depends(get_session)):
     try:
-        server = service.set_enabled(session, server_id, False)
+        # Threadpool: see enable_server — the lock wait must not block the loop.
+        server = await run_in_threadpool(service.set_enabled, session, server_id, False)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     sup = request.app.state.supervisor
@@ -382,7 +393,9 @@ async def import_servers(
     """Bulk-create from a standard mcpServers JSON config. Imported servers are
     disabled by default — the user reviews, then enables."""
     try:
-        created, skipped, warnings = service.import_mcp_servers(session, payload)
+        # Threadpool: a bulk import derives one scrypt config_hash per server — N stacked
+        # derivations must not sit on the event loop.
+        created, skipped, warnings = await run_in_threadpool(service.import_mcp_servers, session, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor

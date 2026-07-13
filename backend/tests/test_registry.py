@@ -32,6 +32,58 @@ def test_unique_slugs(session):
     assert b.slug == "memory-2"
 
 
+def test_concurrent_creates_get_unique_slugs(tmp_path):
+    """Slug allocation is check-then-insert; API handlers now run registry writes in
+    the threadpool, so without the service write lock two same-name creates could both
+    pick the base slug and one would die on the unique constraint instead of getting
+    the -2 suffix. File-backed DB so every thread's connection sees the same data."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.db import models  # noqa: F401 — register tables
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path}/reg.db", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+
+    def make(_):
+        with Session(engine) as s:
+            return service.create_server(s, name="Same Name", runner="npx", command="npx").slug
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        slugs = sorted(ex.map(make, range(4)))
+    assert slugs == ["same-name", "same-name-2", "same-name-3", "same-name-4"]
+
+
+def test_update_through_stale_session_hashes_the_fresh_row(tmp_path):
+    """The PATCH handler pre-reads the row into its request session before the locked
+    update runs; if another request commits in between, the update must re-read the row
+    (not trust its identity map) or it stores a config_hash describing a stale snapshot."""
+    from app.db import models  # noqa: F401 — register tables
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path}/reg.db", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s1, Session(engine) as s2:
+        sid = service.create_server(s1, name="x", runner="npx", command="npx").id
+        # Request B primes its session, as the API handler does. The binding matters:
+        # the handler holds this object in a local across its await, and SQLAlchemy's
+        # identity map is weak — an unreferenced row would be GC'd and re-fetched fresh,
+        # hiding the staleness this test exists to catch.
+        primed = repo.get_server(s2, sid)
+        service.update_server(s1, sid, {"args": ["-y", "pkg"]})  # request A lands first
+        # B edits a different hash-bearing field: without the locked re-read, B would
+        # merge onto its stale snapshot and store a hash over (old args, new env).
+        service.update_server(s2, sid, {"env": {"K": "v"}})
+        del primed
+    with Session(engine) as s3:
+        row = repo.get_server(s3, sid)
+        assert row.args == ["-y", "pkg"]  # A's edit survived B's disjoint PATCH
+        assert row.env == {"K": "v"}
+        assert row.config_hash == service.compute_hash(row)  # hash describes the final row
+
+
 def test_reserved_slug_is_not_assigned(session):
     """A server named "summary" must not get the slug "summary" — that would shadow
     the static /api/health/summary route so its own /api/health/{slug} is unreachable.
