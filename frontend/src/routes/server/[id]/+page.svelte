@@ -12,6 +12,7 @@
 		getSettings,
 		startOauth
 	} from '$lib/api';
+	import { listenForOauthResult, openOauthPopup } from '$lib/oauthPopup';
 	import type { AuthProvider, ServerDetail } from '$lib/types';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
@@ -114,20 +115,67 @@
 	}
 
 	let oauthBusy = $state(false); // authorize / disconnect in flight
+	let oauthPopupWatch: ReturnType<typeof setInterval> | undefined;
+
+	// While the popup is open, poll for the operator closing it mid-sign-in (there's no
+	// event for that) so the Authorize button doesn't stay stuck busy. A completed flow
+	// clears the watch via the message listener before the popup closes itself.
+	function watchOauthPopup(popup: Window) {
+		clearInterval(oauthPopupWatch);
+		oauthPopupWatch = setInterval(() => {
+			if (!popup.closed) return;
+			clearInterval(oauthPopupWatch);
+			oauthPopupWatch = undefined;
+			oauthBusy = false;
+			// The result message normally beats the close, but don't trust the timing:
+			// refresh so a grant that DID land is reflected even if the message was lost.
+			void load(true);
+		}, 500);
+	}
 
 	async function startOauthFlow() {
 		if (!server || oauthBusy) return;
 		oauthBusy = true;
+		// Open the popup synchronously in the click gesture — popup blockers only allow
+		// window.open there — and point it at the provider once the URL arrives. The
+		// provider redirects back to /api/oauth/callback inside the popup; the root
+		// layout forwards the result here via postMessage and closes it.
+		const popup = openOauthPopup();
 		try {
 			const { authorize_url } = await startOauth(server.id);
-			// Full-page navigation to the provider; it redirects back to
-			// /api/oauth/callback, which bounces to this page with ?oauth=connected.
-			window.location.href = authorize_url;
+			if (popup && !popup.closed) {
+				popup.location.href = authorize_url;
+				watchOauthPopup(popup);
+			} else {
+				// Popup blocked (or already dismissed): fall back to the full-page
+				// navigation; the callback bounces back to this page with ?oauth=….
+				window.location.href = authorize_url;
+			}
 		} catch (err) {
+			popup?.close();
 			flashToast(errorMessage(err));
 			oauthBusy = false;
 		}
 	}
+
+	// Receive the sign-in result forwarded from the popup by the root layout.
+	$effect(() => {
+		const stop = listenForOauthResult(({ result, reason }) => {
+			clearInterval(oauthPopupWatch);
+			oauthPopupWatch = undefined;
+			oauthBusy = false;
+			if (result === 'connected') {
+				flashToast('Connected — OAuth sign-in complete.');
+				void load(true); // pick up the new oauth/bridge status without flicker
+			} else {
+				flashToast(reason ? `OAuth failed: ${reason}` : 'OAuth sign-in failed.');
+			}
+		});
+		return () => {
+			stop();
+			clearInterval(oauthPopupWatch);
+		};
+	});
 
 	async function doDisconnect() {
 		if (!server || oauthBusy) return;

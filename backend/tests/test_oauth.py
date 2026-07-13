@@ -393,6 +393,34 @@ def test_merge_scopes_unions_and_dedupes():
     assert oauth_flow._merge_scopes(None) is None
 
 
+def test_repair_authorization_url_rejoins_double_question_mark():
+    # The SDK appends "?<params>" to the discovered authorization_endpoint; when that
+    # endpoint already has a query (e.g. Railway's ?resource=...), the second "?" hides
+    # response_type & friends inside the first parameter's value.
+    broken = (
+        "https://backboard.railway.com/oauth/auth?resource=https%3A%2F%2Fbackboard.railway.com"
+        "?response_type=code&client_id=abc&state=xyz"
+    )
+    fixed = oauth_flow._repair_authorization_url(broken)
+    assert fixed == (
+        "https://backboard.railway.com/oauth/auth?resource=https%3A%2F%2Fbackboard.railway.com"
+        "&response_type=code&client_id=abc&state=xyz"
+    )
+    # state now parses out of the repaired URL
+    assert oauth_flow._extract_state(fixed) == "xyz"
+
+
+def test_repair_authorization_url_leaves_wellformed_urls_alone():
+    ok = "https://auth.example.com/authorize?response_type=code&state=s1"
+    assert oauth_flow._repair_authorization_url(ok) == ok
+    assert oauth_flow._repair_authorization_url("https://auth.example.com/authorize") == (
+        "https://auth.example.com/authorize"
+    )
+    # percent-encoded "?" inside a value is a literal, not a separator — untouched
+    encoded = "https://auth.example.com/authorize?resource=https%3A%2F%2Fx%3Fy&state=s2"
+    assert oauth_flow._repair_authorization_url(encoded) == encoded
+
+
 # --------------------------------------------------------------------------- #
 # API surface
 # --------------------------------------------------------------------------- #

@@ -4,11 +4,21 @@
 	import { page } from '$app/state';
 	import { getAuthStatus } from '$lib/api';
 	import { clearToken } from '$lib/auth';
+	import { forwardOauthResultToOpener } from '$lib/oauthPopup';
 	import favicon from '$lib/assets/favicon.svg';
 	import HealthDot from '$lib/components/HealthDot.svelte';
 	import Logo from '$lib/components/Logo.svelte';
 
 	let { children } = $props();
+
+	// The OAuth callback can bounce to any page (`/server/{id}?oauth=connected` on
+	// success, `/?oauth=error` on failure), so the popup hand-off lives here in the
+	// root layout: when this document is the sign-in popup, forward the result to the
+	// opener and close. No-op for regular tabs.
+	$effect(() => {
+		void page.url.search;
+		forwardOauthResultToOpener(page.url);
+	});
 
 	const onSettings = $derived(page.url.pathname.startsWith('/settings'));
 	const onCatalog = $derived(page.url.pathname.startsWith('/catalog'));
