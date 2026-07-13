@@ -139,7 +139,11 @@ restarts to pick them up. The server page then shows the connection status with
 **Re-authenticate** / **Disconnect** controls. The OAuth handshake runs in the control
 plane (it needs a browser); the per-server bridge only reads and refreshes the stored
 tokens. Credentials live in `<data_dir>/oauth/<server-id>.json` (created `0600`), never
-in the database, so authenticating never restarts the bridge on its own.
+in the database, so authenticating never restarts the bridge on its own. These tokens are
+stored **unencrypted at rest** — protected by file permissions and control of the data
+directory, not encryption (the bridge subprocess must be able to read and refresh them) —
+so keep `<data_dir>` and its backups on encrypted, access-controlled storage. See
+[docs/security.md](docs/security.md) § *Credentials at rest*.
 
 ## Install from a registry (catalog)
 
