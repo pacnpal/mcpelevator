@@ -117,9 +117,14 @@ label it uses to reap orphaned containers). Import surfaces a warning for any `d
 option it drops (host mounts, `--network`, `--env-file`, `--platform`, …).
 
 **Stronger isolation:** instead of the host socket, run a separate `docker:dind` daemon and
-point mcpelevator at it with `DOCKER_HOST=tcp://<dind-host>:2375` — launched images then never
-touch Unraid's own daemon. See the project's `docker-compose.yml` and
-[docs/security.md](security.md) for the full model and both isolation options.
+point mcpelevator at it with `DOCKER_HOST` — launched images then never touch Unraid's own
+daemon. **Security:** a plaintext `tcp://…:2375` endpoint is *unauthenticated* — anyone who can
+reach it controls that daemon (root-equivalent). Only use `2375` on a strictly private,
+non-routable Docker network shared by just these two containers, and **never publish or
+port-forward it**. For anything less contained, front dind with **TLS on `2376`**
+(`DOCKER_HOST=tcp://<dind-host>:2376` + `DOCKER_TLS_VERIFY=1` and certs). See the project's
+`docker-compose.yml` and [docs/security.md](security.md) for the full model and both isolation
+options.
 
 ## Updating
 
@@ -163,7 +168,7 @@ mcpelevator's built-in bearer auth for Claude Code / locally-configured Desktop)
 | `MCPE_MINT_ADMIN_TOKEN` | `false` | Mint + print a fresh admin token on boot (recovery); unset after use |
 | `MCPE_PUBLIC_BASE_URL` | _(unset)_ | Absolute URL clients use when the box sits behind a tunnel/reverse proxy |
 | `MCPE_ALLOWED_HOSTS` | _(unset)_ | Extra hostnames the Host/Origin guard trusts (e.g. a reverse-proxy hostname) |
-| `MCPE_DOCKER_RUNNER` | `false` | **Root-equivalent, opt-in.** First-boot seed for the docker runner (launch image-packaged MCP servers). Needs the Docker socket mounted — see [Docker runner](#docker-runner-opt-in-root-equivalent) |
+| `MCPE_DOCKER_RUNNER` | `false` | **Root-equivalent, opt-in.** First-boot seed for the docker runner (launch image-packaged MCP servers). Needs a Docker endpoint — either the host socket mounted (sibling model) or a `DOCKER_HOST` pointing at a separate dind daemon — see [Docker runner](#docker-runner-opt-in-root-equivalent) |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrently running MCP servers |
 | `MCPE_START_TIMEOUT_S` | `120` | Readiness timeout (covers npx/uvx cold-start installs) |
 

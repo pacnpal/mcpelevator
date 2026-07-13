@@ -27,9 +27,11 @@ def test_version_falls_back_to_pyproject(monkeypatch):
 
     resolved = _resolve_version()
     assert resolved == _version_from_pyproject()
-    assert resolved and resolved[0].isdigit()
+    assert resolved
+    assert resolved[0].isdigit()
 
 
 def test_version_from_pyproject_reads_project_version():
     v = _version_from_pyproject()
-    assert v is not None and v.count(".") >= 2  # e.g. "1.1.0"
+    assert v is not None
+    assert v.count(".") >= 2  # e.g. "1.1.0"
