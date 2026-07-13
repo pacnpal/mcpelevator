@@ -203,6 +203,8 @@ jobs:
           # a tag scan can never clear an alert on main. Pin the upload to main
           # (release commits are cut from main) so each release reconciles the
           # default-branch alert set instead of piling up dead per-tag analyses.
+          # Between releases, security-scan.yml re-scans the published image on
+          # a schedule (or on dispatch) and uploads into this same stream.
           ref: refs/heads/main
           sha: ${{ github.sha }}
 
