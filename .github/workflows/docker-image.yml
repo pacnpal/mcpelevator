@@ -49,8 +49,9 @@ concurrency:
   # default single-slot queue would silently replace a pending run. Releases
   # queue too (queue: max forbids cancel-in-progress), and because queue
   # order is not guaranteed, the "Check newest release" step below re-checks
-  # right before tagging that this run's release is still the newest — so an
-  # out-of-order older release can never roll latest/beta back.
+  # right before tagging that this version is the highest in each floating
+  # tag's channel — so an out-of-order older release can never roll
+  # latest/beta/X.Y/X back.
   group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.channel) || 'release' }}
   queue: max
 
@@ -168,29 +169,54 @@ jobs:
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
           IS_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
-          # latest/beta must only ever move forward. Queued release runs can
-          # execute out of publish order (queue order is not guaranteed), and a
-          # backport release of an old line (e.g. v1.2.4 published after
-          # v2.0.0) must not yank the channel back either — so ask the API
-          # which release is currently newest instead of trusting run order.
-          # latest tracks the newest stable release; beta the newest prerelease.
-          if [ "$IS_PRERELEASE" = "true" ]; then
-            NEWEST=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=30" |
-              jq -r '[.[] | select(.draft == false and .prerelease == true)][0].tag_name // empty')
-          else
-            NEWEST=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" |
-              jq -r '.tag_name // empty')
-          fi
-          if [ "$NEWEST" = "$GITHUB_REF_NAME" ]; then
-            echo "is_newest=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_newest=false" >> "$GITHUB_OUTPUT"
-            echo "Release ${GITHUB_REF_NAME} is not the newest (${NEWEST:-none}): its versioned tags will publish, but latest/beta stay put."
-          fi
+          # Floating tags must only ever move forward. Queued release runs can
+          # execute out of publish order (queue order is not guaranteed) and a
+          # backport of an old line (e.g. v1.2.4 published after v2.0.0) is a
+          # legitimate release, so each floating tag only moves when this
+          # version is the HIGHEST SemVer in its channel across all published
+          # releases: latest over stable releases, beta over prereleases,
+          # X.Y/X over the stable releases sharing that prefix. Highest is
+          # computed here with sort -V rather than trusted from run order or
+          # from /releases/latest (which sorts by created_at — the commit
+          # date — so a backport cut from a fresh commit would wrongly count
+          # as newest). curl -f makes any API failure fail this step (and the
+          # build) loudly instead of silently mis-tagging.
+          RELEASES=$(mktemp)
+          PAGE=1
+          while :; do
+            RESP=$(curl -sfS -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=100&page=${PAGE}")
+            COUNT=$(printf '%s' "$RESP" | jq 'length')
+            printf '%s' "$RESP" | jq -r '.[] | select(.draft == false) | "\(.tag_name) \(.prerelease)"' >> "$RELEASES"
+            [ "$COUNT" -lt 100 ] && break
+            PAGE=$((PAGE + 1))
+          done
+          # The list API can lag the release event, so make sure this run's
+          # own release is always in the comparison set.
+          printf '%s %s\n' "$GITHUB_REF_NAME" "$IS_PRERELEASE" >> "$RELEASES"
+          STABLE=$(awk '$2 == "false" { sub(/^v/, "", $1); print $1 }' "$RELEASES")
+          PRE=$(awk '$2 == "true" { sub(/^v/, "", $1); print $1 }' "$RELEASES")
+          MAJOR=${VERSION%%.*}
+          REST=${VERSION#*.}; MINOR=${REST%%.*}
+          gate() {
+            if [ -n "$1" ] && [ "$(printf '%s\n' "$1" | sort -V | tail -n 1)" = "$VERSION" ]; then
+              echo true
+            else
+              echo false
+            fi
+          }
+          MINOR_SET=$(printf '%s\n' "$STABLE" | grep -E "^${MAJOR}\.${MINOR}\." || true)
+          MAJOR_SET=$(printf '%s\n' "$STABLE" | grep -E "^${MAJOR}\." || true)
+          {
+            echo "latest=$(gate "$STABLE")"
+            echo "beta=$(gate "$PRE")"
+            echo "minor=$(gate "$MINOR_SET")"
+            echo "major=$(gate "$MAJOR_SET")"
+          } >> "$GITHUB_OUTPUT"
+          echo "Floating-tag gates for ${VERSION}: latest=$(gate "$STABLE") beta=$(gate "$PRE") ${MAJOR}.${MINOR}=$(gate "$MINOR_SET") ${MAJOR}=$(gate "$MAJOR_SET")"
 
       - name: Extract Docker metadata
         id: meta
@@ -209,13 +235,14 @@ jobs:
             type=raw,value=${{ steps.version.outputs.image_tag }}
             # The release namespace — floating X.Y/X plus latest (stable) and
             # beta (prerelease) — moves ONLY on a published release; a manual
-            # build never creates or moves any of these. latest/beta further
-            # require this release to still be the newest (see "Check newest
-            # release"), so they only ever move forward.
-            type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' }}
-            type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' && !startsWith(steps.version.outputs.version, '0.') }}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease && steps.newest.outputs.is_newest == 'true' }}
-            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease && steps.newest.outputs.is_newest == 'true' }}
+            # build never creates or moves any of these. Each floating tag
+            # further requires this version to be the highest in its channel
+            # (see "Check newest release"), so floating tags only ever move
+            # forward regardless of run order or backports.
+            type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' && steps.newest.outputs.minor == 'true' }}
+            type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' && steps.newest.outputs.major == 'true' && !startsWith(steps.version.outputs.version, '0.') }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease && steps.newest.outputs.latest == 'true' }}
+            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease && steps.newest.outputs.beta == 'true' }}
             # always a git short SHA tag; on manual runs it carries the channel
             # AND version (dev-1.2.3-sha-abc1234) so it can't overwrite the
             # release's sha tag, and re-dispatching the same commit with a
