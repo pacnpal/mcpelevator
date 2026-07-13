@@ -847,6 +847,12 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     server = repo.get_server(session, server_id)
     if server is None:
         raise KeyError(server_id)
+    # The API handler pre-reads this row (for its OAuth signature) BEFORE entering the
+    # lock, priming the request session's identity map — so a concurrent PATCH committed
+    # while we waited would otherwise be invisible here, and the merge + config_hash
+    # below would run on a stale snapshot that no longer describes the final row.
+    # Re-read from the DB now that we hold the write lock.
+    session.refresh(server)
     # Pre-edit runner: converting a NON-docker server INTO a docker one newly grants the
     # root-equivalent runner, so it must be gated like create/enable. Merely editing a row that
     # was ALREADY docker is not gated (so a broken image/env can be fixed while the runner is
@@ -953,6 +959,14 @@ def set_enabled(session: Session, server_id: str, enabled: bool) -> Server:
         _require_docker_enabled(session)
     server.enabled = enabled
     return repo.save_server(session, server)
+
+
+@_serialized_write
+def delete_server(session: Session, server_id: str) -> bool:
+    """Thin serialized wrapper over ``repo.delete_server``: a delete racing a threaded
+    update that already loaded the row would otherwise make the update's commit blow up
+    with a StaleDataError (UPDATE matching 0 rows) instead of ordering deterministically."""
+    return repo.delete_server(session, server_id)
 
 
 # Node/Python launchers we recognize so the runner badge is meaningful. Anything

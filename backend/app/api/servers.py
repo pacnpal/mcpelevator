@@ -254,7 +254,10 @@ async def update_server(
 async def delete_server(server_id: str, request: Request, session: Session = Depends(get_session)):
     sup = request.app.state.supervisor
     await sup.stop(server_id)  # tear down the process before removing desired state
-    if not repo.delete_server(session, server_id):
+    # Threadpool + service (not repo): the delete must queue behind the registry write
+    # lock — racing a threaded update that already loaded this row would blow up that
+    # update's commit — and waiting for the lock must not sit on the event loop.
+    if not await run_in_threadpool(service.delete_server, session, server_id):
         raise HTTPException(status_code=404, detail="server not found")
     # Cancel any in-flight authorization and drop stored upstream OAuth credentials for this
     # (now-deleted) server — otherwise a late callback could re-promote tokens and leave an
@@ -356,7 +359,9 @@ async def clone_server(
 @router.post("/servers/{server_id}/enable", response_model=ServerSummary)
 async def enable_server(server_id: str, request: Request, session: Session = Depends(get_session)):
     try:
-        server = service.set_enabled(session, server_id, True)
+        # Threadpool: set_enabled takes the registry write lock, and an import in a worker
+        # can hold that lock across many derivations — don't wait for it on the event loop.
+        server = await run_in_threadpool(service.set_enabled, session, server_id, True)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
@@ -370,7 +375,8 @@ async def enable_server(server_id: str, request: Request, session: Session = Dep
 @router.post("/servers/{server_id}/disable", response_model=ServerSummary)
 async def disable_server(server_id: str, request: Request, session: Session = Depends(get_session)):
     try:
-        server = service.set_enabled(session, server_id, False)
+        # Threadpool: see enable_server — the lock wait must not block the loop.
+        server = await run_in_threadpool(service.set_enabled, session, server_id, False)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     sup = request.app.state.supervisor
