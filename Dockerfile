@@ -59,11 +59,14 @@ RUN uv sync --no-dev --frozen 2>/dev/null || uv sync --no-dev
 COPY backend/ ./
 COPY --from=frontend /fe/build /app/frontend/build
 
-# Stamp the release version (passed by CI as APP_VERSION) into the package metadata.
-ARG APP_VERSION=0.1.0
-RUN sed -i "s/^__version__ = .*/__version__ = \"${APP_VERSION}\"/" app/__init__.py
+# Derive the running version from the GitHub release tag: CI passes the tag as APP_VERSION
+# (see .github/workflows/docker-image.yml), and app.__version__ reads MCPE_VERSION first (see
+# backend/app/__init__.py). A non-release/local build gets the honest 0.0.0-dev default rather
+# than a fake number. No source stamping — the env var is the single injection point.
+ARG APP_VERSION=0.0.0-dev
 
 ENV PATH="/app/backend/.venv/bin:${PATH}" \
+    MCPE_VERSION=${APP_VERSION} \
     MCPE_HOST=0.0.0.0 \
     MCPE_PORT=8080 \
     MCPE_DATA_DIR=/data \
