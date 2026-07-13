@@ -116,25 +116,53 @@
 
 	let oauthBusy = $state(false); // authorize / disconnect in flight
 	let oauthPopupWatch: ReturnType<typeof setInterval> | undefined;
+	let oauthGraceTimer: ReturnType<typeof setTimeout> | undefined;
 	// Nonce of the flow THIS page started; broadcasts carrying any other nonce belong
 	// to a different tab's sign-in and are ignored.
 	let oauthNonce: string | null = null;
+
+	// How long a COOP-severed flow (see watchOauthPopup) stays busy waiting for the
+	// completion broadcast before giving up on an operator who abandoned the popup.
+	const OAUTH_SEVERED_GRACE_MS = 90_000;
+
+	function clearOauthTimers() {
+		clearInterval(oauthPopupWatch);
+		oauthPopupWatch = undefined;
+		clearTimeout(oauthGraceTimer);
+		oauthGraceTimer = undefined;
+	}
 
 	// While the popup is open, poll for the operator closing it mid-sign-in (there's no
 	// event for that) so the Authorize button doesn't stay stuck busy. A completed flow
 	// clears the watch via the broadcast listener before the popup closes itself.
 	function watchOauthPopup(popup: Window) {
-		clearInterval(oauthPopupWatch);
+		clearOauthTimers();
+		let polls = 0;
 		oauthPopupWatch = setInterval(() => {
+			polls += 1;
 			if (!popup.closed) return;
 			clearInterval(oauthPopupWatch);
 			oauthPopupWatch = undefined;
-			// `closed` is only a HINT: a provider that serves its auth pages with
-			// Cross-Origin-Opener-Policy severs our WindowProxy, which then reports
-			// closed=true while the popup is still open. Re-enable the button and
-			// refresh, but KEEP the nonce so a completion broadcast that arrives
-			// later (the operator finishing sign-in in that "closed" popup) still
-			// lands instead of being dropped.
+			if (polls <= 2) {
+				// `closed` flipped within ~a second of navigating to the provider: no
+				// human dismisses a popup that fast — this is a provider serving its
+				// auth pages with Cross-Origin-Opener-Policy, which severs our
+				// WindowProxy (it reports closed=true while the popup is still open).
+				// The flow is live, so STAY busy — re-enabling the button here would
+				// invite a second click that cancels the in-flight grant server-side
+				// (begin_authorization supersedes) — and let the completion broadcast
+				// finish it. The grace timer catches an operator who abandons the
+				// now-untrackable popup.
+				oauthGraceTimer = setTimeout(() => {
+					oauthGraceTimer = undefined;
+					oauthBusy = false;
+					void load(true);
+				}, OAUTH_SEVERED_GRACE_MS);
+				return;
+			}
+			// A real close (the operator dismissed the popup): re-enable the button
+			// and refresh, but KEEP the nonce so a completion broadcast that raced
+			// the close still lands.
 			oauthBusy = false;
 			void load(true);
 		}, 500);
@@ -191,8 +219,7 @@
 		const stop = listenForOauthResult(({ result, reason, nonce }) => {
 			if (oauthNonce === null || nonce !== oauthNonce) return; // another tab's flow
 			oauthNonce = null;
-			clearInterval(oauthPopupWatch);
-			oauthPopupWatch = undefined;
+			clearOauthTimers();
 			oauthBusy = false;
 			if (result === 'connected') {
 				flashToast('Connected — OAuth sign-in complete.');
@@ -203,7 +230,7 @@
 		});
 		return () => {
 			stop();
-			clearInterval(oauthPopupWatch);
+			clearOauthTimers();
 		};
 	});
 
@@ -269,8 +296,7 @@
 		// stop watching its popup and drop its nonce so a late broadcast can't toast
 		// or refresh on behalf of a server this page no longer shows.
 		oauthNonce = null;
-		clearInterval(oauthPopupWatch);
-		oauthPopupWatch = undefined;
+		clearOauthTimers();
 		oauthBusy = false;
 		load();
 		// Resolve the global default once so `inherit` servers show their
