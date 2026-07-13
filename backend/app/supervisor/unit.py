@@ -127,6 +127,11 @@ class ServerUnit:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
+                # Reap the killed process so stop() doesn't return while it's still a
+                # zombie holding its loopback port — the reconciler may reuse this slot
+                # immediately. SIGKILL can't be blocked, so this wait is bounded and short.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(proc.wait(), timeout=5)
         if self.runner == "docker":
             await self._reap_container()
         self.state = "stopped"

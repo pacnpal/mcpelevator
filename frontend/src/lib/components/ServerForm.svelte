@@ -297,10 +297,16 @@
 		// otherwise the PATCH would omit it, the backend would keep the old secret, and it
 		// would reject the update as a secret-without-id.
 		if (!oauthClientId.trim()) return null;
-		const typed = oauthClientSecret.trim();
-		if (typed) return typed;
-		// Blank: keep the stored secret in edit mode unless the operator explicitly removes it.
-		if (mode === 'edit' && oauthHasSecret && !oauthRemoveSecret) return undefined;
+		// "Remove" wins over any typed value FIRST: the field is disabled while the box is
+		// ticked, but a secret typed before ticking it would otherwise linger in state and
+		// get sent — resurrecting the very secret the operator asked to drop.
+		if (mode === 'edit' && oauthHasSecret && oauthRemoveSecret) return null;
+		// Send the secret VERBATIM — it's an opaque credential, so don't .trim() the value
+		// (a provider secret may legitimately carry edge whitespace); only use a trimmed
+		// check to tell "typed something" from "left blank".
+		if (oauthClientSecret.trim()) return oauthClientSecret;
+		// Blank: keep the stored secret in edit mode; otherwise no secret.
+		if (mode === 'edit' && oauthHasSecret) return undefined;
 		return null;
 	}
 

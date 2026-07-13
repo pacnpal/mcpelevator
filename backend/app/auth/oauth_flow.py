@@ -70,6 +70,41 @@ _INIT_HEADERS = {
 }
 
 
+def _merge_scopes(*scope_strings: Optional[str]) -> Optional[str]:
+    """Union space-delimited scope strings, preserving first-seen order and dropping
+    duplicates. Returns ``None`` when nothing was supplied (so the SDK omits ``scope``)."""
+    seen: list[str] = []
+    for scope_string in scope_strings:
+        for scope in (scope_string or "").split():
+            if scope not in seen:
+                seen.append(scope)
+    return " ".join(seen) if seen else None
+
+
+class _ScopedOAuthClientProvider(OAuthClientProvider):
+    """``OAuthClientProvider`` that keeps the operator's requested scopes in the grant.
+
+    The SDK runs its own "scope selection strategy" during the 401-driven handshake and
+    OVERWRITES ``context.client_metadata.scope`` from the WWW-Authenticate header / the
+    discovered resource+auth-server metadata (``oauth2.get_client_metadata_scopes``),
+    discarding whatever the operator typed. That's wrong when the operator deliberately
+    asked for a specific set (e.g. an upstream that doesn't advertise scopes, or one
+    that needs a scope it omits from the challenge). We union the operator's scopes back
+    in immediately before the authorization URL is built so they're always requested,
+    while still honouring any the server volunteered."""
+
+    def __init__(self, *args, operator_scopes: Optional[str] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._operator_scopes = operator_scopes or None
+
+    async def _perform_authorization_code_grant(self) -> tuple[str, str]:
+        if self._operator_scopes:
+            self.context.client_metadata.scope = _merge_scopes(
+                self.context.client_metadata.scope, self._operator_scopes
+            )
+        return await super()._perform_authorization_code_grant()
+
+
 class _MemoryTokenStorage(TokenStorage):
     """Ephemeral, in-process token storage used to DRIVE one interactive grant.
 
@@ -315,13 +350,14 @@ async def begin_authorization(server, *, callback_url: str) -> str:
             raise RuntimeError("OAuth callback delivered no authorization code")
         return pending.code, pending.state
 
-    provider = OAuthClientProvider(
+    provider = _ScopedOAuthClientProvider(
         server_url=server.command,
         client_metadata=client_metadata,
         storage=mem,
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
         timeout=_FLOW_TIMEOUT,
+        operator_scopes=server.oauth_scopes or None,
     )
 
     _PENDING[pending.id] = pending

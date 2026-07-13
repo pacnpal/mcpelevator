@@ -233,8 +233,9 @@ async def update_server(
         # STOP the bridge before clearing: a running bridge's in-flight refresh could
         # otherwise set_tokens() after the clear and recreate credentials for the old
         # upstream/client, which the nudge below would then restart the server with.
-        if server.enabled:
-            await sup.stop(server_id)
+        # Unconditional — sup.stop is idempotent, and gating on ``enabled`` would miss a
+        # bridge still winding down from a just-toggled row.
+        await sup.stop(server_id)
         ServerTokenStorage(server_id).clear()
 
     if "slug" in changes:
@@ -316,8 +317,9 @@ async def disconnect_oauth(
     # STOP the bridge before clearing: a running bridge may have an in-flight refresh whose
     # set_tokens() would otherwise recreate the file after clear(), and the nudge would then
     # restart the server with fresh credentials despite the UI reporting it disconnected.
-    if server.enabled:
-        await sup.stop(server_id)
+    # Unconditional — sup.stop is idempotent, and gating on ``enabled`` would miss a bridge
+    # still winding down from a just-toggled row.
+    await sup.stop(server_id)
     ServerTokenStorage(server_id).clear()
     # The server stays enabled, so the reconciler restarts it; with no tokens it can't
     # authenticate upstream and surfaces as needing re-auth — the intended "disconnected"

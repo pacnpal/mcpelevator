@@ -26,7 +26,6 @@ and the file is created ``0600`` — it holds bearer credentials.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -35,6 +34,11 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Optional
+
+try:
+    import fcntl  # POSIX-only; absent on Windows.
+except ImportError:  # pragma: no cover - exercised only on non-POSIX hosts
+    fcntl = None  # type: ignore[assignment]
 
 from mcp.client.auth import TokenStorage
 from mcp.shared.auth import (
@@ -52,6 +56,21 @@ logger = logging.getLogger(__name__)
 # reached here from a request path (``/servers/{server_id}/oauth/...``) can never
 # traverse out of the oauth directory. A non-matching id is refused, not sanitized.
 _SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+# When a token response omits ``expires_in`` (RFC 6749 §5.1 makes it optional) BUT a refresh
+# token is present, assume a modest lifetime so the bridge takes the proactive-refresh path.
+# Without an expiry the SDK treats the token as valid forever, so a token that actually lapses
+# is sent stale, 401s, and drops into the interactive path (which the bridge can't run). Only
+# applied when refreshable — a genuinely long-lived, non-refreshable token must keep being sent.
+_DEFAULT_REFRESHABLE_TTL = 3600
+
+
+def _expires_at_for(tokens: "OAuthToken", *, has_refresh_token: bool) -> Optional[float]:
+    if tokens.expires_in is not None:
+        return time.time() + int(tokens.expires_in)
+    if has_refresh_token:
+        return time.time() + _DEFAULT_REFRESHABLE_TTL
+    return None
 
 
 def oauth_dir() -> Path:
@@ -99,8 +118,16 @@ class ServerTokenStorage(TokenStorage):
         last-writer-win and could drop a just-refreshed token. An ``flock`` on a sidecar
         ``.lock`` file serializes the whole RMW across processes; it's released on every
         path. The ``_write`` temp file is per-call regardless, so an atomic replace is
-        never torn even if a reader isn't holding the lock."""
+        never torn even if a reader isn't holding the lock.
+
+        Where ``fcntl`` is unavailable (Windows) we skip the advisory lock and lean on the
+        atomic ``os.replace`` alone: writes still can't tear, we only lose cross-process
+        RMW serialization (a rarely-hit refresh/auth race), and — importantly — the module
+        still imports so the rest of the backend runs."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if fcntl is None:
+            yield
+            return
         lock_path = self.path.with_suffix(".lock")
         fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
         try:
@@ -171,9 +198,15 @@ class ServerTokenStorage(TokenStorage):
                     dumped["refresh_token"] = prev
             data["tokens"] = dumped
             # Persist an absolute expiry so a fresh process doesn't misread the
-            # relative ``expires_in`` as "seconds from now" on every reload.
-            if tokens.expires_in is not None:
-                data["expires_at"] = time.time() + int(tokens.expires_in)
+            # relative ``expires_in`` as "seconds from now" on every reload. When the
+            # provider omits ``expires_in`` but we (still) hold a refresh token, stamp a
+            # default TTL so the bridge proactively refreshes instead of sending a token
+            # it wrongly believes is eternal (see ``_expires_at_for``).
+            expires_at = _expires_at_for(
+                tokens, has_refresh_token=bool(dumped.get("refresh_token"))
+            )
+            if expires_at is not None:
+                data["expires_at"] = expires_at
             else:
                 data.pop("expires_at", None)
             self._write(data)
@@ -254,20 +287,43 @@ class ServerTokenStorage(TokenStorage):
         existing file — and thus a still-working credential — untouched: no destructive
         pre-clear. It also does NOT carry forward a previous refresh token (that's only for
         the bridge's refresh path); a new grant brings its own, so grafting the old one
-        could bind the wrong account."""
-        data: dict = {}
-        if client_info is not None:
-            data["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
-        if metadata is not None:
-            data["metadata"] = metadata.model_dump(mode="json", exclude_none=True)
-        if protected_resource_metadata is not None:
-            data["protected_resource_metadata"] = protected_resource_metadata.model_dump(
-                mode="json", exclude_none=True
-            )
-        data["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
-        if tokens.expires_in is not None:
-            data["expires_at"] = time.time() + int(tokens.expires_in)
+        could bind the wrong account.
+
+        Discovery artifacts (client_info / metadata / protected_resource_metadata) ARE
+        carried forward when the caller passes ``None`` for one: those aren't credentials,
+        and a grant that skipped a discovery step (e.g. an upstream that advertises AS
+        metadata but no PRM) shouldn't blank out something a prior sign-in learned — the
+        bridge needs the token endpoint / resource to refresh."""
         with self._locked():
+            existing = self._read()
+            data: dict = {}
+            new_client_info = (
+                client_info.model_dump(mode="json", exclude_none=True)
+                if client_info is not None
+                else existing.get("client_info")
+            )
+            if new_client_info:
+                data["client_info"] = new_client_info
+            new_metadata = (
+                metadata.model_dump(mode="json", exclude_none=True)
+                if metadata is not None
+                else existing.get("metadata")
+            )
+            if new_metadata:
+                data["metadata"] = new_metadata
+            new_prm = (
+                protected_resource_metadata.model_dump(mode="json", exclude_none=True)
+                if protected_resource_metadata is not None
+                else existing.get("protected_resource_metadata")
+            )
+            if new_prm:
+                data["protected_resource_metadata"] = new_prm
+            data["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+            expires_at = _expires_at_for(
+                tokens, has_refresh_token=bool(tokens.refresh_token)
+            )
+            if expires_at is not None:
+                data["expires_at"] = expires_at
             self._write(data)
 
     # --- sync status helpers (used by the API) --------------------------- #

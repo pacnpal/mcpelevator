@@ -114,8 +114,17 @@ def test_normalize_oauth_forced_off_for_non_remote():
     assert service.normalize_oauth("npx", True, "scope", "cid", "sec") == (False, "", None, None)
 
 
-def test_normalize_oauth_strips_and_blanks():
-    assert service.normalize_oauth("remote", True, "  a b  ", "  ", "  ") == (True, "a b", None, None)
+def test_normalize_oauth_strips_scopes_and_id_but_preserves_secret():
+    # Scopes and client_id are trimmed; the client secret is an OPAQUE credential and is
+    # kept VERBATIM (edge whitespace can be part of a real provider-issued secret).
+    assert service.normalize_oauth("remote", True, "  a b  ", "  cid  ", "  s3cret ") == (
+        True,
+        "a b",
+        "cid",
+        "  s3cret ",
+    )
+    # A whitespace-only client_id collapses to None, and an empty secret is absent.
+    assert service.normalize_oauth("remote", True, "  a b  ", "  ", "") == (True, "a b", None, None)
 
 
 def test_normalize_oauth_secret_without_id_rejected():
@@ -271,6 +280,57 @@ async def test_set_tokens_preserves_refresh_token_when_absent():
         assert got is not None and got.access_token == "A2" and got.refresh_token == "R1"
     finally:
         store.clear()
+
+
+async def test_set_tokens_stamps_default_expiry_when_refreshable():
+    # A token response can omit expires_in (RFC 6749 §5.1 makes it optional). If a refresh
+    # token IS present, stamp a default expiry so the bridge proactively refreshes instead
+    # of treating the token as eternal and letting it 401 into the interactive path.
+    store = ServerTokenStorage("srv-default-ttl")
+    store.clear()
+    try:
+        await store.set_tokens(
+            OAuthToken(access_token="A", token_type="Bearer", refresh_token="R")
+        )
+        assert store.get_token_expiry() is not None
+        # No refresh token AND no expires_in: a genuinely long-lived opaque token — leave the
+        # expiry unset so it keeps being sent rather than being force-refreshed.
+        store.clear()
+        await store.set_tokens(OAuthToken(access_token="A", token_type="Bearer"))
+        assert store.get_token_expiry() is None
+    finally:
+        store.clear()
+
+
+def test_promote_carries_forward_metadata_when_absent():
+    from mcp.shared.auth import OAuthMetadata
+
+    store = ServerTokenStorage("srv-promote-carry")
+    store.clear()
+    try:
+        meta = OAuthMetadata(
+            issuer="https://as.example",
+            authorization_endpoint="https://as.example/authorize",
+            token_endpoint="https://as.example/token",
+            response_types_supported=["code"],
+        )
+        store.set_metadata(meta)
+        # Promote a fresh grant WITHOUT re-supplying metadata (e.g. a grant path that didn't
+        # re-run discovery). The discovered token endpoint must survive so the bridge can
+        # still refresh, while the tokens are fully replaced.
+        store.promote(tokens=OAuthToken(access_token="NEW", token_type="Bearer", refresh_token="R"))
+        kept = store.get_metadata()
+        assert kept is not None and str(kept.token_endpoint) == "https://as.example/token"
+        assert store.status()["authenticated"] is True
+        assert store.get_token_expiry() is not None  # refreshable -> default TTL stamped
+    finally:
+        store.clear()
+
+
+def test_merge_scopes_unions_and_dedupes():
+    assert oauth_flow._merge_scopes("read write", None, "write admin", "") == "read write admin"
+    assert oauth_flow._merge_scopes("", None) is None
+    assert oauth_flow._merge_scopes(None) is None
 
 
 # --------------------------------------------------------------------------- #

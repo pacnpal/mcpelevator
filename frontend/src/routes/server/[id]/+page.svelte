@@ -175,11 +175,19 @@
 
 	// Initial load + lightweight polling so live state (running/starting) stays
 	// fresh while the page is open. Polls silently to avoid flicker.
+	// Consume the OAuth round-trip result in its OWN effect, keyed on the query string, so
+	// it fires on the post-callback navigation to `/server/{id}?oauth=…` even when the
+	// server id is unchanged (same page) — the load effect below only re-runs on id, and
+	// would otherwise never surface the toast when you were already on this page.
+	$effect(() => {
+		void page.url.search;
+		consumeOauthResult();
+	});
+
 	$effect(() => {
 		// Re-run when the route id changes.
 		void id;
 		load();
-		consumeOauthResult();
 		// Resolve the global default once so `inherit` servers show their
 		// effective auth. Best-effort — endpoint hint just hides on failure.
 		getSettings()
@@ -201,7 +209,11 @@
 	const oauthExpiry = $derived(
 		oauthState?.expires_at ? new Date(oauthState.expires_at * 1000) : null
 	);
-	const oauthExpired = $derived(!!oauthExpiry && oauthExpiry.getTime() < Date.now());
+	// The access token has lapsed by the clock — but that's only ALARMING when there's no
+	// refresh token to renew it. With a refresh token the bridge refreshes silently on the
+	// next call, so a lapsed access token is business as usual, not a red banner.
+	const oauthLapsed = $derived(!!oauthExpiry && oauthExpiry.getTime() < Date.now());
+	const oauthExpired = $derived(oauthLapsed && !oauthState?.has_refresh_token);
 
 	// Effective auth for the endpoint hint: `inherit` resolves to the global
 	// default. `null` while the default is still unknown for an inherit server.
@@ -464,10 +476,13 @@
 					</div>
 					<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
 						{#if oauthExpired}
-							The access token has expired. If the server stops working, re-authenticate to
-							refresh it.
+							The access token has expired and there's no refresh token to renew it
+							automatically. Re-authenticate to reconnect.
+						{:else if oauthState?.has_refresh_token}
+							Access token renews automatically.
 						{:else if oauthExpiry}
-							Access token renews automatically; current one valid until {oauthExpiry.toLocaleString()}.
+							Access token valid until {oauthExpiry.toLocaleString()}. You'll need to
+							re-authenticate here once it expires.
 						{:else}
 							Tokens renew automatically.
 						{/if}

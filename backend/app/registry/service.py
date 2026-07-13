@@ -93,7 +93,11 @@ def normalize_oauth(
         return False, "", None, None
     scopes = (scopes or "").strip()
     client_id = (client_id or "").strip() or None
-    client_secret = (client_secret or "").strip() or None
+    # A client secret is an OPAQUE credential — never .strip() it. A provider-issued
+    # secret can legitimately begin or end with whitespace, and trimming would store a
+    # different value, so the token exchange would authenticate with the wrong secret and
+    # be rejected. Only an empty string counts as "absent".
+    client_secret = client_secret or None
     if client_secret and not client_id:
         raise ValueError("an OAuth client secret requires a client id")
     return True, scopes, client_id, client_secret
