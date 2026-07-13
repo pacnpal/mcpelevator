@@ -1,5 +1,9 @@
-# Trivy ignore rules — consumed by the Security Scan job in
-# .github/workflows/docker-image.yml (passed via the `trivyignores` input).
+# Trivy ignore rules — consumed by the Security Scan jobs in
+# .github/workflows/docker-image.yml (release-time scan) and
+# .github/workflows/security-scan.yml (scheduled/on-demand re-scan of the
+# published image), both via the `trivyignores` input. The scheduled scan is
+# what makes an `expired_at` below actually resurface the alert on time,
+# rather than only whenever the next release happens to be cut.
 #
 # Scope every entry as narrowly as possible (an `id` + `paths`, and an
 # `expired_at` so the suppression self-expires and the alert resurfaces for
