@@ -152,6 +152,9 @@ jobs:
             echo "Refusing to build: version '$VERSION' is not a full semver (X.Y.Z[-prerelease])." >&2
             exit 1
           fi
+          # Shared with the "Check newest release" step, which filters the
+          # release comparison set through the same grammar.
+          echo "SEMVER_RE=${SEMVER_RE}" >> "$GITHUB_ENV"
           # A manual build may be of any ref, so its image tag is namespaced by
           # the required channel (dev-1.2.3 / beta-1.2.3): it can never collide
           # with — or impersonate — a release's version tag.
@@ -179,11 +182,11 @@ jobs:
           # version is the HIGHEST SemVer in its channel across all published
           # releases: latest over stable releases, beta over prereleases,
           # X.Y/X over the stable releases sharing that prefix. Highest is
-          # computed here with sort -V rather than trusted from run order or
-          # from /releases/latest (which sorts by created_at — the commit
-          # date — so a backport cut from a fresh commit would wrongly count
-          # as newest). curl -f makes any API failure fail this step (and the
-          # build) loudly instead of silently mis-tagging.
+          # computed with true SemVer precedence rather than trusted from run
+          # order or from /releases/latest (which sorts by created_at — the
+          # commit date — so a backport cut from a fresh commit would wrongly
+          # count as newest). curl -f makes any API failure fail this step
+          # (and the build) loudly instead of silently mis-tagging.
           RELEASES=$(mktemp)
           PAGE=1
           while :; do
@@ -197,12 +200,37 @@ jobs:
           # The list API can lag the release event, so make sure this run's
           # own release is always in the comparison set.
           printf '%s %s\n' "$GITHUB_REF_NAME" "$IS_PRERELEASE" >> "$RELEASES"
-          STABLE=$(awk '$2 == "false" { sub(/^v/, "", $1); print $1 }' "$RELEASES")
-          PRE=$(awk '$2 == "true" { sub(/^v/, "", $1); print $1 }' "$RELEASES")
+          # Only strictly-SemVer tags compete (SEMVER_RE comes from the
+          # "Resolve version" step): a stray non-SemVer release like
+          # "docs-2026" — which this workflow refuses to build — must not sit
+          # in the set and block the channels forever.
+          STABLE=$(awk '$2 == "false" { sub(/^v/, "", $1); print $1 }' "$RELEASES" | grep -E "$SEMVER_RE" || true)
+          PRE=$(awk '$2 == "true" { sub(/^v/, "", $1); print $1 }' "$RELEASES" | grep -E "$SEMVER_RE" || true)
           MAJOR=${VERSION%%.*}
           REST=${VERSION#*.}; MINOR=${REST%%.*}
+          # True SemVer precedence: numeric prerelease identifiers rank below
+          # alphanumeric ones and fields compare left-to-right. sort -V gets
+          # this wrong (it ranks 1.0.0-alpha.1 above 1.0.0-alpha.beta), so an
+          # older prerelease could repoint :beta backwards.
+          cat > "$RUNNER_TEMP/semver_max.py" <<'PY'
+          import sys
+
+          def key(v):
+              core, _, pre = v.partition("-")
+              core_key = tuple(int(x) for x in core.split("."))
+              if not pre:
+                  return (core_key, (1, ()))
+              ids = tuple(
+                  (0, int(i), "") if i.isdigit() else (1, 0, i)
+                  for i in pre.split(".")
+              )
+              return (core_key, (0, ids))
+
+          versions = [line.strip() for line in sys.stdin if line.strip()]
+          print(max(versions, key=key) if versions else "")
+          PY
           gate() {
-            if [ -n "$1" ] && [ "$(printf '%s\n' "$1" | sort -V | tail -n 1)" = "$VERSION" ]; then
+            if [ -n "$1" ] && [ "$(printf '%s\n' "$1" | python3 "$RUNNER_TEMP/semver_max.py")" = "$VERSION" ]; then
               echo true
             else
               echo false
