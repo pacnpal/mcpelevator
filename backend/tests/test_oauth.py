@@ -211,6 +211,54 @@ async def test_flow_complete_unknown_state_raises():
         await oauth_flow.complete_authorization("nope-not-a-real-state", code="x")
 
 
+async def test_reauth_preserves_tokens_until_success(monkeypatch):
+    # Re-authenticating must not destroy the existing working token up front: the shared
+    # store keeps the old credential until the new grant actually succeeds.
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+
+    class _Srv:
+        id = "srv-reauth-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await store.set_tokens(
+            OAuthToken(access_token="OLD", token_type="Bearer", refresh_token="OLDR")
+        )
+        await oauth_flow.begin_authorization(_Srv, callback_url="http://127.0.0.1/api/oauth/callback")
+        # Flow started, browser not yet returned — the working token is untouched.
+        got = await store.get_tokens()
+        assert got is not None and got.access_token == "OLD"
+
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="new-code")
+        got = await store.get_tokens()
+        assert got is not None and got.access_token == "AT-new-code"  # replaced only on success
+    finally:
+        store.clear()
+
+
+async def test_set_tokens_preserves_refresh_token_when_absent():
+    # A refresh response that omits refresh_token (provider not rotating) must not wipe the
+    # stored one, or the next refresh has no credential.
+    store = ServerTokenStorage("srv-refresh-preserve")
+    store.clear()
+    try:
+        await store.set_tokens(
+            OAuthToken(access_token="A1", token_type="Bearer", refresh_token="R1", expires_in=60)
+        )
+        await store.set_tokens(OAuthToken(access_token="A2", token_type="Bearer", expires_in=60))
+        got = await store.get_tokens()
+        assert got is not None and got.access_token == "A2" and got.refresh_token == "R1"
+    finally:
+        store.clear()
+
+
 # --------------------------------------------------------------------------- #
 # API surface
 # --------------------------------------------------------------------------- #

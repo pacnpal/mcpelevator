@@ -40,6 +40,7 @@ from mcp.shared.auth import (
     OAuthClientInformationFull,
     OAuthMetadata,
     OAuthToken,
+    ProtectedResourceMetadata,
 )
 
 from app.config import get_settings
@@ -144,7 +145,16 @@ class ServerTokenStorage(TokenStorage):
     async def set_tokens(self, tokens: OAuthToken) -> None:
         with self._locked():
             data = self._read()
-            data["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+            dumped = tokens.model_dump(mode="json", exclude_none=True)
+            # A refresh response frequently OMITS ``refresh_token`` (the provider isn't
+            # rotating it). Carry the previous one forward so the next refresh still has a
+            # credential — otherwise the token silently becomes single-use and the bridge
+            # falls into the non-interactive failure path at the next expiry.
+            if not dumped.get("refresh_token"):
+                prev = (data.get("tokens") or {}).get("refresh_token")
+                if prev:
+                    dumped["refresh_token"] = prev
+            data["tokens"] = dumped
             # Persist an absolute expiry so a fresh process doesn't misread the
             # relative ``expires_in`` as "seconds from now" on every reload.
             if tokens.expires_in is not None:
@@ -195,6 +205,24 @@ class ServerTokenStorage(TokenStorage):
             data["metadata"] = metadata.model_dump(mode="json", exclude_none=True)
             self._write(data)
 
+    def get_protected_resource_metadata(self) -> Optional[ProtectedResourceMetadata]:
+        raw = self._read().get("protected_resource_metadata")
+        if not raw:
+            return None
+        try:
+            return ProtectedResourceMetadata.model_validate(raw)
+        except ValueError:
+            return None
+
+    def set_protected_resource_metadata(self, prm: ProtectedResourceMetadata) -> None:
+        # The auth may bind tokens to the PRM ``resource`` (a parent of the MCP URL); the
+        # bridge must refresh against that SAME resource, so persist the PRM and preload it
+        # (see host._build_oauth_auth) rather than letting the SDK recompute it from the URL.
+        with self._locked():
+            data = self._read()
+            data["protected_resource_metadata"] = prm.model_dump(mode="json", exclude_none=True)
+            self._write(data)
+
     # --- sync status helpers (used by the API) --------------------------- #
 
     def status(self) -> dict:
@@ -226,6 +254,11 @@ class ServerTokenStorage(TokenStorage):
 
     def clear(self) -> None:
         """Delete the credential file entirely (e.g. when the server is removed or the
-        operator disconnects the upstream). Idempotent."""
-        self.path.unlink(missing_ok=True)
-        self.path.with_suffix(".lock").unlink(missing_ok=True)
+        operator disconnects the upstream). Idempotent.
+
+        Held under the same lock writers use, so a concurrent bridge refresh can't
+        ``os.replace`` a fresh credential file back in *after* the clear returns (which
+        would resurrect a disconnected server). The ``.lock`` sidecar is intentionally
+        left in place — deleting it while another process may hold it breaks the mutex."""
+        with self._locked():
+            self.path.unlink(missing_ok=True)

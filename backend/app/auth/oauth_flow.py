@@ -35,8 +35,8 @@ from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 import httpx
-from mcp.client.auth import OAuthClientProvider
-from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata
+from mcp.client.auth import OAuthClientProvider, TokenStorage
+from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 from pydantic import AnyHttpUrl
 
 from app.auth.oauth_store import ServerTokenStorage
@@ -68,6 +68,33 @@ _INIT_HEADERS = {
     "Content-Type": "application/json",
     "MCP-Protocol-Version": "2025-06-18",
 }
+
+
+class _MemoryTokenStorage(TokenStorage):
+    """Ephemeral, in-process token storage used to DRIVE one interactive grant.
+
+    The flow runs against this instead of the shared file store so that an existing,
+    working credential is never destroyed by a re-authorization that then fails or is
+    cancelled: the real store is written only on success (see ``_drive``'s promotion).
+    Seeded with the existing client info so a re-auth reuses the registered client and
+    a static-client grant skips Dynamic Client Registration. Also forces the probe to
+    401 (no tokens here), which is what triggers the browser redirect."""
+
+    def __init__(self, client_info: Optional[OAuthClientInformationFull] = None):
+        self._tokens: Optional[OAuthToken] = None
+        self._client_info = client_info
+
+    async def get_tokens(self) -> Optional[OAuthToken]:
+        return self._tokens
+
+    async def set_tokens(self, tokens: OAuthToken) -> None:
+        self._tokens = tokens
+
+    async def get_client_info(self) -> Optional[OAuthClientInformationFull]:
+        return self._client_info
+
+    async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
+        self._client_info = client_info
 
 
 class _Pending:
@@ -115,6 +142,13 @@ def _cancel_existing(server_id: str) -> None:
             _forget(pending)
 
 
+def cancel_pending(server_id: str) -> None:
+    """Cancel any in-flight authorization for a server. Called when its OAuth config is
+    edited: a background flow started against the OLD upstream/scopes/client must not
+    complete and write credentials for the wrong resource back under this id."""
+    _cancel_existing(server_id)
+
+
 def _extract_state(url: str) -> Optional[str]:
     try:
         values = parse_qs(urlparse(url).query).get("state")
@@ -123,15 +157,35 @@ def _extract_state(url: str) -> Optional[str]:
     return values[0] if values else None
 
 
-async def _drive(server, provider: OAuthClientProvider, storage: ServerTokenStorage, pending: _Pending) -> None:
+def _probe_headers(server) -> dict[str, str]:
+    """Headers for the probe request: the base MCP headers plus the server's own extra
+    headers — but NEVER a stale ``Authorization``. If the server was switched from static
+    Headers auth to OAuth, a leftover token header would make the upstream answer 200
+    instead of the 401 that drives the OAuth flow, hanging begin() into a timeout."""
+    headers = dict(_INIT_HEADERS)
+    for key, value in (server.env or {}).items():
+        if key.strip().lower() == "authorization":
+            continue
+        headers[key] = value
+    return headers
+
+
+async def _drive(
+    server,
+    provider: OAuthClientProvider,
+    mem: _MemoryTokenStorage,
+    real: ServerTokenStorage,
+    pending: _Pending,
+) -> None:
     """Run the provider end to end: one authenticated request that 401s, triggering
-    discovery → registration → (park for browser) → code exchange → token storage."""
+    discovery → registration → (park for browser) → code exchange. Tokens land in the
+    ephemeral ``mem`` store; only on success are they PROMOTED to the shared ``real``
+    store, so a failed re-auth never destroys a still-working credential."""
     mcp_url = server.command
-    # Probe with the SAME transport + upstream headers the bridge will use, so an SSE
-    # upstream or one that needs an extra header (e.g. a co-required API key) still
-    # reaches its 401/auth challenge here instead of failing before the redirect.
+    # Probe with the SAME transport the bridge will use so an SSE upstream reaches its
+    # 401/auth challenge here instead of failing before the redirect.
     transport = canonical_transport((server.args or [None])[0]) or DEFAULT_TRANSPORT
-    headers = {**_INIT_HEADERS, **dict(server.env or {})}
+    headers = _probe_headers(server)
     inner_error: Optional[BaseException] = None
     try:
         async with httpx.AsyncClient(
@@ -148,20 +202,29 @@ async def _drive(server, provider: OAuthClientProvider, storage: ServerTokenStor
 
     # The exchange stores tokens *before* the original request is retried, so the
     # handshake can succeed even if that retry (or the connection) then errors. Judge
-    # success on whether tokens actually landed, not on the request outcome.
-    tokens = await storage.get_tokens()
+    # success on whether tokens actually landed in the ephemeral store.
+    tokens = await mem.get_tokens()
     if tokens is not None:
-        # Persist the discovered auth-server metadata so the bridge can refresh
-        # against the real token endpoint without repeating discovery.
-        meta = getattr(provider.context, "oauth_metadata", None)
-        if meta is not None:
-            try:
-                storage.set_metadata(meta)
-            except Exception:  # noqa: BLE001 — metadata is a refresh optimization, not required
-                logger.debug("could not persist OAuth metadata for %s", server.id, exc_info=True)
-        if not pending.done_future.done():
-            pending.done_future.set_result(None)
-        return
+        # Promote the freshly-obtained credentials to the shared store the bridge reads:
+        # client info first (so a refresh has it), then tokens, then the discovered
+        # metadata the bridge preloads so refresh targets the right endpoint + resource.
+        client_info = await mem.get_client_info()
+        try:
+            if client_info is not None:
+                await real.set_client_info(client_info)
+            await real.set_tokens(tokens)
+            meta = getattr(provider.context, "oauth_metadata", None)
+            if meta is not None:
+                real.set_metadata(meta)
+            prm = getattr(provider.context, "protected_resource_metadata", None)
+            if prm is not None:
+                real.set_protected_resource_metadata(prm)
+        except Exception as exc:  # noqa: BLE001 — persistence failure = the grant didn't stick
+            inner_error = exc
+        else:
+            if not pending.done_future.done():
+                pending.done_future.set_result(None)
+            return
 
     error = inner_error or RuntimeError("OAuth flow finished without returning tokens")
     logger.info("OAuth authorization for %s failed: %s", server.id, error)
@@ -177,29 +240,30 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     _reap_stale()
     _cancel_existing(server.id)
 
-    storage = ServerTokenStorage(server.id)
-    # Force a genuine interactive grant: if a valid/refreshable token were still stored,
-    # the probe below would succeed with it, the provider would never call redirect_handler,
-    # and begin() would time out into a 502. Dropping just the tokens (keeping the DCR client
-    # info) makes the probe 401 and re-drives the browser flow, reusing the registered client.
-    storage.clear_tokens()
+    real = ServerTokenStorage(server.id)
     redirect_uris = [AnyHttpUrl(callback_url)]
 
-    # A static, pre-registered client (operator supplied a client id) skips Dynamic
-    # Client Registration: seed the client info into storage so the provider uses it.
+    # Seed the client info the flow will use. A static, pre-registered client (operator
+    # supplied a client id) skips Dynamic Client Registration; otherwise reuse a prior DCR
+    # registration if one exists so a re-auth doesn't register a brand-new client each time.
     if server.oauth_client_id:
         secret = server.oauth_client_secret or None
-        await storage.set_client_info(
-            OAuthClientInformationFull(
-                client_id=server.oauth_client_id,
-                client_secret=secret,
-                redirect_uris=redirect_uris,
-                grant_types=["authorization_code", "refresh_token"],
-                response_types=["code"],
-                token_endpoint_auth_method="client_secret_post" if secret else "none",
-                scope=server.oauth_scopes or None,
-            )
+        seed_client_info: Optional[OAuthClientInformationFull] = OAuthClientInformationFull(
+            client_id=server.oauth_client_id,
+            client_secret=secret,
+            redirect_uris=redirect_uris,
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            token_endpoint_auth_method="client_secret_post" if secret else "none",
+            scope=server.oauth_scopes or None,
         )
+    else:
+        seed_client_info = await real.get_client_info()
+
+    # Drive the grant against an EPHEMERAL store (no tokens → the probe 401s → the browser
+    # redirect fires). The shared store is written only if the grant succeeds (_drive), so a
+    # failed or cancelled re-auth can't wipe a still-working credential.
+    mem = _MemoryTokenStorage(client_info=seed_client_info)
 
     client_metadata = OAuthClientMetadata(
         client_name=CLIENT_NAME,
@@ -231,14 +295,14 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     provider = OAuthClientProvider(
         server_url=server.command,
         client_metadata=client_metadata,
-        storage=storage,
+        storage=mem,
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
         timeout=_FLOW_TIMEOUT,
     )
 
     _PENDING[pending.id] = pending
-    pending.task = asyncio.create_task(_drive(server, provider, storage, pending))
+    pending.task = asyncio.create_task(_drive(server, provider, mem, real, pending))
 
     try:
         return await asyncio.wait_for(asyncio.shield(pending.url_future), timeout=_URL_TIMEOUT)

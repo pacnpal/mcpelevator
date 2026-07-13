@@ -157,6 +157,12 @@ def _build_oauth_auth(oauth: dict):
     metadata = storage.get_metadata()
     if metadata is not None:
         provider.context.oauth_metadata = metadata
+    # Preload the protected-resource metadata too: if the auth server bound the tokens to
+    # the PRM ``resource`` (a parent of the MCP URL), refresh must use that same resource,
+    # not one recomputed from the URL — otherwise a resource-bound refresh is rejected.
+    prm = storage.get_protected_resource_metadata()
+    if prm is not None:
+        provider.context.protected_resource_metadata = prm
     # Preload the stored token expiry so a lapsed access token is *refreshed* (silent)
     # rather than mistaken for valid and driven into the interactive 401 path.
     expiry = storage.get_token_expiry()
