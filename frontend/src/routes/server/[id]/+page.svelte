@@ -129,10 +129,13 @@
 			if (!popup.closed) return;
 			clearInterval(oauthPopupWatch);
 			oauthPopupWatch = undefined;
-			oauthNonce = null;
+			// `closed` is only a HINT: a provider that serves its auth pages with
+			// Cross-Origin-Opener-Policy severs our WindowProxy, which then reports
+			// closed=true while the popup is still open. Re-enable the button and
+			// refresh, but KEEP the nonce so a completion broadcast that arrives
+			// later (the operator finishing sign-in in that "closed" popup) still
+			// lands instead of being dropped.
 			oauthBusy = false;
-			// The result broadcast normally beats the close, but don't trust the timing:
-			// refresh so a grant that DID land is reflected even if the message was lost.
 			void load(true);
 		}, 500);
 	}
@@ -140,6 +143,10 @@
 	async function startOauthFlow() {
 		if (!server || oauthBusy) return;
 		oauthBusy = true;
+		// Capture the initiating route id: a clone or sidebar navigation reuses this
+		// component (see toggle()/doClone()), and a slow discovery must not drive the
+		// PREVIOUS server's sign-in from the new page.
+		const requestedId = id;
 		// Open the popup synchronously in the click gesture — popup blockers only allow
 		// window.open there — and point it at the provider once the URL arrives. The
 		// provider redirects back to /api/oauth/callback inside the popup; the root
@@ -147,6 +154,12 @@
 		const handle = openOauthPopup();
 		try {
 			const { authorize_url } = await startOauth(server.id);
+			if (requestedId !== id) {
+				// Route changed mid-flight: abandon this flow instead of navigating the
+				// popup (or worse, this tab) to the old server's provider.
+				handle?.popup.close();
+				return;
+			}
 			if (handle === null) {
 				// Popup blocked: fall back to the full-page navigation; the callback
 				// bounces back to this page with ?oauth=….
@@ -168,7 +181,7 @@
 			}
 		} catch (err) {
 			handle?.popup.close();
-			flashToast(errorMessage(err));
+			if (requestedId === id) flashToast(errorMessage(err));
 			oauthBusy = false;
 		}
 	}
@@ -252,6 +265,13 @@
 	$effect(() => {
 		// Re-run when the route id changes.
 		void id;
+		// A route change orphans any in-flight OAuth flow from the previous server —
+		// stop watching its popup and drop its nonce so a late broadcast can't toast
+		// or refresh on behalf of a server this page no longer shows.
+		oauthNonce = null;
+		clearInterval(oauthPopupWatch);
+		oauthPopupWatch = undefined;
+		oauthBusy = false;
 		load();
 		// Resolve the global default once so `inherit` servers show their
 		// effective auth. Best-effort — endpoint hint just hides on failure.
