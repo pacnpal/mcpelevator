@@ -48,14 +48,15 @@ def build(server: Server) -> ProcessSpec:
     transport = canonical_transport(args[0] if args else None) or DEFAULT_TRANSPORT
     oauth = None
     if server.oauth:
-        # The bridge builds the OAuth httpx auth from this; tokens/DCR client info are
-        # read from the shared file store keyed by server id, not carried here.
+        # The bridge builds a refresh-only OAuth auth from this. It reads the tokens AND
+        # the DCR/static client info (including any secret) from the shared file store
+        # keyed by server id — the control-plane flow persists them there — so the static
+        # client id/secret are intentionally NOT carried in the spec (which is serialized
+        # into the child's environment): a credential shouldn't ride along where it isn't used.
         oauth = {
             "server_id": server.id,
             "url": server.command,
             "scopes": server.oauth_scopes or "",
-            "client_id": server.oauth_client_id or None,
-            "client_secret": server.oauth_client_secret or None,
         }
     return ProcessSpec(
         command=server.command,  # upstream URL

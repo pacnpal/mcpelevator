@@ -535,10 +535,15 @@ def compute_hash(server: Server) -> str:
             # OAuth config drives how the bridge authenticates upstream, so it IS part
             # of the launch spec — a change must restart the bridge. (The tokens live in
             # a file store, not the row, so *authenticating* leaves the hash untouched.)
+            # The client SECRET is deliberately excluded from this fingerprint: it's a
+            # credential (never hash a secret with a fast digest), and the bridge doesn't
+            # consume it from the spec — it reads the DCR client_info (which carries the
+            # secret) from the token store, and rotating a static secret re-runs auth. Only
+            # its PRESENCE is hashed, so adding/removing a static client still restarts.
             "oauth": server.oauth,
             "oauth_scopes": server.oauth_scopes,
             "oauth_client_id": server.oauth_client_id,
-            "oauth_client_secret": server.oauth_client_secret,
+            "oauth_has_client_secret": bool(server.oauth_client_secret),
             # auth_provider is intentionally excluded: it's enforced at the proxy
             # per-request, so changing it must NOT restart the bridge process.
         }

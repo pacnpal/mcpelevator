@@ -123,6 +123,23 @@ def test_normalize_oauth_secret_without_id_rejected():
         service.normalize_oauth("remote", True, "", None, "secret-without-id")
 
 
+def test_config_hash_excludes_raw_client_secret():
+    # The config fingerprint must not embed the raw client secret (it's a credential, and
+    # the bridge doesn't consume it from the spec). Rotating the value leaves the hash
+    # unchanged; adding/removing a secret (presence) still changes it → a restart.
+    from app.db.models import Server
+
+    def mk(secret):
+        return Server(
+            id="x", slug="x", name="x", runner="remote",
+            command="https://up.example/mcp", args=["streamable-http"], env={},
+            oauth=True, oauth_client_id="cid", oauth_client_secret=secret,
+        )
+
+    assert service.compute_hash(mk("secret-A")) == service.compute_hash(mk("secret-B"))
+    assert service.compute_hash(mk("secret-A")) != service.compute_hash(mk(None))
+
+
 # --------------------------------------------------------------------------- #
 # flow plumbing (begin -> callback -> complete), no network
 # --------------------------------------------------------------------------- #
