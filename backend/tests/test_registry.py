@@ -32,6 +32,29 @@ def test_unique_slugs(session):
     assert b.slug == "memory-2"
 
 
+def test_concurrent_creates_get_unique_slugs(tmp_path):
+    """Slug allocation is check-then-insert; API handlers now run registry writes in
+    the threadpool, so without the service write lock two same-name creates could both
+    pick the base slug and one would die on the unique constraint instead of getting
+    the -2 suffix. File-backed DB so every thread's connection sees the same data."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.db import models  # noqa: F401 — register tables
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path}/reg.db", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+
+    def make(_):
+        with Session(engine) as s:
+            return service.create_server(s, name="Same Name", runner="npx", command="npx").slug
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        slugs = sorted(ex.map(make, range(4)))
+    assert slugs == ["same-name", "same-name-2", "same-name-3", "same-name-4"]
+
+
 def test_reserved_slug_is_not_assigned(session):
     """A server named "summary" must not get the slug "summary" — that would shadow
     the static /api/health/summary route so its own /api/health/{slug} is unreachable.

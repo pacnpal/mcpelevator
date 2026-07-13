@@ -11,7 +11,8 @@ import logging
 import os
 import secrets
 import tempfile
-from functools import lru_cache
+import threading
+from functools import lru_cache, wraps
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
@@ -603,7 +604,8 @@ def backfill_config_hashes(session: Session) -> int:
     salt = _config_hash_salt()
     for server in repo.list_servers(session):
         tag = config_hash_tag(_hash_payload(server), salt=salt)
-        if server.config_hash.startswith(f"{tag}."):
+        # `or ""`: a legacy/hand-edited row can hold NULL — treat it as stale, not a crash.
+        if (server.config_hash or "").startswith(f"{tag}."):
             continue
         new_hash = compute_hash(server)
         if new_hash != server.config_hash:
@@ -701,6 +703,25 @@ def normalize_auth_providers(session: Session) -> int:
 # here so such a name is disambiguated (e.g. "summary" -> "summary-2") at creation.
 _RESERVED_SLUGS = frozenset({"summary"})
 
+# Registry writes were implicitly serialized when the sync service ran inline on the
+# event loop; now that the API handlers run them in the threadpool (to keep the scrypt
+# config_hash derivation off the loop) they can genuinely interleave, and the write
+# paths are read-modify-write: ``_unique_slug`` is check-then-insert, and a concurrent
+# partial PATCH could commit a hash computed from a snapshot that no longer describes
+# the final row. One process-wide lock restores the old serialization — config writes
+# are rare admin actions, so holding it across a ~70ms derivation is irrelevant.
+# RLock because ``import_mcp_servers`` re-enters ``create_server``.
+_write_lock = threading.RLock()
+
+
+def _serialized_write(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _write_lock:
+            return fn(*args, **kwargs)
+
+    return wrapper
+
 
 def _unique_slug(session: Session, name: str) -> str:
     base = slugify(name)
@@ -729,6 +750,7 @@ def _validate_slug(session: Session, raw: str, *, current_id: str) -> str:
     return slug
 
 
+@_serialized_write
 def create_server(
     session: Session,
     *,
@@ -820,6 +842,7 @@ _MUTABLE_FIELDS = {
 }
 
 
+@_serialized_write
 def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> Server:
     server = repo.get_server(session, server_id)
     if server is None:
@@ -884,6 +907,7 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     return repo.save_server(session, server)
 
 
+@_serialized_write
 def clone_server(session: Session, server_id: str, *, name: Optional[str] = None) -> Server:
     """Create a new server from an existing one's launch + exposure config.
 
@@ -918,6 +942,7 @@ def clone_server(session: Session, server_id: str, *, name: Optional[str] = None
     )
 
 
+@_serialized_write
 def set_enabled(session: Session, server_id: str, enabled: bool) -> Server:
     server = repo.get_server(session, server_id)
     if server is None:
@@ -949,6 +974,7 @@ def _infer_runner(command: str) -> str:
     return "command"
 
 
+@_serialized_write
 def import_mcp_servers(
     session: Session, data: dict
 ) -> tuple[list[Server], list[dict], list[dict]]:
