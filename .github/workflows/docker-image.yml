@@ -246,6 +246,9 @@ jobs:
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          # Without this, trivy-action's SARIF mode deliberately ignores the
+          # severity filter above and reports ALL severities.
+          limit-severities-for-sarif: true
           # Narrowly-scoped, self-expiring suppressions for findings we can't act
           # on yet (e.g. Go stdlib CVEs baked into the upstream-built docker CLI
           # binary, pending a docker-ce-cli rebuild). See the file for rationale.
@@ -265,9 +268,19 @@ jobs:
           # on the SAME ref omits them — a tag scan can never clear an alert on
           # main. Pin the upload to main (release commits are cut from main) so
           # each release reconciles the default-branch alert set instead of
-          # piling up dead per-tag analyses.
+          # piling up dead per-tag analyses. Between releases, security-scan.yml
+          # re-scans the published image on a schedule (or on dispatch) and
+          # uploads into this same stream.
           ref: refs/heads/main
           sha: ${{ github.sha }}
+          # Analyses are matched per (ref, category), and with no explicit
+          # category upload-sarif derives "<workflow path>:<job id>" — which
+          # would differ per workflow file and silo security-scan.yml's uploads
+          # away from this one. Pin the category explicitly, to the exact value
+          # this job historically auto-derived, so pre-existing alerts stay in
+          # the same stream. Must stay byte-identical to the category in
+          # security-scan.yml's upload step.
+          category: ".github/workflows/docker-image.yml:scan"
 
   summary:
     name: Build Summary
