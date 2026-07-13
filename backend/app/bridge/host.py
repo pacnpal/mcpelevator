@@ -204,6 +204,31 @@ def _build_oauth_auth(oauth: dict):
     expiry = storage.get_token_expiry()
     if expiry is not None:
         provider.context.token_expiry_time = expiry
+    # The SDK resets context.token_expiry_time from each refresh response's expires_in via
+    # calculate_token_expiry(); when the provider OMITS expires_in that becomes None and
+    # is_token_valid() then treats the access token as valid FOREVER — so a token that actually
+    # lapses is sent stale and 401s into the (headless-impossible) interactive path until the
+    # bridge restarts. Mirror the file store's default-TTL policy in memory (see
+    # ServerTokenStorage._expires_at_for) so a running bridge keeps refreshing proactively:
+    # when a refresh carries a refresh token but no expires_in, stamp the same modest fallback.
+    import time as _time
+
+    from mcp.shared.auth_utils import calculate_token_expiry
+
+    from app.auth.oauth_store import _DEFAULT_REFRESHABLE_TTL
+
+    _context = provider.context
+
+    def _update_token_expiry(token) -> None:
+        if token.expires_in is None and token.refresh_token:
+            _context.token_expiry_time = _time.time() + _DEFAULT_REFRESHABLE_TTL
+        else:
+            _context.token_expiry_time = calculate_token_expiry(token.expires_in)
+
+    # Instance-level override: the SDK calls ``self.context.update_token_expiry(token)`` from
+    # both token-exchange and refresh handlers, so shadowing it on the instance covers both. If
+    # a future SDK inlines the calc this simply stops applying (no breakage).
+    _context.update_token_expiry = _update_token_expiry
     return provider
 
 

@@ -266,6 +266,43 @@ async def test_reauth_preserves_tokens_until_success(monkeypatch):
         store.clear()
 
 
+async def test_flow_rejects_grant_the_endpoint_still_refuses(monkeypatch):
+    # The code exchange succeeds (tokens land in the ephemeral store) but the retried MCP probe
+    # still comes back 401 — the resource rejected the token (wrong resource / missing scope).
+    # The unusable grant must NOT be promoted, and the flow must surface as a failure.
+    class _Reject401(_FakeAsyncClient):
+        async def _handshake(self):
+            ctx = self._provider.context
+            await ctx.redirect_handler(f"https://auth.example/authorize?state={self.STATE}")
+            code, _state = await ctx.callback_handler()
+            await ctx.storage.set_tokens(
+                OAuthToken(access_token=f"AT-{code}", token_type="Bearer", refresh_token="RT", expires_in=3600)
+            )
+            return httpx.Response(401)
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _Reject401)
+
+    class _Srv:
+        id = "srv-flow-reject"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(_Srv, callback_url="http://127.0.0.1/api/oauth/callback")
+        with pytest.raises(Exception):
+            await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c")
+        # Nothing promoted — the server still has no usable credential.
+        assert store.status()["authenticated"] is False
+    finally:
+        store.clear()
+
+
 async def test_set_tokens_preserves_refresh_token_when_absent():
     # A refresh response that omits refresh_token (provider not rotating) must not wipe the
     # stored one, or the next refresh has no credential.
@@ -564,6 +601,40 @@ def test_bridge_no_oauth_auth_until_tokens_exist():
     try:
         oauth = {"server_id": "srv-bridge-noauth", "url": "https://up.example/mcp", "scopes": ""}
         assert host._build_oauth_auth(oauth) is None
+    finally:
+        store.clear()
+
+
+def test_bridge_default_expiry_applied_on_refresh_without_expires_in():
+    import time
+
+    import anyio
+
+    from app.auth.oauth_store import _DEFAULT_REFRESHABLE_TTL
+    from app.bridge import host
+
+    store = ServerTokenStorage("srv-bridge-expiry")
+    store.clear()
+    try:
+        anyio.run(
+            store.set_tokens,
+            OAuthToken(access_token="AT", token_type="Bearer", expires_in=3600),
+        )
+        oauth = {"server_id": "srv-bridge-expiry", "url": "https://up.example/mcp", "scopes": ""}
+        ctx = host._build_oauth_auth(oauth).context
+        # Refresh omits expires_in but carries a refresh token -> in-memory expiry gets the
+        # default TTL, so is_token_valid() won't treat the token as valid forever (which would
+        # skip proactive refresh and 401 into the headless-impossible interactive path).
+        before = time.time()
+        ctx.update_token_expiry(OAuthToken(access_token="A2", token_type="Bearer", refresh_token="R2"))
+        assert ctx.token_expiry_time is not None
+        assert before + _DEFAULT_REFRESHABLE_TTL - 5 <= ctx.token_expiry_time <= time.time() + _DEFAULT_REFRESHABLE_TTL + 5
+        # expires_in present -> the real value is used.
+        ctx.update_token_expiry(OAuthToken(access_token="A3", token_type="Bearer", expires_in=60))
+        assert ctx.token_expiry_time <= time.time() + 61
+        # No refresh token AND no expires_in -> None (genuinely long-lived; keep sending it).
+        ctx.update_token_expiry(OAuthToken(access_token="A4", token_type="Bearer"))
+        assert ctx.token_expiry_time is None
     finally:
         store.clear()
 

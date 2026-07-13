@@ -248,6 +248,7 @@ async def _drive(
     headers = _probe_headers(server)
     method, kwargs = ("GET", {}) if transport == "sse" else ("POST", {"json": _INIT_BODY})
     inner_error: Optional[BaseException] = None
+    final_status: Optional[int] = None
     try:
         async with httpx.AsyncClient(
             auth=provider, timeout=httpx.Timeout(30.0), follow_redirects=True
@@ -255,9 +256,11 @@ async def _drive(
             # STREAM (don't read the body): the OAuth handshake runs to completion before this
             # final response is returned, so the body is irrelevant — and an SSE upstream keeps
             # its ``text/event-stream`` response open (heartbeats), which a body-reading
-            # ``get()`` would block on forever, hanging the flow past its timeout.
-            async with client.stream(method, mcp_url, headers=headers, **kwargs):
-                pass
+            # ``get()`` would block on forever, hanging the flow past its timeout. We DO read the
+            # status line (available once headers arrive, without touching the body) to tell a
+            # genuinely usable grant from one the resource still rejects.
+            async with client.stream(method, mcp_url, headers=headers, **kwargs) as response:
+                final_status = response.status_code
     except asyncio.CancelledError:
         raise
     except BaseException as exc:  # noqa: BLE001 — tolerate; success is decided by whether tokens landed
@@ -267,6 +270,16 @@ async def _drive(
     # handshake can succeed even if that retry (or the connection) then errors. Judge
     # success on whether tokens actually landed in the ephemeral store.
     tokens = await mem.get_tokens()
+    # ...but if the RETRIED MCP request still came back 401/403, the resource rejected the new
+    # token (bound to the wrong resource, missing a required scope, etc.). Promoting it would
+    # leave the UI reporting "connected" and restart the bridge with a credential the upstream
+    # refuses, so treat that as an authorization failure instead of a success.
+    if tokens is not None and final_status in (401, 403):
+        inner_error = inner_error or RuntimeError(
+            f"the upstream still rejected the new OAuth token (HTTP {final_status}) — the "
+            "granted scopes or resource may not match what this server requires"
+        )
+        tokens = None
     if tokens is not None:
         # Promote the freshly-obtained credentials to the shared store the bridge reads, in
         # ONE atomic write that fully replaces any prior state. Building it in memory first
