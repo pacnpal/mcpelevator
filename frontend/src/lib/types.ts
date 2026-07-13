@@ -50,6 +50,20 @@ export interface ServerTool {
 	has_output_schema?: boolean;
 }
 
+/** Upstream-OAuth state for a remote server (GET /api/servers/{id}). */
+export interface OAuthStatus {
+	/** Is this server configured to authenticate upstream via OAuth? */
+	enabled: boolean;
+	/** Are tokens currently stored (the operator has signed in)? */
+	authenticated: boolean;
+	/** OAuth is on but no tokens yet — the operator must connect the provider. */
+	needs_auth: boolean;
+	/** Access-token expiry (unix seconds), if known. */
+	expires_at: number | null;
+	/** A refresh token exists — renewal is silent until it lapses. */
+	has_refresh_token: boolean;
+}
+
 // Superset of ServerSummary returned by GET /api/servers/{id}.
 export interface ServerDetail extends ServerSummary {
 	command: string;
@@ -57,6 +71,14 @@ export interface ServerDetail extends ServerSummary {
 	env: Record<string, string>;
 	cwd: string | null;
 	auth_provider: ServerAuthProvider;
+	/** Remote runner: authenticate to the upstream via OAuth instead of static headers. */
+	oauth: boolean;
+	oauth_scopes: string;
+	oauth_client_id: string | null;
+	/** Whether a static client secret is stored. The secret itself is write-only —
+	 * accepted on create/patch but never returned. */
+	oauth_has_client_secret: boolean;
+	oauth_status: OAuthStatus;
 	config_hash: string;
 	source: string;
 	tools: ServerTool[];
@@ -74,6 +96,11 @@ export interface ServerCreate {
 	mcp_http?: boolean;
 	rest_openapi?: boolean;
 	auth_provider?: ServerAuthProvider;
+	/** Remote runner: authenticate upstream via OAuth (forced off for other runners). */
+	oauth?: boolean;
+	oauth_scopes?: string;
+	oauth_client_id?: string | null;
+	oauth_client_secret?: string | null;
 	enabled?: boolean;
 	/** Provenance. Only a `catalog:<id>` value is honored server-side (a registry install). */
 	source?: string | null;

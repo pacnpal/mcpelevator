@@ -28,6 +28,13 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
 - **One bridge process per enabled server** (`bridge/`, `runners/`): each runs its own uvicorn on
   a loopback port hosting a FastMCP proxy of the stdio command (or an upstream HTTP/SSE URL),
   fault-isolated with a real PID and logs.
+- **Upstream OAuth** (`auth/oauth_store.py`, `auth/oauth_flow.py`): a `remote` server can
+  authenticate to its upstream via OAuth instead of static `env` headers. The interactive
+  authorization-code grant (DCR + PKCE) runs in the control plane (`/api/servers/{id}/oauth/authorize`
+  → public `/api/oauth/callback`, anchored on the OAuth `state`) using the MCP SDK's
+  `OAuthClientProvider`; tokens land in a `0600` file store (`<data_dir>/oauth/<id>.json`) shared
+  with the bridge, which reads them and auto-refreshes. Tokens live off the DB, so authenticating
+  never re-hashes the row or bounces the bridge.
 - **Runners** (`runners/`): `npx`, `uvx`, `command`, `remote` (proxy an already-remote MCP URL),
   and `docker` (image-packaged servers — opt-in + root-equivalent behind the `docker_runner`
   setting). Each runner is a pure `Server -> ProcessSpec` builder; `docker` stores the canonical

@@ -104,6 +104,55 @@ curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/jso
 
 Pasting an `mcpServers` config with remote entries now imports them as `remote` servers instead of skipping: a `url` (or Gemini CLI's `httpUrl`) becomes the upstream, and a `type` / `transport` field selects the transport (defaulting to `streamable-http`).
 
+### Upstream authentication: token headers vs OAuth
+
+A `remote` server authenticates **to the upstream** one of two ways:
+
+- **Headers** (default) — a static API key or bearer token you put under `env`
+  (e.g. `{"Authorization": "Bearer <token>"}`). Long-lived and the more permanent
+  option; nothing expires as long as the token is valid.
+- **OAuth** — mcpelevator runs the provider's OAuth 2.1 sign-in (Dynamic Client
+  Registration + PKCE authorization-code grant), stores the tokens, and **refreshes
+  them automatically**. Set `"oauth": true` on the server; leave `env` empty (OAuth
+  supplies the `Authorization` header). Optional `oauth_scopes` and static
+  `oauth_client_id`/`oauth_client_secret` (blank = auto-register).
+
+> **Most remote MCP servers accept both**, but some support only one — **check the
+> server's docs** to be sure. Prefer a static token/API key when the server issues
+> one: it's more permanent. Choose OAuth when the provider requires it or doesn't
+> hand out static tokens. OAuth sessions can lapse; refresh is automatic, but if the
+> provider's refresh window expires you'll need to re-authenticate — check on OAuth
+> servers periodically.
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/json' -d '{
+  "name": "OAuth MCP", "runner": "remote",
+  "command": "https://example.com/mcp", "args": ["streamable-http"],
+  "oauth": true, "oauth_scopes": "read write"
+}'
+```
+
+Then open the server in the UI — it shows **“This server uses OAuth to authenticate”**
+with an **Authenticate with provider** button. Clicking it sends you to the provider
+to sign in; on return the tokens are stored and, if the server is enabled, its bridge
+restarts to pick them up. The server page then shows the connection status with
+**Re-authenticate** / **Disconnect** controls. The OAuth handshake runs in the control
+plane (it needs a browser); the per-server bridge only reads and refreshes the stored
+tokens. The OAuth **tokens** live in `<data_dir>/oauth/<server-id>.json` (created `0600`),
+never in the database, so authenticating never restarts the bridge on its own.
+
+> **⚠️ Stored unencrypted at rest.** OAuth access/refresh tokens live in
+> `<data_dir>/oauth/<server-id>.json`; a static `oauth_client_secret` you supply is stored
+> in the **SQLite database** (the `server` row, like any `env`/header secret) and, after a
+> successful sign-in, is also copied into the client registration in that same JSON file.
+> All of it is stored **in the clear** — protected by file permissions and control of the
+> data directory, **not** encryption, because the bridge subprocess has to read and refresh
+> it. Anyone who can read the data directory *or a database backup* (host root, an
+> unprotected volume mount, a copied backup) can read these credentials. Keep `<data_dir>`,
+> the SQLite file, and any backups on encrypted, access-controlled storage, and revoke a
+> leaked grant at the provider (or via **Disconnect**) rather than relying on on-disk
+> secrecy. Full rationale: [docs/security.md](docs/security.md) § *Credentials at rest*.
+
 ## Install from a registry (catalog)
 
 Don't know the package name? **Browse** finds servers for you. The catalog searches public
@@ -180,6 +229,8 @@ Two independent layers guard the system, and a request must pass both.
 - The **proxy data plane** (`/s`) uses a pluggable per-server auth provider. v1 ships `none` and `bearer` (SHA-256-hashed tokens); a server set to `bearer` needs a token in `Authorization: Bearer <token>`. A token authorizes every bearer-protected server by default, or you can scope it to a single server when you create it.
 - The **control plane** (`/api`) requires an admin token with the `control` scope. Enforcement follows the `control_plane_auth` setting: `auto` (the default) requires it when `bind_mode=expose` or `MCPE_PUBLIC_BASE_URL` is set (either way the instance is reachable off-host), so a plain local install stays zero-config; `always` requires it even on loopback. `/api/health` (control-plane liveness), `/api/health/{slug}` and `/api/health/summary` (per-server readiness, for load balancers), and `/api/auth/status` stay public.
 
+**Upstream OAuth callback.** `/api/oauth/callback` is public — it's a top-level browser redirect from the upstream authorization server and carries no admin token. It's safe because it only completes a flow the operator themselves started: the unguessable OAuth `state` (bound to that pending authorization) is the anchor, and an unknown/expired state is rejected. Obtained upstream tokens are written to `<data_dir>/oauth/<server-id>.json` (`0600`), shared with the server's bridge for automatic refresh, and never stored in the database.
+
 When control-plane auth is enforced, the SPA shows a login screen. The admin token is printed once to the container logs on first boot (look for "control-plane auth is ON"), and the Settings page can generate one (which logs you in immediately). To switch to `expose` or `always` from the UI you have to generate an admin token first, so you can't lock yourself out.
 
 `MCPE_ADMIN_TOKEN` is a break-glass credential: when set, it's always accepted on `/api`. Use it to recover a lost token, or for CI and automation. A minted token is shown only once (only its hash is stored), so if you lose it and haven't set `MCPE_ADMIN_TOKEN`, set that var and restart to get back in, then generate a fresh token. Alternatively, set `MCPE_MINT_ADMIN_TOKEN=true` and restart: the bootstrap mints a fresh control token and prints it to the logs (existing tokens keep working) — unset the var afterwards so it doesn't mint a new one on every restart.
@@ -196,7 +247,7 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 ## Status / roadmap
 
-**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: bearer tokens for `/s` (scope each to all servers or one), control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes.
+**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: bearer tokens for `/s` (scope each to all servers or one), control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes.
 
 **Planned:** REST/OpenAPI surface per server · more catalog directories · polish.
 

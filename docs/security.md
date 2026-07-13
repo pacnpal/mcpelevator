@@ -17,9 +17,14 @@ port and wrapping a local command (`npx`, `uvx`, arbitrary command) or a remote
 HTTP/SSE upstream.
 
 The primary assets are: control-plane authority to create/enable servers and tokens,
-per-server data-plane bearer tokens, upstream header/env secrets, the SQLite database,
+per-server data-plane bearer tokens, upstream header/env secrets, upstream OAuth tokens
+(stored per server at `<data_dir>/oauth/<server-id>.json`, `0600`), the SQLite database,
 host/container filesystem and network access available to child MCP processes, and the
-integrity of Host/Origin/DNS-rebinding defenses. By design, an authenticated admin can
+integrity of Host/Origin/DNS-rebinding defenses. These upstream credentials — OAuth
+access/refresh tokens, any static `oauth_client_secret`, and header/`env` secrets — are
+stored **unencrypted at rest**, protected by filesystem permissions (`0600` token files,
+the DB file's own mode) rather than envelope encryption; see §3 *Credentials at rest*. By
+design, an authenticated admin can
 obtain local command execution and SSRF-like network access by adding a command or
 remote server. Therefore, "RCE" or "SSRF" is critical only when an unauthenticated,
 off-host, CSRF/DNS-rebinding, or improperly scoped caller reaches those capabilities.
@@ -64,8 +69,15 @@ not trust `X-Forwarded-For`.
 ## 3. Attack surface, mitigations and attacker stories
 
 **Control plane (`/api`).** Sensitive routers in `backend/app/main.py` depend on
-`require_control_plane` from `backend/app/auth/control_plane.py`; health and auth-status
-remain public but are intentionally coarse. Enforcement is `always`, or `auto` when
+`require_control_plane` from `backend/app/auth/control_plane.py`; health, auth-status,
+and the upstream-OAuth redirect callback (`/api/oauth/callback`) remain public but are
+intentionally coarse. The callback is a top-level browser navigation from the upstream
+authorization server, so it carries no control token; it completes only a flow the
+operator already started, anchored on the unguessable OAuth `state` (an unknown/expired
+state is rejected), and stores tokens to the `0600` per-server file rather than the DB.
+The interactive grant (discovery, DCR, PKCE, exchange) runs in the control plane via the
+MCP SDK's `OAuthClientProvider`; each bridge only reads/refreshes the stored tokens and
+can never launch an interactive sign-in. Enforcement is `always`, or `auto` when
 `bind_mode=expose`, `MCPE_PUBLIC_BASE_URL`/`MCPE_ALLOWED_HOSTS` declares an off-host
 origin, or `allow_private_lan` is enabled. A serious attacker story is an off-host
 request creating an enabled `command` server or minting tokens without a control token.
@@ -97,6 +109,27 @@ be resolving `bearer` or `inherit` to `none`, accepting a single-server token fo
 server, or allowing `Host: localhost` from a remote peer. A server explicitly set to `none`
 is not itself a vulnerability when the operator intentionally relies on loopback, LAN trust,
 or an external OAuth/Access gate; it is dangerous if exposed directly to the internet.
+
+**Credentials at rest.** Upstream credentials are stored **unencrypted** on the
+control-plane host. Upstream OAuth access/refresh tokens and the discovered client
+registration live in the per-server `<data_dir>/oauth/<server-id>.json` files (created
+`0600`, atomic replace). A static `oauth_client_secret` the operator supplies is stored in
+the SQLite `server` row alongside upstream header/`env` secrets — so **SQLite backups
+contain OAuth client secrets**, not just data-plane config — and, once a sign-in completes,
+that secret is also copied into the client registration in the JSON file. mcpelevator does
+**not** encrypt any of these at rest — it relies on operating-system file permissions and
+control of the data directory.
+The one exception is data-plane and admin **bearer tokens**, which are SHA-256-hashed and
+never stored in the clear (§ Data plane). Consequently, anyone who can read the data
+directory — host root, a compromised control-plane process, an unprotected volume mount,
+or a copied backup — can read every upstream credential. This is a deliberate tradeoff:
+the tokens must be readable by the headless bridge subprocess so it can call and refresh
+the upstream, and a single-container self-hosted deployment has no shared secret manager
+to delegate to. Static analysis (CodeQL `py/clear-text-storage-sensitive-data`) flags this
+storage; it is a **known, accepted** finding, not a regression. Mitigate at the deployment
+layer: keep the data directory and any backups on encrypted, access-controlled storage,
+don't mount it into untrusted containers, and revoke a leaked grant at the provider (and
+via **Disconnect**, which clears the file store) rather than relying on on-disk secrecy.
 
 **Command execution and supervision.** `backend/app/api/servers.py`,
 `backend/app/registry/service.py`, `backend/app/runners/`, `backend/app/supervisor/unit.py`,
@@ -185,4 +218,9 @@ token attempts despite high entropy.
 **Low:** misconfiguration footguns already documented (wrong Docker port publishing, leaving
 `none` auth on an exposed server); UI lockout or confusing copy URLs; dependency/CI issues that do
 not permit runtime auth bypass; token hashes using unsalted SHA-256 for high-entropy generated
-tokens, which is acceptable but should not be reused for human passwords.
+tokens, which is acceptable but should not be reused for human passwords; upstream credentials
+(OAuth tokens/refresh tokens in the `0600` token files; static client secrets and header/`env`
+secrets in the SQLite row) stored unencrypted at rest, protected by filesystem permissions and
+data-directory control rather than encryption — a
+deliberate tradeoff and the reason the CodeQL `py/clear-text-storage-sensitive-data` alert is a
+known, accepted finding (§3 *Credentials at rest*).

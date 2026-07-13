@@ -53,6 +53,17 @@ class Server(SQLModel, table=True):
     rest_openapi: bool = False
     auth_provider: str = "inherit"  # inherit | none | bearer
 
+    # upstream OAuth (runner="remote" only). When set, mcpelevator authenticates to
+    # the upstream via an OAuth 2.1 authorization-code grant instead of the static
+    # `env` headers. The obtained tokens/DCR client info live in a file store
+    # (app.auth.oauth_store), NOT here — so authenticating never re-hashes the row or
+    # bounces the bridge. `oauth_client_id`/`oauth_client_secret` are optional static
+    # client credentials; empty means Dynamic Client Registration.
+    oauth: bool = False
+    oauth_scopes: str = ""  # space-separated scopes to request (empty = server default)
+    oauth_client_id: Optional[str] = None
+    oauth_client_secret: Optional[str] = None
+
     # desired runtime
     enabled: bool = False
     config_hash: str = ""  # idempotency anchor

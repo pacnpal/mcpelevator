@@ -83,6 +83,7 @@ class ServerUnit:
             "cwd": self.spec.cwd,
             "transport": self.spec.transport,
             "minimal_env": self.spec.minimal_env,
+            "oauth": self.spec.oauth,
             "name": self.name,
             **self.exposure,
         }
@@ -91,6 +92,12 @@ class ServerUnit:
             "MCPE_BRIDGE_SPEC": json.dumps(payload),
             "MCPE_BRIDGE_HOST": self.host,
             "MCPE_BRIDGE_PORT": str(port),
+            # Pin the child to the control plane's ABSOLUTE data dir. A relative
+            # MCPE_DATA_DIR (the default "./data") would otherwise be resolved against
+            # each process's cwd, and the OAuth token store lives there — a source/systemd
+            # launch from a different cwd would have the bridge read a different
+            # ./data/oauth than the control plane wrote, so tokens would never be found.
+            "MCPE_DATA_DIR": str(settings.data_dir.resolve()),
             "PYTHONPATH": str(settings.backend_root),
         }
         self.proc = await asyncio.create_subprocess_exec(
@@ -120,6 +127,11 @@ class ServerUnit:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
+                # Reap the killed process so stop() doesn't return while it's still a
+                # zombie holding its loopback port — the reconciler may reuse this slot
+                # immediately. SIGKILL can't be blocked, so this wait is bounded and short.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(proc.wait(), timeout=5)
         if self.runner == "docker":
             await self._reap_container()
         self.state = "stopped"

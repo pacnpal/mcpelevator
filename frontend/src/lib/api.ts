@@ -242,6 +242,25 @@ export function cloneServer(id: string, name?: string): Promise<ServerSummary> {
 	);
 }
 
+/**
+ * Begin the interactive upstream-OAuth flow for a remote server. Returns the
+ * provider authorization URL the caller should navigate the browser to; the flow
+ * finishes at `/api/oauth/callback`, which redirects back to the server page.
+ */
+export function startOauth(id: string): Promise<{ authorize_url: string }> {
+	return request<{ authorize_url: string }>(
+		`/servers/${encodeURIComponent(id)}/oauth/authorize`,
+		{ method: 'POST' }
+	);
+}
+
+/** Forget a remote server's stored upstream OAuth tokens (so it can be re-authenticated). */
+export function disconnectOauth(id: string): Promise<ServerDetail> {
+	return request<ServerDetail>(`/servers/${encodeURIComponent(id)}/oauth/disconnect`, {
+		method: 'POST'
+	});
+}
+
 export function enableServer(id: string): Promise<ServerSummary> {
 	return request<ServerSummary>(`/servers/${encodeURIComponent(id)}/enable`, {
 		method: 'POST'

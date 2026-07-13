@@ -19,6 +19,7 @@ from app.api.schemas import (
     ImportResult,
     ImportSkipped,
     ImportWarning,
+    OAuthStatus,
     ServerClone,
     ServerCreate,
     ServerDetail,
@@ -27,6 +28,8 @@ from app.api.schemas import (
     Transports,
     Urls,
 )
+from app.auth import oauth_flow
+from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Server
@@ -92,6 +95,32 @@ def _summary(server: Server, sup, session: Session, base: str) -> ServerSummary:
     )
 
 
+def _oauth_signature(server: Server) -> tuple:
+    """The OAuth-affecting config of a server. When this changes across a PATCH, the
+    stored tokens (for the old upstream/provider/client) must be discarded."""
+    return (
+        bool(server.oauth),
+        server.command,  # upstream URL — tokens are bound to this resource
+        server.oauth_scopes or "",
+        server.oauth_client_id,
+        server.oauth_client_secret,
+    )
+
+
+def _oauth_status(server: Server) -> OAuthStatus:
+    """OAuth auth state for a remote server (reads the shared token file)."""
+    if not server.oauth:
+        return OAuthStatus()
+    st = ServerTokenStorage(server.id).status()
+    return OAuthStatus(
+        enabled=True,
+        authenticated=st["authenticated"],
+        needs_auth=not st["authenticated"],
+        expires_at=st["expires_at"],
+        has_refresh_token=st["has_refresh_token"],
+    )
+
+
 def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
     summary = _summary(server, sup, session, base)
     _, _, _, _, tools = _live_state(server, sup, session)
@@ -102,6 +131,11 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         env=server.env,
         cwd=server.cwd,
         auth_provider=server.auth_provider,
+        oauth=bool(server.oauth),
+        oauth_scopes=server.oauth_scopes or "",
+        oauth_client_id=server.oauth_client_id,
+        oauth_has_client_secret=bool(server.oauth_client_secret),
+        oauth_status=_oauth_status(server),
         config_hash=server.config_hash,
         source=server.source,
         tools=tools or [],
@@ -164,14 +198,46 @@ async def update_server(
     request: Request,
     session: Session = Depends(get_session),
 ):
-    changes = {k: v for k, v in payload.model_dump().items() if v is not None}
+    provided = payload.model_dump()
+    changes = {k: v for k, v in provided.items() if v is not None}
+    # The generic None-drop implements partial PATCH, but it also swallows an *explicit*
+    # null on the nullable OAuth client fields — so clearing a static client id/secret to
+    # fall back to Dynamic Client Registration would be silently ignored. Preserve those two
+    # when the client actually sent them (model_fields_set) so null means "clear".
+    for key in ("oauth_client_id", "oauth_client_secret"):
+        if key in payload.model_fields_set:
+            changes[key] = provided[key]
+
+    # Signature of the OAuth-relevant config before the edit, to decide token cleanup below.
+    existing = repo.get_server(session, server_id)
+    before = _oauth_signature(existing) if existing is not None else None
+
     try:
         server = service.update_server(session, server_id, changes)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
     sup = request.app.state.supervisor
+    # If the OAuth config changed (upstream URL, scopes, client) or OAuth was turned off, the
+    # stored tokens belong to the old provider/resource. Clear them so a restarted bridge can't
+    # replay a stale credential and the status stops falsely reading "authenticated". Also
+    # cancel any in-flight authorization (its background flow targets the OLD config) and, if
+    # the server is enabled, restart the bridge so it drops the now-revoked in-memory token —
+    # the client secret is excluded from config_hash, so a secret-only edit wouldn't otherwise
+    # trigger a reconcile.
+    oauth_changed = before is not None and before != _oauth_signature(server)
+    if oauth_changed:
+        oauth_flow.cancel_pending(server_id)
+        # STOP the bridge before clearing: a running bridge's in-flight refresh could
+        # otherwise set_tokens() after the clear and recreate credentials for the old
+        # upstream/client, which the nudge below would then restart the server with.
+        # Unconditional — sup.stop is idempotent, and gating on ``enabled`` would miss a
+        # bridge still winding down from a just-toggled row.
+        await sup.stop(server_id)
+        ServerTokenStorage(server_id).clear()
+
     if "slug" in changes:
         # Re-point a running unit's proxy routing without a restart (config_hash
         # excludes slug, so the reconciler won't do it).
@@ -186,7 +252,81 @@ async def delete_server(server_id: str, request: Request, session: Session = Dep
     await sup.stop(server_id)  # tear down the process before removing desired state
     if not repo.delete_server(session, server_id):
         raise HTTPException(status_code=404, detail="server not found")
+    # Cancel any in-flight authorization and drop stored upstream OAuth credentials for this
+    # (now-deleted) server — otherwise a late callback could re-promote tokens and leave an
+    # orphan credential file on disk for a server that no longer exists.
+    oauth_flow.cancel_pending(server_id)
+    ServerTokenStorage(server_id).clear()
     return Response(status_code=204)
+
+
+def _oauth_callback_url(request: Request) -> str:
+    """The public URL the upstream redirects the operator's browser back to after
+    sign-in. Built from the same base as the copy-menu links so it matches the host
+    the operator actually reached us on (and the operator-declared public URL when set).
+
+    Behind an HTTPS-terminating reverse proxy without ``MCPE_PUBLIC_BASE_URL``, the ASGI
+    request scheme is the plain ``http`` of the proxy→app hop; honor ``X-Forwarded-Proto``
+    so the registered redirect URI is ``https`` (OAuth providers reject non-loopback http
+    callbacks). The operator-declared public URL still wins when set."""
+    base = _base_url(request)
+    if not get_settings().public_base_url and base.startswith("http://"):
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        if forwarded == "https":
+            base = "https://" + base[len("http://"):]
+    return f"{base}/api/oauth/callback"
+
+
+@router.post("/servers/{server_id}/oauth/authorize")
+async def start_oauth(server_id: str, request: Request, session: Session = Depends(get_session)):
+    """Begin the interactive OAuth flow for a remote server: contact the upstream,
+    register/discover, and return the provider authorization URL for the SPA to send
+    the browser to. The operator finishes at ``/api/oauth/callback``."""
+    server = repo.get_server(session, server_id)
+    if server is None:
+        raise HTTPException(status_code=404, detail="server not found")
+    if server.runner != "remote" or not server.oauth:
+        raise HTTPException(status_code=400, detail="this server does not use OAuth")
+    try:
+        url = await oauth_flow.begin_authorization(server, callback_url=_oauth_callback_url(request))
+    except Exception as exc:  # discovery/registration failure or timeout
+        raise HTTPException(status_code=502, detail=f"could not start OAuth: {exc}") from exc
+    return {"authorize_url": url}
+
+
+@router.post("/servers/{server_id}/oauth/disconnect", response_model=ServerDetail)
+async def disconnect_oauth(
+    server_id: str, request: Request, session: Session = Depends(get_session)
+):
+    """Forget the stored upstream tokens so the operator can re-authenticate from
+    scratch (e.g. to switch accounts). A running bridge holds its access token in
+    memory, so an enabled server is restarted immediately: it re-reads the now-empty
+    store and stops serving with the revoked credential until re-authenticated."""
+    server = repo.get_server(session, server_id)
+    if server is None:
+        raise HTTPException(status_code=404, detail="server not found")
+    # Only a remote OAuth server has anything to disconnect; reject others so a stale UI
+    # action or stray API call can't bounce an unrelated running server.
+    if server.runner != "remote" or not server.oauth:
+        raise HTTPException(status_code=400, detail="this server does not use OAuth")
+    sup = request.app.state.supervisor
+    # Cancel any in-flight authorization first: otherwise a callback for that parked flow
+    # could land after the clear and re-promote tokens, silently re-authenticating the
+    # server the operator just disconnected.
+    oauth_flow.cancel_pending(server_id)
+    # STOP the bridge before clearing: a running bridge may have an in-flight refresh whose
+    # set_tokens() would otherwise recreate the file after clear(), and the nudge would then
+    # restart the server with fresh credentials despite the UI reporting it disconnected.
+    # Unconditional — sup.stop is idempotent, and gating on ``enabled`` would miss a bridge
+    # still winding down from a just-toggled row.
+    await sup.stop(server_id)
+    ServerTokenStorage(server_id).clear()
+    # The server stays enabled, so the reconciler restarts it; with no tokens it can't
+    # authenticate upstream and surfaces as needing re-auth — the intended "disconnected"
+    # state (matches the connect path, which also restarts to pick up fresh tokens).
+    if server.enabled:
+        sup.nudge()
+    return _detail(server, sup, session, _base_url(request))
 
 
 @router.post("/servers/{server_id}/clone", response_model=ServerSummary, status_code=201)

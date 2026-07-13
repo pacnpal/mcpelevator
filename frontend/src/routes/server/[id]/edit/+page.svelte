@@ -40,7 +40,11 @@
 					cwd: server.cwd,
 					mcp_http: server.transports.mcp_http,
 					rest_openapi: server.transports.rest_openapi,
-					auth_provider: server.auth_provider
+					auth_provider: server.auth_provider,
+					oauth: server.oauth,
+					oauth_scopes: server.oauth_scopes,
+					oauth_client_id: server.oauth_client_id
+					// oauth_client_secret is write-only (never returned); see oauthHasSecret below.
 				}
 			: null
 	);
@@ -129,6 +133,7 @@
 		<ServerForm
 			mode="edit"
 			{initial}
+			oauthHasSecret={server.oauth_has_client_secret}
 			busy={saving}
 			error={saveError}
 			submitLabel="Save changes"
