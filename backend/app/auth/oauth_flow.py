@@ -40,6 +40,7 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata
 from pydantic import AnyHttpUrl
 
 from app.auth.oauth_store import ServerTokenStorage
+from app.runners.remote import DEFAULT_TRANSPORT, canonical_transport
 from app.util import new_id
 
 logger = logging.getLogger(__name__)
@@ -126,12 +127,20 @@ async def _drive(server, provider: OAuthClientProvider, storage: ServerTokenStor
     """Run the provider end to end: one authenticated request that 401s, triggering
     discovery → registration → (park for browser) → code exchange → token storage."""
     mcp_url = server.command
+    # Probe with the SAME transport + upstream headers the bridge will use, so an SSE
+    # upstream or one that needs an extra header (e.g. a co-required API key) still
+    # reaches its 401/auth challenge here instead of failing before the redirect.
+    transport = canonical_transport((server.args or [None])[0]) or DEFAULT_TRANSPORT
+    headers = {**_INIT_HEADERS, **dict(server.env or {})}
     inner_error: Optional[BaseException] = None
     try:
         async with httpx.AsyncClient(
             auth=provider, timeout=httpx.Timeout(30.0), follow_redirects=True
         ) as client:
-            await client.post(mcp_url, json=_INIT_BODY, headers=_INIT_HEADERS)
+            if transport == "sse":
+                await client.get(mcp_url, headers=headers)
+            else:
+                await client.post(mcp_url, json=_INIT_BODY, headers=headers)
     except asyncio.CancelledError:
         raise
     except BaseException as exc:  # noqa: BLE001 — tolerate; success is decided by whether tokens landed
@@ -169,6 +178,11 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     _cancel_existing(server.id)
 
     storage = ServerTokenStorage(server.id)
+    # Force a genuine interactive grant: if a valid/refreshable token were still stored,
+    # the probe below would succeed with it, the provider would never call redirect_handler,
+    # and begin() would time out into a 502. Dropping just the tokens (keeping the DCR client
+    # info) makes the probe 401 and re-drives the browser flow, reusing the registered client.
+    storage.clear_tokens()
     redirect_uris = [AnyHttpUrl(callback_url)]
 
     # A static, pre-registered client (operator supplied a client id) skips Dynamic

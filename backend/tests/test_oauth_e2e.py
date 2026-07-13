@@ -156,6 +156,8 @@ def mock_transport(monkeypatch):
 class _Srv:
     id = "srv-e2e-1"
     command = MCP_URL
+    args = ["streamable-http"]
+    env: dict = {}
     oauth_client_id = None
     oauth_client_secret = None
     oauth_scopes = "read"

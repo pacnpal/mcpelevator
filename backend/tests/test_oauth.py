@@ -75,6 +75,34 @@ def test_token_store_clear_is_idempotent():
     assert store.status()["authenticated"] is False
 
 
+def test_token_store_rejects_traversal_id():
+    # A server id that could escape the oauth directory must be refused before any FS op.
+    with pytest.raises(ValueError):
+        ServerTokenStorage("../evil")
+    with pytest.raises(ValueError):
+        ServerTokenStorage("a/b")
+
+
+async def test_clear_tokens_keeps_client_info():
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    store = ServerTokenStorage("srv-cleartokens")
+    store.clear()
+    try:
+        await store.set_client_info(
+            OAuthClientInformationFull(client_id="cid", redirect_uris=["http://127.0.0.1/cb"])
+        )
+        await store.set_tokens(
+            OAuthToken(access_token="AT", token_type="Bearer", refresh_token="RT")
+        )
+        store.clear_tokens()
+        assert await store.get_tokens() is None  # tokens gone
+        ci = await store.get_client_info()
+        assert ci is not None and ci.client_id == "cid"  # client registration preserved
+    finally:
+        store.clear()
+
+
 # --------------------------------------------------------------------------- #
 # normalize_oauth (service-level rules)
 # --------------------------------------------------------------------------- #
@@ -136,6 +164,8 @@ async def test_flow_begin_and_complete(monkeypatch):
     class _Srv:
         id = "srv-flow-1"
         command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
         oauth_client_id = None
         oauth_client_secret = None
         oauth_scopes = ""
@@ -190,10 +220,59 @@ def test_detail_exposes_oauth_status_needs_auth():
             detail = c.get(f"/api/servers/{sid}", headers=LOOPBACK).json()
             assert detail["oauth"] is True
             assert detail["oauth_scopes"] == "read write"
+            # The client secret is write-only — never echoed back.
+            assert "oauth_client_secret" not in detail
+            assert detail["oauth_has_client_secret"] is False
             status = detail["oauth_status"]
             assert status["enabled"] is True
             assert status["authenticated"] is False
             assert status["needs_auth"] is True
+        finally:
+            c.delete(f"/api/servers/{sid}", headers=LOOPBACK)
+
+
+def test_update_clears_tokens_on_url_change():
+    import anyio
+
+    with TestClient(app) as c:
+        sid = _create_oauth_server(c)
+        store = ServerTokenStorage(sid)
+        anyio.run(store.set_tokens, OAuthToken(access_token="AT", token_type="Bearer"))
+        assert store.status()["authenticated"] is True
+        try:
+            # Changing the upstream URL invalidates tokens bound to the old resource.
+            r = c.patch(
+                f"/api/servers/{sid}",
+                json={"command": "https://other.example/mcp"},
+                headers=LOOPBACK,
+            )
+            assert r.status_code == 200, r.text
+            assert store.status()["authenticated"] is False
+        finally:
+            c.delete(f"/api/servers/{sid}", headers=LOOPBACK)
+
+
+def test_update_preserves_explicit_null_client_id():
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/servers",
+            json={
+                "name": "oauth-static",
+                "runner": "remote",
+                "command": "https://up.example/mcp",
+                "args": ["streamable-http"],
+                "oauth": True,
+                "oauth_client_id": "cid",
+            },
+            headers=LOOPBACK,
+        )
+        sid = r.json()["id"]
+        try:
+            # An explicit null must switch static-client -> DCR, not be dropped as "unchanged".
+            r = c.patch(f"/api/servers/{sid}", json={"oauth_client_id": None}, headers=LOOPBACK)
+            assert r.status_code == 200, r.text
+            detail = c.get(f"/api/servers/{sid}", headers=LOOPBACK).json()
+            assert detail["oauth_client_id"] is None
         finally:
             c.delete(f"/api/servers/{sid}", headers=LOOPBACK)
 

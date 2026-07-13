@@ -59,7 +59,9 @@ class ServerDetail(ServerSummary):
     oauth: bool = False
     oauth_scopes: str = ""
     oauth_client_id: Optional[str] = None
-    oauth_client_secret: Optional[str] = None
+    # The client secret is write-only: accepted on create/patch but never echoed back
+    # (this response is polled by the UI), so only its presence is exposed.
+    oauth_has_client_secret: bool = False
     oauth_status: OAuthStatus = OAuthStatus()
     config_hash: str = ""
     source: str = "manual"
@@ -101,6 +103,9 @@ class ServerUpdate(BaseModel):
     mcp_http: Optional[bool] = None
     rest_openapi: Optional[bool] = None
     auth_provider: Optional[AuthProvider] = None
+    # StrictBool (unlike mcp_http/rest_openapi above): oauth gates a security-sensitive
+    # upstream-auth mode, so a truthy-coerced "yes"/1 must never silently flip it on — the
+    # SPA sends a real JSON bool.
     oauth: Optional[StrictBool] = None
     oauth_scopes: Optional[str] = None
     oauth_client_id: Optional[str] = None

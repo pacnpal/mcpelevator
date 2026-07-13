@@ -135,7 +135,11 @@
 		try {
 			const updated = await disconnectOauth(server.id);
 			server = { ...server, ...updated };
-			flashToast('Disconnected — re-authenticate to reconnect this server.');
+			flashToast(
+				updated.enabled
+					? 'Disconnected — the server was restarted and needs to re-authenticate to reconnect.'
+					: 'Disconnected — re-authenticate to reconnect this server.'
+			);
 		} catch (err) {
 			flashToast(errorMessage(err));
 		} finally {

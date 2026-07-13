@@ -95,6 +95,18 @@ def _summary(server: Server, sup, session: Session, base: str) -> ServerSummary:
     )
 
 
+def _oauth_signature(server: Server) -> tuple:
+    """The OAuth-affecting config of a server. When this changes across a PATCH, the
+    stored tokens (for the old upstream/provider/client) must be discarded."""
+    return (
+        bool(server.oauth),
+        server.command,  # upstream URL — tokens are bound to this resource
+        server.oauth_scopes or "",
+        server.oauth_client_id,
+        server.oauth_client_secret,
+    )
+
+
 def _oauth_status(server: Server) -> OAuthStatus:
     """OAuth auth state for a remote server (reads the shared token file)."""
     if not server.oauth:
@@ -122,7 +134,7 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         oauth=bool(server.oauth),
         oauth_scopes=server.oauth_scopes or "",
         oauth_client_id=server.oauth_client_id,
-        oauth_client_secret=server.oauth_client_secret,
+        oauth_has_client_secret=bool(server.oauth_client_secret),
         oauth_status=_oauth_status(server),
         config_hash=server.config_hash,
         source=server.source,
@@ -186,13 +198,33 @@ async def update_server(
     request: Request,
     session: Session = Depends(get_session),
 ):
-    changes = {k: v for k, v in payload.model_dump().items() if v is not None}
+    provided = payload.model_dump()
+    changes = {k: v for k, v in provided.items() if v is not None}
+    # The generic None-drop implements partial PATCH, but it also swallows an *explicit*
+    # null on the nullable OAuth client fields — so clearing a static client id/secret to
+    # fall back to Dynamic Client Registration would be silently ignored. Preserve those two
+    # when the client actually sent them (model_fields_set) so null means "clear".
+    for key in ("oauth_client_id", "oauth_client_secret"):
+        if key in payload.model_fields_set:
+            changes[key] = provided[key]
+
+    # Signature of the OAuth-relevant config before the edit, to decide token cleanup below.
+    existing = repo.get_server(session, server_id)
+    before = _oauth_signature(existing) if existing is not None else None
+
     try:
         server = service.update_server(session, server_id, changes)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    # If the OAuth config changed (upstream URL, scopes, client) or OAuth was turned off, the
+    # stored tokens belong to the old provider/resource. Clear them so a restarted bridge can't
+    # replay a stale credential and the status stops falsely reading "authenticated".
+    if before is not None and before != _oauth_signature(server):
+        ServerTokenStorage(server_id).clear()
+
     sup = request.app.state.supervisor
     if "slug" in changes:
         # Re-point a running unit's proxy routing without a restart (config_hash
@@ -216,8 +248,18 @@ async def delete_server(server_id: str, request: Request, session: Session = Dep
 def _oauth_callback_url(request: Request) -> str:
     """The public URL the upstream redirects the operator's browser back to after
     sign-in. Built from the same base as the copy-menu links so it matches the host
-    the operator actually reached us on (and the operator-declared public URL when set)."""
-    return f"{_base_url(request)}/api/oauth/callback"
+    the operator actually reached us on (and the operator-declared public URL when set).
+
+    Behind an HTTPS-terminating reverse proxy without ``MCPE_PUBLIC_BASE_URL``, the ASGI
+    request scheme is the plain ``http`` of the proxy→app hop; honor ``X-Forwarded-Proto``
+    so the registered redirect URI is ``https`` (OAuth providers reject non-loopback http
+    callbacks). The operator-declared public URL still wins when set."""
+    base = _base_url(request)
+    if not get_settings().public_base_url and base.startswith("http://"):
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        if forwarded == "https":
+            base = "https://" + base[len("http://"):]
+    return f"{base}/api/oauth/callback"
 
 
 @router.post("/servers/{server_id}/oauth/authorize")

@@ -43,8 +43,8 @@
 					auth_provider: server.auth_provider,
 					oauth: server.oauth,
 					oauth_scopes: server.oauth_scopes,
-					oauth_client_id: server.oauth_client_id,
-					oauth_client_secret: server.oauth_client_secret
+					oauth_client_id: server.oauth_client_id
+					// oauth_client_secret is write-only (never returned); see oauthHasSecret below.
 				}
 			: null
 	);
@@ -133,6 +133,7 @@
 		<ServerForm
 			mode="edit"
 			{initial}
+			oauthHasSecret={server.oauth_has_client_secret}
 			busy={saving}
 			error={saveError}
 			submitLabel="Save changes"

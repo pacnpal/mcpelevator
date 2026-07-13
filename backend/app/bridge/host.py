@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import os
 
-import uvicorn
 from fastmcp import FastMCP
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
 from fastmcp.server import create_proxy

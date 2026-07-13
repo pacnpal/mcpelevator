@@ -20,6 +20,7 @@
 	let {
 		mode = 'create',
 		initial,
+		oauthHasSecret = false,
 		busy = false,
 		error = null,
 		submitLabel,
@@ -30,6 +31,10 @@
 		/** Prefill values (edit) or partial defaults (create). `slug` is only used
 		 * in edit mode, where it's surfaced as an editable identity field. */
 		initial?: (Partial<ServerCreate> & { slug?: string }) | null;
+		/** Edit mode: whether a static OAuth client secret is already stored. The secret
+		 * value is never returned, so the field starts blank and, if left blank, is omitted
+		 * from the PATCH (kept) rather than cleared. */
+		oauthHasSecret?: boolean;
 		busy?: boolean;
 		/** API error text to surface inline, if any. */
 		error?: string | null;
@@ -149,7 +154,9 @@
 	let oauthScopes = $state(seed.oauthScopes);
 	let oauthClientId = $state(seed.oauthClientId);
 	let oauthClientSecret = $state(seed.oauthClientSecret);
-	let oauthClientOpen = $state(!!seed.oauthClientId);
+	// Open the client-credentials disclosure when there's already an id or a stored secret.
+	// Initial capture only (uncontrolled form), so untrack the prop read.
+	let oauthClientOpen = $state(untrack(() => !!seed.oauthClientId || oauthHasSecret));
 
 	let cwd = $state(seed.cwd);
 	let mcpHttp = $state(seed.mcpHttp);
@@ -277,6 +284,16 @@
 		return out;
 	}
 
+	// The client secret is write-only: not returned by the API, so the field starts blank.
+	// A typed value is sent; blank in edit mode with an existing secret is OMITTED (kept),
+	// otherwise null (no secret).
+	function oauthSecretPayload(): string | null | undefined {
+		if (!(isRemote && oauth)) return null;
+		const typed = oauthClientSecret.trim();
+		if (typed) return typed;
+		return mode === 'edit' && oauthHasSecret ? undefined : null;
+	}
+
 	function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
 		if (!canSubmit) return;
@@ -297,7 +314,7 @@
 			oauth: isRemote && oauth,
 			oauth_scopes: isRemote && oauth ? oauthScopes.trim() : '',
 			oauth_client_id: isRemote && oauth ? oauthClientId.trim() || null : null,
-			oauth_client_secret: isRemote && oauth ? oauthClientSecret.trim() || null : null
+			oauth_client_secret: oauthSecretPayload()
 		};
 		if (mode === 'create') payload.enabled = startAfter;
 		// Only send a slug when it's actually a rename, so an unchanged edit doesn't
@@ -604,18 +621,20 @@
 							<div class="flex flex-col gap-2">
 								<input
 									type="text"
+									aria-label="OAuth client ID"
 									bind:value={oauthClientId}
 									autocomplete="off"
 									spellcheck="false"
-									placeholder="Client ID (optional — blank auto-registers)"
+									placeholder="Client ID — optional, blank auto-registers"
 									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 								/>
 								<input
 									type="password"
+									aria-label="OAuth client secret"
 									bind:value={oauthClientSecret}
 									autocomplete="off"
 									spellcheck="false"
-									placeholder="Client secret (optional)"
+									placeholder={oauthHasSecret ? 'Set — leave blank to keep current' : 'Client secret — optional'}
 									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 								/>
 								<p class="text-xs text-[var(--color-ink-dim)]">

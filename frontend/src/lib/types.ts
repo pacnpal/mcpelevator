@@ -75,7 +75,9 @@ export interface ServerDetail extends ServerSummary {
 	oauth: boolean;
 	oauth_scopes: string;
 	oauth_client_id: string | null;
-	oauth_client_secret: string | null;
+	/** Whether a static client secret is stored. The secret itself is write-only —
+	 * accepted on create/patch but never returned. */
+	oauth_has_client_secret: boolean;
 	oauth_status: OAuthStatus;
 	config_hash: string;
 	source: string;

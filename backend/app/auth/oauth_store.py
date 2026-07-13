@@ -25,8 +25,12 @@ and the file is created ``0600`` — it holds bearer credentials.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
+import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -40,6 +44,11 @@ from mcp.shared.auth import (
 
 from app.config import get_settings
 
+# Server ids are opaque ``new_id()`` hex tokens; constrain hard so a value that ever
+# reached here from a request path (``/servers/{server_id}/oauth/...``) can never
+# traverse out of the oauth directory. A non-matching id is refused, not sanitized.
+_SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
 
 def oauth_dir() -> Path:
     """The directory holding per-server OAuth credential files.
@@ -51,6 +60,13 @@ def oauth_dir() -> Path:
 
 
 def token_path(server_id: str) -> Path:
+    """Path to a server's credential file, refusing any id that isn't a plain token.
+
+    ``server_id`` can originate from a request path parameter, so validate it before
+    it touches the filesystem: only ``[A-Za-z0-9_-]`` is allowed, which cannot contain
+    a path separator or ``..`` and therefore cannot escape :func:`oauth_dir`."""
+    if not _SAFE_ID.fullmatch(server_id or ""):
+        raise ValueError(f"invalid server id {server_id!r}")
     return oauth_dir() / f"{server_id}.json"
 
 
@@ -70,6 +86,27 @@ class ServerTokenStorage(TokenStorage):
 
     # --- raw file I/O ---------------------------------------------------- #
 
+    @contextlib.contextmanager
+    def _locked(self):
+        """Advisory inter-process lock over a read-modify-write.
+
+        The control plane (interactive auth) and the bridge (token refresh) both mutate
+        this file; without a lock two interleaved read→mutate→replace cycles would
+        last-writer-win and could drop a just-refreshed token. An ``flock`` on a sidecar
+        ``.lock`` file serializes the whole RMW across processes; it's released on every
+        path. The ``_write`` temp file is per-call regardless, so an atomic replace is
+        never torn even if a reader isn't holding the lock."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_suffix(".lock")
+        fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
     def _read(self) -> dict:
         try:
             with self.path.open("r", encoding="utf-8") as fh:
@@ -80,9 +117,11 @@ class ServerTokenStorage(TokenStorage):
 
     def _write(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".json.tmp")
-        # 0600 from creation — this file holds bearer + refresh tokens.
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # A UNIQUE temp file per write (not a shared ``<id>.json.tmp``): two concurrent
+        # writers must not share the same temp path, or one ``os.replace`` moves the file
+        # the other still expects. ``mkstemp`` also creates it 0600 — this holds tokens.
+        fd, tmp_name = tempfile.mkstemp(dir=str(self.path.parent), prefix=f"{self.server_id}.", suffix=".tmp")
+        tmp = Path(tmp_name)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(data, fh)
@@ -103,15 +142,16 @@ class ServerTokenStorage(TokenStorage):
             return None
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
-        data = self._read()
-        data["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
-        # Persist an absolute expiry so a fresh process doesn't misread the
-        # relative ``expires_in`` as "seconds from now" on every reload.
-        if tokens.expires_in is not None:
-            data["expires_at"] = time.time() + int(tokens.expires_in)
-        else:
-            data.pop("expires_at", None)
-        self._write(data)
+        with self._locked():
+            data = self._read()
+            data["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+            # Persist an absolute expiry so a fresh process doesn't misread the
+            # relative ``expires_in`` as "seconds from now" on every reload.
+            if tokens.expires_in is not None:
+                data["expires_at"] = time.time() + int(tokens.expires_in)
+            else:
+                data.pop("expires_at", None)
+            self._write(data)
 
     async def get_client_info(self) -> Optional[OAuthClientInformationFull]:
         raw = self._read().get("client_info")
@@ -123,9 +163,10 @@ class ServerTokenStorage(TokenStorage):
             return None
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
-        data = self._read()
-        data["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
-        self._write(data)
+        with self._locked():
+            data = self._read()
+            data["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
+            self._write(data)
 
     # --- metadata (extra; not part of the protocol) ---------------------- #
 
@@ -149,9 +190,10 @@ class ServerTokenStorage(TokenStorage):
             return None
 
     def set_metadata(self, metadata: OAuthMetadata) -> None:
-        data = self._read()
-        data["metadata"] = metadata.model_dump(mode="json", exclude_none=True)
-        self._write(data)
+        with self._locked():
+            data = self._read()
+            data["metadata"] = metadata.model_dump(mode="json", exclude_none=True)
+            self._write(data)
 
     # --- sync status helpers (used by the API) --------------------------- #
 
@@ -169,7 +211,21 @@ class ServerTokenStorage(TokenStorage):
             "has_refresh_token": bool(tokens.get("refresh_token")),
         }
 
+    def clear_tokens(self) -> None:
+        """Drop only the access/refresh tokens, keeping the DCR client info and
+        discovered metadata. Used before an interactive (re-)authorization so the
+        provider can't satisfy the probe with an existing valid token — which would
+        skip the redirect and hang the flow — while a fresh grant reuses the same
+        registered client instead of re-registering. Idempotent."""
+        with self._locked():
+            data = self._read()
+            if not data:
+                return
+            if data.pop("tokens", None) is not None or data.pop("expires_at", None) is not None:
+                self._write(data)
+
     def clear(self) -> None:
-        """Delete the credential file (e.g. when the server is removed or the
+        """Delete the credential file entirely (e.g. when the server is removed or the
         operator disconnects the upstream). Idempotent."""
         self.path.unlink(missing_ok=True)
+        self.path.with_suffix(".lock").unlink(missing_ok=True)
