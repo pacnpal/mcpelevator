@@ -230,9 +230,12 @@ async def update_server(
     oauth_changed = before is not None and before != _oauth_signature(server)
     if oauth_changed:
         oauth_flow.cancel_pending(server_id)
-        ServerTokenStorage(server_id).clear()
+        # STOP the bridge before clearing: a running bridge's in-flight refresh could
+        # otherwise set_tokens() after the clear and recreate credentials for the old
+        # upstream/client, which the nudge below would then restart the server with.
         if server.enabled:
             await sup.stop(server_id)
+        ServerTokenStorage(server_id).clear()
 
     if "slug" in changes:
         # Re-point a running unit's proxy routing without a restart (config_hash

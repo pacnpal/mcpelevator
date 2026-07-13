@@ -10,6 +10,7 @@ state is simply rejected."""
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 from fastapi import APIRouter, Depends
@@ -70,31 +71,46 @@ async def oauth_callback(
     if not code or not state:
         return _oauth_redirect(_ERROR_REDIRECT)
 
+    sup = request.app.state.supervisor
+    # Stop the target server's bridge BEFORE the grant is promoted (which happens inside
+    # complete_authorization). A running bridge re-authenticating an enabled server could
+    # otherwise refresh its old token and overwrite the just-obtained grant. We nudge below
+    # to bring it back — with the new tokens on success, or the preserved old ones on
+    # failure (the flow leaves the store untouched when it doesn't complete).
+    hinted_id = oauth_flow.pending_server_id(state)
+    stopped = False
+    if hinted_id is not None:
+        hinted = repo.get_server(session, hinted_id)
+        if hinted is not None and hinted.enabled:
+            with contextlib.suppress(Exception):
+                await sup.stop(hinted_id)
+            stopped = True
+
     try:
         server_id = await oauth_flow.complete_authorization(state, code)
     except KeyError:
+        if stopped:
+            sup.nudge()  # unknown state; bring the stopped bridge back with existing tokens
         return _oauth_redirect(_ERROR_REDIRECT)
     except Exception as exc:  # token exchange / provider error
         logger.info("OAuth callback failed: %s", exc)
+        if stopped:
+            sup.nudge()  # failed re-auth; restart with the preserved old credentials
         return _oauth_redirect(_ERROR_REDIRECT)
 
-    # Look the server up by the id the flow reported. Redirecting with the *stored*
-    # slug (read from the DB row, never from the request) keeps remote-controlled data
-    # out of the Location entirely.
+    # Look the server up by the id the flow reported. Redirecting with the *stored* id
+    # (read from the DB row, never from the request) keeps remote-controlled data out of
+    # the Location entirely.
     server = repo.get_server(session, server_id)
     if server is None:
+        if stopped:
+            sup.nudge()
         return _oauth_redirect(_ERROR_REDIRECT)
 
-    # Restart an enabled server so its bridge re-reads the freshly stored tokens
+    # Bring an enabled server back so its bridge re-reads the freshly stored tokens
     # (config_hash is unchanged — authenticating never rewrites the row — so the
-    # reconciler wouldn't otherwise bounce it). Best-effort; the reconciler brings it
-    # back on the next tick regardless.
+    # reconciler wouldn't otherwise bounce it).
     if server.enabled:
-        sup = request.app.state.supervisor
-        try:
-            await sup.stop(server.id)
-        except Exception:  # noqa: BLE001 — never fail the redirect on a restart hiccup
-            logger.debug("could not restart %s after OAuth", server.id, exc_info=True)
         sup.nudge()
 
     return _oauth_redirect(f"/server/{server.id}?oauth=connected")

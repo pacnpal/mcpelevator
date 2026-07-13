@@ -142,6 +142,15 @@ def _cancel_existing(server_id: str) -> None:
             _forget(pending)
 
 
+def pending_server_id(state: str) -> Optional[str]:
+    """The server id of the authorization parked on ``state``, or ``None`` — so the
+    callback can stop that server's running bridge *before* the grant is promoted,
+    closing the window where an old bridge's refresh could overwrite the new tokens."""
+    pending_id = _STATE_INDEX.get(state)
+    pending = _PENDING.get(pending_id) if pending_id else None
+    return pending.server_id if pending is not None else None
+
+
 def cancel_pending(server_id: str) -> None:
     """Cancel any in-flight authorization for a server. Called when its OAuth config is
     edited: a background flow started against the OLD upstream/scopes/client must not
@@ -261,13 +270,18 @@ async def begin_authorization(server, *, callback_url: str) -> str:
             scope=server.oauth_scopes or None,
         )
     else:
-        # Reuse a prior DCR registration only if it was registered for THIS callback URL.
-        # If mcpelevator is now reached via a different base URL (localhost vs LAN, or a
-        # changed MCPE_PUBLIC_BASE_URL), the old registration's redirect_uris no longer
-        # match and a strict provider would reject the flow — so force re-registration.
+        # Reuse a prior DCR registration only if it's still usable. Force re-registration
+        # when: it was registered for a DIFFERENT callback URL (mcpelevator now reached via a
+        # different base URL — localhost vs LAN, or a changed MCPE_PUBLIC_BASE_URL — whose
+        # redirect_uri a strict provider would reject), OR its client secret has EXPIRED
+        # (a past nonzero client_secret_expires_at), which would otherwise fail the exchange
+        # and leave the operator unable to reconnect via Re-authenticate.
         existing = await real.get_client_info()
         registered = {str(u) for u in (getattr(existing, "redirect_uris", None) or [])}
-        seed_client_info = existing if (existing is not None and callback_url in registered) else None
+        expires_at = getattr(existing, "client_secret_expires_at", None) if existing else None
+        expired = bool(expires_at) and expires_at < time.time()
+        reusable = existing is not None and callback_url in registered and not expired
+        seed_client_info = existing if reusable else None
 
     # Drive the grant against an EPHEMERAL store (no tokens → the probe 401s → the browser
     # redirect fires). The shared store is written only if the grant succeeds (_drive), so a

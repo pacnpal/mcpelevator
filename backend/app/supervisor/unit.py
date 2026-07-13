@@ -92,6 +92,12 @@ class ServerUnit:
             "MCPE_BRIDGE_SPEC": json.dumps(payload),
             "MCPE_BRIDGE_HOST": self.host,
             "MCPE_BRIDGE_PORT": str(port),
+            # Pin the child to the control plane's ABSOLUTE data dir. A relative
+            # MCPE_DATA_DIR (the default "./data") would otherwise be resolved against
+            # each process's cwd, and the OAuth token store lives there — a source/systemd
+            # launch from a different cwd would have the bridge read a different
+            # ./data/oauth than the control plane wrote, so tokens would never be found.
+            "MCPE_DATA_DIR": str(settings.data_dir.resolve()),
             "PYTHONPATH": str(settings.backend_root),
         }
         self.proc = await asyncio.create_subprocess_exec(
