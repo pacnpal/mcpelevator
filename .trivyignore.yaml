@@ -28,8 +28,9 @@ vulnerabilities:
   #     control plane's own HTTP surface.
   #
   # Remediation is simply to rebuild on a docker-ce-cli that ships patched Go —
-  # the Dockerfile already installs the latest available at build time, so the
-  # next release build picks it up automatically once Docker publishes it.
+  # the Dockerfile reinstalls the latest .deb on every release (its install layer
+  # is keyed on APP_VERSION, so a durably-cached layer can't re-ship a stale binary),
+  # so the next release build picks up the fix automatically once Docker publishes it.
   # Re-triage when this expires: if a rebuilt docker-ce-cli is out, drop these
   # entries; if not, confirm the package is still unpatched and extend.
   - id: CVE-2026-39822
