@@ -27,11 +27,17 @@ export function openOauthPopup(): Window | null {
 	const height = 720;
 	const left = window.screenX + Math.max(0, (window.outerWidth - width) / 2);
 	const top = window.screenY + Math.max(0, (window.outerHeight - height) / 2);
-	return window.open(
-		'about:blank',
-		WINDOW_NAME,
-		`popup=yes,width=${width},height=${height},left=${Math.round(left)},top=${Math.round(top)}`
-	);
+	try {
+		return window.open(
+			'about:blank',
+			WINDOW_NAME,
+			`popup=yes,width=${width},height=${height},left=${Math.round(left)},top=${Math.round(top)}`
+		);
+	} catch {
+		// Some strict environments (sandboxed iframes, restrictive browser policies)
+		// throw instead of returning null — treat both as "blocked".
+		return null;
+	}
 }
 
 /** Subscribe to OAuth results forwarded from the popup. Same-origin messages only.

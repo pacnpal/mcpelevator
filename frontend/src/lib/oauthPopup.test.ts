@@ -110,4 +110,11 @@ describe('openOauthPopup', () => {
 			expect.stringContaining('popup=yes')
 		);
 	});
+
+	it('treats a throwing window.open as blocked (sandboxed/strict environments)', () => {
+		vi.spyOn(window, 'open').mockImplementation(() => {
+			throw new DOMException('blocked');
+		});
+		expect(openOauthPopup()).toBeNull();
+	});
 });

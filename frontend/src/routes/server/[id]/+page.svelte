@@ -143,13 +143,17 @@
 		const popup = openOauthPopup();
 		try {
 			const { authorize_url } = await startOauth(server.id);
-			if (popup && !popup.closed) {
+			if (popup === null) {
+				// Popup blocked: fall back to the full-page navigation; the callback
+				// bounces back to this page with ?oauth=….
+				window.location.href = authorize_url;
+			} else if (popup.closed) {
+				// The operator closed the popup while the URL was being fetched —
+				// that's a cancel, not a blocker; don't yank the whole tab away.
+				oauthBusy = false;
+			} else {
 				popup.location.href = authorize_url;
 				watchOauthPopup(popup);
-			} else {
-				// Popup blocked (or already dismissed): fall back to the full-page
-				// navigation; the callback bounces back to this page with ?oauth=….
-				window.location.href = authorize_url;
 			}
 		} catch (err) {
 			popup?.close();
