@@ -56,7 +56,7 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
 - Version derives from the GitHub release tag — never hardcode a version string. The CI release
   workflow (`.github/workflows/docker-image.yml`) passes the tag as `APP_VERSION`; the `Dockerfile`
   sets it as `ENV MCPE_VERSION`; `app.__version__` (`backend/app/__init__.py`) reads `MCPE_VERSION`
-  first, then installed metadata, then `pyproject.toml`. `backend/pyproject.toml` /
+  first, then the adjacent `pyproject.toml` (source tree), then installed metadata. `backend/pyproject.toml` /
   `frontend/package.json` versions are source metadata that only track the dev line (the tag wins
   at deploy); bump them when cutting a release and run `uv lock`.
 - Add a catalog directory as a plugin: one `Source` module + one line in the source registry

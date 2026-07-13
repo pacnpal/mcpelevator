@@ -34,8 +34,11 @@ def _resolve_version() -> str:
     1. ``MCPE_VERSION`` — injected into the published image from the release tag (the CI
        release workflow passes the tag as ``APP_VERSION``; the ``Dockerfile`` sets it as
        ``MCPE_VERSION``). This is what makes a deployed container report e.g. ``1.2.3``.
-    2. Installed package metadata (``pip``/``uv`` install of a packaged build).
-    3. ``pyproject.toml`` — for a source checkout run in place (the common dev case).
+    2. The adjacent ``pyproject.toml`` — present only when running from a source tree, where
+       it is authoritative. Checked BEFORE installed metadata so a source checkout with a
+       stale editable install still reports the tree's version, not the old dist's.
+    3. Installed package metadata — for a real ``pip``/``uv`` install of a packaged build
+       (no ``pyproject.toml`` sits next to the package in site-packages).
     4. A ``0.0.0+unknown`` fallback.
 
     There is intentionally NO hardcoded version literal here — the release tag is the single
@@ -44,11 +47,13 @@ def _resolve_version() -> str:
     env = os.environ.get("MCPE_VERSION")
     if env:
         return env
+    from_pyproject = _version_from_pyproject()
+    if from_pyproject:
+        return from_pyproject
     try:
         return metadata.version("mcpelevator")
     except metadata.PackageNotFoundError:
-        pass
-    return _version_from_pyproject() or "0.0.0+unknown"
+        return "0.0.0+unknown"
 
 
 __version__ = _resolve_version()
