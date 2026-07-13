@@ -539,8 +539,8 @@ def compute_hash(server: Server) -> str:
             # OAuth config drives how the bridge authenticates upstream, so it IS part
             # of the launch spec — a change must restart the bridge. (The tokens live in
             # a file store, not the row, so *authenticating* leaves the hash untouched.)
-            # The client SECRET is deliberately NOT read here: it's a credential and must
-            # never flow into a fast digest, and the bridge doesn't consume it from the
+            # The client SECRET is deliberately NOT read here: it's a credential that
+            # doesn't belong in the anchor at all, and the bridge doesn't consume it from the
             # spec anyway (it reads the DCR/static client_info from the token store, and a
             # secret change re-runs auth via the API which clears the tokens). The static
             # client is already tracked by the non-sensitive client_id below.

@@ -20,15 +20,28 @@ def slugify(name: str) -> str:
     return s or "server"
 
 
+# Fixed (not per-value) on purpose: the anchor must be deterministic — same logical
+# config, same hash — or the reconciler would bounce every bridge on every boot.
+_CONFIG_HASH_SALT = b"mcpelevator.config_hash.v1"
+
+
 def config_hash(payload: dict[str, Any]) -> str:
     """Stable short hash of a server's launch+exposure config.
 
     The idempotency anchor: the reconciler restarts a server only when this
     changes. Uses canonical JSON (sorted keys) so the same logical config always
     hashes identically.
+
+    The payload carries operator-supplied credentials (``env`` values / upstream
+    headers), and the result is persisted and served by the API — so it is derived
+    with scrypt, a memory-hard KDF, instead of a fast digest: a leaked anchor can't
+    be dictionary-attacked to recover those values. Only computed on config writes
+    and the boot backfill, so the ~70ms cost never sits on a request-serving path.
     """
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+    return hashlib.scrypt(
+        blob.encode("utf-8"), salt=_CONFIG_HASH_SALT, n=2**14, r=8, p=1, dklen=8
+    ).hex()
 
 
 def new_token() -> str:
