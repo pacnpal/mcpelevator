@@ -38,6 +38,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # either the host's socket (sibling containers) or an isolated dind sidecar via DOCKER_HOST.
 # CLI only: the daemon is never run in-image. The runner stays root-equivalent and disabled
 # by default (see the docker_runner setting), so shipping the CLI is inert until enabled.
+#
+# We install the latest published docker-ce-cli .deb — the embedded Go stdlib version is
+# Docker's to bump, not ours. Go stdlib CVEs in this upstream-built binary that are fixed
+# only in a Go release Docker hasn't rebuilt against yet are suppressed, narrowly and with an
+# expiry, in .trivyignore.yaml; each release build picks up the patched .deb automatically
+# once Docker publishes it.
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \

@@ -1,0 +1,51 @@
+# Trivy ignore rules — consumed by the Security Scan job in
+# .github/workflows/docker-image.yml (passed via the `trivyignores` input).
+#
+# Scope every entry as narrowly as possible (an `id` + `paths`, and an
+# `expired_at` so the suppression self-expires and the alert resurfaces for
+# re-triage rather than being buried forever). Only suppress a finding we
+# genuinely cannot act on yet — never a fixable one.
+
+vulnerabilities:
+  # Two Go standard-library vulnerabilities baked into the `docker` CLI binary
+  # (docker-ce-cli), which is compiled and released by Docker — we install the
+  # published .deb, we do not build it, so the embedded Go version is entirely
+  # upstream's to bump. Both were fixed only in Go 1.25.12 / 1.26.5, released
+  # 2026-07-08; a docker-ce-cli rebuilt against a patched Go is not yet
+  # published, so there is no newer package to install (Trivy reports them as
+  # "fixed" because the Go vuln DB knows the fixed toolchain version, not
+  # because a fixed docker-ce-cli exists).
+  #
+  # The docker runner that uses this CLI is opt-in and OFF by default (the
+  # `docker_runner` setting / MCPE_DOCKER_RUNNER), and the daemon is never run
+  # in-image, so the CLI is inert on a default deployment. Neither issue is
+  # reachable through mcpelevator itself:
+  #   - CVE-2026-39822 (os.Root symlink following → directory traversal) is a
+  #     library API misuse hazard for programs that call os.Root; the docker
+  #     CLI's own use is not an attacker-controlled traversal surface here.
+  #   - CVE-2026-42505 (crypto/tls Encrypted Client Hello PSK-identity leak)
+  #     only matters for ECH-enabled TLS clients; it does not affect the
+  #     control plane's own HTTP surface.
+  #
+  # Remediation is simply to rebuild on a docker-ce-cli that ships patched Go —
+  # the Dockerfile already installs the latest available at build time, so the
+  # next release build picks it up automatically once Docker publishes it.
+  # Re-triage when this expires: if a rebuilt docker-ce-cli is out, drop these
+  # entries; if not, confirm the package is still unpatched and extend.
+  - id: CVE-2026-39822
+    paths:
+      - "usr/bin/docker"
+    expired_at: 2026-10-13
+    statement: >-
+      Go os.Root symlink traversal in the upstream-built docker-ce-cli binary;
+      fixed only in Go 1.25.12/1.26.5 (2026-07-08), awaiting a docker-ce-cli
+      rebuild. The docker runner is opt-in and disabled by default.
+  - id: CVE-2026-42505
+    paths:
+      - "usr/bin/docker"
+    expired_at: 2026-10-13
+    statement: >-
+      Go crypto/tls Encrypted Client Hello PSK-identity leak in the
+      upstream-built docker-ce-cli binary; fixed only in Go 1.25.12/1.26.5
+      (2026-07-08), awaiting a docker-ce-cli rebuild. The docker runner is
+      opt-in and disabled by default.
