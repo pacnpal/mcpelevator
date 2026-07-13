@@ -46,11 +46,11 @@ concurrency:
   # different groups. Runs within a group queue FIFO instead of canceling:
   # dispatching dev-1.2.4 must not kill an in-flight dev-1.2.3 (each publishes
   # a distinct tag), and queue: max keeps every queued dispatch, where the
-  # default single-slot queue would silently replace a pending run. FIFO also
-  # keeps releases correct without cancel-in-progress (which queue: max
-  # forbids anyway): back-to-back releases apply their floating tags in
-  # order, so the newest release's tags still win — the superseded build is
-  # just no longer skipped.
+  # default single-slot queue would silently replace a pending run. Releases
+  # queue too (queue: max forbids cancel-in-progress), and because queue
+  # order is not guaranteed, the "Check newest release" step below re-checks
+  # right before tagging that this run's release is still the newest — so an
+  # out-of-order older release can never roll latest/beta back.
   group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.channel) || 'release' }}
   queue: max
 
@@ -163,6 +163,35 @@ jobs:
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "Building version ${VERSION} (image tag: ${IMAGE_TAG})"
 
+      - name: Check newest release
+        id: newest
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IS_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          # latest/beta must only ever move forward. Queued release runs can
+          # execute out of publish order (queue order is not guaranteed), and a
+          # backport release of an old line (e.g. v1.2.4 published after
+          # v2.0.0) must not yank the channel back either — so ask the API
+          # which release is currently newest instead of trusting run order.
+          # latest tracks the newest stable release; beta the newest prerelease.
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            NEWEST=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=30" |
+              jq -r '[.[] | select(.draft == false and .prerelease == true)][0].tag_name // empty')
+          else
+            NEWEST=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" |
+              jq -r '.tag_name // empty')
+          fi
+          if [ "$NEWEST" = "$GITHUB_REF_NAME" ]; then
+            echo "is_newest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_newest=false" >> "$GITHUB_OUTPUT"
+            echo "Release ${GITHUB_REF_NAME} is not the newest (${NEWEST:-none}): its versioned tags will publish, but latest/beta stay put."
+          fi
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -180,11 +209,13 @@ jobs:
             type=raw,value=${{ steps.version.outputs.image_tag }}
             # The release namespace — floating X.Y/X plus latest (stable) and
             # beta (prerelease) — moves ONLY on a published release; a manual
-            # build never creates or moves any of these.
+            # build never creates or moves any of these. latest/beta further
+            # require this release to still be the newest (see "Check newest
+            # release"), so they only ever move forward.
             type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' }}
             type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' && !startsWith(steps.version.outputs.version, '0.') }}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
-            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease && steps.newest.outputs.is_newest == 'true' }}
+            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease && steps.newest.outputs.is_newest == 'true' }}
             # always a git short SHA tag; on manual runs it carries the channel
             # AND version (dev-1.2.3-sha-abc1234) so it can't overwrite the
             # release's sha tag, and re-dispatching the same commit with a
