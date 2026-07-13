@@ -83,6 +83,7 @@ class ServerUnit:
             "cwd": self.spec.cwd,
             "transport": self.spec.transport,
             "minimal_env": self.spec.minimal_env,
+            "oauth": self.spec.oauth,
             "name": self.name,
             **self.exposure,
         }

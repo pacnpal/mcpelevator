@@ -110,19 +110,80 @@ def _child_env(spec: dict) -> dict[str, str]:
     return {**os.environ, **server_env}
 
 
+def _build_oauth_auth(oauth: dict):
+    """Build a refresh-only OAuth httpx auth for a remote upstream.
+
+    The interactive authorization already happened in the control plane (see
+    ``app.auth.oauth_flow``); the tokens + DCR client info live in the shared file
+    store. Here the bridge only needs an ``OAuthClientProvider`` that reads those
+    tokens and refreshes them automatically as the access token expires. Discovery
+    metadata is preloaded from the store so refresh targets the real token endpoint
+    rather than the SDK's ``<server-url>/token`` fallback.
+
+    The redirect/callback handlers raise: a bridge can't run an interactive sign-in.
+    If the refresh token itself has lapsed, the upstream 401 leads here, the request
+    fails, and the server goes unhealthy — the operator re-authenticates from the UI.
+    """
+    from app.auth.oauth_store import ServerTokenStorage  # local import: keeps bridge import light
+
+    from mcp.client.auth import OAuthClientProvider
+    from mcp.shared.auth import OAuthClientMetadata
+    from pydantic import AnyHttpUrl
+
+    async def _no_interactive(*_args, **_kwargs):
+        raise RuntimeError(
+            "this upstream needs OAuth sign-in — re-authenticate it from the mcpelevator UI"
+        )
+
+    url = oauth["url"]
+    storage = ServerTokenStorage(oauth["server_id"])
+    client_metadata = OAuthClientMetadata(
+        client_name="mcpelevator",
+        # Never used for refresh, but the model requires a redirect URI; a loopback
+        # placeholder is fine (the bridge never performs an interactive grant).
+        redirect_uris=[AnyHttpUrl("http://127.0.0.1/callback")],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        scope=oauth.get("scopes") or None,
+    )
+    provider = OAuthClientProvider(
+        server_url=url,
+        client_metadata=client_metadata,
+        storage=storage,
+        redirect_handler=_no_interactive,
+        callback_handler=_no_interactive,
+    )
+    # Preload the discovered auth-server metadata so refresh knows the token endpoint
+    # without a fresh 401/discovery round-trip (see ServerTokenStorage.set_metadata).
+    metadata = storage.get_metadata()
+    if metadata is not None:
+        provider.context.oauth_metadata = metadata
+    # Preload the stored token expiry so a lapsed access token is *refreshed* (silent)
+    # rather than mistaken for valid and driven into the interactive 401 path.
+    expiry = storage.get_token_expiry()
+    if expiry is not None:
+        provider.context.token_expiry_time = expiry
+    return provider
+
+
 def _build_transport(spec: dict):
     """Pick the upstream transport from the spec's ``transport`` discriminator.
 
     ``stdio`` (the default) spawns the local command; ``streamable-http`` / ``sse``
     front an already-remote MCP URL. For the remote kinds ``command`` is the URL and
     ``env`` is the upstream HTTP headers — so they are NOT merged into ``os.environ``
-    (that merge is only meaningful for a real child process).
+    (that merge is only meaningful for a real child process). When ``oauth`` is set the
+    upstream authenticates via an OAuth token (auto-refreshed) instead of static headers.
     """
     kind = spec.get("transport") or "stdio"
+    oauth = spec.get("oauth")
+    auth = _build_oauth_auth(oauth) if oauth else None
     if kind in ("streamable-http", "http"):
-        return StreamableHttpTransport(url=spec["command"], headers=dict(spec.get("env") or {}))
+        return StreamableHttpTransport(
+            url=spec["command"], headers=dict(spec.get("env") or {}), auth=auth
+        )
     if kind == "sse":
-        return SSETransport(url=spec["command"], headers=dict(spec.get("env") or {}))
+        return SSETransport(url=spec["command"], headers=dict(spec.get("env") or {}), auth=auth)
     return StdioTransport(
         command=spec["command"],
         args=list(spec.get("args") or []),

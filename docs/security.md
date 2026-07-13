@@ -17,7 +17,8 @@ port and wrapping a local command (`npx`, `uvx`, arbitrary command) or a remote
 HTTP/SSE upstream.
 
 The primary assets are: control-plane authority to create/enable servers and tokens,
-per-server data-plane bearer tokens, upstream header/env secrets, the SQLite database,
+per-server data-plane bearer tokens, upstream header/env secrets, upstream OAuth tokens
+(stored per server at `<data_dir>/oauth/<server-id>.json`, `0600`), the SQLite database,
 host/container filesystem and network access available to child MCP processes, and the
 integrity of Host/Origin/DNS-rebinding defenses. By design, an authenticated admin can
 obtain local command execution and SSRF-like network access by adding a command or
@@ -64,8 +65,15 @@ not trust `X-Forwarded-For`.
 ## 3. Attack surface, mitigations and attacker stories
 
 **Control plane (`/api`).** Sensitive routers in `backend/app/main.py` depend on
-`require_control_plane` from `backend/app/auth/control_plane.py`; health and auth-status
-remain public but are intentionally coarse. Enforcement is `always`, or `auto` when
+`require_control_plane` from `backend/app/auth/control_plane.py`; health, auth-status,
+and the upstream-OAuth redirect callback (`/api/oauth/callback`) remain public but are
+intentionally coarse. The callback is a top-level browser navigation from the upstream
+authorization server, so it carries no control token; it completes only a flow the
+operator already started, anchored on the unguessable OAuth `state` (an unknown/expired
+state is rejected), and stores tokens to the `0600` per-server file rather than the DB.
+The interactive grant (discovery, DCR, PKCE, exchange) runs in the control plane via the
+MCP SDK's `OAuthClientProvider`; each bridge only reads/refreshes the stored tokens and
+can never launch an interactive sign-in. Enforcement is `always`, or `auto` when
 `bind_mode=expose`, `MCPE_PUBLIC_BASE_URL`/`MCPE_ALLOWED_HOSTS` declares an off-host
 origin, or `allow_private_lan` is enabled. A serious attacker story is an off-host
 request creating an enabled `command` server or minting tokens without a control token.

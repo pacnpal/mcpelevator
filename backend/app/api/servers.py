@@ -19,6 +19,7 @@ from app.api.schemas import (
     ImportResult,
     ImportSkipped,
     ImportWarning,
+    OAuthStatus,
     ServerClone,
     ServerCreate,
     ServerDetail,
@@ -27,6 +28,8 @@ from app.api.schemas import (
     Transports,
     Urls,
 )
+from app.auth import oauth_flow
+from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Server
@@ -92,6 +95,20 @@ def _summary(server: Server, sup, session: Session, base: str) -> ServerSummary:
     )
 
 
+def _oauth_status(server: Server) -> OAuthStatus:
+    """OAuth auth state for a remote server (reads the shared token file)."""
+    if not getattr(server, "oauth", False):
+        return OAuthStatus()
+    st = ServerTokenStorage(server.id).status()
+    return OAuthStatus(
+        enabled=True,
+        authenticated=st["authenticated"],
+        needs_auth=not st["authenticated"],
+        expires_at=st["expires_at"],
+        has_refresh_token=st["has_refresh_token"],
+    )
+
+
 def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
     summary = _summary(server, sup, session, base)
     _, _, _, _, tools = _live_state(server, sup, session)
@@ -102,6 +119,11 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         env=server.env,
         cwd=server.cwd,
         auth_provider=server.auth_provider,
+        oauth=bool(server.oauth),
+        oauth_scopes=server.oauth_scopes or "",
+        oauth_client_id=server.oauth_client_id,
+        oauth_client_secret=server.oauth_client_secret,
+        oauth_status=_oauth_status(server),
         config_hash=server.config_hash,
         source=server.source,
         tools=tools or [],
@@ -186,7 +208,47 @@ async def delete_server(server_id: str, request: Request, session: Session = Dep
     await sup.stop(server_id)  # tear down the process before removing desired state
     if not repo.delete_server(session, server_id):
         raise HTTPException(status_code=404, detail="server not found")
+    # Drop any stored upstream OAuth credentials for this (now-deleted) server.
+    ServerTokenStorage(server_id).clear()
     return Response(status_code=204)
+
+
+def _oauth_callback_url(request: Request) -> str:
+    """The public URL the upstream redirects the operator's browser back to after
+    sign-in. Built from the same base as the copy-menu links so it matches the host
+    the operator actually reached us on (and the operator-declared public URL when set)."""
+    return f"{_base_url(request)}/api/oauth/callback"
+
+
+@router.post("/servers/{server_id}/oauth/authorize")
+async def start_oauth(server_id: str, request: Request, session: Session = Depends(get_session)):
+    """Begin the interactive OAuth flow for a remote server: contact the upstream,
+    register/discover, and return the provider authorization URL for the SPA to send
+    the browser to. The operator finishes at ``/api/oauth/callback``."""
+    server = repo.get_server(session, server_id)
+    if server is None:
+        raise HTTPException(status_code=404, detail="server not found")
+    if server.runner != "remote" or not server.oauth:
+        raise HTTPException(status_code=400, detail="this server does not use OAuth")
+    try:
+        url = await oauth_flow.begin_authorization(server, callback_url=_oauth_callback_url(request))
+    except Exception as exc:  # discovery/registration failure or timeout
+        raise HTTPException(status_code=502, detail=f"could not start OAuth: {exc}") from exc
+    return {"authorize_url": url}
+
+
+@router.post("/servers/{server_id}/oauth/disconnect", response_model=ServerDetail)
+async def disconnect_oauth(
+    server_id: str, request: Request, session: Session = Depends(get_session)
+):
+    """Forget the stored upstream tokens so the operator can re-authenticate from
+    scratch (e.g. to switch accounts). The bridge, if running, keeps its in-memory
+    token until it next restarts — restart the server to force re-auth immediately."""
+    server = repo.get_server(session, server_id)
+    if server is None:
+        raise HTTPException(status_code=404, detail="server not found")
+    ServerTokenStorage(server_id).clear()
+    return _detail(server, request.app.state.supervisor, session, _base_url(request))
 
 
 @router.post("/servers/{server_id}/clone", response_model=ServerSummary, status_code=201)

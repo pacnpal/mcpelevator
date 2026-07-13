@@ -40,7 +40,11 @@
 					cwd: server.cwd,
 					mcp_http: server.transports.mcp_http,
 					rest_openapi: server.transports.rest_openapi,
-					auth_provider: server.auth_provider
+					auth_provider: server.auth_provider,
+					oauth: server.oauth,
+					oauth_scopes: server.oauth_scopes,
+					oauth_client_id: server.oauth_client_id,
+					oauth_client_secret: server.oauth_client_secret
 				}
 			: null
 	);

@@ -39,12 +39,28 @@ class ServerSummary(BaseModel):
     tools_count: int = 0
 
 
+class OAuthStatus(BaseModel):
+    """Upstream-OAuth state for a remote server, surfaced so the UI can prompt the
+    operator to authenticate (and warn when a re-auth is due)."""
+
+    enabled: bool = False  # is this server configured to authenticate upstream via OAuth?
+    authenticated: bool = False  # are tokens currently stored?
+    needs_auth: bool = False  # OAuth is on but no tokens yet — the operator must connect
+    expires_at: Optional[float] = None  # access-token expiry (unix seconds), if known
+    has_refresh_token: bool = False  # a refresh token exists (silent renewal until it lapses)
+
+
 class ServerDetail(ServerSummary):
     command: str
     args: list[str] = []
     env: dict[str, str] = {}
     cwd: Optional[str] = None
     auth_provider: str = "inherit"
+    oauth: bool = False
+    oauth_scopes: str = ""
+    oauth_client_id: Optional[str] = None
+    oauth_client_secret: Optional[str] = None
+    oauth_status: OAuthStatus = OAuthStatus()
     config_hash: str = ""
     source: str = "manual"
     tools: list[dict] = []
@@ -60,6 +76,11 @@ class ServerCreate(BaseModel):
     mcp_http: bool = True
     rest_openapi: bool = False
     auth_provider: AuthProvider = "inherit"
+    # Upstream OAuth (remote runner only; forced off elsewhere server-side).
+    oauth: bool = False
+    oauth_scopes: str = ""
+    oauth_client_id: Optional[str] = None
+    oauth_client_secret: Optional[str] = None
     enabled: bool = False
     # Provenance. Only a "catalog:<id>" value is honored (a registry install);
     # anything else falls back to "manual" server-side. See servers.create_server.
@@ -80,6 +101,10 @@ class ServerUpdate(BaseModel):
     mcp_http: Optional[bool] = None
     rest_openapi: Optional[bool] = None
     auth_provider: Optional[AuthProvider] = None
+    oauth: Optional[StrictBool] = None
+    oauth_scopes: Optional[str] = None
+    oauth_client_id: Optional[str] = None
+    oauth_client_secret: Optional[str] = None
 
 
 class ServerClone(BaseModel):

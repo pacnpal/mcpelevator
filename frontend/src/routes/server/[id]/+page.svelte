@@ -5,10 +5,12 @@
 		cloneServer,
 		deleteServer,
 		disableServer,
+		disconnectOauth,
 		enableServer,
 		errorMessage,
 		getServer,
-		getSettings
+		getSettings,
+		startOauth
 	} from '$lib/api';
 	import type { AuthProvider, ServerDetail } from '$lib/types';
 	import CopyButton from '$lib/components/CopyButton.svelte';
@@ -111,6 +113,49 @@
 		}
 	}
 
+	let oauthBusy = $state(false); // authorize / disconnect in flight
+
+	async function startOauthFlow() {
+		if (!server || oauthBusy) return;
+		oauthBusy = true;
+		try {
+			const { authorize_url } = await startOauth(server.id);
+			// Full-page navigation to the provider; it redirects back to
+			// /api/oauth/callback, which bounces to this page with ?oauth=connected.
+			window.location.href = authorize_url;
+		} catch (err) {
+			flashToast(errorMessage(err));
+			oauthBusy = false;
+		}
+	}
+
+	async function doDisconnect() {
+		if (!server || oauthBusy) return;
+		oauthBusy = true;
+		try {
+			const updated = await disconnectOauth(server.id);
+			server = { ...server, ...updated };
+			flashToast('Disconnected — re-authenticate to reconnect this server.');
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			oauthBusy = false;
+		}
+	}
+
+	// Surface the result of an OAuth round-trip (?oauth=connected|error&reason=…), then
+	// strip the query so a refresh doesn't re-toast. Runs once per navigation.
+	function consumeOauthResult() {
+		const result = page.url.searchParams.get('oauth');
+		if (!result) return;
+		if (result === 'connected') flashToast('Connected — OAuth sign-in complete.');
+		else if (result === 'error') {
+			const reason = page.url.searchParams.get('reason');
+			flashToast(reason ? `OAuth failed: ${reason}` : 'OAuth sign-in failed.');
+		}
+		void goto(`/server/${id}`, { replaceState: true, noScroll: true, keepFocus: true });
+	}
+
 	async function doDelete() {
 		if (!server || deleting) return;
 		deleting = true;
@@ -130,6 +175,7 @@
 		// Re-run when the route id changes.
 		void id;
 		load();
+		consumeOauthResult();
 		// Resolve the global default once so `inherit` servers show their
 		// effective auth. Best-effort — endpoint hint just hides on failure.
 		getSettings()
@@ -145,6 +191,13 @@
 	});
 
 	const envEntries = $derived(Object.entries(server?.env ?? {}));
+
+	// OAuth banner state. `oauth` is the resolved status object on a remote server.
+	const oauthState = $derived(server?.oauth_status ?? null);
+	const oauthExpiry = $derived(
+		oauthState?.expires_at ? new Date(oauthState.expires_at * 1000) : null
+	);
+	const oauthExpired = $derived(!!oauthExpiry && oauthExpiry.getTime() < Date.now());
 
 	// Effective auth for the endpoint hint: `inherit` resolves to the global
 	// default. `null` while the default is still unknown for an inherit server.
@@ -311,6 +364,101 @@
 				</a>
 			</div>
 		</div>
+
+		<!-- Upstream OAuth: connect / status banner -->
+		{#if oauthState?.enabled}
+			{#if oauthState.needs_auth}
+				<!-- Not yet connected: the primary call to action. -->
+				<div
+					class="flex flex-col gap-3 rounded-[var(--radius-card)] border px-4 py-4 sm:flex-row sm:items-center sm:justify-between"
+					style="border-color: color-mix(in oklab, var(--color-accent) 45%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);"
+				>
+					<div class="flex items-start gap-3">
+						<svg class="mt-0.5 size-5 shrink-0 text-[var(--color-accent)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<rect x="3" y="11" width="18" height="11" rx="2" />
+							<path d="M7 11V7a5 5 0 0 1 10 0v4" />
+						</svg>
+						<div class="min-w-0">
+							<p class="text-sm font-semibold text-[var(--color-ink)]">
+								This server uses OAuth to authenticate
+							</p>
+							<p class="mt-0.5 text-xs leading-relaxed text-[var(--color-ink-muted)]">
+								Sign in with the provider to connect it. mcpelevator stores the tokens and
+								refreshes them automatically.
+							</p>
+						</div>
+					</div>
+					<button
+						type="button"
+						onclick={startOauthFlow}
+						disabled={oauthBusy}
+						aria-busy={oauthBusy}
+						class="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold text-[var(--color-on-accent,#fff)] transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+						style="background-color: var(--color-accent);"
+					>
+						{#if oauthBusy}
+							<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+								<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
+								<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+							</svg>
+							Starting…
+						{:else}
+							Authenticate with provider
+						{/if}
+					</button>
+				</div>
+			{:else}
+				<!-- Connected: quiet status + re-auth / disconnect. -->
+				<div
+					class="flex flex-col gap-2 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3"
+				>
+					<div class="flex flex-wrap items-center justify-between gap-2">
+						<div class="flex items-center gap-2">
+							<svg class="size-4 shrink-0 {oauthExpired ? 'text-[var(--color-state-failed)]' : 'text-[var(--color-state-running,var(--color-accent))]'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								{#if oauthExpired}
+									<circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
+								{:else}
+									<path d="M20 6 9 17l-5-5" />
+								{/if}
+							</svg>
+							<span class="text-sm font-medium text-[var(--color-ink)]">
+								{oauthExpired ? 'OAuth token expired' : 'Authenticated via OAuth'}
+							</span>
+						</div>
+						<div class="flex items-center gap-2">
+							<button
+								type="button"
+								onclick={startOauthFlow}
+								disabled={oauthBusy}
+								aria-busy={oauthBusy}
+								class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
+							>
+								Re-authenticate
+							</button>
+							<button
+								type="button"
+								onclick={doDisconnect}
+								disabled={oauthBusy}
+								class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
+							>
+								Disconnect
+							</button>
+						</div>
+					</div>
+					<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+						{#if oauthExpired}
+							The access token has expired. If the server stops working, re-authenticate to
+							refresh it.
+						{:else if oauthExpiry}
+							Access token renews automatically; current one valid until {oauthExpiry.toLocaleString()}.
+						{:else}
+							Tokens renew automatically.
+						{/if}
+						OAuth sessions can lapse over time — if this server ever stops responding, re-authenticate here.
+					</p>
+				</div>
+			{/if}
+		{/if}
 
 		<!-- last_error -->
 		{#if server.last_error}

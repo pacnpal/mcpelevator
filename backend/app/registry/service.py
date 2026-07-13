@@ -73,6 +73,32 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
     return url, [transport]
 
 
+def normalize_oauth(
+    runner: str,
+    oauth: bool,
+    scopes: Optional[str],
+    client_id: Optional[str],
+    client_secret: Optional[str],
+) -> tuple[bool, str, Optional[str], Optional[str]]:
+    """Canonicalize a server's upstream-OAuth config.
+
+    OAuth only applies to the ``remote`` runner (there's no upstream URL to authenticate
+    against otherwise), so it is forced off for every other runner and the fields are
+    cleared — keeping ``config_hash`` stable and preventing a stray secret from riding
+    along on a local server. Blank strings collapse to ``""`` / ``None`` so the stored
+    shape is deterministic. A client secret without a client id is meaningless (there's
+    no static client to authenticate) — reject it rather than silently drop it.
+    """
+    if runner != "remote" or not oauth:
+        return False, "", None, None
+    scopes = (scopes or "").strip()
+    client_id = (client_id or "").strip() or None
+    client_secret = (client_secret or "").strip() or None
+    if client_secret and not client_id:
+        raise ValueError("an OAuth client secret requires a client id")
+    return True, scopes, client_id, client_secret
+
+
 # --- docker (OCI image) normalization ------------------------------------------
 # The canonical stored shape for a docker server is minimal (SSOT): command = image
 # reference, args = the CONTAINER's own arguments, env = the env map. A pasted
@@ -506,6 +532,13 @@ def compute_hash(server: Server) -> str:
             "cwd": server.cwd,
             "mcp_http": server.mcp_http,
             "rest_openapi": server.rest_openapi,
+            # OAuth config drives how the bridge authenticates upstream, so it IS part
+            # of the launch spec — a change must restart the bridge. (The tokens live in
+            # a file store, not the row, so *authenticating* leaves the hash untouched.)
+            "oauth": server.oauth,
+            "oauth_scopes": server.oauth_scopes,
+            "oauth_client_id": server.oauth_client_id,
+            "oauth_client_secret": server.oauth_client_secret,
             # auth_provider is intentionally excluded: it's enforced at the proxy
             # per-request, so changing it must NOT restart the bridge process.
         }
@@ -657,6 +690,10 @@ def create_server(
     mcp_http: bool = True,
     rest_openapi: bool = False,
     auth_provider: str = "inherit",
+    oauth: bool = False,
+    oauth_scopes: str = "",
+    oauth_client_id: Optional[str] = None,
+    oauth_client_secret: Optional[str] = None,
     enabled: bool = False,
     source: str = "manual",
     warnings_sink: Optional[list[str]] = None,
@@ -677,6 +714,10 @@ def create_server(
     if runner == "remote":
         command, args = normalize_remote(command, args)
         cwd = None
+    # OAuth applies only to remote; normalize (and force-off elsewhere) before hashing.
+    oauth, oauth_scopes, oauth_client_id, oauth_client_secret = normalize_oauth(
+        runner, oauth, oauth_scopes, oauth_client_id, oauth_client_secret
+    )
     # A docker server is stored in canonical (image, container_args, env) shape; a pasted
     # `docker run …` invocation is parsed down to it. The gate bites only when the server
     # is created already enabled — a disabled import stays reviewable.
@@ -700,6 +741,10 @@ def create_server(
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
         auth_provider=auth_provider,
+        oauth=oauth,
+        oauth_scopes=oauth_scopes,
+        oauth_client_id=oauth_client_id,
+        oauth_client_secret=oauth_client_secret,
         enabled=enabled,
         source=source,
     )
@@ -717,6 +762,10 @@ _MUTABLE_FIELDS = {
     "mcp_http",
     "rest_openapi",
     "auth_provider",
+    "oauth",
+    "oauth_scopes",
+    "oauth_client_id",
+    "oauth_client_secret",
 }
 
 
@@ -747,6 +796,17 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
         # the stale working directory here (remote has no process) to keep the row canonical.
         server.cwd = None
+    # Normalize OAuth (and force it off for any non-remote runner) so a stray secret can't
+    # ride along on a converted server and the hash stays deterministic.
+    server.oauth, server.oauth_scopes, server.oauth_client_id, server.oauth_client_secret = (
+        normalize_oauth(
+            server.runner,
+            bool(server.oauth),
+            server.oauth_scopes,
+            server.oauth_client_id,
+            server.oauth_client_secret,
+        )
+    )
     if server.runner == "docker":
         server.command, server.args, server.env, _ = _normalize_validate_docker(
             server.command, server.args, server.env, name=server.name
@@ -798,6 +858,10 @@ def clone_server(session: Session, server_id: str, *, name: Optional[str] = None
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,
         auth_provider=src.auth_provider,
+        oauth=bool(src.oauth),
+        oauth_scopes=src.oauth_scopes or "",
+        oauth_client_id=src.oauth_client_id,
+        oauth_client_secret=src.oauth_client_secret,
         enabled=False,
         source="clone",
     )

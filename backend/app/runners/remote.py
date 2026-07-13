@@ -46,8 +46,20 @@ def build(server: Server) -> ProcessSpec:
     # Rows are stored canonical (service.normalize_remote), but canonicalize again so
     # a hand-written/legacy row still yields a transport the bridge can build.
     transport = canonical_transport(args[0] if args else None) or DEFAULT_TRANSPORT
+    oauth = None
+    if getattr(server, "oauth", False):
+        # The bridge builds the OAuth httpx auth from this; tokens/DCR client info are
+        # read from the shared file store keyed by server id, not carried here.
+        oauth = {
+            "server_id": server.id,
+            "url": server.command,
+            "scopes": server.oauth_scopes or "",
+            "client_id": server.oauth_client_id or None,
+            "client_secret": server.oauth_client_secret or None,
+        }
     return ProcessSpec(
         command=server.command,  # upstream URL
         env=dict(server.env or {}),  # upstream HTTP headers
         transport=transport,
+        oauth=oauth,
     )

@@ -114,6 +114,10 @@
 			restOpenapi: init.rest_openapi ?? false,
 			startAfter: init.enabled ?? true,
 			authProvider: init.auth_provider ?? 'inherit',
+			oauth: init.oauth ?? false,
+			oauthScopes: init.oauth_scopes ?? '',
+			oauthClientId: init.oauth_client_id ?? '',
+			oauthClientSecret: init.oauth_client_secret ?? '',
 			envRows: envToRows(init.env)
 		};
 	});
@@ -137,6 +141,15 @@
 
 	// Remote runner: the upstream transport (command holds the URL; args = [transport]).
 	let transport = $state(seed.transport);
+
+	// Remote runner upstream auth: static Headers (the default) vs OAuth. When OAuth is
+	// on, mcpelevator runs the provider sign-in and stores/refreshes tokens; scopes and
+	// static client credentials are optional (empty client id = Dynamic Client Registration).
+	let oauth = $state(seed.oauth);
+	let oauthScopes = $state(seed.oauthScopes);
+	let oauthClientId = $state(seed.oauthClientId);
+	let oauthClientSecret = $state(seed.oauthClientSecret);
+	let oauthClientOpen = $state(!!seed.oauthClientId);
 
 	let cwd = $state(seed.cwd);
 	let mcpHttp = $state(seed.mcpHttp);
@@ -278,7 +291,13 @@
 			cwd: isRemote || isDocker ? null : cwd.trim() ? cwd.trim() : null,
 			mcp_http: mcpHttp,
 			rest_openapi: restOpenapi,
-			auth_provider: authProvider
+			auth_provider: authProvider,
+			// Upstream OAuth only applies to remote; the backend forces it off elsewhere,
+			// but keep the payload honest so a runner switch clears it client-side too.
+			oauth: isRemote && oauth,
+			oauth_scopes: isRemote && oauth ? oauthScopes.trim() : '',
+			oauth_client_id: isRemote && oauth ? oauthClientId.trim() || null : null,
+			oauth_client_secret: isRemote && oauth ? oauthClientSecret.trim() || null : null
 		};
 		if (mode === 'create') payload.enabled = startAfter;
 		// Only send a slug when it's actually a rename, so an unchanged edit doesn't
@@ -481,9 +500,133 @@
 				</svg>
 			</div>
 			<p class="text-xs text-[var(--color-ink-dim)]">
-				mcpelevator proxies this endpoint and fronts it with its own auth. Add any
-				upstream auth as <span class="font-medium">Headers</span> below.
+				mcpelevator proxies this endpoint and fronts it with its own auth. Choose how it
+				authenticates <span class="font-medium">to the upstream</span> below.
 			</p>
+
+			<!-- Upstream authentication: static Headers vs OAuth sign-in. -->
+			<span class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
+				Upstream authentication
+			</span>
+			<div class="grid grid-cols-2 gap-2">
+				<label
+					class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+					style={!oauth
+						? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+				>
+					<span class="flex items-center gap-2">
+						<input type="radio" name="upstream-auth" checked={!oauth} onchange={() => (oauth = false)} />
+						<span class="text-sm font-medium text-[var(--color-ink)]">Headers</span>
+					</span>
+					<span class="text-xs text-[var(--color-ink-dim)]">API key / static bearer token</span>
+				</label>
+				<label
+					class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+					style={oauth
+						? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+				>
+					<span class="flex items-center gap-2">
+						<input type="radio" name="upstream-auth" checked={oauth} onchange={() => (oauth = true)} />
+						<span class="text-sm font-medium text-[var(--color-ink)]">OAuth</span>
+					</span>
+					<span class="text-xs text-[var(--color-ink-dim)]">Sign in with the provider</span>
+				</label>
+			</div>
+
+			<!-- Which to pick: most servers support both, but not all. -->
+			<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+				Most remote MCP servers accept <span class="font-medium">both</span> a static token
+				header and OAuth, but some support only one — check the server's docs to be sure. A
+				long-lived <span class="font-medium">token/API key</span> (under Headers) is the more
+				permanent option; <span class="font-medium">OAuth</span> is best when the provider
+				requires it or doesn't issue static tokens.
+			</p>
+
+			{#if oauth}
+				<div class="mt-1 flex flex-col gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-3">
+					<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+						{#if mode === 'create'}
+							After you create this server, open it and click
+							<span class="font-medium text-[var(--color-ink)]">Authenticate with provider</span>
+							to sign in — mcpelevator stores the tokens and refreshes them automatically.
+						{:else}
+							Use <span class="font-medium text-[var(--color-ink)]">Authenticate with provider</span>
+							on the server page to sign in — mcpelevator stores the tokens and refreshes them
+							automatically.
+						{/if}
+					</p>
+					<p
+						class="flex items-start gap-2 text-xs leading-relaxed text-[var(--color-ink-muted)]"
+					>
+						<svg class="mt-0.5 size-4 shrink-0 text-[var(--color-ink-dim)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
+						</svg>
+						<span>
+							OAuth sessions can expire. Refresh is automatic, but if the provider's refresh
+							window lapses you'll need to re-authenticate here to keep the server working —
+							check on it periodically.
+						</span>
+					</p>
+
+					<div class="flex flex-col gap-2">
+						<label for="srv-oauth-scopes" class="text-xs font-medium text-[var(--color-ink-muted)]">
+							Scopes <span class="text-[var(--color-ink-dim)]">(optional, space-separated)</span>
+						</label>
+						<input
+							id="srv-oauth-scopes"
+							type="text"
+							bind:value={oauthScopes}
+							autocomplete="off"
+							spellcheck="false"
+							placeholder="read write"
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+						<p class="text-xs text-[var(--color-ink-dim)]">
+							Leave blank to request whatever scopes the provider advertises.
+						</p>
+					</div>
+
+					<!-- Static client credentials: optional. Blank = Dynamic Client Registration. -->
+					<div class="flex flex-col gap-2">
+						<button
+							type="button"
+							onclick={() => (oauthClientOpen = !oauthClientOpen)}
+							class="flex w-fit items-center gap-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
+						>
+							<svg class="size-3.5 transition-transform" style={oauthClientOpen ? 'transform: rotate(90deg);' : ''} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<path d="m9 18 6-6-6-6" />
+							</svg>
+							Client credentials (advanced)
+						</button>
+						{#if oauthClientOpen}
+							<div class="flex flex-col gap-2">
+								<input
+									type="text"
+									bind:value={oauthClientId}
+									autocomplete="off"
+									spellcheck="false"
+									placeholder="Client ID (optional — blank auto-registers)"
+									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								/>
+								<input
+									type="password"
+									bind:value={oauthClientSecret}
+									autocomplete="off"
+									spellcheck="false"
+									placeholder="Client secret (optional)"
+									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								/>
+								<p class="text-xs text-[var(--color-ink-dim)]">
+									Leave blank to register automatically (Dynamic Client Registration). Fill these
+									in only if the provider issued you a pre-registered client.
+								</p>
+							</div>
+						{/if}
+					</div>
+				</div>
+			{/if}
 		</div>
 	{:else if isDocker}
 		<!-- runner === docker: command = OCI image ref, args = the container's own args.
@@ -698,7 +841,7 @@
 	<fieldset class="flex flex-col gap-2 border-0 p-0">
 		<div class="flex items-center justify-between">
 			<legend class="text-sm font-medium text-[var(--color-ink)]">
-				{isRemote ? 'Headers' : 'Environment'}
+				{isRemote ? (oauth ? 'Extra headers' : 'Headers') : 'Environment'}
 			</legend>
 			<button
 				type="button"
@@ -724,7 +867,9 @@
 				class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-3 text-xs text-[var(--color-ink-dim)]"
 			>
 				{isRemote
-					? 'No headers. Add upstream auth (e.g. Authorization) the remote endpoint needs.'
+					? oauth
+						? 'No extra headers. OAuth supplies the Authorization header; add others only if the upstream needs them.'
+						: 'No headers. Add upstream auth (e.g. Authorization) the remote endpoint needs.'
 					: 'No environment variables. Add API keys or config the server needs.'}
 			</p>
 		{:else}
