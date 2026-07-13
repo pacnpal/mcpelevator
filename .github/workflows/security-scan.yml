@@ -79,6 +79,9 @@ jobs:
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          # Without this, trivy-action's SARIF mode deliberately ignores the
+          # severity filter above and reports ALL severities.
+          limit-severities-for-sarif: true
           # Narrowly-scoped, self-expiring suppressions for findings we can't act
           # on yet (e.g. Go stdlib CVEs baked into the upstream-built docker CLI
           # binary, pending a docker-ce-cli rebuild). See the file for rationale.
@@ -94,3 +97,13 @@ jobs:
           # that's what lets a run here close alerts a release scan opened.
           ref: refs/heads/main
           sha: ${{ steps.main.outputs.sha }}
+          # Code-scanning analyses are matched per (ref, category); when no
+          # category is given, upload-sarif derives one from "<workflow
+          # path>:<job id>", which would silo this workflow's uploads away from
+          # the release scan's and leave its alerts open forever. This value is
+          # NOT arbitrary: it must stay byte-identical to the category in
+          # docker-image.yml's upload step, and it deliberately spells the
+          # release scan's original auto-derived category so it also matches
+          # the analyses (and open alerts) uploaded before the category was
+          # made explicit.
+          category: ".github/workflows/docker-image.yml:scan"
