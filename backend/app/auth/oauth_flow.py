@@ -210,15 +210,18 @@ async def _drive(
         # metadata the bridge preloads so refresh targets the right endpoint + resource.
         client_info = await mem.get_client_info()
         try:
+            # Write client info + discovered metadata FIRST, then the tokens LAST. status()
+            # keys off the token blob, so tokens-last means a metadata write that raises never
+            # leaves the store looking authenticated with a half-promoted grant.
             if client_info is not None:
                 await real.set_client_info(client_info)
-            await real.set_tokens(tokens)
             meta = getattr(provider.context, "oauth_metadata", None)
             if meta is not None:
                 real.set_metadata(meta)
             prm = getattr(provider.context, "protected_resource_metadata", None)
             if prm is not None:
                 real.set_protected_resource_metadata(prm)
+            await real.set_tokens(tokens)
         except Exception as exc:  # noqa: BLE001 — persistence failure = the grant didn't stick
             inner_error = exc
         else:

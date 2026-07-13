@@ -249,7 +249,11 @@ class ServerTokenStorage(TokenStorage):
             data = self._read()
             if not data:
                 return
-            if data.pop("tokens", None) is not None or data.pop("expires_at", None) is not None:
+            # Pop BOTH before the check — an ``or`` on the two pops would short-circuit and
+            # leave a stale ``expires_at`` behind when a token was present.
+            tokens_popped = data.pop("tokens", None) is not None
+            expiry_popped = data.pop("expires_at", None) is not None
+            if tokens_popped or expiry_popped:
                 self._write(data)
 
     def clear(self) -> None:
