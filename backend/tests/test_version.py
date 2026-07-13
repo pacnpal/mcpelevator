@@ -13,8 +13,18 @@ def test_version_prefers_env(monkeypatch):
 
 def test_version_falls_back_to_pyproject(monkeypatch):
     # A source checkout (no MCPE_VERSION, virtual package) resolves from pyproject.toml,
-    # never the "unknown" placeholder.
+    # never the "unknown" placeholder. Force the metadata lookup to miss so the fallback is
+    # always exercised — otherwise an ambient editable install of mcpelevator (with a
+    # possibly-different version) would satisfy step 2 and this test wouldn't test the fallback.
+    import importlib.metadata
+
     monkeypatch.delenv("MCPE_VERSION", raising=False)
+
+    def _miss(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", _miss)
+
     resolved = _resolve_version()
     assert resolved == _version_from_pyproject()
     assert resolved and resolved[0].isdigit()

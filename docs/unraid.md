@@ -103,10 +103,11 @@ To turn it on in the template (both steps are required):
 
 1. Set **Docker Runner (root-equivalent)** (`MCPE_DOCKER_RUNNER`) to `true`. This seeds the
    `docker_runner` setting on first boot; the Settings toggle is authoritative afterwards.
-2. Add the **Docker Socket** mount — host path `/var/run/docker.sock` → container
-   `/var/run/docker.sock` (the template ships this as an empty, advanced field; fill in the
-   host path to mount it). This is the *sibling-container* model: launched images talk to
-   Unraid's own Docker daemon.
+2. Add the **Docker socket mount** manually — in the container's edit page click **Add another
+   Path, Port, Variable, Label or Device**, choose **Path**, and set both **Container Path** and
+   **Host Path** to `/var/run/docker.sock`. This is the *sibling-container* model: launched
+   images talk to Unraid's own Docker daemon. (The template deliberately doesn't ship this mount —
+   an empty socket path would generate an invalid bind and fail the container for everyone.)
 
 Once enabled, paste an `mcpServers` docker config (e.g. `docker run … <image>`) or install
 an **OCI** catalog entry, then start it like any other server. mcpelevator stores the

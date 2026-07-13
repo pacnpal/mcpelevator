@@ -21,7 +21,9 @@ def _version_from_pyproject() -> Optional[str]:
     try:
         with pyproject.open("rb") as f:
             return tomllib.load(f)["project"]["version"]
-    except (OSError, KeyError, tomllib.TOMLDecodeError):
+    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError):
+        # TypeError guards a structurally-malformed file (e.g. ``project`` parsed as a
+        # non-table), so a bad pyproject can never crash the import of ``app``.
         return None
 
 
