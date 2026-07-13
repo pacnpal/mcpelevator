@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { listServers } from '$lib/api';
 	import type { ServerSummary } from '$lib/types';
 	import ServerCard from '$lib/components/ServerCard.svelte';
@@ -48,6 +50,20 @@
 	$effect(() => {
 		load();
 		return () => clearTimeout(toastTimer);
+	});
+
+	// The OAuth callback's failure redirect lands HERE (`/?oauth=error` — a fixed,
+	// literal target; see backend/app/api/auth.py). The popup flow consumes it via the
+	// root layout before this page ever shows, but the full-tab fallback (popup blocked,
+	// or a cross-origin callback) arrives as a regular navigation — surface the failure
+	// instead of silently dumping the operator on the server list, then strip the query
+	// so a refresh doesn't re-toast.
+	$effect(() => {
+		void page.url.search;
+		if (page.url.searchParams.get('oauth') !== 'error') return;
+		const reason = page.url.searchParams.get('reason');
+		flashToast(reason ? `OAuth failed: ${reason}` : 'OAuth sign-in failed.');
+		void goto('/', { replaceState: true, noScroll: true, keepFocus: true });
 	});
 </script>
 

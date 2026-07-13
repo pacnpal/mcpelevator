@@ -209,6 +209,25 @@ def cancel_pending(server_id: str) -> None:
     _cancel_existing(server_id)
 
 
+def _repair_authorization_url(url: str) -> str:
+    """Fix authorization URLs the SDK builds for endpoints that already carry a query.
+
+    The SDK joins its parameters as ``f"{auth_endpoint}?{urlencode(params)}"`` — but some
+    providers advertise an ``authorization_endpoint`` that itself contains a query string
+    (Railway: ``/oauth/auth?resource=https%3A%2F%2Fbackboard.railway.com``). The blind join
+    yields a second raw ``?``, and everything after it — ``response_type=code`` first —
+    is swallowed into the preceding parameter's value, so the provider rejects the request.
+
+    RFC 3986 permits raw ``?`` inside a query, so the endpoint's own query may legally
+    contain more of them — but ``urlencode`` percent-encodes ``?``, so in the joined URL
+    the LAST raw ``?`` is always the separator the SDK added. Re-join only that one with
+    ``&``, leaving the endpoint's own query byte-for-byte intact."""
+    base, sep, params = url.rpartition("?")
+    if not sep or "?" not in base:
+        return url  # zero or one '?' — already well-formed
+    return f"{base}&{params}"
+
+
 def _extract_state(url: str) -> Optional[str]:
     try:
         values = parse_qs(urlparse(url).query).get("state")
@@ -372,6 +391,7 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     pending = _Pending(server.id)
 
     async def redirect_handler(authorization_url: str) -> None:
+        authorization_url = _repair_authorization_url(authorization_url)
         state = _extract_state(authorization_url)
         pending.state = state
         if state is not None:
