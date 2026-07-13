@@ -41,9 +41,11 @@ on:
 
 concurrency:
   # Releases serialize among themselves (a newer release supersedes an in-flight
-  # build), but manual builds get their own per-version group so a dev/beta
-  # build can't cancel a release publish (or vice versa).
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.version) || 'release' }}
+  # build), and manual builds serialize per channel — keyed on the channel, not
+  # the free-typed version, so `v1.2.3` and `1.2.3` dispatches can't race the
+  # same image tag from different groups. Release and manual runs never cancel
+  # each other.
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.channel) || 'release' }}
   cancel-in-progress: true
 
 env:
@@ -128,17 +130,18 @@ jobs:
               exit 1
               ;;
           esac
-          # Require a full semver (X.Y.Z, optionally -prerelease/+build). A release
-          # tagged with anything else (e.g. "docs-2026") must not publish an image:
-          # every image has to carry a real release version in APP_VERSION so the
-          # running instance reports the version, never a bare tag like "latest".
-          case "$VERSION" in
-            [0-9]*.[0-9]*.[0-9]*) ;;
-            *)
-              echo "Refusing to build: version '$VERSION' is not a full semver (X.Y.Z)." >&2
-              exit 1
-              ;;
-          esac
+          # Require a strict full semver (X.Y.Z, optionally -prerelease). A loose
+          # glob is not enough now that the free-typed manual input feeds the
+          # image tag directly: 1.2.3.4 or 1.2.3foo must not publish. +build
+          # metadata is rejected too ('+' can't appear in a docker tag; the
+          # charset check above already refuses it). Every image has to carry a
+          # real version in APP_VERSION so the running instance reports the
+          # version, never a bare tag like "latest".
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+          if ! printf '%s' "$VERSION" | grep -Eq "$SEMVER_RE"; then
+            echo "Refusing to build: version '$VERSION' is not a full semver (X.Y.Z[-prerelease])." >&2
+            exit 1
+          fi
           # A manual build may be of any ref, so its image tag is namespaced by
           # the required channel (dev-1.2.3 / beta-1.2.3): it can never collide
           # with — or impersonate — a release's version tag.
@@ -173,9 +176,12 @@ jobs:
             type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' && !startsWith(steps.version.outputs.version, '0.') }}
             type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
             type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease }}
-            # always a git short SHA tag, channel-prefixed on manual runs so a
-            # dev build of a released commit can't overwrite the release's sha tag
-            type=sha,prefix=${{ github.event_name == 'workflow_dispatch' && format('{0}-sha-', inputs.channel) || 'sha-' }},format=short
+            # always a git short SHA tag; on manual runs it carries the channel
+            # AND version (dev-1.2.3-sha-abc1234) so it can't overwrite the
+            # release's sha tag, and re-dispatching the same commit with a
+            # different version can't silently repoint one sha tag at images
+            # stamped with different APP_VERSIONs
+            type=sha,prefix=${{ github.event_name == 'workflow_dispatch' && format('{0}-{1}-sha-', inputs.channel, steps.version.outputs.version) || 'sha-' }},format=short
           labels: |
             org.opencontainers.image.title=mcpelevator
             org.opencontainers.image.description=Elevate stdio MCP servers into authenticated HTTP endpoints
