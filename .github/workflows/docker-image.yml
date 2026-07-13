@@ -5,17 +5,34 @@ name: Build and Push Docker Image
 # Runs on GitHub-hosted runners (ubuntu-latest). Docker and buildx are
 # pre-installed on GitHub-hosted runners, and arm64 layers are built via QEMU.
 #
-# Trigger: ONLY a published GitHub release whose tag is a full semver (vX.Y.Z,
-# optionally -prerelease). There is deliberately no manual/workflow_dispatch path:
-# every published image is stamped with a real release version (APP_VERSION), so
-# the running instance reports e.g. `v1.2.3` — never `latest`/`dev`/a bare image
-# tag. A release tagged with anything that isn't full semver fails the build.
+# Triggers:
+#   - A published GitHub release whose tag is a full semver (vX.Y.Z, optionally
+#     -prerelease). The release tag is the image version.
+#   - Manual workflow_dispatch, which requires an explicit full-semver `version`
+#     input (e.g. to rebuild a release image on a patched base). Pick the matching
+#     tag as the ref when rebuilding an old version. `latest` is only pushed when
+#     the `latest` checkbox is ticked.
+#
+# In both cases every published image is stamped with a real release version
+# (APP_VERSION), so the running instance reports e.g. `v1.2.3` — never
+# `latest`/`dev`/a bare image tag. Anything that isn't full semver fails the build.
 #
 # No secrets required: GHCR auth uses the automatic GITHUB_TOKEN.
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image version to build (full semver, e.g. 1.2.3 or v1.2.3-rc.1)"
+        required: true
+        type: string
+      latest:
+        description: "Also push the `latest` tag"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}
@@ -83,10 +100,17 @@ jobs:
 
       - name: Resolve version
         id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          # Only releases trigger this workflow, so the version is always the
-          # release tag with any leading `v` stripped (v1.2.3 -> 1.2.3).
-          VERSION="${GITHUB_REF_NAME#v}"
+          # Release: the version is the release tag. Manual dispatch: the version
+          # is the required `version` input. Either way any leading `v` is
+          # stripped (v1.2.3 -> 1.2.3).
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${INPUT_VERSION#v}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
           # Reject anything outside a safe tag charset before it reaches later steps.
           case "$VERSION" in
             ''|*[!A-Za-z0-9_.-]*)
@@ -114,13 +138,16 @@ jobs:
         with:
           images: ${{ env.GHCR_IMAGE }}
           tags: |
-            # Versioned tags from the release tag (vX.Y.Z)
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
-            # latest for a stable release, beta for a prerelease
-            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
-            type=raw,value=beta,enable=${{ github.event.release.prerelease }}
+            # Versioned tags from the resolved version (release tag or the
+            # workflow_dispatch `version` input) — the ref isn't a tag on a
+            # manual run, so pass the version explicitly instead of relying on it.
+            type=semver,pattern={{version}},value=v${{ steps.version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.version }}
+            type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }},enable=${{ !startsWith(steps.version.outputs.version, '0.') }}
+            # latest for a stable release (or when explicitly requested on a
+            # manual run), beta for a prerelease
+            type=raw,value=latest,enable=${{ (github.event_name == 'release' && !github.event.release.prerelease) || (github.event_name == 'workflow_dispatch' && inputs.latest) }}
+            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease }}
             # always a git short SHA tag
             type=sha,prefix=sha-,format=short
           labels: |
@@ -197,12 +224,13 @@ jobs:
         if: always() && hashFiles('trivy-results.sarif') != ''
         with:
           sarif_file: trivy-results.sarif
-          # This workflow only fires on release:published, so GITHUB_REF is the
-          # tag (refs/tags/vX.Y.Z). Code-scanning alerts are tracked per-ref and
-          # only auto-close when a newer analysis on the SAME ref omits them —
-          # a tag scan can never clear an alert on main. Pin the upload to main
-          # (release commits are cut from main) so each release reconciles the
-          # default-branch alert set instead of piling up dead per-tag analyses.
+          # GITHUB_REF here is usually a tag (refs/tags/vX.Y.Z on a release, or
+          # a manual dispatch run against a tag). Code-scanning alerts are
+          # tracked per-ref and only auto-close when a newer analysis on the
+          # SAME ref omits them — a tag scan can never clear an alert on main.
+          # Pin the upload to main (release commits are cut from main) so each
+          # scan reconciles the default-branch alert set instead of piling up
+          # dead per-tag analyses.
           ref: refs/heads/main
           sha: ${{ github.sha }}
 
