@@ -12,7 +12,7 @@
 		getSettings,
 		startOauth
 	} from '$lib/api';
-	import { listenForOauthResult, openOauthPopup } from '$lib/oauthPopup';
+	import { listenForOauthResult, openOauthPopup, popupCanRelay } from '$lib/oauthPopup';
 	import type { AuthProvider, ServerDetail } from '$lib/types';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
@@ -116,18 +116,22 @@
 
 	let oauthBusy = $state(false); // authorize / disconnect in flight
 	let oauthPopupWatch: ReturnType<typeof setInterval> | undefined;
+	// Nonce of the flow THIS page started; broadcasts carrying any other nonce belong
+	// to a different tab's sign-in and are ignored.
+	let oauthNonce: string | null = null;
 
 	// While the popup is open, poll for the operator closing it mid-sign-in (there's no
 	// event for that) so the Authorize button doesn't stay stuck busy. A completed flow
-	// clears the watch via the message listener before the popup closes itself.
+	// clears the watch via the broadcast listener before the popup closes itself.
 	function watchOauthPopup(popup: Window) {
 		clearInterval(oauthPopupWatch);
 		oauthPopupWatch = setInterval(() => {
 			if (!popup.closed) return;
 			clearInterval(oauthPopupWatch);
 			oauthPopupWatch = undefined;
+			oauthNonce = null;
 			oauthBusy = false;
-			// The result message normally beats the close, but don't trust the timing:
+			// The result broadcast normally beats the close, but don't trust the timing:
 			// refresh so a grant that DID land is reflected even if the message was lost.
 			void load(true);
 		}, 500);
@@ -140,23 +144,30 @@
 		// window.open there — and point it at the provider once the URL arrives. The
 		// provider redirects back to /api/oauth/callback inside the popup; the root
 		// layout broadcasts the result here (same-origin channel) and closes it.
-		const popup = openOauthPopup();
+		const handle = openOauthPopup();
 		try {
 			const { authorize_url } = await startOauth(server.id);
-			if (popup === null) {
+			if (handle === null) {
 				// Popup blocked: fall back to the full-page navigation; the callback
 				// bounces back to this page with ?oauth=….
 				window.location.href = authorize_url;
-			} else if (popup.closed) {
+			} else if (handle.popup.closed) {
 				// The operator closed the popup while the URL was being fetched —
 				// that's a cancel, not a blocker; don't yank the whole tab away.
 				oauthBusy = false;
+			} else if (!popupCanRelay(authorize_url)) {
+				// The callback lands on a DIFFERENT origin (MCPE_PUBLIC_BASE_URL set
+				// while browsing via LAN/localhost): the popup could never message us
+				// back, so use the full-tab flow for this configuration.
+				handle.popup.close();
+				window.location.href = authorize_url;
 			} else {
-				popup.location.href = authorize_url;
-				watchOauthPopup(popup);
+				oauthNonce = handle.nonce;
+				handle.popup.location.href = authorize_url;
+				watchOauthPopup(handle.popup);
 			}
 		} catch (err) {
-			popup?.close();
+			handle?.popup.close();
 			flashToast(errorMessage(err));
 			oauthBusy = false;
 		}
@@ -164,7 +175,9 @@
 
 	// Receive the sign-in result broadcast from the popup by the root layout.
 	$effect(() => {
-		const stop = listenForOauthResult(({ result, reason }) => {
+		const stop = listenForOauthResult(({ result, reason, nonce }) => {
+			if (oauthNonce === null || nonce !== oauthNonce) return; // another tab's flow
+			oauthNonce = null;
 			clearInterval(oauthPopupWatch);
 			oauthPopupWatch = undefined;
 			oauthBusy = false;
