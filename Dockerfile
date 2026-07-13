@@ -33,20 +33,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 
-# docker CLI ONLY (docker-ce-cli, not the daemon) from Docker's official apt repo, so the
-# opt-in `docker` runner can launch image-packaged MCP servers against a mounted daemon —
-# either the host's socket (sibling containers) or an isolated dind sidecar via DOCKER_HOST.
-# CLI only: the daemon is never run in-image. The runner stays root-equivalent and disabled
-# by default (see the docker_runner setting), so shipping the CLI is inert until enabled.
-RUN install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
-    && chmod a+r /etc/apt/keyrings/docker.asc \
-    && arch="$(dpkg --print-architecture)" \
-    && echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends docker-ce-cli \
-    && rm -rf /var/lib/apt/lists/*
-
 # uv + uvx (Python MCP servers) from the official image
 COPY --from=uv /uv /uvx /bin/
 
@@ -64,6 +50,30 @@ COPY --from=frontend /fe/build /app/frontend/build
 # backend/app/__init__.py). A non-release/local build gets the honest 0.0.0-dev default rather
 # than a fake number. No source stamping — the env var is the single injection point.
 ARG APP_VERSION=0.0.0-dev
+
+# docker CLI ONLY (docker-ce-cli, not the daemon) from Docker's official apt repo, so the
+# opt-in `docker` runner can launch image-packaged MCP servers against a mounted daemon —
+# either the host's socket (sibling containers) or an isolated dind sidecar via DOCKER_HOST.
+# CLI only: the daemon is never run in-image. The runner stays root-equivalent and disabled
+# by default (see the docker_runner setting), so shipping the CLI is inert until enabled.
+#
+# Deliberately installed here, AFTER the cached dependency layers above, and keyed on
+# APP_VERSION (referenced in the RUN, so the arg's value is part of this layer's cache key).
+# Every release build carries a fresh APP_VERSION, so this layer always re-runs and reinstalls
+# the LATEST published docker-ce-cli .deb — picking up a Go-patched rebuild the moment Docker
+# ships one — without invalidating the expensive uv-sync/arm64 layers before it. That is what
+# lets the Go stdlib CVEs suppressed in .trivyignore.yaml clear automatically on the next
+# release once a fixed .deb exists, instead of a durably-cached layer re-shipping a
+# now-fixable binary while the suppression hides it.
+RUN echo "docker-ce-cli refresh for mcpelevator ${APP_VERSION}" \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && arch="$(dpkg --print-architecture)" \
+    && echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/app/backend/.venv/bin:${PATH}" \
     MCPE_VERSION=${APP_VERSION} \
