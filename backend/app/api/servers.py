@@ -97,7 +97,7 @@ def _summary(server: Server, sup, session: Session, base: str) -> ServerSummary:
 
 def _oauth_status(server: Server) -> OAuthStatus:
     """OAuth auth state for a remote server (reads the shared token file)."""
-    if not getattr(server, "oauth", False):
+    if not server.oauth:
         return OAuthStatus()
     st = ServerTokenStorage(server.id).status()
     return OAuthStatus(
@@ -242,13 +242,22 @@ async def disconnect_oauth(
     server_id: str, request: Request, session: Session = Depends(get_session)
 ):
     """Forget the stored upstream tokens so the operator can re-authenticate from
-    scratch (e.g. to switch accounts). The bridge, if running, keeps its in-memory
-    token until it next restarts — restart the server to force re-auth immediately."""
+    scratch (e.g. to switch accounts). A running bridge holds its access token in
+    memory, so an enabled server is restarted immediately: it re-reads the now-empty
+    store and stops serving with the revoked credential until re-authenticated."""
     server = repo.get_server(session, server_id)
     if server is None:
         raise HTTPException(status_code=404, detail="server not found")
     ServerTokenStorage(server_id).clear()
-    return _detail(server, request.app.state.supervisor, session, _base_url(request))
+    sup = request.app.state.supervisor
+    # Bounce a running bridge so it can no longer use the (now-cleared) in-memory token.
+    # The server stays enabled, so the reconciler restarts it; with no tokens it can't
+    # authenticate upstream and surfaces as needing re-auth — the intended "disconnected"
+    # state (matches the connect path, which also restarts to pick up fresh tokens).
+    if server.enabled:
+        await sup.stop(server_id)
+        sup.nudge()
+    return _detail(server, sup, session, _base_url(request))
 
 
 @router.post("/servers/{server_id}/clone", response_model=ServerSummary, status_code=201)

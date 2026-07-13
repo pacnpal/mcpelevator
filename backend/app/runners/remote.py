@@ -47,7 +47,7 @@ def build(server: Server) -> ProcessSpec:
     # a hand-written/legacy row still yields a transport the bridge can build.
     transport = canonical_transport(args[0] if args else None) or DEFAULT_TRANSPORT
     oauth = None
-    if getattr(server, "oauth", False):
+    if server.oauth:
         # The bridge builds the OAuth httpx auth from this; tokens/DCR client info are
         # read from the shared file store keyed by server id, not carried here.
         oauth = {
