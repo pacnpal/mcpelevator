@@ -19,10 +19,9 @@ from starlette.requests import Request
 from starlette.staticfiles import StaticFiles
 
 from app import __version__
-from app.aggregate.hub import AGGREGATE_SLUG, AggregateHub
-from app.aggregate.route import AggregateEndpoint
 from app.api import auth as auth_api
 from app.api import catalog as catalog_api
+from app.api import groups as groups_api
 from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
@@ -41,6 +40,9 @@ from app.auth.middleware import (
 )
 from app.config import get_settings
 from app.db import get_engine, init_db, repo
+from app.groups import registry as group_registry
+from app.groups.hub import GroupHub
+from app.groups.route import GroupDispatch
 from app.proxy.router import router as proxy_router
 from app.registry import service
 from app.registry import settings as runtime_settings
@@ -135,8 +137,12 @@ async def lifespan(app: FastAPI):
     with Session(get_engine()) as session:
         service.normalize_auth_providers(session)  # canonicalize legacy auth_provider values
         service.normalize_docker_servers(session)  # canonicalize legacy docker rows before enable
-        service.normalize_reserved_slugs(session)  # rename rows the /s/all mount would shadow
+        service.normalize_reserved_slugs(session)  # rename rows a reserved slug would shadow
         service.backfill_config_hashes(session)  # rehash upgraded rows -> no spurious restarts
+        # The group registry is the single source of truth for /g/<name>. Validate it
+        # against the server table before serving: an unknown member id means an
+        # inconsistent (hand-edited) config, and we refuse to boot rather than serve it.
+        group_registry.validate_at_startup(session)
     _bootstrap_private_lan()  # seed LAN access from env before deciding auth enforcement
     _bootstrap_docker_runner()  # seed docker-runner enable from env (headless)
     _bootstrap_control_plane_auth()
@@ -144,9 +150,9 @@ async def lifespan(app: FastAPI):
     supervisor = Supervisor()
     await supervisor.boot_reset()  # observed runtime from a prior process is stale
     app.state.supervisor = supervisor
-    # The aggregate hub (constructed in create_app) tracks the running topology: every
-    # reconcile pass converges the unified endpoint's mounted set.
-    supervisor.on_converged = lambda: app.state.aggregate.sync(supervisor)
+    # The group hub (constructed in create_app) tracks the running topology: every
+    # reconcile pass converges each group's mounted set.
+    supervisor.on_converged = lambda: app.state.groups.sync(supervisor)
     reconciler = asyncio.create_task(supervisor.run_forever())
     try:
         yield
@@ -157,7 +163,7 @@ async def lifespan(app: FastAPI):
             await reconciler
         except asyncio.CancelledError:
             pass
-        await app.state.aggregate.close()  # stop the aggregate's session manager
+        await app.state.groups.close()  # stop each group's session manager
         await app.state.http.aclose()
 
 
@@ -218,13 +224,13 @@ def create_app() -> FastAPI:
     app.include_router(catalog_api.router, prefix="/api", dependencies=gated)
     app.include_router(tokens_api.router, prefix="/api", dependencies=gated)
     app.include_router(settings_api.router, prefix="/api", dependencies=gated)
-    # Unified endpoint BEFORE the proxy catch-all: registration order wins, and the
-    # "all" slug is reserved so no real server can be shadowed by this mount. The hub
-    # is constructed here (state for the dispatcher) but only starts serving once the
-    # lifespan wires it to the supervisor and the setting is on.
-    hub = AggregateHub()
-    app.state.aggregate = hub
-    app.mount(f"/s/{AGGREGATE_SLUG}", AggregateEndpoint(hub))
+    app.include_router(groups_api.router, prefix="/api", dependencies=gated)
+    # Group endpoints (/g/<name>/mcp) BEFORE the proxy catch-all and the SPA mount:
+    # registration order wins. The hub is constructed here (state for the dispatcher)
+    # but only starts serving groups once the lifespan wires it to the supervisor.
+    hub = GroupHub()
+    app.state.groups = hub
+    app.mount("/g", GroupDispatch(hub))
     app.include_router(proxy_router)  # /s/{slug}/...
 
     fe = settings.frontend_dir

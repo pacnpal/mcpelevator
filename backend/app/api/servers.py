@@ -29,29 +29,17 @@ from app.api.schemas import (
     Transports,
     Urls,
 )
-from app.api.util import base_url
+from app.api.util import base_url, resync_groups
 from app.auth import oauth_flow
 from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Server
+from app.groups import registry as group_registry
 from app.registry import service
 from app.registry import settings as runtime_settings
 
 router = APIRouter()
-
-
-async def _resync_aggregate(request: Request) -> None:
-    """Converge the unified endpoint NOW instead of on the next reconcile. Membership-
-    affecting server changes — auth_provider tightened to bearer, mcp_http turned off,
-    a slug rename, a delete — must not leave the stale mounted set serveable in the
-    gap (under default auth 'none' a just-bearer'd server would otherwise stay exposed
-    auth-free through /s/all until the reconciler fires). No-op when the hub's
-    topology key is unchanged; sync() is lock-serialized and task-safe."""
-    try:
-        await request.app.state.aggregate.sync(request.app.state.supervisor)
-    except Exception as exc:  # the registry write already committed; don't fail the call
-        print(f"[mcpelevator] aggregate resync error: {exc}", flush=True)
 
 
 def _live_state(server: Server, sup, session: Session):
@@ -248,25 +236,43 @@ async def update_server(
         sup.rename_slug(server_id, server.slug)
     sup.nudge()  # config_hash may have changed -> reconciler restarts if needed
     if changes.keys() & {"auth_provider", "mcp_http", "slug"}:
-        await _resync_aggregate(request)  # membership/namespace changed — no async gap
+        await resync_groups(request)  # membership/namespace changed — no async gap
     return _summary(server, sup, session, base_url(request))
+
+
+def _prune_then_delete(session: Session, server_id: str) -> bool:
+    """Prune the server from every group's explicit member list, then delete the row —
+    both under a SINGLE hold of the config write lock. Run in the threadpool by the
+    caller, never on the event loop: prune_server and service.delete_server each take
+    that lock, and a bulk import holding it while deriving scrypt hashes would otherwise
+    stall the loop (and all proxy/API traffic) here.
+
+    Prune FIRST so an interruption between the two commits leaves a benign state — the
+    row lingers but no group references a missing id (which validate_at_startup would
+    refuse to boot on), and a retried delete completes it. Holding the lock across BOTH
+    also closes the window where a concurrent group write could re-add this server after
+    the prune but before the delete. The lock is reentrant, so the inner acquisitions in
+    prune_server / delete_server are cheap no-ops. A no-op prune for a nonexistent id.
+    Returns False when the server didn't exist (-> 404)."""
+    with service.config_write_lock():
+        group_registry.prune_server(session, server_id)
+        return service.delete_server(session, server_id)
 
 
 @router.delete("/servers/{server_id}", status_code=204)
 async def delete_server(server_id: str, request: Request, session: Session = Depends(get_session)):
     sup = request.app.state.supervisor
     await sup.stop(server_id)  # tear down the process before removing desired state
-    # Threadpool + service (not repo): the delete must queue behind the registry write
-    # lock — racing a threaded update that already loaded this row would blow up that
-    # update's commit — and waiting for the lock must not sit on the event loop.
-    if not await run_in_threadpool(service.delete_server, session, server_id):
+    # Prune + delete in the worker thread (see _prune_then_delete): both take the config
+    # write lock, so the wait must not sit on the event loop.
+    if not await run_in_threadpool(_prune_then_delete, session, server_id):
         raise HTTPException(status_code=404, detail="server not found")
     # Cancel any in-flight authorization and drop stored upstream OAuth credentials for this
     # (now-deleted) server — otherwise a late callback could re-promote tokens and leave an
     # orphan credential file on disk for a server that no longer exists.
     oauth_flow.cancel_pending(server_id)
     ServerTokenStorage(server_id).clear()
-    await _resync_aggregate(request)  # drop the deleted server from /s/all at once
+    await resync_groups(request)
     return Response(status_code=204)
 
 

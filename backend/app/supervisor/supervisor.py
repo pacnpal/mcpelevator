@@ -63,8 +63,8 @@ class Supervisor:
         self.units: dict[str, ServerUnit] = {}
         self._nudge = asyncio.Event()
         self._stopping = False
-        # Fired after each reconcile pass so a dependent (the aggregate hub) can
-        # converge on the new topology. The supervisor stays aggregate-unaware.
+        # Fired after each reconcile pass so a dependent (the group hub) can
+        # converge on the new topology. The supervisor stays group-unaware.
         self.on_converged: Optional[Callable[[], Awaitable[None]]] = None
 
     # --- lookups (used by the reverse proxy + API) ----------------------- #
@@ -83,7 +83,7 @@ class Supervisor:
 
     def running_endpoints(self) -> list[tuple[str, str, str, int]]:
         """``(server_id, slug, host, port)`` for every unit currently running —
-        the live topology the aggregate hub mounts from."""
+        the live topology the group hub mounts from."""
         return [
             (server_id, u.slug, u.host, u.port)
             for server_id, u in self.units.items()

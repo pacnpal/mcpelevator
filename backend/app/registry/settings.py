@@ -7,6 +7,7 @@ and the default auth provider for servers set to ``inherit``.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -31,14 +32,13 @@ DEFAULTS: dict[str, Any] = {
     # (sibling containers on the host, or an isolated dind sidecar via DOCKER_HOST). The
     # service/supervisor refuse to enable or start a docker server while this is off.
     "docker_runner": False,
-    # Serve the unified MCP endpoint at /s/all/mcp — one aggregated surface bundling
-    # the tools of the running servers, namespaced by slug. OFF by default: it's one
-    # URL that reaches many servers' tools, so exposed setups must opt in deliberately.
-    "unified_endpoint": False,
-    # Which servers the unified endpoint bundles: "all" (every running server) or a
-    # list of server ids (the operator-picked subset). Ids of since-deleted servers
-    # are simply ignored at mount time.
-    "unified_servers": "all",
+    # The group registry — the single source of truth for what /g/<name>/mcp serves.
+    # A mapping from group name to either "*" (every registered server, present and
+    # future) or an ordered list of server ids. EMPTY by default: a group is one URL
+    # that reaches many servers' tools, so exposed setups must declare each one
+    # deliberately. There is no special-case name — add {"all": "*"} for a bundle of
+    # everything. See app.groups.registry for the resolution + validation rules.
+    "groups": {},
 }
 
 
@@ -51,19 +51,39 @@ _PROVIDERS = {"none", "bearer"}
 _CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
 
 
-def _normalize_unified_servers(value: Any) -> Any:
-    """Validate the unified-endpoint membership: the literal ``"all"`` or a list of
-    server-id strings (deduped, order kept). Structural only — ids of deleted servers
-    are ignored at mount time rather than rejected here, so a delete can never strand
-    an unwritable setting."""
-    if value == "all":
-        return "all"
+# Group names are the routing key in /g/<name>/mcp, so they must be URL-safe: lowercase
+# alphanumerics and single hyphens (the slugify() vocabulary), non-empty. Validated here
+# so a name that couldn't be routed can never be stored.
+_GROUP_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def _normalize_group_members(name: str, value: Any) -> Any:
+    """Validate one group's member value: the literal ``"*"`` (every registered
+    server) or a list of server-id strings (deduped, order kept). Structural only —
+    referential validation (ids must be registered servers) lives in
+    ``app.groups.registry`` so create/delete can prune without a circular import."""
+    if value == "*":
+        return "*"
     if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
-        raise ValueError(f"invalid unified_servers: {value!r}")
+        raise ValueError(f"invalid members for group {name!r}: {value!r}")
     out: list[str] = []
     for v in value:
         if v not in out:
             out.append(v)
+    return out
+
+
+def _normalize_groups(value: Any) -> dict[str, Any]:
+    """Validate the group registry: a mapping from a URL-safe group name to a member
+    value (see ``_normalize_group_members``). Rejects a malformed name or member shape
+    so a value that couldn't be routed or resolved can never be stored."""
+    if not isinstance(value, dict):
+        raise ValueError(f"groups must be an object, got {value!r}")
+    out: dict[str, Any] = {}
+    for name, members in value.items():
+        if not isinstance(name, str) or not _GROUP_NAME_RE.match(name):
+            raise ValueError(f"invalid group name {name!r} (use lowercase letters, digits, hyphens)")
+        out[name] = _normalize_group_members(name, members)
     return out
 
 
@@ -105,10 +125,8 @@ def write(
             raise ValueError(f"invalid allow_private_lan: {value!r}")
         if key == "docker_runner" and not isinstance(value, bool):
             raise ValueError(f"invalid docker_runner: {value!r}")
-        if key == "unified_endpoint" and not isinstance(value, bool):
-            raise ValueError(f"invalid unified_endpoint: {value!r}")
-        if key == "unified_servers":
-            value = _normalize_unified_servers(value)
+        if key == "groups":
+            value = _normalize_groups(value)
         if key == "allowed_hosts":
             value = _normalize_hosts(value)
         pending[key] = value
@@ -140,10 +158,6 @@ def docker_runner(session: Session) -> bool:
     return repo.setting_get(session, "docker_runner", DEFAULTS["docker_runner"])
 
 
-def unified_endpoint(session: Session) -> bool:
-    return repo.setting_get(session, "unified_endpoint", DEFAULTS["unified_endpoint"])
-
-
-def unified_servers(session: Session) -> Any:
-    """``"all"`` or a list of server ids (see DEFAULTS)."""
-    return repo.setting_get(session, "unified_servers", DEFAULTS["unified_servers"])
+def groups(session: Session) -> dict[str, Any]:
+    """The group registry: ``{name: "*" | [server_id, ...]}`` (see DEFAULTS)."""
+    return repo.setting_get(session, "groups", DEFAULTS["groups"])

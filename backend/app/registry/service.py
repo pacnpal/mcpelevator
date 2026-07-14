@@ -12,6 +12,7 @@ import os
 import secrets
 import tempfile
 import threading
+from contextlib import contextmanager
 from functools import lru_cache, wraps
 from typing import Any, Optional
 from urllib.parse import urlsplit
@@ -697,12 +698,12 @@ def normalize_auth_providers(session: Session) -> int:
 
 
 def normalize_reserved_slugs(session: Session) -> int:
-    """Rename servers whose slug has since become reserved (e.g. ``all``, claimed by
-    the unified endpoint's ``/s/all`` mount) via the standard creation-time
-    disambiguation (``all`` -> ``all-2``). Without this a pre-existing row would be
-    silently shadowed by the new route. Slug is excluded from ``config_hash``, so the
-    rename never bounces a running bridge; the reconciler converges the routing key
-    within one pass. Idempotent. Returns the count changed."""
+    """Rename servers whose slug has since become reserved (e.g. ``summary``, which would
+    shadow the static ``/api/health/summary`` route) via the standard creation-time
+    disambiguation (``summary`` -> ``summary-2``). Without this a pre-existing row would
+    be silently shadowed by the sibling literal route. Slug is excluded from
+    ``config_hash``, so the rename never bounces a running bridge; the reconciler
+    converges the routing key within one pass. Idempotent. Returns the count changed."""
     changed = 0
     for server in repo.list_servers(session):
         if server.slug not in _RESERVED_SLUGS:
@@ -719,14 +720,14 @@ def normalize_reserved_slugs(session: Session) -> int:
     return changed
 
 
-# Slugs that would collide with a sibling literal segment on the proxy/API routes
-# and shadow it. A server slugged "summary" would capture GET /api/health/summary
-# (the aggregate route) so its own /api/health/{slug} could never be reached, and a
-# load balancer would read the aggregate instead of that server's status. "all" is
-# the unified endpoint's mount at /s/all (see app.aggregate), which is registered
-# before the proxy catch-all and would shadow a server slugged "all". Reserved here
-# so such a name is disambiguated (e.g. "summary" -> "summary-2") at creation.
-_RESERVED_SLUGS = frozenset({"summary", "all"})
+# Slugs that would collide with a sibling literal segment on the proxy/API routes and
+# shadow it. A server slugged "summary" would capture GET /api/health/summary (the
+# per-server-readiness aggregate for load balancers) so its own /api/health/{slug}
+# could never be reached, and a load balancer would read that summary instead of the
+# server's status. Reserved here so such a name is disambiguated (e.g. "summary" ->
+# "summary-2") at creation. Note: "all" is NOT reserved — group endpoints live under
+# their own /g/<name> prefix, so a server may be slugged "all" and served at /s/all.
+_RESERVED_SLUGS = frozenset({"summary"})
 
 # Registry writes were implicitly serialized when the sync service ran inline on the
 # event loop; now that the API handlers run them in the threadpool (to keep the scrypt
@@ -746,6 +747,18 @@ def _serialized_write(fn):
             return fn(*args, **kwargs)
 
     return wrapper
+
+
+@contextmanager
+def config_write_lock():
+    """Public access to the process-wide config write lock so a sibling registry (the
+    group registry, ``app.groups.registry``) can serialize its referential
+    validate-then-write against server create/update/delete. Without it a server delete
+    can land between a group write's ``validate_members`` and its commit, persisting a
+    group that references a now-deleted server — which the startup validation would then
+    refuse to boot on. The lock is an ``RLock``, so re-entering it (same thread) is safe."""
+    with _write_lock:
+        yield
 
 
 def _unique_slug(session: Session, name: str) -> str:

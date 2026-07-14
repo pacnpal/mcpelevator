@@ -167,11 +167,6 @@ class SettingsInfo(BaseModel):
     control_plane_auth: ControlPlaneAuthMode = "auto"
     allow_private_lan: bool = False
     docker_runner: bool = False
-    unified_endpoint: bool = False
-    # "all" or the operator-picked list of server ids the unified endpoint bundles
-    unified_servers: Union[Literal["all"], list[str]] = "all"
-    # read-only, derived: the copyable /s/all/mcp URL when the endpoint is enabled
-    unified_endpoint_url: Optional[str] = None
 
 
 class SettingsUpdate(BaseModel):
@@ -186,9 +181,24 @@ class SettingsUpdate(BaseModel):
     # StrictBool for the same reason — the docker runner is root-equivalent, so a coerced
     # truthy value must never flip it on.
     docker_runner: Optional[StrictBool] = None
-    # StrictBool again: the unified endpoint widens exposure, so no coerced truthiness.
-    unified_endpoint: Optional[StrictBool] = None
-    unified_servers: Optional[Union[Literal["all"], list[StrictStr]]] = None
+
+
+# ---- Groups (the /g/<name> registry) ----------------------------------------
+
+# A group's members: the wildcard "*" (every registered server, present and future)
+# or an explicit, ordered list of server ids. StrictStr so a non-string can't slip in.
+GroupMembers = Union[Literal["*"], list[StrictStr]]
+
+
+class GroupInfo(BaseModel):
+    name: str
+    members: GroupMembers
+    # read-only, derived: the copyable /g/<name>/mcp URL
+    url: str
+
+
+class GroupUpsert(BaseModel):
+    members: GroupMembers
 
 
 class AuthStatus(BaseModel):

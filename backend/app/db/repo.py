@@ -186,6 +186,21 @@ def get_token_by_hash(session: Session, token_hash: str) -> Optional[Token]:
     return session.exec(select(Token).where(Token.token_hash == token_hash)).first()
 
 
+def delete_tokens_by_scope(session: Session, scope: str) -> int:
+    """Hard-delete every token carrying exactly ``scope``; returns the count removed.
+
+    Used when a group is deleted: a ``group:<name>`` scope is a deterministic string
+    (unlike a random server id), so leaving its tokens behind would let them silently
+    re-authorize a *different* group later recreated under the same name. Revoking them
+    on delete keeps "delete the group" meaning "revoke access to it"."""
+    tokens = list(session.exec(select(Token).where(Token.scope == scope)).all())
+    for token in tokens:
+        session.delete(token)
+    if tokens:
+        session.commit()
+    return len(tokens)
+
+
 def delete_token(
     session: Session,
     token_id: str,

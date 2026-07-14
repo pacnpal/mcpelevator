@@ -1,18 +1,23 @@
 <script lang="ts">
 	import {
 		createToken,
+		deleteGroup,
 		deleteToken,
 		errorMessage,
 		getAuthStatus,
 		getSettings,
+		listGroups,
 		listServers,
 		listTokens,
+		putGroup,
 		updateSettings
 	} from '$lib/api';
 	import type {
 		AuthProvider,
 		BindMode,
 		ControlPlaneAuth,
+		GroupInfo,
+		GroupMembers,
 		ServerSummary,
 		SettingsInfo,
 		TokenCreated,
@@ -42,6 +47,7 @@
 	let settings = $state<SettingsInfo | null>(null);
 	let tokens = $state<TokenInfo[]>([]);
 	let servers = $state<ServerSummary[]>([]);
+	let groups = $state<GroupInfo[]>([]);
 	// Whether THIS browser holds a working control token (not just whether one exists
 	// in the backend). That's what decides if enabling enforcement would lock us out.
 	let hasUsableAdminCredential = $state(false);
@@ -50,15 +56,17 @@
 		loadState = 'loading';
 		loadError = null;
 		try {
-			const [s, t, srv, auth] = await Promise.all([
+			const [s, t, srv, grp, auth] = await Promise.all([
 				getSettings(),
 				listTokens(),
 				listServers(),
+				listGroups(),
 				getAuthStatus()
 			]);
 			settings = s;
 			tokens = t;
 			servers = srv;
+			groups = grp;
 			hasUsableAdminCredential = auth.authenticated;
 			loadState = 'ready';
 		} catch (err) {
@@ -110,10 +118,14 @@
 		return collides ? `${server.name} (${server.slug})` : server.name;
 	}
 
-	/** Human label for a token's scope: 'All servers', the server's label, or a
-	 * fallback when the scoped server no longer exists. */
+	/** Human label for a token's scope: 'All servers', a group, the server's label, or
+	 * a fallback when the scoped server/group no longer exists. */
 	function scopeLabel(scope: string): string {
-		if (scope === 'all') return 'All servers';
+		if (scope === 'all') return 'All servers & groups';
+		if (scope.startsWith('group:')) {
+			const name = scope.slice('group:'.length);
+			return groups.some((g) => g.name === name) ? `Group: ${name}` : 'Unknown group';
+		}
 		const server = servers.find((s) => s.id === scope);
 		return server ? serverLabel(server) : 'Unknown server';
 	}
@@ -340,54 +352,137 @@
 		patchSettings({ docker_runner: true }, 'docker_runner');
 	}
 
-	// ---- Unified endpoint -------------------------------------------------------
-	// One URL (/s/all/mcp) bundling the running servers' tools, namespaced by slug.
-	// Membership is either "all" or an explicit list of server ids — the operator
-	// picks which servers to combine.
-	const unifiedMode = $derived(settings?.unified_servers === 'all' ? 'all' : 'selected');
-	const unifiedSelection = $derived(
-		settings && settings.unified_servers !== 'all' ? settings.unified_servers : []
-	);
-	// Synthetic summary so the existing CopyMenu (client-config snippets) works for
-	// the aggregate URL without any changes to install.ts.
-	const aggregateSummary = $derived(
-		settings?.unified_endpoint && settings.unified_endpoint_url
-			? ({
-					id: 'aggregate',
-					slug: 'all',
-					name: 'All servers',
-					runner: 'remote',
-					enabled: true,
-					state: 'running',
-					transports: { mcp_http: true, rest_openapi: false },
-					urls: { mcp: settings.unified_endpoint_url, rest: null },
-					auth: settings.default_auth_provider === 'bearer' ? 'bearer' : 'none',
-					last_error: null,
-					pid: null,
-					port: null,
-					tools_count: 0
-				} satisfies ServerSummary)
-			: null
-	);
+	// ---- Groups (the /g/<name> registry) ----------------------------------------
+	// A group is a named bundle served at /g/<name>/mcp — the union of its running
+	// members' tools, namespaced by slug. Membership is "*" (every registered server,
+	// present and future) or an explicit list of server ids. There is no special-case
+	// name; add a group named "all" with members "*" for a bundle of everything.
+	let newGroupName = $state('');
+	let newGroupMode = $state<'all' | 'selected'>('all');
+	let newGroupSelection = $state<string[]>([]);
+	let savingGroup = $state(false);
+	let deletingGroup = $state<string | null>(null);
 
-	function setUnifiedEndpoint(value: boolean) {
-		if (!settings || settings.unified_endpoint === value) return;
-		patchSettings({ unified_endpoint: value }, 'unified_endpoint');
+	// A group name is the URL routing key, so mirror the backend grammar (lowercase
+	// alphanumerics + single hyphens) — reject anything that couldn't be routed.
+	const groupNameValid = $derived(/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(newGroupName.trim()));
+
+	/** Human label for a group's membership: "all servers" for the wildcard, else a
+	 * count. */
+	function membersLabel(members: GroupMembers): string {
+		if (members === '*') return 'all servers';
+		return members.length === 1 ? '1 server' : `${members.length} servers`;
 	}
 
-	function setUnifiedMode(mode: 'all' | 'selected') {
-		if (!settings || unifiedMode === mode) return;
-		// Switching to "selected" prefills every server, so nothing silently drops out
-		// of the bundle — the operator prunes from there.
-		const value = mode === 'all' ? ('all' as const) : servers.map((s) => s.id);
-		patchSettings({ unified_servers: value }, 'unified_servers');
+	/** Synthetic summary so the existing CopyMenu (client-config snippets) works for a
+	 * group's /g/<name>/mcp URL without any changes to install.ts. */
+	function groupSummary(group: GroupInfo): ServerSummary {
+		return {
+			id: `group:${group.name}`,
+			slug: group.name,
+			name: `Group: ${group.name}`,
+			runner: 'remote',
+			enabled: true,
+			state: 'running',
+			transports: { mcp_http: true, rest_openapi: false },
+			urls: { mcp: group.url, rest: null },
+			auth: settings?.default_auth_provider === 'bearer' ? 'bearer' : 'none',
+			last_error: null,
+			pid: null,
+			port: null,
+			tools_count: 0
+		} satisfies ServerSummary;
 	}
 
-	function toggleUnifiedServer(id: string, included: boolean) {
-		if (!settings || settings.unified_servers === 'all') return;
-		const current = settings.unified_servers;
-		const next = included ? [...current, id] : current.filter((x) => x !== id);
-		patchSettings({ unified_servers: next }, 'unified_servers');
+	function toggleNewGroupServer(id: string, included: boolean) {
+		newGroupSelection = included
+			? [...newGroupSelection, id]
+			: newGroupSelection.filter((x) => x !== id);
+	}
+
+	async function refreshGroups() {
+		try {
+			groups = await listGroups();
+		} catch (err) {
+			flashToast(errorMessage(err));
+		}
+	}
+
+	// A pending replace: set when the entered name matches an existing group, so the
+	// create form doubles as an in-place editor (putGroup replaces membership) WITHOUT
+	// silently overwriting — the operator confirms first. Cleared automatically once the
+	// name no longer matches (the banner's condition re-checks it).
+	let confirmReplaceName = $state<string | null>(null);
+
+	async function submitGroup() {
+		const name = newGroupName.trim();
+		const members: GroupMembers = newGroupMode === 'all' ? '*' : newGroupSelection;
+		savingGroup = true;
+		try {
+			await putGroup(name, members);
+			await refreshGroups();
+			newGroupName = '';
+			newGroupMode = 'all';
+			newGroupSelection = [];
+			confirmReplaceName = null;
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			savingGroup = false;
+		}
+	}
+
+	// The existing group a submit would replace (name matches), or null for a create.
+	const replaceTarget = $derived(
+		groups.find((g) => g.name === newGroupName.trim()) ?? null
+	);
+
+	// Load an existing group's CURRENT membership into the form so the operator edits
+	// from its real state — never from the default 'all'/[] — which would otherwise let
+	// an in-place replace silently broaden a group's (and its tokens') authorization.
+	function editGroup(group: GroupInfo) {
+		newGroupName = group.name;
+		newGroupMode = group.members === '*' ? 'all' : 'selected';
+		newGroupSelection = group.members === '*' ? [] : [...group.members];
+		confirmReplaceName = null;
+		confirmDeleteGroup = null;
+	}
+
+	function handleCreateGroup(e: SubmitEvent) {
+		e.preventDefault();
+		if (savingGroup || !groupNameValid) return;
+		const name = newGroupName.trim();
+		// putGroup has replace semantics. If the name is taken, require an explicit
+		// confirm so membership is never *silently* overwritten — but still allow editing
+		// an existing group in place, rather than forcing a delete+recreate that would
+		// take /g/<name>/mcp offline and revoke its group:<name> tokens.
+		if (replaceTarget) {
+			confirmReplaceName = name;
+			return;
+		}
+		void submitGroup();
+	}
+
+	// Delete needs an explicit confirm (it takes a live /g/<name>/mcp endpoint offline),
+	// mirroring the per-row token-revoke gate.
+	let confirmDeleteGroup = $state<string | null>(null);
+
+	async function handleDeleteGroup(name: string) {
+		if (deletingGroup) return;
+		deletingGroup = name;
+		try {
+			await deleteGroup(name);
+			groups = groups.filter((g) => g.name !== name);
+			// The backend revokes this group's tokens on delete; drop them from the list too
+			// so a revoked group:<name> token can't keep looking valid (and a same-named
+			// group recreated later won't make the stale rows appear to work again).
+			tokens = tokens.filter((t) => t.scope !== `group:${name}`);
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			deletingGroup = null;
+			confirmDeleteGroup = null;
+		}
 	}
 
 	// ---- Allowed hosts editor -------------------------------------------------
@@ -551,7 +646,7 @@
 						autocomplete="off"
 						spellcheck="false"
 						placeholder="e.g. claude-desktop"
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 					/>
 				</div>
 				<div class="flex min-w-0 flex-col gap-1.5">
@@ -561,12 +656,21 @@
 					<select
 						id="token-scope"
 						bind:value={newTokenScope}
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
 					>
-						<option value="all">All servers</option>
-						{#each servers as server (server.id)}
-							<option value={server.id}>{serverLabel(server)}</option>
-						{/each}
+						<option value="all">All servers &amp; groups</option>
+						{#if groups.length > 0}
+							<optgroup label="Groups">
+								{#each groups as group (group.name)}
+									<option value={`group:${group.name}`}>Group: {group.name}</option>
+								{/each}
+							</optgroup>
+						{/if}
+						<optgroup label="Servers">
+							{#each servers as server (server.id)}
+								<option value={server.id}>{serverLabel(server)}</option>
+							{/each}
+						</optgroup>
 					</select>
 				</div>
 				<button
@@ -632,8 +736,10 @@
 										<span
 											class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
 											title={token.scope === 'all'
-												? 'Authorizes every bearer-protected server'
-												: 'Authorizes only this server'}
+												? 'Authorizes every bearer-protected server and group'
+												: token.scope.startsWith('group:')
+													? 'Authorizes only this group'
+													: 'Authorizes only this server'}
 											style={token.scope === 'all'
 												? 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'
 												: 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'}
@@ -946,70 +1052,195 @@
 				{/if}
 			</fieldset>
 
-			<!-- Unified endpoint -->
-			<fieldset class="flex flex-col gap-2 border-0 p-0">
-				<legend class="text-sm font-medium text-[var(--color-ink)]">Unified endpoint</legend>
-				<label
-					class="flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
-					style={settings.unified_endpoint
-						? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
-						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+			<!-- Groups -->
+			<fieldset class="flex flex-col gap-3 border-0 p-0">
+				<legend class="text-sm font-medium text-[var(--color-ink)]">Groups</legend>
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					A group is served at <code class="font-mono">/g/&lt;name&gt;/mcp</code> — one URL
+					bundling its running members' tools, each prefixed by the member's slug (e.g.
+					<code class="font-mono">github_create_issue</code>). Members are
+					<code class="font-mono">all servers</code> (every registered server, including
+					future ones) or a picked list. A group uses the default auth provider above; when
+					that is <code class="font-mono">none</code>, members with stricter (bearer) auth are
+					excluded so they can't be reached auth-free. Name a group
+					<code class="font-mono">all</code> with <code class="font-mono">all servers</code>
+					for a bundle of everything.
+				</p>
+
+				<!-- Existing groups -->
+				{#if groups.length === 0}
+					<p
+						class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-4 text-center text-xs text-[var(--color-ink-dim)]"
+					>
+						No groups yet. Create one below to serve a bundle at
+						<code class="font-mono">/g/&lt;name&gt;/mcp</code>.
+					</p>
+				{:else}
+					<ul class="flex flex-col gap-2">
+						{#each groups as group (group.name)}
+							<li
+								class="flex flex-col gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5"
+							>
+								<div class="flex items-center justify-between gap-2">
+									<div class="flex min-w-0 flex-col gap-0.5">
+										<span class="truncate font-mono text-sm font-semibold text-[var(--color-ink)]">
+											{group.name}
+										</span>
+										<span class="text-[11px] text-[var(--color-ink-dim)]">
+											{membersLabel(group.members)}
+										</span>
+									</div>
+									<div class="flex shrink-0 items-center gap-1.5">
+										<CopyMenu server={groupSummary(group)} />
+										{#if confirmDeleteGroup !== group.name}
+											<button
+												type="button"
+												onclick={() => editGroup(group)}
+												aria-label={`Edit group ${group.name}`}
+												class="shrink-0 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+											>
+												Edit
+											</button>
+										{/if}
+										{#if confirmDeleteGroup === group.name}
+											<button
+												type="button"
+												onclick={() => handleDeleteGroup(group.name)}
+												disabled={deletingGroup === group.name}
+												aria-busy={deletingGroup === group.name}
+												class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+												style="background-color: var(--color-state-failed);"
+											>
+												Delete
+											</button>
+											<button
+												type="button"
+												onclick={() => (confirmDeleteGroup = null)}
+												disabled={deletingGroup === group.name}
+												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+											>
+												Cancel
+											</button>
+										{:else}
+											<button
+												type="button"
+												onclick={() => (confirmDeleteGroup = group.name)}
+												aria-label={`Delete group ${group.name}`}
+												class="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium transition active:translate-y-px"
+												style="border-color: color-mix(in oklab, var(--color-state-failed) 35%, transparent); color: var(--color-state-failed);"
+											>
+												Delete
+											</button>
+										{/if}
+									</div>
+								</div>
+								{#if confirmDeleteGroup === group.name}
+									<p class="text-[11px] leading-tight text-[var(--color-state-failed)]">
+										This takes <code class="font-mono">{group.url}</code> offline and revokes tokens
+										scoped to this group.
+									</p>
+								{/if}
+								<code class="min-w-0 truncate font-mono text-[11px] text-[var(--color-ink-dim)]">
+									{group.url}
+								</code>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+
+				<!-- New group -->
+				<form
+					onsubmit={handleCreateGroup}
+					class="flex flex-col gap-2 rounded-lg border border-dashed border-[var(--color-line)] p-3"
 				>
-					<input
-						type="checkbox"
-						checked={settings.unified_endpoint}
-						onchange={(e) => setUnifiedEndpoint(e.currentTarget.checked)}
-						disabled={savingField === 'unified_endpoint'}
-						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
-					/>
-					<span class="flex flex-col gap-0.5">
-						<span class="text-sm font-medium text-[var(--color-ink)]">
-							Serve one MCP endpoint that bundles your servers
-						</span>
-						<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
-							One URL (<code class="font-mono">/s/all/mcp</code>) exposing every included
-							running server's tools, prefixed by slug (e.g.
-							<code class="font-mono">github_create_issue</code>). It uses the default auth
-							provider above; when that is <code class="font-mono">none</code>, servers with
-							stricter (bearer) auth are excluded so they can't be reached auth-free.
-						</span>
-					</span>
-				</label>
-				{#if settings.unified_endpoint}
-					{#if aggregateSummary}
-						<div
-							class="flex items-center justify-between gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2"
+					<div class="flex flex-wrap items-end gap-2">
+						<div class="flex min-w-0 flex-1 basis-40 flex-col gap-1.5">
+							<label for="group-name" class="text-xs font-medium text-[var(--color-ink-muted)]">
+								New group
+							</label>
+							<input
+								id="group-name"
+								type="text"
+								bind:value={newGroupName}
+								autocomplete="off"
+								spellcheck="false"
+								placeholder="e.g. all, dev-tools"
+								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							/>
+						</div>
+						<button
+							type="submit"
+							disabled={!groupNameValid || savingGroup}
+							aria-busy={savingGroup}
+							class="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
 						>
-							<code class="min-w-0 flex-1 truncate font-mono text-xs text-[var(--color-ink)]">
-								{settings.unified_endpoint_url}
-							</code>
-							<CopyMenu server={aggregateSummary} />
+							{groups.some((g) => g.name === newGroupName.trim()) ? 'Update group' : 'Create group'}
+						</button>
+					</div>
+					{#if newGroupName.trim().length > 0 && !groupNameValid}
+						<p class="text-[11px] text-[var(--color-state-failed)]">
+							Use lowercase letters, digits, and single hyphens (the URL routing key).
+						</p>
+					{/if}
+					{#if confirmReplaceName !== null && confirmReplaceName === newGroupName.trim()}
+						<div
+							role="alert"
+							class="flex flex-col gap-2.5 rounded-lg border p-3"
+							style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+						>
+							<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+								A group named <code class="font-mono text-[var(--color-ink)]">{confirmReplaceName}</code>
+								already exists{#if replaceTarget} (currently <strong>{membersLabel(replaceTarget.members)}</strong>){/if}.
+								Replace its members with your selection above? Its
+								<code class="font-mono">/g/{confirmReplaceName}/mcp</code> endpoint stays up and its
+								tokens keep working — only the membership changes. Use <strong>Edit</strong> on the
+								group above to start from its current members.
+							</p>
+							<div class="flex items-center gap-1.5">
+								<button
+									type="button"
+									onclick={() => submitGroup()}
+									disabled={savingGroup}
+									aria-busy={savingGroup}
+									class="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-70"
+								>
+									Replace members
+								</button>
+								<button
+									type="button"
+									onclick={() => (confirmReplaceName = null)}
+									disabled={savingGroup}
+									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+								>
+									Cancel
+								</button>
+							</div>
 						</div>
 					{/if}
-					<div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Servers to combine">
+
+					<div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Group members">
 						{#each [
-							{ value: 'all', label: 'All servers', hint: 'every running server, including future ones' },
+							{ value: 'all', label: 'All servers', hint: 'every registered server, including future ones' },
 							{ value: 'selected', label: 'Selected servers', hint: 'only the servers you pick below' }
 						] as const as choice (choice.value)}
 							<label
 								class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
-								style={unifiedMode === choice.value
+								style={newGroupMode === choice.value
 									? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
 									: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
 							>
 								<span class="flex items-center gap-2">
 									<input
 										type="radio"
-										name="unified-mode"
+										name="new-group-mode"
 										value={choice.value}
-										checked={unifiedMode === choice.value}
-										onchange={() => setUnifiedMode(choice.value)}
-										disabled={savingField === 'unified_servers'}
+										checked={newGroupMode === choice.value}
+										onchange={() => (newGroupMode = choice.value)}
 										class="sr-only"
 									/>
 									<span
 										class="text-sm font-semibold"
-										style={unifiedMode === choice.value
+										style={newGroupMode === choice.value
 											? 'color: var(--color-accent);'
 											: 'color: var(--color-ink);'}
 									>
@@ -1022,7 +1253,7 @@
 							</label>
 						{/each}
 					</div>
-					{#if unifiedMode === 'selected'}
+					{#if newGroupMode === 'selected'}
 						{#if servers.length === 0}
 							<p class="text-xs text-[var(--color-ink-dim)]">No servers yet — add one first.</p>
 						{:else}
@@ -1036,9 +1267,8 @@
 									>
 										<input
 											type="checkbox"
-											checked={unifiedSelection.includes(server.id)}
-											onchange={(e) => toggleUnifiedServer(server.id, e.currentTarget.checked)}
-											disabled={savingField === 'unified_servers'}
+											checked={newGroupSelection.includes(server.id)}
+											onchange={(e) => toggleNewGroupServer(server.id, e.currentTarget.checked)}
 											class="size-4 shrink-0 accent-[var(--color-accent)]"
 										/>
 										<span class="min-w-0 flex-1 truncate text-sm text-[var(--color-ink)]">
@@ -1051,11 +1281,11 @@
 								{/each}
 							</div>
 							<p class="text-xs text-[var(--color-ink-dim)]">
-								Only running servers appear in the bundle; a disabled pick joins when it starts.
+								Only running members appear in the bundle; a disabled pick joins when it starts.
 							</p>
 						{/if}
 					{/if}
-				{/if}
+				</form>
 			</fieldset>
 
 			<!-- Control-plane auth -->
@@ -1126,7 +1356,7 @@
 						spellcheck="false"
 						placeholder="mcp.example.com"
 						aria-label="Add allowed host"
-						class="min-w-0 flex-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						class="min-w-0 flex-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 					/>
 					<button
 						type="submit"

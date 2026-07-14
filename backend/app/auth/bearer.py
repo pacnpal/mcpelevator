@@ -33,8 +33,12 @@ class BearerProvider:
                     headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
                 )
             scope = record.scope  # read inside the session; the row detaches on exit
-        # A token scoped to a specific server authorizes only that server; "all"
-        # (the default) authorizes every bearer-protected server.
+        # "all" (the default) authorizes every bearer-protected surface. Otherwise the
+        # scope must equal this surface's id: a real server id for a /s/<slug> request,
+        # or the synthetic "group:<name>" id for a /g/<name> request (see
+        # app.groups.hub.group_server). So a group-A token reaching group B — or any
+        # server — is rejected exactly like a wrong-server token, and a per-server token
+        # can't authorize a group bundle.
         if scope != "all" and scope != server.id:
             raise HTTPException(
                 status_code=403,
