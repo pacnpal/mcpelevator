@@ -9,6 +9,7 @@ No subprocess is ever spawned. Route tests reuse the ``test_proxy`` patterns
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -291,6 +292,54 @@ async def test_hub_dead_upstream_is_skipped_not_fatal(clean_settings):
             repo.delete_server(session, dead.id)
 
 
+async def test_hub_lifecycle_is_task_safe(clean_settings):
+    """anyio lifespans must exit in the task that entered them. The hub is driven
+    from different tasks in production (reconciler hook, settings resync, shutdown),
+    so enter/exit run inside a dedicated runner task — sync/close from any mix of
+    caller tasks must not raise cancel-scope/context errors."""
+    _write_settings(unified_endpoint=True)
+    with Session(get_engine()) as session:
+        a = _mk_server(session, "Task Safe")
+    try:
+        hub = _hub_for({"up-task-safe": _make_upstream("t", "x")})
+        sup = _endpoints(a)
+        await asyncio.create_task(hub.sync(sup))  # enter in task A
+        assert hub.app is not None
+        await asyncio.create_task(hub.sync(_endpoints()))  # tear down in task B
+        assert hub.app is None
+        await asyncio.create_task(hub.sync(sup))  # re-enter in task C
+        assert hub.app is not None
+        await hub.close()  # exit from the test task
+        assert hub.app is None
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, a.id)
+
+
+def test_internal_hop_never_forwards_authorization():
+    """The /s/all bearer token authorizes the whole bundle; the hub's internal hop to
+    the loopback bridges must not propagate it (a remote-runner bridge would forward
+    it once more, leaking it to arbitrary upstreams)."""
+    from fastmcp.server.providers.proxy import ProxyClient
+
+    from app.aggregate.hub import _default_transport
+
+    # premise: fastmcp's ProxyClient turns caller-credential forwarding ON for HTTP
+    # transports — if this ever changes, the override below is dead code to revisit
+    plain = ProxyClient(_default_transport("http://127.0.0.1:1/mcp"))
+    assert plain.transport.forward_incoming_headers is True
+
+    captured = []
+
+    def factory(url: str):
+        transport = _default_transport(url)
+        captured.append(transport)
+        return transport
+
+    AggregateHub(transport_factory=factory)._make_proxy("s", "http://127.0.0.1:1/mcp")
+    assert captured[0].forward_incoming_headers is False
+
+
 # --- supervisor hook ----------------------------------------------------------- #
 
 
@@ -395,6 +444,40 @@ def test_route_bearer_matrix(clean_settings):
             "/s/all/mcp", headers={**LOOPBACK, "authorization": f"Bearer {all_scoped}"}
         )
         assert r.status_code == 200
+
+
+def test_patch_auth_downgrade_resyncs_aggregate_before_returning(clean_settings):
+    """PATCHing default_auth_provider bearer->none must not leave a window where the
+    OLD mounted set (which may include bearer-only servers) is served under the NEW
+    unauthenticated default — the handler resyncs the hub before returning."""
+    _write_settings(unified_endpoint=True, default_auth_provider="bearer")
+    with Session(get_engine()) as session:
+        locked = _mk_server(session, "Locked Down", auth_provider="bearer")
+    admin = _mint_token(scope="all")
+    auth = {**LOOPBACK, "authorization": f"Bearer {admin}"}
+    try:
+        with TestClient(app) as client:
+            client.app.state.supervisor.on_converged = None  # only PATCH-time syncs
+            client.app.state.supervisor.running_endpoints = lambda: [
+                (locked.id, locked.slug, "127.0.0.1", 49999)
+            ]
+            # prime under bearer: the locked server is mounted (mounting is lazy — no
+            # connection is made, so the dead port is irrelevant)
+            r = client.patch("/api/settings", json={"unified_endpoint": True}, headers=auth)
+            assert r.status_code == 200
+            hub = client.app.state.aggregate
+            assert hub._key == frozenset({(locked.slug, "127.0.0.1", 49999)})
+
+            # downgrade: by the time the PATCH returns, the bearer-only server is out
+            r = client.patch(
+                "/api/settings", json={"default_auth_provider": "none"}, headers=auth
+            )
+            assert r.status_code == 200
+            assert hub._key == frozenset()
+            assert hub.app is None
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, locked.id)
 
 
 # --- settings: registry validation + API surface -------------------------------- #

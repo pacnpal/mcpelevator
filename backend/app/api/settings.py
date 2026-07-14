@@ -54,11 +54,18 @@ async def update_settings(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     # Gate changes apply at once instead of waiting for the next poll interval (which an
-    # operator may have lengthened): docker_runner stops running docker units, and the
-    # unified-endpoint settings (incl. default_auth_provider, which drives its inclusion
-    # rule) converge the aggregate via the post-reconcile hook.
-    if changes.keys() & {
-        "docker_runner", "unified_endpoint", "unified_servers", "default_auth_provider"
-    }:
+    # operator may have lengthened): docker_runner stops running docker units via the
+    # nudged reconcile.
+    if "docker_runner" in changes:
         request.app.state.supervisor.nudge()
+    # Aggregate-affecting changes must converge BEFORE this returns, not on the next
+    # reconcile: the /s/all dispatcher enforces the NEW default auth on the very next
+    # request, so a bearer->none downgrade must not leave the OLD mounted set (which
+    # may include bearer-only servers) serveable in the gap. sync() is lock-serialized
+    # and its lifespans run in their own tasks, so calling it from this handler is safe.
+    if changes.keys() & {"unified_endpoint", "unified_servers", "default_auth_provider"}:
+        try:
+            await request.app.state.aggregate.sync(request.app.state.supervisor)
+        except Exception as exc:  # the write already committed; don't fail the PATCH
+            print(f"[mcpelevator] aggregate resync error: {exc}", flush=True)
     return result

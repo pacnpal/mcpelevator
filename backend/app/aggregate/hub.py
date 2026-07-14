@@ -20,15 +20,15 @@ itself requires an ``all``-scoped token, which already authorizes every server.)
 
 The Streamable-HTTP app runs stateless (a fresh transport per request), so swapping
 instances never strands client sessions. Starlette does NOT run a mounted sub-app's
-lifespan, so the hub enters/exits the FastMCP app's lifespan itself on an
-``AsyncExitStack`` — that is what starts the session manager for exactly as long as
-each instance is live.
+lifespan, and anyio lifespans must exit in the task that entered them — so each
+instance's lifespan runs inside its own ``_AppRunner`` task, which starts the session
+manager for exactly as long as that instance is live and makes teardown safe from any
+caller task (reconciler hook, settings resync, app shutdown).
 """
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import AsyncExitStack
 from typing import Callable, Optional
 
 from fastmcp import FastMCP
@@ -66,6 +66,47 @@ def _default_transport(url: str) -> ClientTransport:
     return StreamableHttpTransport(url=url)
 
 
+class _AppRunner:
+    """Owns one FastMCP http_app lifespan inside a dedicated task.
+
+    Starlette/anyio lifespans must exit in the task that entered them (cancel scopes
+    are task-affine), but the hub is driven from several tasks: the reconciler's
+    ``on_converged``, a settings PATCH resync, and the FastAPI lifespan's shutdown.
+    Running the enter/wait/exit sequence in its own task makes teardown safe from
+    any caller — ``close()`` just signals the runner and awaits it.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+        self._stop = asyncio.Event()
+        self._task: Optional[asyncio.Task] = None
+
+    async def start(self) -> None:
+        started: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        async def run() -> None:
+            try:
+                async with self.app.router.lifespan_context(self.app):
+                    started.set_result(None)
+                    await self._stop.wait()
+            except BaseException as exc:
+                if not started.done():
+                    started.set_exception(exc)  # startup failure -> surface to start()
+                else:
+                    raise  # shutdown failure -> surfaced (and logged) by close()
+
+        self._task = asyncio.create_task(run())
+        await started
+
+    async def close(self) -> None:
+        self._stop.set()
+        if self._task is not None:
+            try:
+                await self._task
+            except Exception as exc:
+                print(f"[mcpelevator] aggregate lifespan shutdown error: {exc}", flush=True)
+
+
 class AggregateHub:
     """Builds and hot-swaps the aggregate FastMCP app from live supervisor state."""
 
@@ -76,7 +117,7 @@ class AggregateHub:
         # mirroring how tests patch app.bridge.host._build_transport
         self._transport_factory = transport_factory
         self._app: Optional[ASGIApp] = None
-        self._stack: Optional[AsyncExitStack] = None
+        self._runner: Optional[_AppRunner] = None
         self._key: Optional[frozenset] = None
         self._lock = asyncio.Lock()
 
@@ -130,30 +171,41 @@ class AggregateHub:
                 return
             await self._swap(entries, key)
 
+    def _make_proxy(self, slug: str, url: str) -> FastMCP:
+        transport = self._transport_factory(url)
+        client = ProxyClient(transport, roots=_forward_roots)
+        proxy = create_proxy(client, name=slug)
+        # Both ProxyClient.__init__ and create_proxy turn ON forwarding of the
+        # caller's Authorization header for HTTP transports (caller-credential
+        # propagation), so this override must come LAST. On this INTERNAL hop that
+        # forwarding would send the /s/all bearer token — which authorizes the whole
+        # bundle — to every bridge, and a remote-runner bridge would forward it once
+        # more to its upstream. Never propagate it; bridges are unauthenticated
+        # loopback and the aggregate's auth was already enforced at the dispatcher.
+        if hasattr(transport, "forward_incoming_headers"):
+            transport.forward_incoming_headers = False
+        return proxy
+
     async def _swap(self, entries: list[tuple[str, str, int]], key: frozenset) -> None:
         agg = FastMCP("mcpelevator-all")
         for slug, host, port in sorted(entries):
-            transport = self._transport_factory(f"http://{host}:{port}/mcp")
-            client = ProxyClient(transport, roots=_forward_roots)
-            agg.mount(create_proxy(client, name=slug), namespace=slug)
+            agg.mount(self._make_proxy(slug, f"http://{host}:{port}/mcp"), namespace=slug)
         # stateless: a fresh upstream transport per request, so swapping instances never
         # strands a session. Host/Origin protection stays OFF here — enforce() in the
         # dispatcher is the single guard, identical to every other /s route.
         app = agg.http_app(path="/mcp", stateless_http=True, host_origin_protection=False)
-        # anyio cancel scopes are strictly LIFO within a task: the OLD lifespan must
-        # exit before the new one is entered, or the second swap raises "attempted to
-        # exit a cancel scope that isn't the current task's". The instant of emptiness
-        # is fine — a request in the gap gets the dispatcher's 503, and swaps only
-        # happen on topology changes.
+        # The old instance is torn down before the new one starts (the moment of
+        # emptiness just 503s at the dispatcher; swaps only happen on topology
+        # changes). Each lifespan runs inside its own _AppRunner task.
         await self._teardown()
-        stack = AsyncExitStack()
-        await stack.enter_async_context(app.router.lifespan_context(app))
-        self._app, self._stack, self._key = app, stack, key
+        runner = _AppRunner(app)
+        await runner.start()
+        self._app, self._runner, self._key = app, runner, key
 
     async def _teardown(self) -> None:
-        old, self._app, self._stack, self._key = self._stack, None, None, None
+        old, self._app, self._runner, self._key = self._runner, None, None, None
         if old is not None:
-            await old.aclose()
+            await old.close()
 
     async def close(self) -> None:
         """Shutdown: stop the session manager cleanly (called from the app lifespan)."""
