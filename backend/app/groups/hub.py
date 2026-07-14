@@ -32,6 +32,7 @@ resync, app shutdown).
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Callable, Optional
 
 from fastmcp import FastMCP
@@ -49,6 +50,8 @@ from app.db import get_engine, repo
 from app.db.models import Server
 from app.groups import registry
 from app.registry import settings as runtime_settings
+
+logger = logging.getLogger(__name__)
 
 
 def group_server(name: str) -> Server:
@@ -108,8 +111,8 @@ class _AppRunner:
         if self._task is not None:
             try:
                 await self._task
-            except Exception as exc:
-                print(f"[mcpelevator] group lifespan shutdown error: {exc}", flush=True)
+            except Exception:
+                logger.exception("group lifespan shutdown error")
 
 
 class _Instance:
@@ -192,7 +195,7 @@ class GroupHub:
                     continue  # topology unchanged — keep the live instance
                 try:
                     await self._swap(name, entries, key)
-                except Exception as exc:
+                except Exception:
                     # Isolate per group: one group's build/start failure must not abort the
                     # whole pass and starve every group after it in iteration order (the
                     # reconciler only wraps the whole on_converged call). Fail CLOSED for the
@@ -201,7 +204,7 @@ class GroupHub:
                     # one whose auth was just tightened) — _swap can fail either before or
                     # after its own teardown, so we force it here. Other groups still
                     # converge this pass; the reconciler retries the failed one next pass.
-                    print(f"[mcpelevator] group {name!r} sync error: {exc}", flush=True)
+                    logger.exception("group %r sync error", name)
                     await self._teardown(name)
 
     def _make_proxy(self, slug: str, url: str) -> FastMCP:

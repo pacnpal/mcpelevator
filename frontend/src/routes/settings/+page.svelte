@@ -432,6 +432,22 @@
 		}
 	}
 
+	// The existing group a submit would replace (name matches), or null for a create.
+	const replaceTarget = $derived(
+		groups.find((g) => g.name === newGroupName.trim()) ?? null
+	);
+
+	// Load an existing group's CURRENT membership into the form so the operator edits
+	// from its real state — never from the default 'all'/[] — which would otherwise let
+	// an in-place replace silently broaden a group's (and its tokens') authorization.
+	function editGroup(group: GroupInfo) {
+		newGroupName = group.name;
+		newGroupMode = group.members === '*' ? 'all' : 'selected';
+		newGroupSelection = group.members === '*' ? [] : [...group.members];
+		confirmReplaceName = null;
+		confirmDeleteGroup = null;
+	}
+
 	function handleCreateGroup(e: SubmitEvent) {
 		e.preventDefault();
 		if (savingGroup || !groupNameValid) return;
@@ -440,7 +456,7 @@
 		// confirm so membership is never *silently* overwritten — but still allow editing
 		// an existing group in place, rather than forcing a delete+recreate that would
 		// take /g/<name>/mcp offline and revoke its group:<name> tokens.
-		if (groups.some((g) => g.name === name)) {
+		if (replaceTarget) {
 			confirmReplaceName = name;
 			return;
 		}
@@ -1072,6 +1088,16 @@
 									</div>
 									<div class="flex shrink-0 items-center gap-1.5">
 										<CopyMenu server={groupSummary(group)} />
+										{#if confirmDeleteGroup !== group.name}
+											<button
+												type="button"
+												onclick={() => editGroup(group)}
+												aria-label={`Edit group ${group.name}`}
+												class="shrink-0 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+											>
+												Edit
+											</button>
+										{/if}
 										{#if confirmDeleteGroup === group.name}
 											<button
 												type="button"
@@ -1160,9 +1186,11 @@
 						>
 							<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
 								A group named <code class="font-mono text-[var(--color-ink)]">{confirmReplaceName}</code>
-								already exists. Replace its members with your selection above? Its
+								already exists{#if replaceTarget} (currently <strong>{membersLabel(replaceTarget.members)}</strong>){/if}.
+								Replace its members with your selection above? Its
 								<code class="font-mono">/g/{confirmReplaceName}/mcp</code> endpoint stays up and its
-								tokens keep working — only the membership changes.
+								tokens keep working — only the membership changes. Use <strong>Edit</strong> on the
+								group above to start from its current members.
 							</p>
 							<div class="flex items-center gap-1.5">
 								<button

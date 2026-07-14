@@ -11,19 +11,17 @@ mounted set is never serveable before the reconciler fires.
 
 from __future__ import annotations
 
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from sqlmodel import Session
 from starlette.requests import Request
 from starlette.responses import Response
 
 from app.api.schemas import GroupInfo, GroupUpsert
-from app.api.util import base_url
+from app.api.util import base_url, resync_groups
 from app.db import get_session, repo
 from app.groups import registry
-
-logger = logging.getLogger(__name__)
+from app.registry import service
 
 router = APIRouter()
 
@@ -32,17 +30,24 @@ def _url(request: Request, name: str) -> str:
     return f"{base_url(request)}/g/{name}/mcp"
 
 
-async def _resync_groups(request: Request) -> None:
-    """Converge the group hub NOW instead of on the next reconcile, so a just-written
-    (or deleted) group serves its new membership immediately. No-op when a group's
-    topology key is unchanged; sync() is lock-serialized and task-safe."""
-    try:
-        await request.app.state.groups.sync(request.app.state.supervisor)
-    except Exception:  # the registry write already committed; don't fail the call
-        # sync() isolates per-group failures internally (a bad group fails closed to 503
-        # without blocking the rest), so reaching here is a broader failure; log the
-        # traceback and let the reconciler re-converge on its next pass.
-        logger.exception("group resync failed")
+def _delete_group_and_tokens(session: Session, name: str) -> bool:
+    """Revoke the group's tokens and remove its registry entry under a SINGLE hold of the
+    config write lock. Run in the threadpool by the caller: the lock is a threading
+    RLock, so waiting on it (while a server import/create holds it deriving config hashes)
+    must not sit on the event loop.
+
+    Holding the lock across the whole operation makes it atomic w.r.t. group-token
+    creation (which takes the same lock and rechecks existence before inserting), closing
+    the race where a token minted for a group being deleted would survive the revocation
+    and re-authorize a same-named group recreated later. Revoke BEFORE removing so an
+    interruption leaves the benign state (tokens gone, group lingers). Returns False when
+    the group didn't exist (-> 404)."""
+    with service.config_write_lock():
+        if not registry.exists(session, name):
+            return False
+        repo.delete_tokens_by_scope(session, f"group:{name}")
+        registry.delete_group(session, name)
+        return True
 
 
 @router.get("/groups", response_model=list[GroupInfo])
@@ -61,27 +66,21 @@ async def upsert_group(
     session: Session = Depends(get_session),
 ):
     try:
-        registry.write_group(session, name, payload.members)
+        # Threadpool: write_group takes the config write lock (shared with server
+        # creates/imports deriving scrypt hashes), so the wait must stay off the loop.
+        stored = await run_in_threadpool(registry.write_group, session, name, payload.members)
     except ValueError as exc:  # bad name grammar or an unknown member id
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _resync_groups(request)
-    stored = registry.read(session)[name]
-    return GroupInfo(name=name, members=stored, url=_url(request, name))
+    await resync_groups(request)
+    return GroupInfo(name=name, members=stored[name], url=_url(request, name))
 
 
 @router.delete("/groups/{name}", status_code=204)
 async def delete_group(
     name: str, request: Request, session: Session = Depends(get_session)
 ):
-    if not registry.exists(session, name):
+    # Revoke + remove under the config write lock, off the event loop (see helper).
+    if not await run_in_threadpool(_delete_group_and_tokens, session, name):
         raise HTTPException(status_code=404, detail="group not found")
-    # Revoke tokens scoped to this group BEFORE removing the registry entry. The scope
-    # string (``group:<name>``) is deterministic, so a lingering token would silently
-    # re-authorize a *different* group later recreated under the same name — unlike a
-    # random, never-reused server id. Revoking first makes the only interruptible state
-    # benign: if a crash lands between the two commits, the tokens are already gone (no
-    # reusable credentials) and the group simply lingers until a retried delete removes it.
-    repo.delete_tokens_by_scope(session, f"group:{name}")
-    registry.delete_group(session, name)
-    await _resync_groups(request)
+    await resync_groups(request)
     return Response(status_code=204)

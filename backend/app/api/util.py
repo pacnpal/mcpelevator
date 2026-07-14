@@ -2,9 +2,28 @@
 
 from __future__ import annotations
 
+import logging
+
 from starlette.requests import Request
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+async def resync_groups(request: Request) -> None:
+    """Converge the group hub NOW instead of on the next reconcile, so a membership- or
+    auth-affecting change (a server delete/edit, a group write, a default-auth change)
+    takes effect before the handler returns rather than leaving a stale mounted set
+    serveable in the gap. Shared fail-safe used by the server, group, and settings
+    routers: ``sync()`` isolates per-group failures internally (a bad group fails closed
+    to 503 without blocking the rest), so a raised exception here is a broader failure —
+    log the traceback and let the reconciler re-converge on its next pass; never fail the
+    already-committed write. ``sync()`` is lock-serialized and task-safe."""
+    try:
+        await request.app.state.groups.sync(request.app.state.supervisor)
+    except Exception:  # the registry write already committed; don't fail the call
+        logger.exception("group resync failed")
 
 
 def base_url(request: Request) -> str:

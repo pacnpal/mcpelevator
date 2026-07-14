@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -30,7 +29,7 @@ from app.api.schemas import (
     Transports,
     Urls,
 )
-from app.api.util import base_url
+from app.api.util import base_url, resync_groups
 from app.auth import oauth_flow
 from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
@@ -40,25 +39,7 @@ from app.groups import registry as group_registry
 from app.registry import service
 from app.registry import settings as runtime_settings
 
-logger = logging.getLogger(__name__)
-
 router = APIRouter()
-
-
-async def _resync_groups(request: Request) -> None:
-    """Converge the group hub NOW instead of on the next reconcile. Membership-affecting
-    server changes — auth_provider tightened to bearer, mcp_http turned off, a slug
-    rename, a delete — must not leave a group's stale mounted set serveable in the gap
-    (under default auth 'none' a just-bearer'd member would otherwise stay exposed
-    auth-free through /g/<name> until the reconciler fires). No-op when a group's
-    topology key is unchanged; sync() is lock-serialized and task-safe."""
-    try:
-        await request.app.state.groups.sync(request.app.state.supervisor)
-    except Exception:  # the registry write already committed; don't fail the call
-        # sync() isolates per-group failures internally (a bad group fails closed to 503
-        # without blocking the rest), so reaching here means a broader failure (e.g. a DB
-        # read). Log with the traceback; the reconciler re-converges on its next pass.
-        logger.exception("group resync failed")
 
 
 def _live_state(server: Server, sup, session: Session):
@@ -255,7 +236,7 @@ async def update_server(
         sup.rename_slug(server_id, server.slug)
     sup.nudge()  # config_hash may have changed -> reconciler restarts if needed
     if changes.keys() & {"auth_provider", "mcp_http", "slug"}:
-        await _resync_groups(request)  # membership/namespace changed — no async gap
+        await resync_groups(request)  # membership/namespace changed — no async gap
     return _summary(server, sup, session, base_url(request))
 
 
@@ -291,7 +272,7 @@ async def delete_server(server_id: str, request: Request, session: Session = Dep
     # orphan credential file on disk for a server that no longer exists.
     oauth_flow.cancel_pending(server_id)
     ServerTokenStorage(server_id).clear()
-    await _resync_groups(request)
+    await resync_groups(request)
     return Response(status_code=204)
 
 

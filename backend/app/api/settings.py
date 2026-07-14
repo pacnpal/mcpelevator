@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 from starlette.requests import Request
 
 from app.api.schemas import SettingsInfo, SettingsUpdate
+from app.api.util import resync_groups
 from app.auth.control_plane import would_lock_out
 from app.db import get_session
 from app.registry import settings as runtime_settings
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -63,11 +60,5 @@ async def update_settings(
     # (which may include bearer-only members) serveable in the gap. sync() is
     # lock-serialized and its lifespans run in their own tasks, so calling it here is safe.
     if "default_auth_provider" in changes:
-        try:
-            await request.app.state.groups.sync(request.app.state.supervisor)
-        except Exception:  # the write already committed; don't fail the PATCH
-            # sync() isolates per-group failures internally (a bad group fails closed to
-            # 503 without blocking the rest), so reaching here is a broader failure; log
-            # the traceback and let the reconciler re-converge on its next pass.
-            logger.exception("group resync failed")
+        await resync_groups(request)
     return result
