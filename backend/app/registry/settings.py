@@ -49,6 +49,11 @@ DEFAULTS: dict[str, Any] = {
     # Optional identity allowlist matched case-insensitively against the token's
     # preferred_username / login / email / sub claims (empty = any valid token).
     "oauth_allowed_subjects": [],
+    # Scopes advertised as ``scopes_supported`` in the Protected Resource Metadata.
+    # MCP clients build their authorize request from this (per the MCP auth spec), so
+    # it steers which claims the AS puts in tokens — e.g. ["openid","profile","email"]
+    # makes preferred_username/email available to oauth_allowed_subjects. Empty = omit.
+    "oauth_scopes": [],
     # Also accept LOCAL bearer tokens ("mcpe_..."-prefixed) on oauth-protected
     # servers, with normal bearer scope semantics — one endpoint for OAuth humans
     # and token-carrying automation. Off by default: pure-OAuth unless opted in.
@@ -157,6 +162,14 @@ def write(
             value = deduped
         if key == "oauth_accept_bearer" and not isinstance(value, bool):
             raise ValueError(f"invalid oauth_accept_bearer: {value!r}")
+        if key == "oauth_scopes":
+            if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+                raise ValueError(f"invalid oauth_scopes: {value!r}")
+            scopes: list[str] = []
+            for v in (x.strip() for x in value):
+                if v not in scopes:
+                    scopes.append(v)
+            value = scopes
         if key == "allowed_hosts":
             value = _normalize_hosts(value)
         pending[key] = value
@@ -190,6 +203,10 @@ def oauth_audience(session: Session) -> str:
 
 def oauth_allowed_subjects(session: Session) -> list[str]:
     return repo.setting_get(session, "oauth_allowed_subjects", DEFAULTS["oauth_allowed_subjects"])
+
+
+def oauth_scopes(session: Session) -> list[str]:
+    return repo.setting_get(session, "oauth_scopes", DEFAULTS["oauth_scopes"])
 
 
 def oauth_accept_bearer(session: Session) -> bool:

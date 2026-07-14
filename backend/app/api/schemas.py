@@ -171,6 +171,7 @@ class SettingsInfo(BaseModel):
     oauth_audience: str = ""
     oauth_allowed_subjects: list[str] = []
     oauth_accept_bearer: bool = False
+    oauth_scopes: list[str] = []
 
 
 class SettingsUpdate(BaseModel):
@@ -182,6 +183,7 @@ class SettingsUpdate(BaseModel):
     oauth_audience: Optional[str] = None
     oauth_allowed_subjects: Optional[list[str]] = None
     oauth_accept_bearer: Optional[StrictBool] = None
+    oauth_scopes: Optional[list[str]] = None
     # StrictBool, not bool: Optional[bool] would coerce "yes"/"true"/1 to True at the
     # API boundary, so the registry's isinstance(bool) invariant would never fire for an
     # API caller. Strict keeps the bool-only contract end to end (the SPA sends a JSON bool).

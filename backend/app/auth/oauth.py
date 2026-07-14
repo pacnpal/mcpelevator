@@ -213,6 +213,7 @@ async def protected_resource_metadata(slug: str, request: Request):
         raise HTTPException(status_code=404, detail="not found")
     with Session(get_engine()) as session:
         config_url = runtime_settings.oauth_config_url(session)
+        scopes = runtime_settings.oauth_scopes(session)
     try:
         doc = await _discovery(config_url)
     except Exception as exc:
@@ -220,8 +221,15 @@ async def protected_resource_metadata(slug: str, request: Request):
             status_code=503, detail="authorization server metadata unavailable"
         ) from exc
     base = base_url(request)
-    return {
+    meta = {
         "resource": f"{base}/s/{slug}/mcp",
         "authorization_servers": [doc["issuer"]],
         "bearer_methods_supported": ["header"],
     }
+    # Advertised scopes steer the client's authorize request (MCP clients read
+    # scopes_supported from this document) — and therefore which claims the AS
+    # puts in tokens. Without e.g. "profile", an AS like Authentik issues tokens
+    # with no preferred_username and an identity allowlist can only match sub.
+    if scopes:
+        meta["scopes_supported"] = scopes
+    return meta

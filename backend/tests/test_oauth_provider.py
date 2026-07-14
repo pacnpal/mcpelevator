@@ -187,6 +187,11 @@ async def test_metadata_route_advertises_issuer(session, monkeypatch):
     out = await protected_resource_metadata("svc", _request({"Host": "box.local:8080"}))
     assert out["authorization_servers"] == [ISSUER]
     assert out["resource"].endswith("/s/svc/mcp")
+    assert "scopes_supported" not in out  # empty setting -> field omitted
+
+    runtime_settings.write(session, {"oauth_scopes": ["openid", "profile", "email"]})
+    out = await protected_resource_metadata("svc", _request({"Host": "box.local:8080"}))
+    assert out["scopes_supported"] == ["openid", "profile", "email"]
 
 
 async def test_metadata_route_404_for_non_oauth_server(session):
