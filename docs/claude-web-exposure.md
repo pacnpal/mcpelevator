@@ -10,8 +10,9 @@ real commands and dashboard steps, and helps you pick.
 >   endpoint must be a **public HTTPS URL** — `127.0.0.1:8080` is unreachable to it.
 > - Claude web custom connectors support only **OAuth** or **no auth** — there is
 >   **no field for a static bearer token or custom headers**.
-> - mcpelevator v1 ships `none` and `bearer` auth, **not OAuth**. So Claude web
->   cannot send the bearer token that `/s/<slug>/mcp` expects.
+> - mcpelevator ships `none`, `bearer`, and (new) `oauth` auth. `oauth` turns
+>   mcpelevator into an OAuth 2.1 **resource server** (RFC 9728) for an
+>   authorization server you already run — no bearer field needed on the client.
 > - **Path A** (claude.ai web **and mobile**): a **Cloudflare Tunnel** to your
 >   loopback origin **+ a Cloudflare Access self-hosted application with Managed
 >   OAuth** in front. Access becomes the OAuth provider mcpelevator doesn't have.
@@ -326,6 +327,56 @@ add the connector URL.
 > `https://mcp.example.com/s/<slug>/mcp` as the backend MCP server, enable Managed
 > OAuth on the portal, and give clients the **portal URL** (`https://<sub>.<domain>/mcp`),
 > not the origin path. **Test with a throwaway server before relying on it.**
+
+## Path C — bring your own authorization server (the `oauth` provider)
+
+If you already run an OIDC-capable identity provider (Authentik, Keycloak, Auth0,
+Okta, ...), the `oauth` auth provider makes mcpelevator itself the OAuth-protected
+resource — no Cloudflare Access layer needed. mcpelevator validates the JWTs your
+AS mints (issuer + JWKS via its discovery document) and serves RFC 9728 Protected
+Resource Metadata, which is exactly the discovery chain Claude web follows:
+
+```text
+Claude web ──► https://mcp.example.com/s/<slug>/mcp        (401 + resource_metadata)
+           ──► /.well-known/oauth-protected-resource/s/<slug>/mcp
+           ──► your AS (metadata → register/PKCE → sign-in → token)
+           ──► Bearer <jwt>  ──►  verified against your AS's JWKS
+```
+
+Setup:
+
+1. Shared baseline (above), plus a public HTTPS route to mcpelevator (tunnel or
+   reverse proxy). Add the public hostname to the Host/Origin allowlist.
+2. Create an OAuth2/OIDC provider + application at your AS for Claude. Redirect
+   URI: Claude publishes its connector callback (`https://claude.ai/api/mcp/auth_callback`).
+3. Point mcpelevator at the AS (Settings, or the API):
+
+   ```bash
+   curl -X PATCH http://127.0.0.1:8080/api/settings \
+     -H "Authorization: Bearer <admin token>" -H 'Content-Type: application/json' \
+     -d '{
+       "oauth_config_url": "https://auth.example.com/application/o/mcp/.well-known/openid-configuration",
+       "oauth_allowed_subjects": ["alice", "bob"]
+     }'
+   ```
+
+   `oauth_config_url` also accepts a bare issuer URL. `oauth_audience` (optional)
+   pins the `aud` claim; `oauth_allowed_subjects` (optional) allowlists identities
+   by `preferred_username`/`login`/`email`/`sub`.
+4. Set a server's auth to `oauth` (or `default_auth_provider` to `oauth`), then add
+   the connector in Claude with the `/s/<slug>/mcp` URL. Claude discovers your AS
+   and drives the sign-in.
+
+Caveats:
+
+- **DCR:** Claude web prefers Dynamic Client Registration. If your AS doesn't
+  support it (e.g. Authentik), use the connector's advanced settings to supply the
+  client id/secret of the static client you created in step 2.
+- The AS must mint **JWT access tokens** verifiable via its JWKS (Authentik,
+  Keycloak, Auth0 do by default; opaque-token setups won't work).
+- `oauth` is all-or-nothing per server; token *scoping* per server stays the job
+  of the `bearer` provider. Combine them: `oauth` for Claude-facing servers,
+  `bearer` for automation.
 
 ## Path B — Claude Code / Desktop (public HTTPS + bearer)
 

@@ -43,6 +43,9 @@ def test_settings_defaults_and_write(session):
         "allow_private_lan": False,
         "docker_runner": False,
         "groups": {},
+        "oauth_config_url": "",
+        "oauth_audience": "",
+        "oauth_allowed_subjects": [],
     }
     runtime_settings.write(
         session,

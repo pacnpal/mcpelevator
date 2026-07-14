@@ -39,6 +39,16 @@ DEFAULTS: dict[str, Any] = {
     # deliberately. There is no special-case name — add {"all": "*"} for a bundle of
     # everything. See app.groups.registry for the resolution + validation rules.
     "groups": {},
+    # --- oauth provider (RFC 9728 resource server; see app.auth.oauth) ---
+    # OIDC discovery / RFC 8414 metadata URL of the EXTERNAL authorization server
+    # (a bare issuer URL also works). Empty = oauth provider unconfigured; servers
+    # set to oauth then fail closed (403).
+    "oauth_config_url": "",
+    # Optional ``aud`` claim to require in access tokens (empty = don't check).
+    "oauth_audience": "",
+    # Optional identity allowlist matched case-insensitively against the token's
+    # preferred_username / login / email / sub claims (empty = any valid token).
+    "oauth_allowed_subjects": [],
 }
 
 
@@ -47,7 +57,7 @@ def read_all(session: Session) -> dict[str, Any]:
 
 
 _MODES = {"local", "expose"}
-_PROVIDERS = {"none", "bearer"}
+_PROVIDERS = {"none", "bearer", "oauth"}
 _CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
 
 
@@ -127,6 +137,20 @@ def write(
             raise ValueError(f"invalid docker_runner: {value!r}")
         if key == "groups":
             value = _normalize_groups(value)
+        if key == "oauth_config_url":
+            if not isinstance(value, str) or (value and not value.startswith(("http://", "https://"))):
+                raise ValueError(f"invalid oauth_config_url: {value!r}")
+            value = value.strip()
+        if key == "oauth_audience" and not isinstance(value, str):
+            raise ValueError(f"invalid oauth_audience: {value!r}")
+        if key == "oauth_allowed_subjects":
+            if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+                raise ValueError(f"invalid oauth_allowed_subjects: {value!r}")
+            deduped: list[str] = []
+            for v in (x.strip() for x in value):
+                if v not in deduped:
+                    deduped.append(v)
+            value = deduped
         if key == "allowed_hosts":
             value = _normalize_hosts(value)
         pending[key] = value
@@ -148,6 +172,18 @@ def default_auth_provider(session: Session) -> str:
 
 def control_plane_auth(session: Session) -> str:
     return repo.setting_get(session, "control_plane_auth", DEFAULTS["control_plane_auth"])
+
+
+def oauth_config_url(session: Session) -> str:
+    return repo.setting_get(session, "oauth_config_url", DEFAULTS["oauth_config_url"])
+
+
+def oauth_audience(session: Session) -> str:
+    return repo.setting_get(session, "oauth_audience", DEFAULTS["oauth_audience"])
+
+
+def oauth_allowed_subjects(session: Session) -> list[str]:
+    return repo.setting_get(session, "oauth_allowed_subjects", DEFAULTS["oauth_allowed_subjects"])
 
 
 def allow_private_lan(session: Session) -> bool:

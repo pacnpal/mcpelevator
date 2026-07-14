@@ -25,6 +25,7 @@ from starlette.requests import Request
 
 from app.auth.bearer import BearerProvider
 from app.auth.none import NoneProvider
+from app.auth.oauth import OAuthProvider
 from app.config import get_settings
 from app.db import get_engine
 from app.db.models import Server
@@ -34,6 +35,7 @@ from app.util import host_only
 _PROVIDERS = {
     "none": NoneProvider(),
     "bearer": BearerProvider(),
+    "oauth": OAuthProvider(),
 }
 
 # Loopback hostnames, trusted only when the peer itself connects from loopback

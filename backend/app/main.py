@@ -219,6 +219,11 @@ def create_app() -> FastAPI:
     # token when enforcement is on (require_control_plane is a no-op otherwise).
     app.include_router(health_api.router, prefix="/api")
     app.include_router(auth_api.router, prefix="/api")
+    # RFC 9728 Protected Resource Metadata for oauth-protected servers — public by
+    # design (clients fetch it pre-auth), no /api prefix, registered before the SPA.
+    from app.auth.oauth import wellknown as oauth_wellknown
+
+    app.include_router(oauth_wellknown)
     gated = [Depends(require_control_plane)]
     app.include_router(servers_api.router, prefix="/api", dependencies=gated)
     app.include_router(catalog_api.router, prefix="/api", dependencies=gated)
