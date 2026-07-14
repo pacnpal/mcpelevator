@@ -118,10 +118,14 @@
 		return collides ? `${server.name} (${server.slug})` : server.name;
 	}
 
-	/** Human label for a token's scope: 'All servers', the server's label, or a
-	 * fallback when the scoped server no longer exists. */
+	/** Human label for a token's scope: 'All servers', a group, the server's label, or
+	 * a fallback when the scoped server/group no longer exists. */
 	function scopeLabel(scope: string): string {
 		if (scope === 'all') return 'All servers';
+		if (scope.startsWith('group:')) {
+			const name = scope.slice('group:'.length);
+			return groups.some((g) => g.name === name) ? `Group: ${name}` : 'Unknown group';
+		}
 		const server = servers.find((s) => s.id === scope);
 		return server ? serverLabel(server) : 'Unknown server';
 	}
@@ -610,9 +614,18 @@
 						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 					>
 						<option value="all">All servers</option>
-						{#each servers as server (server.id)}
-							<option value={server.id}>{serverLabel(server)}</option>
-						{/each}
+						{#if groups.length > 0}
+							<optgroup label="Groups">
+								{#each groups as group (group.name)}
+									<option value={`group:${group.name}`}>Group: {group.name}</option>
+								{/each}
+							</optgroup>
+						{/if}
+						<optgroup label="Servers">
+							{#each servers as server (server.id)}
+								<option value={server.id}>{serverLabel(server)}</option>
+							{/each}
+						</optgroup>
 					</select>
 				</div>
 				<button
@@ -678,8 +691,10 @@
 										<span
 											class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
 											title={token.scope === 'all'
-												? 'Authorizes every bearer-protected server'
-												: 'Authorizes only this server'}
+												? 'Authorizes every bearer-protected server and group'
+												: token.scope.startsWith('group:')
+													? 'Authorizes only this group'
+													: 'Authorizes only this server'}
 											style={token.scope === 'all'
 												? 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'
 												: 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'}

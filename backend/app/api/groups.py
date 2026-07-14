@@ -18,7 +18,7 @@ from starlette.responses import Response
 
 from app.api.schemas import GroupInfo, GroupUpsert
 from app.api.util import base_url
-from app.db import get_session
+from app.db import get_session, repo
 from app.groups import registry
 
 router = APIRouter()
@@ -68,5 +68,9 @@ async def delete_group(
 ):
     if not registry.delete_group(session, name):
         raise HTTPException(status_code=404, detail="group not found")
+    # Revoke tokens scoped to this group. Its scope string (``group:<name>``) is
+    # deterministic, so a lingering token would silently re-authorize a *different*
+    # group later recreated under the same name — unlike a random, never-reused server id.
+    repo.delete_tokens_by_scope(session, f"group:{name}")
     await _resync_groups(request)
     return Response(status_code=204)

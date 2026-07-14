@@ -418,22 +418,16 @@ async def _fake_inner(scope, receive, send):
     )(scope, receive, send)
 
 
-class _NoopRunner:
-    """Stand-in for _AppRunner in route tests: teardown (lifespan shutdown) awaits
-    close(), so it must be an awaitable no-op."""
-
-    async def close(self) -> None:
-        pass
-
-
 def _stub_group(client: TestClient, name: str) -> None:
-    """Freeze a group with a fake inner app (and stop the reconciler's sync from
-    clobbering it), the way test_proxy stubs supervisor.endpoint."""
-    from app.groups.hub import _Instance
-
+    """Route the dispatcher to a fake inner app for ``name`` by overriding the hub's
+    ``app_for`` (not by poking ``_instances``): the background reconciler rebuilds an
+    instance for every declared group — including an empty one — so a raw ``_instances``
+    entry would race that rebuild. Overriding ``app_for`` wins deterministically. Also
+    stops the reconciler's sync hook, the way test_proxy stubs supervisor.endpoint."""
     client.app.state.supervisor.on_converged = None
     hub = client.app.state.groups
-    hub._instances[name] = _Instance(_fake_inner, _NoopRunner(), frozenset())
+    prev = hub.app_for
+    hub.app_for = lambda n, _prev=prev: _fake_inner if n == name else _prev(n)
 
 
 def _mint_token(scope: str = "all") -> str:
@@ -463,11 +457,13 @@ def test_route_rejects_off_allowlist_host(clean_settings):
 
 
 def test_route_503_when_group_not_built(clean_settings):
-    """The group exists in the registry but the hub hasn't built it yet (transient)."""
+    """The group exists in the registry but the hub hasn't built it yet (transient).
+    Force that state by overriding app_for -> None (poking _instances would race the
+    reconciler, which rebuilds an instance for every declared group)."""
     _write_groups({"g": "*"})
     with TestClient(app) as client:
         client.app.state.supervisor.on_converged = None
-        client.app.state.groups._instances.pop("g", None)
+        client.app.state.groups.app_for = lambda name: None
         r = client.post("/g/g/mcp", headers=LOOPBACK)
         assert r.status_code == 503
         assert "not ready" in r.text
@@ -636,6 +632,49 @@ def test_token_scope_accepts_group_and_rejects_unknown(clean_settings):
         assert r.json()["scope"] == "group:team"
         r = client.post("/api/tokens", json={"name": "t", "scope": "group:ghost"}, headers=LOOPBACK)
         assert r.status_code == 400
+
+
+def test_deleting_a_group_revokes_its_tokens(clean_settings):
+    """A group's scope string (group:<name>) is deterministic, so deleting the group
+    must revoke its tokens — otherwise a same-named group recreated later would be
+    silently re-authorized by the old token."""
+    _write_groups({"team": "*", "other": "*"})
+    with TestClient(app) as client:
+        client.app.state.supervisor.on_converged = None
+        team_tok = client.post(
+            "/api/tokens", json={"name": "t", "scope": "group:team"}, headers=LOOPBACK
+        ).json()["id"]
+        other_tok = client.post(
+            "/api/tokens", json={"name": "o", "scope": "group:other"}, headers=LOOPBACK
+        ).json()["id"]
+
+        r = client.delete("/api/groups/team", headers=LOOPBACK)
+        assert r.status_code == 204
+
+        ids = {t["id"] for t in client.get("/api/tokens", headers=LOOPBACK).json()}
+        assert team_tok not in ids  # revoked with the group
+        assert other_tok in ids  # a different group's token is untouched
+
+
+def test_group_writes_take_the_config_write_lock(clean_settings):
+    """The group registry serializes its validate-then-write against server writes
+    (config_write_lock) so a concurrent delete can't strand a dangling member."""
+    from unittest.mock import patch
+
+    from app.registry import service as svc
+
+    with Session(get_engine()) as session:
+        a = _mk_server(session, "Lock A")
+    try:
+        with patch.object(svc, "config_write_lock", wraps=svc.config_write_lock) as spy:
+            with Session(get_engine()) as session:
+                registry.write_group(session, "g", [a.id])
+                registry.delete_group(session, "g")
+                registry.prune_server(session, a.id)
+        assert spy.call_count == 3  # every registry write path acquired the lock
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, a.id)
 
 
 def test_no_s_all_route_survives():

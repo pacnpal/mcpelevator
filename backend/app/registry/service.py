@@ -12,6 +12,7 @@ import os
 import secrets
 import tempfile
 import threading
+from contextlib import contextmanager
 from functools import lru_cache, wraps
 from typing import Any, Optional
 from urllib.parse import urlsplit
@@ -746,6 +747,18 @@ def _serialized_write(fn):
             return fn(*args, **kwargs)
 
     return wrapper
+
+
+@contextmanager
+def config_write_lock():
+    """Public access to the process-wide config write lock so a sibling registry (the
+    group registry, ``app.groups.registry``) can serialize its referential
+    validate-then-write against server create/update/delete. Without it a server delete
+    can land between a group write's ``validate_members`` and its commit, persisting a
+    group that references a now-deleted server — which the startup validation would then
+    refuse to boot on. The lock is an ``RLock``, so re-entering it (same thread) is safe."""
+    with _write_lock:
+        yield
 
 
 def _unique_slug(session: Session, name: str) -> str:

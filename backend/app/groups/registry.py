@@ -34,6 +34,7 @@ from typing import Union
 from sqlmodel import Session
 
 from app.db import repo
+from app.registry import service
 from app.registry import settings as runtime_settings
 
 # Every registered server, present and future. A resolution rule, not a group
@@ -92,36 +93,45 @@ def validate_at_startup(session: Session) -> None:
 def write_group(session: Session, name: str, members: Members) -> dict[str, Members]:
     """Create or replace one group (referentially validated), returning the full
     registry. Structural validation/normalization (name grammar, dedupe) runs in
-    the settings SSOT writer."""
-    validate_members(session, name, members)
-    updated = dict(read(session))
-    updated[name] = members
-    runtime_settings.write(session, {"groups": updated})
-    return read(session)
+    the settings SSOT writer.
+
+    The referential check + write are serialized against server create/update/delete
+    (``config_write_lock``): otherwise a delete could remove a member between
+    ``validate_members`` and the commit, persisting a dangling reference the startup
+    validation would then refuse to boot on."""
+    with service.config_write_lock():
+        validate_members(session, name, members)
+        updated = dict(read(session))
+        updated[name] = members
+        runtime_settings.write(session, {"groups": updated})
+        return read(session)
 
 
 def delete_group(session: Session, name: str) -> bool:
-    """Remove a group; returns False when it doesn't exist."""
-    current = dict(read(session))
-    if name not in current:
-        return False
-    del current[name]
-    runtime_settings.write(session, {"groups": current})
-    return True
+    """Remove a group; returns False when it doesn't exist. Serialized with server
+    writes so it can't interleave with a concurrent registry-touching operation."""
+    with service.config_write_lock():
+        current = dict(read(session))
+        if name not in current:
+            return False
+        del current[name]
+        runtime_settings.write(session, {"groups": current})
+        return True
 
 
 def prune_server(session: Session, server_id: str) -> None:
     """Drop a (just-deleted) server from every explicit member list, keeping the
     registry referentially intact without stranding groups. Wildcard groups need
-    nothing — they resolve against the live server table. Runs in the caller's
-    delete transaction."""
-    current = read(session)
-    updated = {
-        name: members if members == WILDCARD else [m for m in members if m != server_id]
-        for name, members in current.items()
-    }
-    if updated != current:
-        runtime_settings.write(session, {"groups": updated})
+    nothing — they resolve against the live server table. Serialized with server
+    writes so a concurrent group write can't re-add the id after this prunes it."""
+    with service.config_write_lock():
+        current = read(session)
+        updated = {
+            name: members if members == WILDCARD else [m for m in members if m != server_id]
+            for name, members in current.items()
+        }
+        if updated != current:
+            runtime_settings.write(session, {"groups": updated})
 
 
 def resolve(session: Session, name: str) -> list[str] | None:
