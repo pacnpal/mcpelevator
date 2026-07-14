@@ -408,17 +408,14 @@
 		}
 	}
 
-	async function handleCreateGroup(e: SubmitEvent) {
-		e.preventDefault();
-		if (savingGroup || !groupNameValid) return;
+	// A pending replace: set when the entered name matches an existing group, so the
+	// create form doubles as an in-place editor (putGroup replaces membership) WITHOUT
+	// silently overwriting — the operator confirms first. Cleared automatically once the
+	// name no longer matches (the banner's condition re-checks it).
+	let confirmReplaceName = $state<string | null>(null);
+
+	async function submitGroup() {
 		const name = newGroupName.trim();
-		// putGroup has replace semantics; the create form must not silently overwrite an
-		// existing group's membership. Reject a name that's already taken — editing an
-		// existing group is done from its own row.
-		if (groups.some((g) => g.name === name)) {
-			flashToast(`A group named "${name}" already exists.`);
-			return;
-		}
 		const members: GroupMembers = newGroupMode === 'all' ? '*' : newGroupSelection;
 		savingGroup = true;
 		try {
@@ -427,11 +424,27 @@
 			newGroupName = '';
 			newGroupMode = 'all';
 			newGroupSelection = [];
+			confirmReplaceName = null;
 		} catch (err) {
 			flashToast(errorMessage(err));
 		} finally {
 			savingGroup = false;
 		}
+	}
+
+	function handleCreateGroup(e: SubmitEvent) {
+		e.preventDefault();
+		if (savingGroup || !groupNameValid) return;
+		const name = newGroupName.trim();
+		// putGroup has replace semantics. If the name is taken, require an explicit
+		// confirm so membership is never *silently* overwritten — but still allow editing
+		// an existing group in place, rather than forcing a delete+recreate that would
+		// take /g/<name>/mcp offline and revoke its group:<name> tokens.
+		if (groups.some((g) => g.name === name)) {
+			confirmReplaceName = name;
+			return;
+		}
+		void submitGroup();
 	}
 
 	// Delete needs an explicit confirm (it takes a live /g/<name>/mcp endpoint offline),
@@ -1131,13 +1144,46 @@
 							aria-busy={savingGroup}
 							class="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
 						>
-							Create group
+							{groups.some((g) => g.name === newGroupName.trim()) ? 'Update group' : 'Create group'}
 						</button>
 					</div>
 					{#if newGroupName.trim().length > 0 && !groupNameValid}
 						<p class="text-[11px] text-[var(--color-state-failed)]">
 							Use lowercase letters, digits, and single hyphens (the URL routing key).
 						</p>
+					{/if}
+					{#if confirmReplaceName !== null && confirmReplaceName === newGroupName.trim()}
+						<div
+							role="alert"
+							class="flex flex-col gap-2.5 rounded-lg border p-3"
+							style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+						>
+							<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+								A group named <code class="font-mono text-[var(--color-ink)]">{confirmReplaceName}</code>
+								already exists. Replace its members with your selection above? Its
+								<code class="font-mono">/g/{confirmReplaceName}/mcp</code> endpoint stays up and its
+								tokens keep working — only the membership changes.
+							</p>
+							<div class="flex items-center gap-1.5">
+								<button
+									type="button"
+									onclick={() => submitGroup()}
+									disabled={savingGroup}
+									aria-busy={savingGroup}
+									class="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-70"
+								>
+									Replace members
+								</button>
+								<button
+									type="button"
+									onclick={() => (confirmReplaceName = null)}
+									disabled={savingGroup}
+									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+								>
+									Cancel
+								</button>
+							</div>
+						</div>
 					{/if}
 
 					<div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Group members">

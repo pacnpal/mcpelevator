@@ -259,22 +259,32 @@ async def update_server(
     return _summary(server, sup, session, base_url(request))
 
 
+def _prune_then_delete(session: Session, server_id: str) -> bool:
+    """Prune the server from every group's explicit member list, then delete the row —
+    both under a SINGLE hold of the config write lock. Run in the threadpool by the
+    caller, never on the event loop: prune_server and service.delete_server each take
+    that lock, and a bulk import holding it while deriving scrypt hashes would otherwise
+    stall the loop (and all proxy/API traffic) here.
+
+    Prune FIRST so an interruption between the two commits leaves a benign state — the
+    row lingers but no group references a missing id (which validate_at_startup would
+    refuse to boot on), and a retried delete completes it. Holding the lock across BOTH
+    also closes the window where a concurrent group write could re-add this server after
+    the prune but before the delete. The lock is reentrant, so the inner acquisitions in
+    prune_server / delete_server are cheap no-ops. A no-op prune for a nonexistent id.
+    Returns False when the server didn't exist (-> 404)."""
+    with service.config_write_lock():
+        group_registry.prune_server(session, server_id)
+        return service.delete_server(session, server_id)
+
+
 @router.delete("/servers/{server_id}", status_code=204)
 async def delete_server(server_id: str, request: Request, session: Session = Depends(get_session)):
     sup = request.app.state.supervisor
     await sup.stop(server_id)  # tear down the process before removing desired state
-    # Prune the server from every group's explicit member list BEFORE deleting the row,
-    # so a crash in the gap between the two commits can't leave a group referencing a
-    # now-deleted server — a dangling reference that validate_at_startup would refuse to
-    # boot on. Pruning first makes the only interruptible state benign: the row lingers
-    # but no group points at a missing id, and a retried delete simply completes.
-    # (Wildcard groups resolve against the live table, so they need no pruning.) It's a
-    # no-op for an id that isn't an explicit member, including a nonexistent server.
-    group_registry.prune_server(session, server_id)
-    # Threadpool + service (not repo): the delete must queue behind the registry write
-    # lock — racing a threaded update that already loaded this row would blow up that
-    # update's commit — and waiting for the lock must not sit on the event loop.
-    if not await run_in_threadpool(service.delete_server, session, server_id):
+    # Prune + delete in the worker thread (see _prune_then_delete): both take the config
+    # write lock, so the wait must not sit on the event loop.
+    if not await run_in_threadpool(_prune_then_delete, session, server_id):
         raise HTTPException(status_code=404, detail="server not found")
     # Cancel any in-flight authorization and drop stored upstream OAuth credentials for this
     # (now-deleted) server — otherwise a late callback could re-promote tokens and leave an
