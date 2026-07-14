@@ -19,7 +19,9 @@ from fastapi.testclient import TestClient
 from fastmcp import FastMCP
 from fastmcp.client.transports import FastMCPTransport
 from sqlmodel import Session
+from starlette.applications import Starlette
 from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from app.db import get_engine, repo
 from app.db.models import Server, Token
@@ -445,7 +447,22 @@ async def _fake_inner(scope, receive, send):
     )(scope, receive, send)
 
 
-def _stub_group(client: TestClient, name: str) -> None:
+async def _fake_inner_endpoint(request):
+    return JSONResponse(
+        {
+            "path": request.scope["path"],
+            "root_path": request.scope.get("root_path", ""),
+            "app_root_path": request.scope.get("app_root_path", ""),
+        }
+    )
+
+
+_routed_fake_inner = Starlette(
+    routes=[Route("/mcp", _fake_inner_endpoint, methods=["POST"])]
+)
+
+
+def _stub_group(client: TestClient, name: str, inner=_fake_inner) -> None:
     """Route the dispatcher to a fake inner app for ``name`` by overriding the hub's
     ``app_for`` (not by poking ``_instances``): the background reconciler rebuilds an
     instance for every declared group — including an empty one — so a raw ``_instances``
@@ -454,7 +471,7 @@ def _stub_group(client: TestClient, name: str) -> None:
     client.app.state.supervisor.on_converged = None
     hub = client.app.state.groups
     prev = hub.app_for
-    hub.app_for = lambda n, _prev=prev: _fake_inner if n == name else _prev(n)
+    hub.app_for = lambda n, _prev=prev: inner if n == name else _prev(n)
 
 
 def _mint_token(scope: str = "all") -> str:
@@ -508,6 +525,20 @@ def test_route_delegates_with_mount_scope(clean_settings):
         assert body["root_path"].endswith("/g/team")
         # what Starlette routing matches against (get_route_path) is the remainder
         assert body["path"].removeprefix(body["root_path"]) == "/mcp"
+
+
+def test_route_delegates_when_proxy_strips_app_root_path(clean_settings):
+    """Parse the group relative to /g when an upstream proxy strips app_root_path."""
+    _write_groups({"team": "*"})
+    with TestClient(app, root_path="/mcpelevator") as client:
+        _stub_group(client, "team", _routed_fake_inner)
+        r = client.post("/g/team/mcp", headers=LOOPBACK)
+        assert r.status_code == 200
+        assert r.json() == {
+            "path": "/g/team/mcp",
+            "root_path": "/g/team",
+            "app_root_path": "/mcpelevator",
+        }
 
 
 def test_route_bearer_matrix(clean_settings):

@@ -14,11 +14,12 @@ Deterministic behavior:
 - **Known but empty group** (no running members) -> the hub still builds a valid
   (tool-less) bundle, so ``initialize`` succeeds and ``tools/list`` is ``[]``.
 
-Scope surgery: a request to ``/g/<name>/mcp`` arrives here (behind the ``/g``
-mount) with ``root_path == "/g"`` and ``path == "/g/<name>/mcp"``. The group's
-inner app was built with ``path="/mcp"``, so extending ``root_path`` to
-``/g/<name>`` makes Starlette's ``get_route_path`` (path minus root_path) resolve
-to ``/mcp``.
+Scope surgery: a request to ``/g/<name>/mcp`` arrives here behind the ``/g``
+mount. ``root_path`` includes both an optional outer ``app_root_path`` and ``/g``,
+while ``path`` may omit that app prefix when a proxy already stripped it. Deriving
+the routing root relative to ``app_root_path``, then extending it to ``/g/<name>``,
+makes the group's inner app (built with ``path="/mcp"``) resolve the route to
+``/mcp`` in either deployment shape.
 """
 
 from __future__ import annotations
@@ -44,11 +45,22 @@ class GroupDispatch:
         if scope["type"] != "http":  # pragma: no cover — Mount only routes http here
             raise RuntimeError("GroupDispatch only handles http")
 
-        # Path relative to the current mount (root_path now includes the "/g" prefix, and
-        # any outer ASGI root_path the app is served under). get_route_path is Starlette's
-        # own root_path-aware helper — safer than slicing by len(root_path), which would
-        # misparse the group name when the app is mounted under a non-empty root_path.
-        route_path = get_route_path(scope)  # -> "/<name>/<rest>"
+        # A proxy may strip app_root_path from path while Starlette still accumulates it
+        # into root_path. In that shape, route against only this app's mount portion
+        # ("/g"); when path retains the outer prefix, keep the accumulated root instead.
+        path = scope["path"]
+        root_path = scope.get("root_path", "")
+        app_root_path = scope.get("app_root_path", "")
+        path_includes_app_root = path == app_root_path or path.startswith(
+            f"{app_root_path}/"
+        )
+        routing_root_path = root_path
+        if app_root_path and not path_includes_app_root:
+            routing_root_path = root_path.removeprefix(app_root_path)
+
+        route_scope = dict(scope)
+        route_scope["root_path"] = routing_root_path
+        route_path = get_route_path(route_scope)  # -> "/<name>/<rest>"
         name, _, _ = route_path.lstrip("/").partition("/")
         if not name:
             await Response("unknown group", status_code=404)(scope, receive, send)
@@ -78,9 +90,9 @@ class GroupDispatch:
             await Response("group not ready", status_code=503)(scope, receive, send)
             return
 
-        # Delegate to the group's inner app. Extend root_path by the group name so the
-        # inner app (built with path="/mcp") resolves the route path to "/mcp"; path
-        # stays the full "/g/<name>/mcp" (Starlette routes on path minus root_path).
+        # Delegate to the group's inner app. Extend the routing root by the group name
+        # so the inner app (built with path="/mcp") resolves the remainder to "/mcp".
+        # app_root_path remains on the scope for external URL generation.
         sub_scope = dict(scope)
-        sub_scope["root_path"] = scope.get("root_path", "") + "/" + name
+        sub_scope["root_path"] = routing_root_path + "/" + name
         await inner(sub_scope, receive, send)
