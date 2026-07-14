@@ -68,6 +68,11 @@ services:
       # Isolation model (B): target the dind sidecar's daemon instead of a host socket.
       # Uncomment together with the `dind` service below and run `--profile docker-dind`.
       # - DOCKER_HOST=tcp://dind:2375
+      # Extra Debian packages installed at container startup (space-separated), for MCP
+      # servers that need tools beyond the baked-in toolchain (build-essential, cmake,
+      # go, rust are already in the image). Adds startup time on first boot / recreate;
+      # a failed install warns and boot continues.
+      # - MCPE_APT_PACKAGES=ffmpeg libpq-dev
     # Wait for the dind daemon to be accepting connections before this app reconciles, so an
     # already-enabled docker server doesn't fail its first start against a not-yet-ready
     # daemon (a failed unit isn't auto-retried). Only takes effect with the docker-dind profile

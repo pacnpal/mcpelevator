@@ -169,6 +169,7 @@ mcpelevator's built-in bearer auth for Claude Code / locally-configured Desktop)
 | `MCPE_PUBLIC_BASE_URL` | _(unset)_ | Absolute URL clients use when the box sits behind a tunnel/reverse proxy |
 | `MCPE_ALLOWED_HOSTS` | _(unset)_ | Extra hostnames the Host/Origin guard trusts (e.g. a reverse-proxy hostname) |
 | `MCPE_DOCKER_RUNNER` | `false` | **Root-equivalent, opt-in.** First-boot seed for the docker runner (launch image-packaged MCP servers). Needs a Docker endpoint — either the host socket mounted (sibling model) or a `DOCKER_HOST` pointing at a separate dind daemon — see [Docker runner](#docker-runner-opt-in-root-equivalent) |
+| `MCPE_APT_PACKAGES` | _(unset)_ | Space-separated extra Debian packages installed at container startup, for servers that need tools beyond the baked-in build toolchain. A failed install warns and boot continues |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrently running MCP servers |
 | `MCPE_START_TIMEOUT_S` | `120` | Readiness timeout (covers npx/uvx cold-start installs) |
 
