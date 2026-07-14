@@ -412,6 +412,13 @@
 		e.preventDefault();
 		if (savingGroup || !groupNameValid) return;
 		const name = newGroupName.trim();
+		// putGroup has replace semantics; the create form must not silently overwrite an
+		// existing group's membership. Reject a name that's already taken — editing an
+		// existing group is done from its own row.
+		if (groups.some((g) => g.name === name)) {
+			flashToast(`A group named "${name}" already exists.`);
+			return;
+		}
 		const members: GroupMembers = newGroupMode === 'all' ? '*' : newGroupSelection;
 		savingGroup = true;
 		try {
@@ -427,6 +434,10 @@
 		}
 	}
 
+	// Delete needs an explicit confirm (it takes a live /g/<name>/mcp endpoint offline),
+	// mirroring the per-row token-revoke gate.
+	let confirmDeleteGroup = $state<string | null>(null);
+
 	async function handleDeleteGroup(name: string) {
 		if (deletingGroup) return;
 		deletingGroup = name;
@@ -437,6 +448,7 @@
 			flashToast(errorMessage(err));
 		} finally {
 			deletingGroup = null;
+			confirmDeleteGroup = null;
 		}
 	}
 
@@ -1047,19 +1059,44 @@
 									</div>
 									<div class="flex shrink-0 items-center gap-1.5">
 										<CopyMenu server={groupSummary(group)} />
-										<button
-											type="button"
-											onclick={() => handleDeleteGroup(group.name)}
-											disabled={deletingGroup === group.name}
-											aria-busy={deletingGroup === group.name}
-											aria-label={`Delete group ${group.name}`}
-											class="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium transition active:translate-y-px disabled:opacity-50"
-											style="border-color: color-mix(in oklab, var(--color-state-failed) 35%, transparent); color: var(--color-state-failed);"
-										>
-											Delete
-										</button>
+										{#if confirmDeleteGroup === group.name}
+											<button
+												type="button"
+												onclick={() => handleDeleteGroup(group.name)}
+												disabled={deletingGroup === group.name}
+												aria-busy={deletingGroup === group.name}
+												class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+												style="background-color: var(--color-state-failed);"
+											>
+												Delete
+											</button>
+											<button
+												type="button"
+												onclick={() => (confirmDeleteGroup = null)}
+												disabled={deletingGroup === group.name}
+												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+											>
+												Cancel
+											</button>
+										{:else}
+											<button
+												type="button"
+												onclick={() => (confirmDeleteGroup = group.name)}
+												aria-label={`Delete group ${group.name}`}
+												class="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium transition active:translate-y-px"
+												style="border-color: color-mix(in oklab, var(--color-state-failed) 35%, transparent); color: var(--color-state-failed);"
+											>
+												Delete
+											</button>
+										{/if}
 									</div>
 								</div>
+								{#if confirmDeleteGroup === group.name}
+									<p class="text-[11px] leading-tight text-[var(--color-state-failed)]">
+										This takes <code class="font-mono">{group.url}</code> offline and revokes tokens
+										scoped to this group.
+									</p>
+								{/if}
 								<code class="min-w-0 truncate font-mono text-[11px] text-[var(--color-ink-dim)]">
 									{group.url}
 								</code>

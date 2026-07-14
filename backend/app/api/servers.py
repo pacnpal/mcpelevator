@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -39,6 +40,8 @@ from app.groups import registry as group_registry
 from app.registry import service
 from app.registry import settings as runtime_settings
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
@@ -51,8 +54,11 @@ async def _resync_groups(request: Request) -> None:
     topology key is unchanged; sync() is lock-serialized and task-safe."""
     try:
         await request.app.state.groups.sync(request.app.state.supervisor)
-    except Exception as exc:  # the registry write already committed; don't fail the call
-        print(f"[mcpelevator] group resync error: {exc}", flush=True)
+    except Exception:  # the registry write already committed; don't fail the call
+        # sync() isolates per-group failures internally (a bad group fails closed to 503
+        # without blocking the rest), so reaching here means a broader failure (e.g. a DB
+        # read). Log with the traceback; the reconciler re-converges on its next pass.
+        logger.exception("group resync failed")
 
 
 def _live_state(server: Server, sup, session: Session):
@@ -257,6 +263,14 @@ async def update_server(
 async def delete_server(server_id: str, request: Request, session: Session = Depends(get_session)):
     sup = request.app.state.supervisor
     await sup.stop(server_id)  # tear down the process before removing desired state
+    # Prune the server from every group's explicit member list BEFORE deleting the row,
+    # so a crash in the gap between the two commits can't leave a group referencing a
+    # now-deleted server — a dangling reference that validate_at_startup would refuse to
+    # boot on. Pruning first makes the only interruptible state benign: the row lingers
+    # but no group points at a missing id, and a retried delete simply completes.
+    # (Wildcard groups resolve against the live table, so they need no pruning.) It's a
+    # no-op for an id that isn't an explicit member, including a nonexistent server.
+    group_registry.prune_server(session, server_id)
     # Threadpool + service (not repo): the delete must queue behind the registry write
     # lock — racing a threaded update that already loaded this row would blow up that
     # update's commit — and waiting for the lock must not sit on the event loop.
@@ -267,10 +281,6 @@ async def delete_server(server_id: str, request: Request, session: Session = Dep
     # orphan credential file on disk for a server that no longer exists.
     oauth_flow.cancel_pending(server_id)
     ServerTokenStorage(server_id).clear()
-    # Drop the deleted server from every group's explicit member list so the registry
-    # stays referentially intact (wildcard groups resolve against the live table, so
-    # they need no pruning). Then converge the group hub at once.
-    group_registry.prune_server(session, server_id)
     await _resync_groups(request)
     return Response(status_code=204)
 

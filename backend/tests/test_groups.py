@@ -385,6 +385,33 @@ async def test_hub_dead_upstream_is_skipped_not_fatal(clean_settings):
             repo.delete_server(session, dead.id)
 
 
+async def test_hub_one_groups_swap_failure_does_not_block_others(clean_settings):
+    """A single group's build failure must fail closed for that group (app_for -> None,
+    the dispatcher 503s it) without starving the other groups' convergence in the same
+    pass."""
+    with Session(get_engine()) as session:
+        good = _mk_server(session, "Good Member")
+        bad = _mk_server(session, "Bad Member")
+    _write_groups({"g-good": [good.id], "g-bad": [bad.id]})
+    try:
+        def factory(url: str):
+            if url.startswith("http://up-bad-member"):
+                raise RuntimeError("boom building bad group's proxy")
+            return FastMCPTransport(_make_upstream("g", "works"))
+
+        hub = GroupHub(transport_factory=factory)
+        await hub.sync(_endpoints(good, bad))
+        # the healthy group converged; the failing one failed closed (no stale instance)
+        assert hub.app_for("g-good") is not None
+        assert await _list_tool_names(hub.app_for("g-good")) == ["good-member_works"]
+        assert hub.app_for("g-bad") is None
+        await hub.close()
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, good.id)
+            repo.delete_server(session, bad.id)
+
+
 def test_internal_hop_never_forwards_authorization():
     """A group's bearer token authorizes the whole bundle; the hub's internal hop to
     the loopback bridges must not propagate it (a remote-runner bridge would forward it

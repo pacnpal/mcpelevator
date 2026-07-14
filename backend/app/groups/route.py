@@ -27,6 +27,7 @@ from fastapi import HTTPException
 from sqlmodel import Session
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.routing import get_route_path
 from starlette.types import Receive, Scope, Send
 
 from app.auth.middleware import enforce
@@ -43,8 +44,11 @@ class GroupDispatch:
         if scope["type"] != "http":  # pragma: no cover — Mount only routes http here
             raise RuntimeError("GroupDispatch only handles http")
 
-        root_path = scope.get("root_path", "")
-        route_path = scope["path"][len(root_path):]  # "/g" stripped -> "/<name>/<rest>"
+        # Path relative to the current mount (root_path now includes the "/g" prefix, and
+        # any outer ASGI root_path the app is served under). get_route_path is Starlette's
+        # own root_path-aware helper — safer than slicing by len(root_path), which would
+        # misparse the group name when the app is mounted under a non-empty root_path.
+        route_path = get_route_path(scope)  # -> "/<name>/<rest>"
         name, _, _ = route_path.lstrip("/").partition("/")
         if not name:
             await Response("unknown group", status_code=404)(scope, receive, send)
@@ -78,5 +82,5 @@ class GroupDispatch:
         # inner app (built with path="/mcp") resolves the route path to "/mcp"; path
         # stays the full "/g/<name>/mcp" (Starlette routes on path minus root_path).
         sub_scope = dict(scope)
-        sub_scope["root_path"] = root_path + "/" + name
+        sub_scope["root_path"] = scope.get("root_path", "") + "/" + name
         await inner(sub_scope, receive, send)

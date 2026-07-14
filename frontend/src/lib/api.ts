@@ -401,10 +401,14 @@ export function listGroups(): Promise<GroupInfo[]> {
 /** Create or replace a group. `members` is `'*'` (every registered server) or an
  * ordered list of server ids. A 400 surfaces an unknown member id or a bad name. */
 export function putGroup(name: string, members: GroupMembers): Promise<GroupInfo> {
+	// Guard an empty name here: an empty path segment would resolve to `/groups/` and
+	// hit the collection route (405/unexpected) instead of failing clearly.
+	if (!name) return Promise.reject(new Error('group name is required'));
 	return jsonRequest<GroupInfo>(`/groups/${encodeURIComponent(name)}`, 'PUT', { members });
 }
 
 /** Delete a group by name. */
 export function deleteGroup(name: string): Promise<void> {
+	if (!name) return Promise.reject(new Error('group name is required'));
 	return request<void>(`/groups/${encodeURIComponent(name)}`, { method: 'DELETE' });
 }

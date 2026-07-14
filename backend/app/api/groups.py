@@ -11,6 +11,8 @@ mounted set is never serveable before the reconciler fires.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 from starlette.requests import Request
@@ -20,6 +22,8 @@ from app.api.schemas import GroupInfo, GroupUpsert
 from app.api.util import base_url
 from app.db import get_session, repo
 from app.groups import registry
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -34,8 +38,11 @@ async def _resync_groups(request: Request) -> None:
     topology key is unchanged; sync() is lock-serialized and task-safe."""
     try:
         await request.app.state.groups.sync(request.app.state.supervisor)
-    except Exception as exc:  # the registry write already committed; don't fail the call
-        print(f"[mcpelevator] group resync error: {exc}", flush=True)
+    except Exception:  # the registry write already committed; don't fail the call
+        # sync() isolates per-group failures internally (a bad group fails closed to 503
+        # without blocking the rest), so reaching here is a broader failure; log the
+        # traceback and let the reconciler re-converge on its next pass.
+        logger.exception("group resync failed")
 
 
 @router.get("/groups", response_model=list[GroupInfo])
@@ -66,11 +73,15 @@ async def upsert_group(
 async def delete_group(
     name: str, request: Request, session: Session = Depends(get_session)
 ):
-    if not registry.delete_group(session, name):
+    if not registry.exists(session, name):
         raise HTTPException(status_code=404, detail="group not found")
-    # Revoke tokens scoped to this group. Its scope string (``group:<name>``) is
-    # deterministic, so a lingering token would silently re-authorize a *different*
-    # group later recreated under the same name — unlike a random, never-reused server id.
+    # Revoke tokens scoped to this group BEFORE removing the registry entry. The scope
+    # string (``group:<name>``) is deterministic, so a lingering token would silently
+    # re-authorize a *different* group later recreated under the same name — unlike a
+    # random, never-reused server id. Revoking first makes the only interruptible state
+    # benign: if a crash lands between the two commits, the tokens are already gone (no
+    # reusable credentials) and the group simply lingers until a retried delete removes it.
     repo.delete_tokens_by_scope(session, f"group:{name}")
+    registry.delete_group(session, name)
     await _resync_groups(request)
     return Response(status_code=204)

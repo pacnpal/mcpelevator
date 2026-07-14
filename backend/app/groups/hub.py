@@ -190,7 +190,19 @@ class GroupHub:
                 current = self._instances.get(name)
                 if current is not None and current.key == key:
                     continue  # topology unchanged — keep the live instance
-                await self._swap(name, entries, key)
+                try:
+                    await self._swap(name, entries, key)
+                except Exception as exc:
+                    # Isolate per group: one group's build/start failure must not abort the
+                    # whole pass and starve every group after it in iteration order (the
+                    # reconciler only wraps the whole on_converged call). Fail CLOSED for the
+                    # bad group: tear down any surviving instance so app_for(name) is None
+                    # and the dispatcher 503s it, rather than serving a stale bundle (e.g.
+                    # one whose auth was just tightened) — _swap can fail either before or
+                    # after its own teardown, so we force it here. Other groups still
+                    # converge this pass; the reconciler retries the failed one next pass.
+                    print(f"[mcpelevator] group {name!r} sync error: {exc}", flush=True)
+                    await self._teardown(name)
 
     def _make_proxy(self, slug: str, url: str) -> FastMCP:
         transport = self._transport_factory(url)
