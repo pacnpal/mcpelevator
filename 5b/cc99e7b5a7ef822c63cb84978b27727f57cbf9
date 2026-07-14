@@ -1,0 +1,22 @@
+backend/tests/test_groups.py
+  s_28471c08df7ca4::t_b9246866a2ff05 530-533,535-538,541-543
+  s_28471c08df7ca4::t_26c2ccc4860171 22,24,450-465,474,534,539-540
+backend/app/groups/route.py
+  s_28471c08df7ca4::t_d12235db357e78 17-22,48-63,93-95,97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "5bcc99e7b5a7ef822c63cb84978b27727f57cbf9",
+  "prompts": {},
+  "sessions": {
+    "s_28471c08df7ca4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f61b8-2112-7ee0-b240-251e100d0b58",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "pacnpal <183241239+pacnpal@users.noreply.github.com>"
+    }
+  }
+}
