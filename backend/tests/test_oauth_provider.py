@@ -204,3 +204,48 @@ def test_config_url_normalization():
     assert oauth_mod._normalize_config_url(CONFIG_URL) == CONFIG_URL
     rfc8414 = "https://as.example/.well-known/oauth-authorization-server"
     assert oauth_mod._normalize_config_url(rfc8414) == rfc8414
+
+
+async def test_accept_bearer_delegates_local_tokens(session, keypair, monkeypatch):
+    """With oauth_accept_bearer on, an mcpe_ token gets the bearer provider's verdict
+    (accept + scope semantics); JWTs still go down the OAuth path; and with the
+    setting off (default) an mcpe_ token is treated as an (invalid) JWT."""
+    from app.auth import bearer as bearer_mod
+    from app.db import repo
+    from app.db.models import Token
+    from app.util import hash_token
+
+    monkeypatch.setattr(bearer_mod, "get_engine", oauth_mod.get_engine)
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_accept_bearer": True}
+    )
+    session.add(
+        Token(id="t1", name="auto", token_hash=hash_token("mcpe_localtoken"), prefix="mcpe_loc", scope="all")
+    )
+    session.commit()
+
+    req = _request({"Authorization": "Bearer mcpe_localtoken"})
+    await OAuthProvider().authenticate(req, _server())  # local token accepted
+
+    scoped = Token(
+        id="t2", name="other", token_hash=hash_token("mcpe_scoped"), prefix="mcpe_sco", scope="other-id"
+    )
+    session.add(scoped)
+    session.commit()
+    with pytest.raises(HTTPException) as exc:  # bearer 403 scope semantics preserved
+        await OAuthProvider().authenticate(
+            _request({"Authorization": "Bearer mcpe_scoped"}), _server()
+        )
+    assert exc.value.status_code == 403
+
+    jwt_tok = _token(keypair)  # JWTs still verify on the same endpoint
+    await OAuthProvider().authenticate(
+        _request({"Authorization": f"Bearer {jwt_tok}"}), _server()
+    )
+
+    runtime_settings.write(session, {"oauth_accept_bearer": False})
+    with pytest.raises(HTTPException) as exc:  # default-off: mcpe_ token is a bad JWT
+        await OAuthProvider().authenticate(
+            _request({"Authorization": "Bearer mcpe_localtoken"}), _server()
+        )
+    assert exc.value.status_code == 401

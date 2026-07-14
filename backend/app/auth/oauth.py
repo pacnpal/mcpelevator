@@ -128,6 +128,7 @@ class OAuthProvider:
             config_url = runtime_settings.oauth_config_url(session)
             audience = runtime_settings.oauth_audience(session)
             allowed = runtime_settings.oauth_allowed_subjects(session)
+            accept_bearer = runtime_settings.oauth_accept_bearer(session)
         # Fail closed, like resolve() does for an unknown provider: a server marked
         # oauth with no AS configured must not fall through to unauthenticated.
         if not config_url:
@@ -136,6 +137,17 @@ class OAuthProvider:
         base = base_url(request)
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         token = token.strip()
+
+        # Opt-in bearer coexistence (oauth_accept_bearer): one endpoint serving OAuth
+        # humans AND token-carrying automation. Local tokens are unambiguous — every
+        # minted token is "mcpe_"-prefixed (see util.new_token) and no JWT can start
+        # that way (base64url of any JSON header can't) — so delegation is exact: a
+        # local-looking token gets the bearer provider's verdict (including its 403
+        # scope semantics) and never falls through to JWT parsing, and vice versa.
+        if accept_bearer and token.startswith("mcpe_"):
+            from app.auth.bearer import BearerProvider
+
+            return await BearerProvider().authenticate(request, server)
         if scheme.lower() != "bearer" or not token:
             raise HTTPException(
                 status_code=401,

@@ -374,9 +374,10 @@ Caveats:
   client id/secret of the static client you created in step 2.
 - The AS must mint **JWT access tokens** verifiable via its JWKS (Authentik,
   Keycloak, Auth0 do by default; opaque-token setups won't work).
-- `oauth` is all-or-nothing per server; token *scoping* per server stays the job
-  of the `bearer` provider. Combine them: `oauth` for Claude-facing servers,
-  `bearer` for automation.
+- Need OAuth humans AND token-carrying automation on the same endpoints? Set
+  `oauth_accept_bearer: true` — local `mcpe_...` tokens then get the bearer
+  provider's verdict (including its per-server scoping) on oauth-protected
+  servers, while everything else goes down the JWT path. Off by default.
 
 ## Path B — Claude Code / Desktop (public HTTPS + bearer)
 

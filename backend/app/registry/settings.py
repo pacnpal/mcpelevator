@@ -49,6 +49,10 @@ DEFAULTS: dict[str, Any] = {
     # Optional identity allowlist matched case-insensitively against the token's
     # preferred_username / login / email / sub claims (empty = any valid token).
     "oauth_allowed_subjects": [],
+    # Also accept LOCAL bearer tokens ("mcpe_..."-prefixed) on oauth-protected
+    # servers, with normal bearer scope semantics — one endpoint for OAuth humans
+    # and token-carrying automation. Off by default: pure-OAuth unless opted in.
+    "oauth_accept_bearer": False,
 }
 
 
@@ -151,6 +155,8 @@ def write(
                 if v not in deduped:
                     deduped.append(v)
             value = deduped
+        if key == "oauth_accept_bearer" and not isinstance(value, bool):
+            raise ValueError(f"invalid oauth_accept_bearer: {value!r}")
         if key == "allowed_hosts":
             value = _normalize_hosts(value)
         pending[key] = value
@@ -184,6 +190,10 @@ def oauth_audience(session: Session) -> str:
 
 def oauth_allowed_subjects(session: Session) -> list[str]:
     return repo.setting_get(session, "oauth_allowed_subjects", DEFAULTS["oauth_allowed_subjects"])
+
+
+def oauth_accept_bearer(session: Session) -> bool:
+    return repo.setting_get(session, "oauth_accept_bearer", DEFAULTS["oauth_accept_bearer"])
 
 
 def allow_private_lan(session: Session) -> bool:

@@ -46,6 +46,7 @@ def test_settings_defaults_and_write(session):
         "oauth_config_url": "",
         "oauth_audience": "",
         "oauth_allowed_subjects": [],
+        "oauth_accept_bearer": False,
     }
     runtime_settings.write(
         session,
