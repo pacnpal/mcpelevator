@@ -480,6 +480,35 @@ def test_patch_auth_downgrade_resyncs_aggregate_before_returning(clean_settings)
             repo.delete_server(session, locked.id)
 
 
+def test_patch_server_auth_tightening_resyncs_aggregate_before_returning(clean_settings):
+    """PATCHing a mounted server from none/inherit to explicit bearer (under default
+    'none') must drop it from /s/all before the response returns — not on the next
+    reconcile — or its tools stay reachable unauthenticated in the gap."""
+    _write_settings(unified_endpoint=True, default_auth_provider="none")
+    with Session(get_engine()) as session:
+        srv = _mk_server(session, "Tightened")
+    try:
+        with TestClient(app) as client:
+            client.app.state.supervisor.on_converged = None  # only handler-time syncs
+            client.app.state.supervisor.running_endpoints = lambda: [
+                (srv.id, srv.slug, "127.0.0.1", 49998)
+            ]
+            r = client.patch("/api/settings", json={"unified_endpoint": True}, headers=LOOPBACK)
+            assert r.status_code == 200
+            hub = client.app.state.aggregate
+            assert hub._key == frozenset({(srv.slug, "127.0.0.1", 49998)})
+
+            r = client.patch(
+                f"/api/servers/{srv.id}", json={"auth_provider": "bearer"}, headers=LOOPBACK
+            )
+            assert r.status_code == 200
+            assert hub._key == frozenset()
+            assert hub.app is None
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, srv.id)
+
+
 # --- settings: registry validation + API surface -------------------------------- #
 
 

@@ -41,6 +41,19 @@ from app.registry import settings as runtime_settings
 router = APIRouter()
 
 
+async def _resync_aggregate(request: Request) -> None:
+    """Converge the unified endpoint NOW instead of on the next reconcile. Membership-
+    affecting server changes — auth_provider tightened to bearer, mcp_http turned off,
+    a slug rename, a delete — must not leave the stale mounted set serveable in the
+    gap (under default auth 'none' a just-bearer'd server would otherwise stay exposed
+    auth-free through /s/all until the reconciler fires). No-op when the hub's
+    topology key is unchanged; sync() is lock-serialized and task-safe."""
+    try:
+        await request.app.state.aggregate.sync(request.app.state.supervisor)
+    except Exception as exc:  # the registry write already committed; don't fail the call
+        print(f"[mcpelevator] aggregate resync error: {exc}", flush=True)
+
+
 def _live_state(server: Server, sup, session: Session):
     unit = sup.unit(server.id)
     if unit is not None:
@@ -234,6 +247,8 @@ async def update_server(
         # excludes slug, so the reconciler won't do it).
         sup.rename_slug(server_id, server.slug)
     sup.nudge()  # config_hash may have changed -> reconciler restarts if needed
+    if changes.keys() & {"auth_provider", "mcp_http", "slug"}:
+        await _resync_aggregate(request)  # membership/namespace changed — no async gap
     return _summary(server, sup, session, base_url(request))
 
 
@@ -251,6 +266,7 @@ async def delete_server(server_id: str, request: Request, session: Session = Dep
     # orphan credential file on disk for a server that no longer exists.
     oauth_flow.cancel_pending(server_id)
     ServerTokenStorage(server_id).clear()
+    await _resync_aggregate(request)  # drop the deleted server from /s/all at once
     return Response(status_code=204)
 
 
