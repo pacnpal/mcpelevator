@@ -646,7 +646,7 @@
 						autocomplete="off"
 						spellcheck="false"
 						placeholder="e.g. claude-desktop"
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 					/>
 				</div>
 				<div class="flex min-w-0 flex-col gap-1.5">
@@ -656,7 +656,7 @@
 					<select
 						id="token-scope"
 						bind:value={newTokenScope}
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
 					>
 						<option value="all">All servers &amp; groups</option>
 						{#if groups.length > 0}
@@ -1165,7 +1165,7 @@
 								autocomplete="off"
 								spellcheck="false"
 								placeholder="e.g. all, dev-tools"
-								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 							/>
 						</div>
 						<button
@@ -1356,7 +1356,7 @@
 						spellcheck="false"
 						placeholder="mcp.example.com"
 						aria-label="Add allowed host"
-						class="min-w-0 flex-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						class="min-w-0 flex-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 					/>
 					<button
 						type="submit"

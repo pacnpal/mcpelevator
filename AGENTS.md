@@ -40,13 +40,12 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   setting). Each runner is a pure `Server -> ProcessSpec` builder; `docker` stores the canonical
   image+container-args+env shape and synthesizes a hardened `docker run` (the bridge scrubs the
   child env for docker units so a `-e KEY` passthrough can't reach the control plane's secrets).
-- **Unified endpoint** (`aggregate/`): opt-in (`unified_endpoint` setting) aggregate at
-  `/s/all/mcp` — a control-plane-hosted FastMCP mounting a proxy per running server (all of
-  them, or the `unified_servers` id subset), tools namespaced by slug, rebuilt-and-swapped
-  after each reconcile via the supervisor's `on_converged` hook (the hub owns the sub-app's
-  lifespan; Starlette doesn't run mounted lifespans). The `all` slug is reserved. Auth runs
-  through the same `enforce()` with a synthetic pseudo-server: bearer requires an all-scoped
-  token, and servers stricter than the default provider are excluded when the default is `none`.
+- **Groups** (`groups/`): a SQLite-backed registry maps each group name to `"*"` or an ordered
+  list of server IDs and serves it at `/g/<name>/mcp`; `all` is an ordinary, unreserved group
+  name. `GroupHub` converges one namespaced FastMCP bundle per group from the running supervisor
+  topology after each reconcile. Auth reuses `enforce()` with synthetic `group:<name>` identities,
+  so bearer tokens may be scoped to that group or `all`; members whose effective auth is stricter
+  than the group are excluded to prevent an auth downgrade.
 - **Auth** (`auth/`): two independent layers per request — a Host/Origin allowlist middleware
   (DNS-rebinding defense) plus pluggable per-server bearer auth on `/s` and control-plane bearer
   auth that gates the sensitive `/api` routers only when enforcement is on (default `auto`: when

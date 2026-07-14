@@ -10,6 +10,7 @@ No subprocess is ever spawned. Route tests reuse the ``test_proxy`` patterns
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -412,6 +413,48 @@ async def test_hub_one_groups_swap_failure_does_not_block_others(clean_settings)
         with Session(get_engine()) as session:
             repo.delete_server(session, good.id)
             repo.delete_server(session, bad.id)
+
+
+async def test_resync_failure_invalidates_every_group_before_teardown(clean_settings):
+    """A broad hub failure must make every mounted group unreachable before any
+    runner teardown can block or fail."""
+    from app.api.util import resync_groups
+
+    _write_groups({"first": [], "second": []})
+    hub = _hub_for({})
+    await hub.sync(_endpoints())
+    assert hub.app_for("first") is not None
+    assert hub.app_for("second") is not None
+
+    teardown_started = asyncio.Event()
+    allow_teardown = asyncio.Event()
+    first_runner = hub._instances["first"].runner
+    original_close = first_runner.close
+
+    async def blocking_close():
+        teardown_started.set()
+        await allow_teardown.wait()
+        await original_close()
+
+    async def broken_sync(_supervisor):
+        raise RuntimeError("broad sync failure")
+
+    first_runner.close = blocking_close
+    hub.sync = broken_sync
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(groups=hub, supervisor=object()))
+    )
+
+    task = asyncio.create_task(resync_groups(request))
+    try:
+        await asyncio.sleep(0)
+        assert teardown_started.is_set()
+        assert hub.app_for("first") is None
+        assert hub.app_for("second") is None
+    finally:
+        allow_teardown.set()
+        await task
+        await hub.close()
 
 
 def test_internal_hop_never_forwards_authorization():

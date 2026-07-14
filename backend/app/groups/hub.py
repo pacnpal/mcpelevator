@@ -246,5 +246,11 @@ class GroupHub:
     async def close(self) -> None:
         """Shutdown: stop every session manager cleanly (called from the app lifespan)."""
         async with self._lock:
-            for name in list(self._instances):
-                await self._teardown(name)
+            # Invalidate the whole routing registry before awaiting any teardown. A
+            # runner close can block or fail, but no stale group app may remain
+            # reachable while shutdown is in progress (including fail-closed shutdown
+            # after a broad sync failure).
+            instances = list(self._instances.values())
+            self._instances.clear()
+            for instance in instances:
+                await instance.runner.close()
