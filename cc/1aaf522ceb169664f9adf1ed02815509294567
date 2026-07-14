@@ -1,0 +1,28 @@
+frontend/src/routes/settings/+page.svelte
+  s_28471c08df7ca4::t_cac95c6f2f263a 649,659,1168,1359
+backend/app/groups/hub.py
+  s_28471c08df7ca4::t_dbc360a205433c 249-256
+backend/tests/test_groups.py
+  s_28471c08df7ca4::t_62aa8d6ace6b5b 13,418-457
+  s_28471c08df7ca4::t_9478d6c4ba3405 458-459
+AGENTS.md
+  s_28471c08df7ca4::t_431a7b990c4e01 43-48
+backend/app/api/util.py
+  s_28471c08df7ca4::t_dbc360a205433c 21-23,28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "cc1aaf522ceb169664f9adf1ed02815509294567",
+  "prompts": {},
+  "sessions": {
+    "s_28471c08df7ca4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f61b8-2112-7ee0-b240-251e100d0b58",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "pacnpal <183241239+pacnpal@users.noreply.github.com>"
+    }
+  }
+}
