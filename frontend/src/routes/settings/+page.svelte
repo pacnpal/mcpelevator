@@ -121,7 +121,7 @@
 	/** Human label for a token's scope: 'All servers', a group, the server's label, or
 	 * a fallback when the scoped server/group no longer exists. */
 	function scopeLabel(scope: string): string {
-		if (scope === 'all') return 'All servers';
+		if (scope === 'all') return 'All servers & groups';
 		if (scope.startsWith('group:')) {
 			const name = scope.slice('group:'.length);
 			return groups.some((g) => g.name === name) ? `Group: ${name}` : 'Unknown group';
@@ -473,6 +473,10 @@
 		try {
 			await deleteGroup(name);
 			groups = groups.filter((g) => g.name !== name);
+			// The backend revokes this group's tokens on delete; drop them from the list too
+			// so a revoked group:<name> token can't keep looking valid (and a same-named
+			// group recreated later won't make the stale rows appear to work again).
+			tokens = tokens.filter((t) => t.scope !== `group:${name}`);
 		} catch (err) {
 			flashToast(errorMessage(err));
 		} finally {
@@ -654,7 +658,7 @@
 						bind:value={newTokenScope}
 						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 					>
-						<option value="all">All servers</option>
+						<option value="all">All servers &amp; groups</option>
 						{#if groups.length > 0}
 							<optgroup label="Groups">
 								{#each groups as group (group.name)}
