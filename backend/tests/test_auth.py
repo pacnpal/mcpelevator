@@ -42,8 +42,7 @@ def test_settings_defaults_and_write(session):
         "control_plane_auth": "auto",
         "allow_private_lan": False,
         "docker_runner": False,
-        "unified_endpoint": False,
-        "unified_servers": "all",
+        "groups": {},
     }
     runtime_settings.write(
         session,

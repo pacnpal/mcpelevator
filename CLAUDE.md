@@ -40,13 +40,20 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   setting). Each runner is a pure `Server -> ProcessSpec` builder; `docker` stores the canonical
   image+container-args+env shape and synthesizes a hardened `docker run` (the bridge scrubs the
   child env for docker units so a `-e KEY` passthrough can't reach the control plane's secrets).
-- **Unified endpoint** (`aggregate/`): opt-in (`unified_endpoint` setting) aggregate at
-  `/s/all/mcp` — a control-plane-hosted FastMCP mounting a proxy per running server (all of
-  them, or the `unified_servers` id subset), tools namespaced by slug, rebuilt-and-swapped
-  after each reconcile via the supervisor's `on_converged` hook (the hub owns the sub-app's
-  lifespan; Starlette doesn't run mounted lifespans). The `all` slug is reserved. Auth runs
-  through the same `enforce()` with a synthetic pseudo-server: bearer requires an all-scoped
-  token, and servers stricter than the default provider are excluded when the default is `none`.
+- **Group registry** (`groups/`): the `groups` runtime setting is the single source of truth
+  mapping a group name to its members — either `"*"` (every registered server, present and
+  future) or an ordered list of server ids. Each group is served at `/g/<name>/mcp`: a
+  control-plane-hosted FastMCP mounting a proxy per running member, tools namespaced by slug,
+  rebuilt-and-swapped per group after each reconcile via the supervisor's `on_converged` hook
+  (the hub owns each sub-app's lifespan; Starlette doesn't run mounted lifespans). There is no
+  special-case name — `all` is just a conventional entry with members `"*"`. The registry is
+  validated at write time and again at startup (`registry.validate_at_startup` fails the boot
+  on an unknown member id, naming the offending group + server); an unknown group name 404s at
+  request time and an empty group serves a valid tool-less bundle. Auth runs through the same
+  `enforce()` with a synthetic `group:<name>` pseudo-server: bearer requires a matching
+  `group:<name>`-scoped (or `all`) token, and members stricter than the default provider are
+  excluded when the default is `none`. There is no `/s/all` — single servers live only under
+  `/s/<slug>`, groups only under `/g/<name>`, so `all` is now an ordinary server slug.
 - **Auth** (`auth/`): two independent layers per request — a Host/Origin allowlist middleware
   (DNS-rebinding defense) plus pluggable per-server bearer auth on `/s` and control-plane bearer
   auth that gates the sensitive `/api` routers only when enforcement is on (default `auto`: when

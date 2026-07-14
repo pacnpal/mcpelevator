@@ -11,6 +11,7 @@ from app.auth.control_plane import enforcement_enabled
 from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Token
+from app.groups import registry as group_registry
 from app.util import hash_token, new_id, new_token
 
 router = APIRouter()
@@ -26,13 +27,21 @@ async def list_tokens(session: Session = Depends(get_session)):
 
 @router.post("/tokens", response_model=TokenCreated, status_code=201)
 async def create_token(payload: TokenCreate, session: Session = Depends(get_session)):
-    # scope is the access boundary: "all" (every bearer-protected server), a specific
-    # server id, or "control" (a control-plane admin token). Reject a blank or dangling
-    # value rather than silently widening or minting a token that authorizes nothing.
+    # scope is the access boundary: "all" (every bearer-protected server + every group),
+    # a specific server id, "group:<name>" (one /g/<name> bundle), or "control" (a
+    # control-plane admin token). Reject a blank or dangling value rather than silently
+    # widening or minting a token that authorizes nothing.
     scope = payload.scope.strip()
     if not scope:
-        raise HTTPException(status_code=400, detail="scope must be 'all', 'control', or a server id")
-    if scope not in ("all", "control") and repo.get_server(session, scope) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="scope must be 'all', 'control', 'group:<name>', or a server id",
+        )
+    if scope.startswith("group:"):
+        group_name = scope[len("group:"):]
+        if not group_registry.exists(session, group_name):
+            raise HTTPException(status_code=400, detail=f"unknown group scope {scope!r}")
+    elif scope not in ("all", "control") and repo.get_server(session, scope) is None:
         raise HTTPException(status_code=400, detail=f"unknown server scope {scope!r}")
     raw = new_token()
     token = Token(

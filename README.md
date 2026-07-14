@@ -15,7 +15,8 @@ The protocol bridging is done by [FastMCP](https://gofastmcp.com); mcpelevator i
                                                     ▼
   FastAPI ─ /            SvelteKit SPA              (one container, one port)
           ─ /api/*       control plane (SSOT in SQLite)
-          ─ /s/<slug>/mcp   reverse-proxy ─┐  auth + Host/Origin enforced here
+          ─ /s/<slug>/mcp   one server   ─┐  auth + Host/Origin enforced here
+          ─ /g/<name>/mcp   a group       │  (a registry-declared bundle of servers)
                                            ▼
   per enabled server: 1 supervised bridge process (own uvicorn on a loopback port)
       FastMCP proxy(stdio command — or a remote HTTP/SSE URL) → Streamable HTTP   ← fault-isolated, real PID/logs
@@ -104,7 +105,7 @@ curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/jso
 
 Pasting an `mcpServers` config with remote entries now imports them as `remote` servers instead of skipping: a `url` (or Gemini CLI's `httpUrl`) becomes the upstream, and a `type` / `transport` field selects the transport (defaulting to `streamable-http`).
 
-**One URL for everything (unified endpoint).** Turn on **Unified endpoint** in Settings (or `PATCH /api/settings {"unified_endpoint": true}`) and `http://…/s/all/mcp` serves the tools of your running servers as a single MCP bundle — each tool prefixed by its server's slug (e.g. `memory_create_entities`), so one client entry covers everything. You choose what's in it: **all servers**, or a **picked subset** (`unified_servers`, a server-id list in the same Settings panel). The bundle follows the default auth provider; see **Security** for the exclusion rule that keeps bearer-protected servers out of an unauthenticated bundle.
+**One URL for a bundle of servers (groups).** Declare a **group** in Settings (or `PUT /api/groups/<name>`) and `http://…/g/<name>/mcp` serves the tools of that group's running members as a single MCP bundle — each tool prefixed by the member's slug (e.g. `memory_create_entities`), so one client entry covers the whole set. A group's members are **all servers** (`"*"` — every registered server, present and future) or a **picked list** of server ids. There's no special name: create a group called `all` with members `"*"` for a bundle of everything. Groups follow the default auth provider; see **Security** for the exclusion rule that keeps bearer-protected servers out of an unauthenticated bundle, and **Route reference** below for the full grammar and the registry config format.
 
 ### Upstream authentication: token headers vs OAuth
 
@@ -238,7 +239,7 @@ When control-plane auth is enforced, the SPA shows a login screen. The admin tok
 
 `MCPE_ADMIN_TOKEN` is a break-glass credential: when set, it's always accepted on `/api`. Use it to recover a lost token, or for CI and automation. A minted token is shown only once (only its hash is stored), so if you lose it and haven't set `MCPE_ADMIN_TOKEN`, set that var and restart to get back in, then generate a fresh token. Alternatively, set `MCPE_MINT_ADMIN_TOKEN=true` and restart: the bootstrap mints a fresh control token and prints it to the logs (existing tokens keep working) — unset the var afterwards so it doesn't mint a new one on every restart.
 
-**Unified endpoint** — the aggregate at `/s/all/mcp` is **off by default** (one URL reaching many servers' tools widens exposure, so you opt in). It sits behind the same Host/Origin guard as every `/s` route and authenticates with the **default auth provider**: under `bearer`, only an *all*-scoped token is accepted (a token scoped to a single server can't authorize the bundle). Under `none`, servers whose own auth is stricter than the default (explicitly set to `bearer`) are **excluded from the bundle**, so their tools can never be reached auth-free through `/s/all`.
+**Groups** — a group served at `/g/<name>/mcp` bundles the tools of its running members (see **Route reference** for how a group is declared). No groups exist by default (one URL reaching many servers' tools widens exposure, so you declare each one deliberately). A group sits behind the same Host/Origin guard as every `/s` route and authenticates with the **default auth provider**: under `bearer`, only a `group:<name>`-scoped token (or an *all*-scoped one) is accepted — a token scoped to a single server, or to a *different* group, is rejected exactly like a wrong-server token. Under `none`, members whose own auth is stricter than the default (explicitly set to `bearer`) are **excluded from the bundle**, so their tools can never be reached auth-free through the group URL.
 
 **Docker runner** — launch MCP servers packaged as Docker/OCI images (e.g. `ghcr.io/github/github-mcp-server`). It is **opt-in and root-equivalent**: OFF by default behind a Settings toggle (`docker_runner`, or `MCPE_DOCKER_RUNNER=true` to seed it headless), because it runs arbitrary images on a Docker daemon. Enable it, then paste an `mcpServers` docker config or install an **OCI catalog** entry. mcpelevator stores the canonical shape (image + container args + env) and synthesizes a hardened `docker run` (`--rm --init --cap-drop ALL --security-opt no-new-privileges --pids-limit` + a memory cap, secrets passed by name so a value never enters mcpelevator's own argv/`ps` (Docker still resolves it into the container env, readable via `docker inspect` by anyone with daemon access), and a label the supervisor uses to reap orphaned containers). Two isolation models, selected by `docker-compose.yml` config only (identical runner code): **sibling containers** via the mounted host socket (simplest, hands the host daemon to containers) or an isolated **`docker:dind` sidecar** via `DOCKER_HOST` (blast-radius isolation, privileged sidecar). Networking and the root filesystem stay at Docker's defaults so egress-needing servers work.
 
@@ -252,9 +253,39 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 ## Status / roadmap
 
-**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: bearer tokens for `/s` (scope each to all servers or one), control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Unified endpoint**: one opt-in URL (`/s/all/mcp`) bundling the tools of all — or a picked subset of — your running servers, slug-prefixed.
+**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: bearer tokens for `/s` and `/g` (scope each to all surfaces, one server, or one group), control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
 
 **Planned:** REST/OpenAPI surface per server · more catalog directories · polish.
+
+## Route reference
+
+Two request grammars, both behind the same Host/Origin guard and per-request auth (see **Security**):
+
+| Route | Serves |
+| --- | --- |
+| `/s/<slug>/mcp` | **One server.** `<slug>` is the server's routing key (operator-renameable). |
+| `/g/<name>/mcp` | **A group.** `<name>` is a registry entry; the URL serves the union of the group's running members' tools, each namespaced by the member's slug (`<slug>_<tool>`). |
+
+There is no `/s/all` or any other reserved slug beyond `summary` (which would shadow `/api/health/summary`) — single servers live only under `/s`, groups only under `/g`, so `all` is now an ordinary server slug if you want one.
+
+**The group registry** is the `groups` setting (SQLite, edited in Settings or via `PUT /api/groups/<name>` / `DELETE /api/groups/<name>`), a map from group name to its members. A member value is either `"*"` (every registered server, present and future) or an ordered list of server ids. Group names are URL-safe (lowercase letters, digits, single hyphens). Example registry:
+
+```jsonc
+{
+  "all":    "*",                       // every server — the bundle-of-everything
+  "search": ["srv_a1b2c3", "srv_d4e5"] // just these two, in this order
+}
+```
+
+Determinism:
+
+- **Unknown group name** at request time → `404` (same shape as an unknown `/s` slug), never a 500.
+- **Empty group** (declared but no running members) → a valid, tool-less bundle: `initialize` succeeds and `tools/list` is `[]`; members appear as they start.
+- **Unknown member id** → rejected when you write the group (`400`), and the registry is re-validated at **startup** — an id that references no registered server (only reachable by hand-editing the database, since writes validate and deletes prune) **fails the boot loudly**, naming the offending group and server id.
+
+Scope a bearer token to a group with `group:<name>` (in the token's scope field). Such a token authorizes `/g/<name>` and nothing else; an `all`-scoped token authorizes every server and every group.
+
+> **Changelog:** the previous single unified endpoint at `/s/all/mcp` (the `unified_endpoint` / `unified_servers` settings) has been **removed** in favor of the group registry above. Recreate its behavior by declaring a group named `all` with members `"*"`.
 
 ## License
 

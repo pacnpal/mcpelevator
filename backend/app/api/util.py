@@ -8,7 +8,7 @@ from app.config import get_settings
 
 
 def base_url(request: Request) -> str:
-    """Base URL for copyable links (server copy menu, unified endpoint). Prefer the
+    """Base URL for copyable links (server copy menu, group endpoints). Prefer the
     operator-declared public URL; otherwise use the host the client actually reached
     us on — so a LAN device (with ``allow_private_lan``) copies
     ``http://192.168.1.50:8080/...`` rather than the ``0.0.0.0``→``127.0.0.1`` rewrite

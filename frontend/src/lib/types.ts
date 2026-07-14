@@ -265,13 +265,18 @@ export interface SettingsInfo {
 	 * OFF by default and root-equivalent — it runs arbitrary images on the mounted
 	 * Docker daemon. Gates docker-server enable/start and OCI catalog installs. */
 	docker_runner: boolean;
-	/** Serve the unified MCP endpoint at /s/all/mcp — one URL bundling the tools of
-	 * the running servers, namespaced by slug. OFF by default. */
-	unified_endpoint: boolean;
-	/** Which servers the unified endpoint bundles: "all" or a list of server ids. */
-	unified_servers: 'all' | string[];
-	/** Read-only, derived by the backend: the copyable /s/all/mcp URL when enabled. */
-	unified_endpoint_url?: string | null;
+}
+
+/** A group's members: the wildcard "*" (every registered server, present and
+ * future) or an explicit, ordered list of server ids. */
+export type GroupMembers = '*' | string[];
+
+/** A named group served at /g/<name>/mcp (GET/PUT /api/groups). */
+export interface GroupInfo {
+	name: string;
+	members: GroupMembers;
+	/** Read-only, derived by the backend: the copyable /g/<name>/mcp URL. */
+	url: string;
 }
 
 /** Shape of GET /api/auth/status — the SPA polls this to decide whether to show login. */

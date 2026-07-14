@@ -16,6 +16,8 @@ import type {
 	CatalogList,
 	CatalogSource,
 	CatalogVersions,
+	GroupInfo,
+	GroupMembers,
 	HealthResponse,
 	ImportResult,
 	ServerCreate,
@@ -387,4 +389,22 @@ export function deleteToken(id: string): Promise<void> {
 	return request<void>(`/tokens/${encodeURIComponent(id)}`, {
 		method: 'DELETE'
 	});
+}
+
+// ---- Groups (the /g/<name> registry) ----------------------------------------
+
+/** List the configured groups (each with its members and copyable /g/<name>/mcp URL). */
+export function listGroups(): Promise<GroupInfo[]> {
+	return request<GroupInfo[]>('/groups');
+}
+
+/** Create or replace a group. `members` is `'*'` (every registered server) or an
+ * ordered list of server ids. A 400 surfaces an unknown member id or a bad name. */
+export function putGroup(name: string, members: GroupMembers): Promise<GroupInfo> {
+	return jsonRequest<GroupInfo>(`/groups/${encodeURIComponent(name)}`, 'PUT', { members });
+}
+
+/** Delete a group by name. */
+export function deleteGroup(name: string): Promise<void> {
+	return request<void>(`/groups/${encodeURIComponent(name)}`, { method: 'DELETE' });
 }
