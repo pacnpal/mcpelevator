@@ -11,7 +11,10 @@
 # a container recreate while installed packages do not) records the installed list,
 # so a plain restart skips the 10-60s apt round-trip; a recreate or a changed list
 # reinstalls.
-set -u
+# -f: the unquoted $MCPE_APT_PACKAGES expansions below rely on word splitting only —
+# disable pathname expansion so a glob character in a (typo'd) package name can never
+# match files in the cwd.
+set -uf
 
 MARKER=/var/lib/mcpelevator/.apt-packages-installed
 

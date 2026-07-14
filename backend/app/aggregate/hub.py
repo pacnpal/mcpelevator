@@ -95,16 +95,23 @@ class AggregateHub:
                     return
                 selection = runtime_settings.unified_servers(session)
                 default = runtime_settings.default_auth_provider(session)
-                servers = {s.id: s for s in repo.list_servers(session)}
+                # snapshot to plain values while the session is open — the rows
+                # detach on exit, and detached-attribute access must never be
+                # load-bearing here
+                servers = {
+                    s.id: (s.mcp_http, s.auth_provider) for s in repo.list_servers(session)
+                }
 
             entries: list[tuple[str, str, int]] = []
             for server_id, slug, host, port in supervisor.running_endpoints():
-                server = servers.get(server_id)
-                if server is None or not server.mcp_http:
+                row = servers.get(server_id)
+                if row is None:
+                    continue
+                mcp_http, effective = row
+                if not mcp_http:
                     continue
                 if selection != "all" and server_id not in selection:
                     continue
-                effective = server.auth_provider
                 if effective == "inherit":
                     effective = default
                 # Anti-downgrade: never mount a server whose own auth is stricter than
