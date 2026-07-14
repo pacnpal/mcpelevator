@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, StrictBool
+from typing import Union
+
+from pydantic import BaseModel, StrictBool, StrictStr
 
 # The auth providers a server may select. Constrained here so a malformed value
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
@@ -165,6 +167,11 @@ class SettingsInfo(BaseModel):
     control_plane_auth: ControlPlaneAuthMode = "auto"
     allow_private_lan: bool = False
     docker_runner: bool = False
+    unified_endpoint: bool = False
+    # "all" or the operator-picked list of server ids the unified endpoint bundles
+    unified_servers: Union[Literal["all"], list[str]] = "all"
+    # read-only, derived: the copyable /s/all/mcp URL when the endpoint is enabled
+    unified_endpoint_url: Optional[str] = None
 
 
 class SettingsUpdate(BaseModel):
@@ -179,6 +186,9 @@ class SettingsUpdate(BaseModel):
     # StrictBool for the same reason — the docker runner is root-equivalent, so a coerced
     # truthy value must never flip it on.
     docker_runner: Optional[StrictBool] = None
+    # StrictBool again: the unified endpoint widens exposure, so no coerced truthiness.
+    unified_endpoint: Optional[StrictBool] = None
+    unified_servers: Optional[Union[Literal["all"], list[StrictStr]]] = None
 
 
 class AuthStatus(BaseModel):
