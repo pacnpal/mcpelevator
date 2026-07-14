@@ -31,6 +31,14 @@ DEFAULTS: dict[str, Any] = {
     # (sibling containers on the host, or an isolated dind sidecar via DOCKER_HOST). The
     # service/supervisor refuse to enable or start a docker server while this is off.
     "docker_runner": False,
+    # Serve the unified MCP endpoint at /s/all/mcp — one aggregated surface bundling
+    # the tools of the running servers, namespaced by slug. OFF by default: it's one
+    # URL that reaches many servers' tools, so exposed setups must opt in deliberately.
+    "unified_endpoint": False,
+    # Which servers the unified endpoint bundles: "all" (every running server) or a
+    # list of server ids (the operator-picked subset). Ids of since-deleted servers
+    # are simply ignored at mount time.
+    "unified_servers": "all",
 }
 
 
@@ -41,6 +49,22 @@ def read_all(session: Session) -> dict[str, Any]:
 _MODES = {"local", "expose"}
 _PROVIDERS = {"none", "bearer"}
 _CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
+
+
+def _normalize_unified_servers(value: Any) -> Any:
+    """Validate the unified-endpoint membership: the literal ``"all"`` or a list of
+    server-id strings (deduped, order kept). Structural only — ids of deleted servers
+    are ignored at mount time rather than rejected here, so a delete can never strand
+    an unwritable setting."""
+    if value == "all":
+        return "all"
+    if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+        raise ValueError(f"invalid unified_servers: {value!r}")
+    out: list[str] = []
+    for v in value:
+        if v not in out:
+            out.append(v)
+    return out
 
 
 def _normalize_hosts(hosts: Any) -> list[str]:
@@ -81,6 +105,10 @@ def write(
             raise ValueError(f"invalid allow_private_lan: {value!r}")
         if key == "docker_runner" and not isinstance(value, bool):
             raise ValueError(f"invalid docker_runner: {value!r}")
+        if key == "unified_endpoint" and not isinstance(value, bool):
+            raise ValueError(f"invalid unified_endpoint: {value!r}")
+        if key == "unified_servers":
+            value = _normalize_unified_servers(value)
         if key == "allowed_hosts":
             value = _normalize_hosts(value)
         pending[key] = value
@@ -110,3 +138,12 @@ def allow_private_lan(session: Session) -> bool:
 
 def docker_runner(session: Session) -> bool:
     return repo.setting_get(session, "docker_runner", DEFAULTS["docker_runner"])
+
+
+def unified_endpoint(session: Session) -> bool:
+    return repo.setting_get(session, "unified_endpoint", DEFAULTS["unified_endpoint"])
+
+
+def unified_servers(session: Session) -> Any:
+    """``"all"`` or a list of server ids (see DEFAULTS)."""
+    return repo.setting_get(session, "unified_servers", DEFAULTS["unified_servers"])

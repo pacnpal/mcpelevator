@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from sqlmodel import Session
 
@@ -63,6 +63,9 @@ class Supervisor:
         self.units: dict[str, ServerUnit] = {}
         self._nudge = asyncio.Event()
         self._stopping = False
+        # Fired after each reconcile pass so a dependent (the aggregate hub) can
+        # converge on the new topology. The supervisor stays aggregate-unaware.
+        self.on_converged: Optional[Callable[[], Awaitable[None]]] = None
 
     # --- lookups (used by the reverse proxy + API) ----------------------- #
 
@@ -77,6 +80,15 @@ class Supervisor:
         if u is not None and u.state == "running" and u.port is not None:
             return (u.host, u.port)
         return None
+
+    def running_endpoints(self) -> list[tuple[str, str, str, int]]:
+        """``(server_id, slug, host, port)`` for every unit currently running —
+        the live topology the aggregate hub mounts from."""
+        return [
+            (server_id, u.slug, u.host, u.port)
+            for server_id, u in self.units.items()
+            if u.state == "running" and u.port is not None
+        ]
 
     def rename_slug(self, server_id: str, slug: str) -> None:
         """Update a live unit's routing slug in place (no restart).
@@ -190,6 +202,12 @@ class Supervisor:
                     server_id, state="failed", pid=None, port=None,
                     last_error=start_error, tools=[],
                 )
+
+        if self.on_converged is not None:
+            try:
+                await self.on_converged()
+            except Exception as exc:  # a hub bug must never kill the reconcile loop
+                print(f"[mcpelevator] post-reconcile hook error: {exc}")
 
     def _write_runtime(self, server_id: str, **fields) -> None:
         """Persist one runtime row in its own short-lived session/transaction, so a slow

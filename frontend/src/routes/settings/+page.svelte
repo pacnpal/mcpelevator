@@ -21,6 +21,7 @@
 	import { clearToken, setToken } from '$lib/auth';
 	import { isLoopbackHost, isPrivateIpHost, normalizeHost } from '$lib/host';
 	import CopyButton from '$lib/components/CopyButton.svelte';
+	import CopyMenu from '$lib/components/CopyMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 
 	type LoadState = 'loading' | 'ready' | 'error';
@@ -337,6 +338,56 @@
 	function confirmEnableDockerRunner() {
 		confirmEnableDocker = false;
 		patchSettings({ docker_runner: true }, 'docker_runner');
+	}
+
+	// ---- Unified endpoint -------------------------------------------------------
+	// One URL (/s/all/mcp) bundling the running servers' tools, namespaced by slug.
+	// Membership is either "all" or an explicit list of server ids — the operator
+	// picks which servers to combine.
+	const unifiedMode = $derived(settings?.unified_servers === 'all' ? 'all' : 'selected');
+	const unifiedSelection = $derived(
+		settings && settings.unified_servers !== 'all' ? settings.unified_servers : []
+	);
+	// Synthetic summary so the existing CopyMenu (client-config snippets) works for
+	// the aggregate URL without any changes to install.ts.
+	const aggregateSummary = $derived(
+		settings?.unified_endpoint && settings.unified_endpoint_url
+			? ({
+					id: 'aggregate',
+					slug: 'all',
+					name: 'All servers',
+					runner: 'remote',
+					enabled: true,
+					state: 'running',
+					transports: { mcp_http: true, rest_openapi: false },
+					urls: { mcp: settings.unified_endpoint_url, rest: null },
+					auth: settings.default_auth_provider === 'bearer' ? 'bearer' : 'none',
+					last_error: null,
+					pid: null,
+					port: null,
+					tools_count: 0
+				} satisfies ServerSummary)
+			: null
+	);
+
+	function setUnifiedEndpoint(value: boolean) {
+		if (!settings || settings.unified_endpoint === value) return;
+		patchSettings({ unified_endpoint: value }, 'unified_endpoint');
+	}
+
+	function setUnifiedMode(mode: 'all' | 'selected') {
+		if (!settings || unifiedMode === mode) return;
+		// Switching to "selected" prefills every server, so nothing silently drops out
+		// of the bundle — the operator prunes from there.
+		const value = mode === 'all' ? ('all' as const) : servers.map((s) => s.id);
+		patchSettings({ unified_servers: value }, 'unified_servers');
+	}
+
+	function toggleUnifiedServer(id: string, included: boolean) {
+		if (!settings || settings.unified_servers === 'all') return;
+		const current = settings.unified_servers;
+		const next = included ? [...current, id] : current.filter((x) => x !== id);
+		patchSettings({ unified_servers: next }, 'unified_servers');
 	}
 
 	// ---- Allowed hosts editor -------------------------------------------------
@@ -892,6 +943,118 @@
 							</button>
 						</div>
 					</div>
+				{/if}
+			</fieldset>
+
+			<!-- Unified endpoint -->
+			<fieldset class="flex flex-col gap-2 border-0 p-0">
+				<legend class="text-sm font-medium text-[var(--color-ink)]">Unified endpoint</legend>
+				<label
+					class="flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+					style={settings.unified_endpoint
+						? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+				>
+					<input
+						type="checkbox"
+						checked={settings.unified_endpoint}
+						onchange={(e) => setUnifiedEndpoint(e.currentTarget.checked)}
+						disabled={savingField === 'unified_endpoint'}
+						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+					/>
+					<span class="flex flex-col gap-0.5">
+						<span class="text-sm font-medium text-[var(--color-ink)]">
+							Serve one MCP endpoint that bundles your servers
+						</span>
+						<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+							One URL (<code class="font-mono">/s/all/mcp</code>) exposing every included
+							running server's tools, prefixed by slug (e.g.
+							<code class="font-mono">github_create_issue</code>). It uses the default auth
+							provider above; when that is <code class="font-mono">none</code>, servers with
+							stricter (bearer) auth are excluded so they can't be reached auth-free.
+						</span>
+					</span>
+				</label>
+				{#if settings.unified_endpoint}
+					{#if aggregateSummary}
+						<div
+							class="flex items-center justify-between gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2"
+						>
+							<code class="min-w-0 flex-1 truncate font-mono text-xs text-[var(--color-ink)]">
+								{settings.unified_endpoint_url}
+							</code>
+							<CopyMenu server={aggregateSummary} />
+						</div>
+					{/if}
+					<div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Servers to combine">
+						{#each [
+							{ value: 'all', label: 'All servers', hint: 'every running server, including future ones' },
+							{ value: 'selected', label: 'Selected servers', hint: 'only the servers you pick below' }
+						] as const as choice (choice.value)}
+							<label
+								class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+								style={unifiedMode === choice.value
+									? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+									: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+							>
+								<span class="flex items-center gap-2">
+									<input
+										type="radio"
+										name="unified-mode"
+										value={choice.value}
+										checked={unifiedMode === choice.value}
+										onchange={() => setUnifiedMode(choice.value)}
+										disabled={savingField === 'unified_servers'}
+										class="sr-only"
+									/>
+									<span
+										class="text-sm font-semibold"
+										style={unifiedMode === choice.value
+											? 'color: var(--color-accent);'
+											: 'color: var(--color-ink);'}
+									>
+										{choice.label}
+									</span>
+								</span>
+								<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+									{choice.hint}
+								</span>
+							</label>
+						{/each}
+					</div>
+					{#if unifiedMode === 'selected'}
+						{#if servers.length === 0}
+							<p class="text-xs text-[var(--color-ink-dim)]">No servers yet — add one first.</p>
+						{:else}
+							<div
+								class="flex flex-col gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-2"
+							>
+								{#each servers as server (server.id)}
+									<label
+										class="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition hover:bg-[var(--color-surface)]"
+										class:opacity-60={!server.enabled}
+									>
+										<input
+											type="checkbox"
+											checked={unifiedSelection.includes(server.id)}
+											onchange={(e) => toggleUnifiedServer(server.id, e.currentTarget.checked)}
+											disabled={savingField === 'unified_servers'}
+											class="size-4 shrink-0 accent-[var(--color-accent)]"
+										/>
+										<span class="min-w-0 flex-1 truncate text-sm text-[var(--color-ink)]">
+											{serverLabel(server)}
+										</span>
+										{#if !server.enabled}
+											<span class="text-[10px] text-[var(--color-ink-dim)]">disabled</span>
+										{/if}
+									</label>
+								{/each}
+							</div>
+							<p class="text-xs text-[var(--color-ink-dim)]">
+								Only running servers appear in the bundle; a disabled pick joins when it starts.
+							</p>
+						{/if}
+					{/if}
 				{/if}
 			</fieldset>
 

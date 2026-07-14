@@ -29,6 +29,7 @@ from app.api.schemas import (
     Transports,
     Urls,
 )
+from app.api.util import base_url
 from app.auth import oauth_flow
 from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
@@ -38,6 +39,19 @@ from app.registry import service
 from app.registry import settings as runtime_settings
 
 router = APIRouter()
+
+
+async def _resync_aggregate(request: Request) -> None:
+    """Converge the unified endpoint NOW instead of on the next reconcile. Membership-
+    affecting server changes — auth_provider tightened to bearer, mcp_http turned off,
+    a slug rename, a delete — must not leave the stale mounted set serveable in the
+    gap (under default auth 'none' a just-bearer'd server would otherwise stay exposed
+    auth-free through /s/all until the reconciler fires). No-op when the hub's
+    topology key is unchanged; sync() is lock-serialized and task-safe."""
+    try:
+        await request.app.state.aggregate.sync(request.app.state.supervisor)
+    except Exception as exc:  # the registry write already committed; don't fail the call
+        print(f"[mcpelevator] aggregate resync error: {exc}", flush=True)
 
 
 def _live_state(server: Server, sup, session: Session):
@@ -50,20 +64,6 @@ def _live_state(server: Server, sup, session: Session):
     return "stopped", None, None, None, []
 
 
-def _base_url(request: Request) -> str:
-    """Base URL for the copy-menu server links. Prefer the operator-declared public URL;
-    otherwise use the host the client actually reached us on — so a LAN device (with
-    ``allow_private_lan``) copies ``http://192.168.1.50:8080/...`` rather than the
-    ``0.0.0.0``→``127.0.0.1`` rewrite baked into ``settings.base_url``. The Host header is
-    already validated by the control-plane allowlist before any handler runs, so it's a
-    trusted value here. Falls back to the derived settings URL when there's no Host."""
-    settings = get_settings()
-    if settings.public_base_url:
-        return settings.base_url  # operator-declared canonical URL wins
-    host = request.headers.get("host", "").strip()
-    if host:
-        return f"{request.url.scheme or 'http'}://{host}"
-    return settings.base_url
 
 
 def _summary(server: Server, sup, session: Session, base: str) -> ServerSummary:
@@ -146,7 +146,7 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
 @router.get("/servers", response_model=list[ServerSummary])
 async def list_servers(request: Request, session: Session = Depends(get_session)):
     sup = request.app.state.supervisor
-    base = _base_url(request)
+    base = base_url(request)
     return [_summary(s, sup, session, base) for s in repo.list_servers(session)]
 
 
@@ -183,7 +183,7 @@ async def create_server(
     sup = request.app.state.supervisor
     if server.enabled:
         sup.nudge()
-    return _summary(server, sup, session, _base_url(request))
+    return _summary(server, sup, session, base_url(request))
 
 
 @router.get("/servers/{server_id}", response_model=ServerDetail)
@@ -191,7 +191,7 @@ async def get_server(server_id: str, request: Request, session: Session = Depend
     server = repo.get_server(session, server_id)
     if server is None:
         raise HTTPException(status_code=404, detail="server not found")
-    return _detail(server, request.app.state.supervisor, session, _base_url(request))
+    return _detail(server, request.app.state.supervisor, session, base_url(request))
 
 
 @router.patch("/servers/{server_id}", response_model=ServerSummary)
@@ -247,7 +247,9 @@ async def update_server(
         # excludes slug, so the reconciler won't do it).
         sup.rename_slug(server_id, server.slug)
     sup.nudge()  # config_hash may have changed -> reconciler restarts if needed
-    return _summary(server, sup, session, _base_url(request))
+    if changes.keys() & {"auth_provider", "mcp_http", "slug"}:
+        await _resync_aggregate(request)  # membership/namespace changed — no async gap
+    return _summary(server, sup, session, base_url(request))
 
 
 @router.delete("/servers/{server_id}", status_code=204)
@@ -264,6 +266,7 @@ async def delete_server(server_id: str, request: Request, session: Session = Dep
     # orphan credential file on disk for a server that no longer exists.
     oauth_flow.cancel_pending(server_id)
     ServerTokenStorage(server_id).clear()
+    await _resync_aggregate(request)  # drop the deleted server from /s/all at once
     return Response(status_code=204)
 
 
@@ -276,7 +279,7 @@ def _oauth_callback_url(request: Request) -> str:
     request scheme is the plain ``http`` of the proxy→app hop; honor ``X-Forwarded-Proto``
     so the registered redirect URI is ``https`` (OAuth providers reject non-loopback http
     callbacks). The operator-declared public URL still wins when set."""
-    base = _base_url(request)
+    base = base_url(request)
     if not get_settings().public_base_url and base.startswith("http://"):
         forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
         if forwarded == "https":
@@ -333,7 +336,7 @@ async def disconnect_oauth(
     # state (matches the connect path, which also restarts to pick up fresh tokens).
     if server.enabled:
         sup.nudge()
-    return _detail(server, sup, session, _base_url(request))
+    return _detail(server, sup, session, base_url(request))
 
 
 @router.post("/servers/{server_id}/clone", response_model=ServerSummary, status_code=201)
@@ -353,7 +356,7 @@ async def clone_server(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     # Clone is created disabled; nothing to reconcile until the user enables it.
-    return _summary(server, request.app.state.supervisor, session, _base_url(request))
+    return _summary(server, request.app.state.supervisor, session, base_url(request))
 
 
 @router.post("/servers/{server_id}/enable", response_model=ServerSummary)
@@ -369,7 +372,7 @@ async def enable_server(server_id: str, request: Request, session: Session = Dep
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     sup = request.app.state.supervisor
     sup.nudge()
-    return _summary(server, sup, session, _base_url(request))
+    return _summary(server, sup, session, base_url(request))
 
 
 @router.post("/servers/{server_id}/disable", response_model=ServerSummary)
@@ -381,7 +384,7 @@ async def disable_server(server_id: str, request: Request, session: Session = De
         raise HTTPException(status_code=404, detail="server not found")
     sup = request.app.state.supervisor
     sup.nudge()
-    return _summary(server, sup, session, _base_url(request))
+    return _summary(server, sup, session, base_url(request))
 
 
 @router.post("/servers/import", response_model=ImportResult, status_code=201)
@@ -399,7 +402,7 @@ async def import_servers(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
-    base = _base_url(request)
+    base = base_url(request)
     return ImportResult(
         created=[_summary(s, sup, session, base) for s in created],
         skipped=[ImportSkipped(**s) for s in skipped],

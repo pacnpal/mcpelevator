@@ -696,12 +696,37 @@ def normalize_auth_providers(session: Session) -> int:
     return changed
 
 
+def normalize_reserved_slugs(session: Session) -> int:
+    """Rename servers whose slug has since become reserved (e.g. ``all``, claimed by
+    the unified endpoint's ``/s/all`` mount) via the standard creation-time
+    disambiguation (``all`` -> ``all-2``). Without this a pre-existing row would be
+    silently shadowed by the new route. Slug is excluded from ``config_hash``, so the
+    rename never bounces a running bridge; the reconciler converges the routing key
+    within one pass. Idempotent. Returns the count changed."""
+    changed = 0
+    for server in repo.list_servers(session):
+        if server.slug not in _RESERVED_SLUGS:
+            continue
+        old = server.slug
+        server.slug = _unique_slug(session, server.slug)
+        repo.save_server(session, server)
+        print(
+            f"[mcpelevator] slug {old!r} is now reserved — "
+            f"server {server.name!r} renamed to {server.slug!r}",
+            flush=True,
+        )
+        changed += 1
+    return changed
+
+
 # Slugs that would collide with a sibling literal segment on the proxy/API routes
 # and shadow it. A server slugged "summary" would capture GET /api/health/summary
 # (the aggregate route) so its own /api/health/{slug} could never be reached, and a
-# load balancer would read the aggregate instead of that server's status. Reserved
-# here so such a name is disambiguated (e.g. "summary" -> "summary-2") at creation.
-_RESERVED_SLUGS = frozenset({"summary"})
+# load balancer would read the aggregate instead of that server's status. "all" is
+# the unified endpoint's mount at /s/all (see app.aggregate), which is registered
+# before the proxy catch-all and would shadow a server slugged "all". Reserved here
+# so such a name is disambiguated (e.g. "summary" -> "summary-2") at creation.
+_RESERVED_SLUGS = frozenset({"summary", "all"})
 
 # Registry writes were implicitly serialized when the sync service ran inline on the
 # event loop; now that the API handlers run them in the threadpool (to keep the scrypt

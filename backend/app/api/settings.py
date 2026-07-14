@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 from starlette.requests import Request
 
+from app.aggregate.hub import AGGREGATE_SLUG
 from app.api.schemas import SettingsInfo, SettingsUpdate
+from app.api.util import base_url
 from app.auth.control_plane import would_lock_out
 from app.db import get_session
 from app.registry import settings as runtime_settings
@@ -14,9 +16,18 @@ from app.registry import settings as runtime_settings
 router = APIRouter()
 
 
+def _info(request: Request, values: dict) -> SettingsInfo:
+    info = SettingsInfo(**values)
+    if info.unified_endpoint:
+        # derived, read-only: the copyable aggregate URL (same base derivation as the
+        # per-server copy menu)
+        info.unified_endpoint_url = f"{base_url(request)}/s/{AGGREGATE_SLUG}/mcp"
+    return info
+
+
 @router.get("/settings", response_model=SettingsInfo)
-async def get_settings(session: Session = Depends(get_session)):
-    return SettingsInfo(**runtime_settings.read_all(session))
+async def get_settings(request: Request, session: Session = Depends(get_session)):
+    return _info(request, runtime_settings.read_all(session))
 
 
 @router.patch("/settings", response_model=SettingsInfo)
@@ -39,12 +50,22 @@ async def update_settings(
     try:
         # Invariants (enum settings + the host allowlist) are enforced in the SSOT
         # writer; the guard runs under its write lock. Surface ValueError as a 400.
-        result = SettingsInfo(**runtime_settings.write(session, changes, guard=guard))
+        result = _info(request, runtime_settings.write(session, changes, guard=guard))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # Toggling the root-equivalent docker runner is a gate change — nudge the reconciler so it
-    # applies at once (stop running docker units when turned off) instead of waiting for the
-    # next poll interval, which an operator may have lengthened.
+    # Gate changes apply at once instead of waiting for the next poll interval (which an
+    # operator may have lengthened): docker_runner stops running docker units via the
+    # nudged reconcile.
     if "docker_runner" in changes:
         request.app.state.supervisor.nudge()
+    # Aggregate-affecting changes must converge BEFORE this returns, not on the next
+    # reconcile: the /s/all dispatcher enforces the NEW default auth on the very next
+    # request, so a bearer->none downgrade must not leave the OLD mounted set (which
+    # may include bearer-only servers) serveable in the gap. sync() is lock-serialized
+    # and its lifespans run in their own tasks, so calling it from this handler is safe.
+    if changes.keys() & {"unified_endpoint", "unified_servers", "default_auth_provider"}:
+        try:
+            await request.app.state.aggregate.sync(request.app.state.supervisor)
+        except Exception as exc:  # the write already committed; don't fail the PATCH
+            print(f"[mcpelevator] aggregate resync error: {exc}", flush=True)
     return result

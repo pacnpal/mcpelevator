@@ -33,6 +33,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 
+# Common native build toolchain, baked in (issue #81): plenty of npx/uvx MCP servers
+# compile native extensions on install (node-gyp, cmake-based wheels, Go/Rust builds)
+# and expect these to exist. Debian's go/rust are the distro-pinned versions; a server
+# that needs a newer toolchain can add it at startup via MCPE_APT_PACKAGES (see
+# docker-entrypoint.sh) or a derived image. Kept as its own early layer so it caches
+# independently of the app/dependency layers below.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake pkg-config golang rustc cargo \
+    && rm -rf /var/lib/apt/lists/*
+
 # uv + uvx (Python MCP servers) from the official image
 COPY --from=uv /uv /uvx /bin/
 
@@ -87,8 +97,13 @@ ENV PATH="/app/backend/.venv/bin:${PATH}" \
 VOLUME ["/data"]
 EXPOSE 8080
 
-# tini as PID 1 reaps the bridge/npx/uvx subprocess trees (no zombies/orphans).
-ENTRYPOINT ["tini", "--"]
+# Entrypoint wrapper: installs MCPE_APT_PACKAGES (extra Debian packages beyond the
+# baked toolchain above) at startup, then execs the CMD. Install failures warn and
+# boot continues. tini stays PID 1 and the script exec's, so uvicorn remains tini's
+# direct child and the bridge/npx/uvx subprocess trees are still reaped (no zombies).
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 # Bind where MCPE_HOST/MCPE_PORT say, not a hardcoded 8080: under host networking
 # (the recommended Unraid/NAS setup) there is no port mapping, so the env var is
 # the only way to move the port. `exec` keeps uvicorn as tini's direct child.
