@@ -173,7 +173,7 @@ class OAuthProvider:
             )
         if allowed:
             allowed_lower = {a.lower() for a in allowed}
-            claims = getattr(access, "claims", None) or {}
+            claims = access.claims
             if not allowed_lower & set(_identity(claims)):
                 raise HTTPException(
                     status_code=403,
