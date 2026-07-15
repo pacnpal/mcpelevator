@@ -155,7 +155,7 @@ def write(
             if value:
                 parsed = urlsplit(value)
                 try:
-                    parsed.port
+                    _ = parsed.port  # accessing .port rejects malformed values
                     valid_port = True
                 except ValueError:
                     valid_port = False
