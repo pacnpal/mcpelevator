@@ -15,7 +15,7 @@ real commands and dashboard steps, and helps you pick.
 >   authorization server you already run — no bearer field needed on the client.
 > - **Path A** (claude.ai web **and mobile**): a **Cloudflare Tunnel** to your
 >   loopback origin **+ a Cloudflare Access self-hosted application with Managed
->   OAuth** in front. Access becomes the OAuth provider mcpelevator doesn't have.
+>   OAuth** in front. Access provides the OAuth layer ahead of mcpelevator.
 > - **Path B** (Claude Code / Desktop via local config): a public HTTPS tunnel **+
 >   mcpelevator's built-in bearer auth**. Simplest, works today.
 > - **Path C** (claude.ai web/mobile with your own identity provider): mcpelevator's
@@ -53,8 +53,8 @@ Two facts drive everything below:
    send a static `Authorization: Bearer` header directly.)
 
 That is the whole reason "expose for web securely" needs more than flipping a port.
-Path A's job is to put something in front that **does** speak OAuth on
-mcpelevator's behalf; Cloudflare Access's **Managed OAuth** does exactly that.
+Path A puts an OAuth-aware gate in front of mcpelevator; Cloudflare Access's
+**Managed OAuth** provides that layer.
 
 ## Never do this
 
@@ -76,7 +76,7 @@ ever published to a public interface.
 > private-IP devices on your network reach the box directly (with an admin token on
 > `/api`), without a public tunnel.
 
-## Shared baseline (do this for either path)
+## Shared baseline (do this for every path)
 
 Whichever path you choose, harden mcpelevator first. These are runtime settings on
 the **Settings** page (or the `/api/settings` endpoint) plus two env vars. Assume
@@ -401,7 +401,7 @@ precisely what mcpelevator's built-in `bearer` provider checks — so no OAuth l
 is needed. Two surfaces are deliberately *not* here: the **mobile** app, and
 Desktop's **remote connectors added through the Claude account UI** — both are
 dialed from Anthropic's cloud with nowhere to set a header, just like the browser,
-so they need **Path A**. (Only Desktop's *local* config path qualifies for bearer.)
+so they need **Path A or Path C**. (Only Desktop's *local* config path qualifies for bearer.)
 
 ### Step 1 — Shared baseline
 
@@ -488,15 +488,15 @@ curl -i -H "Authorization: Bearer <OTHER_SERVER_TOKEN>" https://mcp.example.com/
 
 ## Choosing
 
-| Capability | **Path A — Access Managed OAuth** | **Path B — bearer** |
-|---|---|---|
-| Works in claude.ai **web browser** | ✅¹ (self-hosted-app recipe; #478 did not reproduce in local testing) | ❌ (web can't send a bearer) |
-| Works in Claude **mobile app** | ✅ (same self-hosted-app recipe as web) | ❌ (mobile can't send a bearer) |
-| Works in Claude **Code / Desktop (local config)** | ✅ (turn on **Allow loopback clients** on the Access app — see Step 3) | ✅ |
-| Works in Claude **Desktop remote connector** (account UI) | ✅ (cloud-dialed like web; same self-hosted-app recipe) | ❌ (cloud-dialed, no header) |
-| Auth mechanism | OAuth 2.1 + PKCE at the Access edge | mcpelevator `bearer` token |
-| Setup effort | Higher (tunnel **+** Access app + Managed OAuth) | Lower (tunnel only) |
-| Maturity today | Self-hosted-app recipe works today — the #478 failure did not reproduce in local testing (exact cause unconfirmed); the separate MCP *portal* path still has an open report (#410) | Stable, fully supported by mcpelevator v1 |
+| Capability | **Path A: Access Managed OAuth** | **Path B: bearer** | **Path C: external authorization server** |
+|---|---|---|---|
+| Works in claude.ai **web browser** | ✅¹ (self-hosted-app recipe; #478 did not reproduce in local testing) | ❌ (web can't send a bearer) | ✅ (when the AS supports Claude's OAuth client flow) |
+| Works in Claude **mobile app** | ✅ (same self-hosted-app recipe as web) | ❌ (mobile can't send a bearer) | ✅ (same OAuth connector as web) |
+| Works in Claude **Code / Desktop (local config)** | ✅ (turn on **Allow loopback clients** on the Access app; see Step 3) | ✅ | ✅ (with an OAuth-capable client) |
+| Works in Claude **Desktop remote connector** (account UI) | ✅ (cloud-dialed like web; same self-hosted-app recipe) | ❌ (cloud-dialed, no header) | ✅ (same OAuth connector as web) |
+| Auth mechanism | OAuth 2.1 + PKCE at the Access edge | mcpelevator `bearer` token | JWT validation at mcpelevator against the AS's JWKS |
+| Setup effort | Higher (tunnel + Access app + Managed OAuth) | Lower (tunnel only) | Medium if you already operate an AS |
+| Maturity today | Self-hosted-app recipe works today; the #478 failure did not reproduce in local testing (exact cause unconfirmed); the separate MCP *portal* path still has an open report (#410) | Stable, fully supported by mcpelevator v1 | Built in; interoperability depends on the AS's DCR or static-client support |
 
 ¹ ✅ here means **verified once in local testing**: against a self-hosted Access
 app with Managed OAuth, the claude.ai connector completed the OAuth login **and
@@ -507,9 +507,9 @@ resolution and the exact cause wasn't confirmed from the wire — so treat this 
 "works in this configuration" and test with a throwaway server before relying on it.
 
 **Rule of thumb:** if you need the **browser or mobile** connector, take **Path A**
-using a **self-hosted Access application + Managed OAuth** (not the MCP portal), and
-test with a throwaway server first. If Claude Code / Desktop is acceptable, take
-**Path B** — it's secure, simpler, and uses only what mcpelevator already ships.
+for Cloudflare Access or **Path C** when you already operate a compatible authorization
+server. Test either OAuth path with a throwaway server first. If Claude Code or local
+Desktop is acceptable, take **Path B** because it is secure and simpler.
 
 ## Security checklist before you go live
 
@@ -521,6 +521,7 @@ test with a throwaway server first. If Claude Code / Desktop is acceptable, take
 - [ ] **Path A:** Managed OAuth **Allowed redirect URIs** include Claude's callbacks (`https://claude.ai/*`, `https://claude.com/*`).
 - [ ] **Path A with `bearer`:** the header-injection rule is scoped to `/s/` routes and fires **only** behind the Access gate, never on an ungated hostname or on `/api/*`.
 - [ ] **Path B:** per-server auth is `bearer` with a minted token; no server is reachable unauthenticated from the public URL.
+- [ ] **Path C:** the discovery URL and audience are configured before servers switch to `oauth`; the AS issues JWT access tokens for that audience.
 - [ ] `MCPE_TRUSTED_PROXIES` is **not** trusting a publicly-reachable interface.
 - [ ] Tested: no/invalid token → 401, wrong scope → 403, valid → connects.
 

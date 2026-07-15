@@ -249,7 +249,13 @@ class GroupHub:
         instances = list(self._instances.values())
         self._instances.clear()
         for instance in instances:
-            await instance.runner.close()
+            try:
+                await instance.runner.close()
+            except Exception:
+                # Keep closing the remaining runners. The routing registry is already
+                # empty, so losing later instances here would make them unreachable
+                # for a subsequent cleanup attempt.
+                logger.exception("group runner close failed")
 
     @asynccontextmanager
     async def auth_transition(self):

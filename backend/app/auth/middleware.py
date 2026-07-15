@@ -289,15 +289,10 @@ def request_allowlist(session: Session) -> list[str]:
     return allowed
 
 
-async def enforce(request: Request, server: Server) -> None:
-    with Session(get_engine()) as session:
-        allowed = request_allowlist(session)
-        default = runtime_settings.default_auth_provider(session)
-        allow_private = private_lan_allowed(request, session)
-
-    # Always validate Host/Origin (DNS-rebinding defense). In local mode only loopback
-    # and the configured public host pass; expose adds the runtime allowlist too, and
-    # allow_private_lan adds private-IP-literal hosts from a private-network peer.
+def enforce_host(request: Request, session: Session) -> None:
+    """Apply the Host/Origin guard without requiring a data-plane credential."""
+    allowed = request_allowlist(session)
+    allow_private = private_lan_allowed(request, session)
     ok, reason = host_allowed(
         request.headers.get("host", ""),
         request.headers.get("origin"),
@@ -307,5 +302,15 @@ async def enforce(request: Request, server: Server) -> None:
     )
     if not ok:
         raise HTTPException(status_code=403, detail=reason)
+
+
+async def enforce(request: Request, server: Server) -> None:
+    with Session(get_engine()) as session:
+        default = runtime_settings.default_auth_provider(session)
+        # Always validate Host/Origin (DNS-rebinding defense). In local mode only
+        # loopback and the configured public host pass; expose adds the runtime
+        # allowlist, and allow_private_lan adds private-IP-literal hosts from a
+        # private-network peer.
+        enforce_host(request, session)
 
     await resolve(server, default).authenticate(request, server)

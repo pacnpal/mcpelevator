@@ -335,10 +335,10 @@ async def test_hub_excludes_members_with_incompatible_auth(clean_settings):
         locked = _mk_server(session, "Locked One", auth_provider="bearer")
         oauth = _mk_server(session, "OAuth One", auth_provider="oauth")
     _write_groups({"all": "*"}, default_auth_provider="none")
+    hub = _hub_for({"up-open-one": _make_upstream("o", "free"),
+                    "up-locked-one": _make_upstream("l", "secret"),
+                    "up-oauth-one": _make_upstream("x", "oauth")})
     try:
-        hub = _hub_for({"up-open-one": _make_upstream("o", "free"),
-                        "up-locked-one": _make_upstream("l", "secret"),
-                        "up-oauth-one": _make_upstream("x", "oauth")})
         await hub.sync(_endpoints(open_srv, locked, oauth))
         assert await _list_tool_names(hub.app_for("all")) == ["open-one_free"]
 
@@ -351,8 +351,8 @@ async def test_hub_excludes_members_with_incompatible_auth(clean_settings):
         _write_groups({"all": "*"}, default_auth_provider="oauth")
         await hub.sync(_endpoints(open_srv, locked, oauth))
         assert await _list_tool_names(hub.app_for("all")) == ["oauth-one_oauth", "open-one_free"]
-        await hub.close()
     finally:
+        await hub.close()
         with Session(get_engine()) as session:
             repo.delete_server(session, open_srv.id)
             repo.delete_server(session, locked.id)
@@ -395,8 +395,8 @@ async def test_auth_transition_blocks_reconcile_and_serves_no_stale_bundle(clean
         assert hub.app_for("g") is None  # fail closed until the queued reconcile finishes
         await reconcile
         assert hub.app_for("g") is not None
-        await hub.close()
     finally:
+        await hub.close()
         with Session(get_engine()) as session:
             repo.delete_server(session, server.id)
 
@@ -487,6 +487,33 @@ async def test_resync_failure_invalidates_every_group_before_teardown(clean_sett
         allow_teardown.set()
         await task
         await hub.close()
+
+
+async def test_hub_close_attempts_every_runner_after_one_fails(caplog):
+    closed = []
+
+    class Runner:
+        def __init__(self, name: str, fail: bool = False):
+            self.name = name
+            self.fail = fail
+
+        async def close(self):
+            closed.append(self.name)
+            if self.fail:
+                raise RuntimeError(f"{self.name} failed")
+
+    hub = _hub_for({})
+    hub._instances = {
+        "bad": SimpleNamespace(runner=Runner("bad", fail=True)),
+        "good": SimpleNamespace(runner=Runner("good")),
+    }
+    caplog.set_level("ERROR", logger="app.groups.hub")
+
+    await hub.close()
+
+    assert closed == ["bad", "good"]
+    assert hub._instances == {}
+    assert "group runner close failed" in caplog.text
 
 
 def test_internal_hop_never_forwards_authorization():

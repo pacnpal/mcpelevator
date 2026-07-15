@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import time
 from typing import Any, Optional
 
@@ -48,6 +49,8 @@ from app.api.util import base_url
 from app.db import get_engine, repo
 from app.db.models import Server
 from app.registry import settings as runtime_settings
+
+logger = logging.getLogger(__name__)
 
 _DISCOVERY_TTL_S = 3600.0
 
@@ -89,12 +92,20 @@ class _OAuthJWTVerifier(JWTVerifier):
         keys = document.get("keys")
         if not isinstance(keys, list) or not keys:
             raise _AuthorizationServerUnavailable("JWKS contains no verification keys")
-        try:
-            for key in keys:
+        usable_keys = []
+        for key in keys:
+            try:
                 _jwk_to_pem(key)
-        except Exception as exc:
-            raise _AuthorizationServerUnavailable("JWKS contains an unusable key") from exc
-        return document
+            except Exception:
+                continue
+            usable_keys.append(key)
+        if not usable_keys:
+            raise _AuthorizationServerUnavailable("JWKS contains no usable verification keys")
+        # Authorization servers may publish unsupported or malformed keys alongside
+        # the RSA/EC keys this provider accepts. FastMCP converts every key in the
+        # document, so remove unrelated keys rather than letting one disable every
+        # otherwise-valid token.
+        return {**document, "keys": usable_keys}
 
 
 def _normalize_config_url(config_url: str) -> str:
@@ -227,8 +238,9 @@ class OAuthProvider:
         except Exception as exc:
             # AS metadata/JWKS unreachable is OUR outage, not the client's: a 401
             # would send well-behaved clients into a pointless re-auth loop.
+            logger.exception("authorization server unavailable")
             raise HTTPException(
-                status_code=503, detail=f"authorization server unreachable: {exc}"
+                status_code=503, detail="authorization server unavailable"
             ) from exc
         if access is None:
             raise HTTPException(
@@ -277,6 +289,12 @@ def _effective_oauth(kind: str, slug: str) -> bool:
 
 @wellknown.get("/.well-known/oauth-protected-resource/{kind}/{slug}/mcp")
 async def protected_resource_metadata(kind: str, slug: str, request: Request):
+    # This endpoint is public for pre-auth discovery, but the independent
+    # Host/Origin guard still applies before the request Host is used in metadata.
+    from app.auth.middleware import enforce_host
+
+    with Session(get_engine()) as session:
+        enforce_host(request, session)
     if not _effective_oauth(kind, slug):
         raise HTTPException(status_code=404, detail="not found")
     with Session(get_engine()) as session:

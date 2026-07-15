@@ -194,7 +194,7 @@ async def test_subject_allowlist(session, keypair):
     assert exc.value.status_code == 403
 
 
-async def test_as_outage_is_503_not_401(session, keypair, monkeypatch):
+async def test_as_outage_is_503_not_401(session, keypair, monkeypatch, caplog):
     runtime_settings.write(
         session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
     )
@@ -203,12 +203,15 @@ async def test_as_outage_is_503_not_401(session, keypair, monkeypatch):
         raise RuntimeError("jwks fetch failed")
 
     monkeypatch.setattr(oauth_mod, "_verifier_for", boom)
+    caplog.set_level("ERROR", logger=oauth_mod.__name__)
     token = _token(keypair)
     with pytest.raises(HTTPException) as exc:
         await OAuthProvider().authenticate(
             _request({"Authorization": f"Bearer {token}"}), _server()
         )
     assert exc.value.status_code == 503
+    assert exc.value.detail == "authorization server unavailable"
+    assert "jwks fetch failed" in caplog.text
 
 
 async def test_real_jwks_transport_failure_is_503(session, keypair, monkeypatch):
@@ -271,6 +274,39 @@ async def test_unusable_jwks_is_503(session, keypair, monkeypatch, jwks):
                 _request({"Authorization": f"Bearer {token}"}), _server()
             )
     assert exc.value.status_code == 503
+
+
+async def test_jwks_ignores_unrelated_unusable_keys(session, keypair, monkeypatch):
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
+    valid = {
+        **import_key(keypair.public_key, "RSA").as_dict(),
+        "kid": "known",
+        "alg": "RS256",
+    }
+    jwks = {"keys": [{"kty": "OKP", "kid": "unrelated"}, valid]}
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=jwks)
+        )
+    ) as client:
+        verifier = oauth_mod._OAuthJWTVerifier(
+            jwks_uri=f"{ISSUER}/jwks",
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            http_client=client,
+        )
+
+        async def real_verifier(config_url: str, audience: str, algorithm: str):
+            return verifier
+
+        monkeypatch.setattr(oauth_mod, "_verifier_for", real_verifier)
+        token = _token(keypair, kid="known")
+        await OAuthProvider().authenticate(
+            _request({"Authorization": f"Bearer {token}"}), _server()
+        )
 
 
 async def test_unknown_kid_on_usable_jwks_is_401(session, keypair, monkeypatch):
@@ -376,7 +412,7 @@ async def test_metadata_route_advertises_issuer(session, monkeypatch):
 
     monkeypatch.setattr(oauth_mod, "_discovery", fake_discovery)
     out = await protected_resource_metadata(
-        "s", "svc", _request({"Host": "box.local:8080"})
+        "s", "svc", _request({"Host": "127.0.0.1:8080"})
     )
     assert out["authorization_servers"] == [ISSUER]
     assert out["resource"].endswith("/s/svc/mcp")
@@ -384,7 +420,7 @@ async def test_metadata_route_advertises_issuer(session, monkeypatch):
 
     runtime_settings.write(session, {"oauth_scopes": ["openid", "profile", "email"]})
     out = await protected_resource_metadata(
-        "s", "svc", _request({"Host": "box.local:8080"})
+        "s", "svc", _request({"Host": "127.0.0.1:8080"})
     )
     assert out["scopes_supported"] == ["openid", "profile", "email"]
 
@@ -407,9 +443,25 @@ async def test_metadata_route_supports_oauth_groups(session, monkeypatch):
 
     monkeypatch.setattr(oauth_mod, "_discovery", fake_discovery)
     out = await protected_resource_metadata(
-        "g", "team", _request({"Host": "box.local:8080"})
+        "g", "team", _request({"Host": "127.0.0.1:8080"})
     )
     assert out["resource"].endswith("/g/team/mcp")
+
+
+async def test_metadata_route_rejects_off_allowlist_host(session):
+    from app.auth.oauth import protected_resource_metadata
+
+    session.add(_server())
+    session.commit()
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await protected_resource_metadata(
+            "s", "svc", _request({"Host": "evil.example"})
+        )
+    assert exc.value.status_code == 403
 
 
 async def test_group_challenge_points_to_group_metadata(session):
@@ -430,7 +482,9 @@ async def test_metadata_route_404_for_non_oauth_server(session):
     from app.auth.oauth import protected_resource_metadata
 
     with pytest.raises(HTTPException) as exc:
-        await protected_resource_metadata("s", "missing", _request())
+        await protected_resource_metadata(
+            "s", "missing", _request({"Host": "127.0.0.1"})
+        )
     assert exc.value.status_code == 404
 
 

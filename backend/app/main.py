@@ -11,7 +11,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from sqlmodel import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -32,12 +32,7 @@ from app.auth.control_plane import (
     mint_control_token,
     require_control_plane,
 )
-from app.auth.middleware import (
-    host_allowed,
-    is_loopback_client,
-    private_lan_allowed,
-    request_allowlist,
-)
+from app.auth.middleware import enforce_host
 from app.config import get_settings
 from app.db import get_engine, init_db, repo
 from app.groups import registry as group_registry
@@ -202,17 +197,10 @@ def create_app() -> FastAPI:
         # adds per-request bearer auth when enforcement is on.
         if request.url.path == "/api" or request.url.path.startswith("/api/"):
             with Session(get_engine()) as session:
-                allowed = request_allowlist(session)
-                allow_private = private_lan_allowed(request, session)
-            ok, reason = host_allowed(
-                request.headers.get("host", ""),
-                request.headers.get("origin"),
-                allowed,
-                client_is_loopback=is_loopback_client(request),
-                allow_private=allow_private,
-            )
-            if not ok:
-                return JSONResponse({"detail": reason}, status_code=403)
+                try:
+                    enforce_host(request, session)
+                except HTTPException as exc:
+                    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
         return await call_next(request)
 
     # health and auth-status stay public; the sensitive routers require a control

@@ -153,9 +153,9 @@ port as usual; leave `MCPE_PORT` at `8080` and remap on the host side instead.
 
 Don't port-forward the raw port. To reach the box from outside (e.g. Claude web/mobile
 away from home), use a tunnel that terminates auth — see
-[claude-web-exposure.md](claude-web-exposure.md) for two concrete recipes (Cloudflare
-Tunnel + Access with Managed OAuth for claude.ai web/mobile, or a public HTTPS tunnel +
-mcpelevator's built-in bearer auth for Claude Code / locally-configured Desktop). Set
+[claude-web-exposure.md](claude-web-exposure.md) for three concrete recipes (Cloudflare
+Tunnel + Access with Managed OAuth, a public HTTPS tunnel + mcpelevator's built-in
+bearer auth, or mcpelevator's OAuth resource server with your own authorization server). Set
 `MCPE_PUBLIC_BASE_URL` to the tunnel URL so the copy menu hands out the right addresses.
 
 ## Environment variables (template reference)
