@@ -87,6 +87,28 @@ class Settings(BaseSettings):
     start_timeout_s: float = 120.0  # generous: covers npx/uvx cold-start install
     health_interval_s: float = 10.0
     restart_budget: int = 5  # consecutive failed (re)starts before -> FAILED
+    restart_stable_s: float = 60.0
+
+    @field_validator("start_timeout_s")
+    @classmethod
+    def _positive_start_timeout(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("start_timeout_s must be greater than zero")
+        return value
+
+    @field_validator("restart_budget")
+    @classmethod
+    def _positive_restart_budget(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("restart_budget must be at least one")
+        return value
+
+    @field_validator("restart_stable_s")
+    @classmethod
+    def _nonnegative_restart_stable(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("restart_stable_s must not be negative")
+        return value
 
     @property
     def resolved_db_path(self) -> Path:

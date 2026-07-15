@@ -87,11 +87,46 @@ Via the API (the UI add-flow wraps this):
 ```bash
 curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/json' -d '{
   "name": "Memory", "runner": "npx", "command": "npx",
-  "args": ["-y", "@modelcontextprotocol/server-memory"], "enabled": true
+  "args": ["-y", "@modelcontextprotocol/server-memory"],
+  "setup_script": "command -v node >/dev/null", "enabled": true
 }'
 ```
 
 Then point any MCP client at `http://127.0.0.1:8080/s/memory/mcp`.
+
+### Per-server setup and startup retries
+
+`setup_script` is optional and supported only by the `npx`, `uvx`, and `command`
+local runners. Before every startup attempt, mcpelevator runs it with
+`/bin/sh -e -c` as the mcpelevator process user, using the local MCP child's initial
+effective environment and working directory. Files and other external effects persist
+according to where the script writes them. Shell-local changes such as `export`, `cd`,
+and aliases end with the setup shell and do not carry into the MCP child. Scripts must
+be safe to run again. Docker setup belongs in the image, and a `remote` server has no
+local setup process.
+
+The script is stored as plain server configuration, and its combined stdout/stderr goes
+to the authenticated server logs. Treat both the script and its output as sensitive.
+The official container currently runs as root, so setup scripts in that container do
+too. Across a container replacement, only mounted or otherwise persistent paths and
+package caches configured on those paths survive. `MCPE_APT_PACKAGES` is different: it
+is global container bootstrap for extra Debian packages before mcpelevator starts, not
+per-server setup.
+
+Each startup attempt runs setup, launches the bridge, and checks readiness. Setup and
+readiness each get a separate `MCPE_START_TIMEOUT_S` window. Failed setup, bridge launch
+or readiness, and exits before a stable run retry the full attempt, including setup.
+`MCPE_RESTART_BUDGET` defaults to 5 attempts, with waits of 2, 4, 8, then 16 seconds;
+further waits stay at 16 seconds. After `MCPE_RESTART_STABLE_S` (60 seconds by default)
+of uninterrupted running, the retry budget is restored. Stop cancels startup and any
+pending retry.
+
+An enabled server in `failed` or `unhealthy` state can be retried in the UI without
+changing its saved configuration, or through the API:
+
+```bash
+curl -X POST "http://127.0.0.1:8080/api/servers/<server-id>/retry"
+```
 
 **Already remote?** Use the `remote` runner to proxy an existing Streamable-HTTP/SSE MCP URL — no local process. The launch spec reuses the same fields: `command` is the upstream URL, `args[0]` is the transport (`streamable-http` or `sse`), and `env` is the upstream HTTP headers.
 
@@ -197,12 +232,14 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_MINT_ADMIN_TOKEN` | `false` | Force-mint a fresh admin token on boot and print it (recovery for a lost token); unset after grabbing it |
 | `MCPE_ALLOW_PRIVATE_LAN` | `false` | First-boot seed for the LAN-access setting (headless bootstrap); see **Security** |
 | `MCPE_DOCKER_RUNNER` | `false` | First-boot seed for the (root-equivalent) docker-runner setting; needs the Docker socket mounted or a dind sidecar |
-| `MCPE_APT_PACKAGES` | _(none)_ | Space-separated extra Debian packages installed at container startup (Docker image only), for servers that need tools beyond the baked-in toolchain. A failed install warns and boot continues |
+| `MCPE_APT_PACKAGES` | _(none)_ | Global, space-separated extra Debian packages installed before mcpelevator starts (Docker image only), not per-server `setup_script`. A failed install warns and boot continues; packages must be reinstalled after container replacement |
 | `MCPE_DATA_DIR` | `./data` | SQLite + caches |
 | `MCPE_FRONTEND_DIR` | `../frontend/build` | Built SPA to serve |
 | `MCPE_PORT_RANGE_START` / `_END` | `49200` / `49400` | Loopback ports for bridge processes |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrent running servers |
-| `MCPE_START_TIMEOUT_S` | `120` | Readiness timeout (covers npx/uvx cold start) |
+| `MCPE_START_TIMEOUT_S` | `120` | Separate timeout for setup and for readiness on each startup attempt (covers npx/uvx cold start) |
+| `MCPE_RESTART_BUDGET` | `5` | Startup attempts before `failed`; retry waits are 2/4/8/16 seconds and cap at 16 |
+| `MCPE_RESTART_STABLE_S` | `60` | Uninterrupted running time before the retry budget is restored |
 | `MCPE_VERSION` | _(image: release tag)_ | Version the instance reports (`/api/health`, UI badge). Set by the published image from the release tag; you don't normally set it. Unset → derived from the adjacent `pyproject.toml` (source tree), else installed package metadata |
 
 ## Security
@@ -255,7 +292,7 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 ## Status / roadmap
 
-**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: local bearer tokens or external-AS OAuth JWTs for `/s` and `/g`, control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
+**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop / retry, with optional setup scripts for local runners. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: local bearer tokens or external-AS OAuth JWTs for `/s` and `/g`, control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
 
 **Planned:** REST/OpenAPI surface per server · more catalog directories · polish.
 

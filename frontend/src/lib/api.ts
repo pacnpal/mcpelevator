@@ -275,6 +275,12 @@ export function disableServer(id: string): Promise<ServerSummary> {
 	});
 }
 
+export function retryServer(id: string): Promise<ServerSummary> {
+	return request<ServerSummary>(`/servers/${encodeURIComponent(id)}/retry`, {
+		method: 'POST'
+	});
+}
+
 export interface LogStreamHandlers {
 	onOpen?: () => void;
 	onLine: (line: string) => void;

@@ -9,9 +9,18 @@
 		enableServer,
 		errorMessage,
 		getServer,
+		retryServer,
 		startOauth
 	} from '$lib/api';
 	import { listenForOauthResult, openOauthPopup, popupCanRelay } from '$lib/oauthPopup';
+	import {
+		formatCountdown,
+		formatElapsed,
+		hasActiveStartup,
+		pollingInterval,
+		primaryServerAction,
+		startupPhaseLabel
+	} from '$lib/startup';
 	import type { ServerDetail } from '$lib/types';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
@@ -27,7 +36,7 @@
 	let loadState = $state<LoadState>('loading');
 	let loadError = $state<string | null>(null);
 
-	let busy = $state(false); // enable/disable in flight
+	let busy = $state(false); // start/stop/retry in flight
 	let deleting = $state(false);
 	let confirmDelete = $state(false);
 	let cloning = $state(false);
@@ -40,16 +49,23 @@
 		toastTimer = setTimeout(() => (toast = null), 6000);
 	}
 
+	let loadingId: string | null = null;
+	let mutationRevision = 0;
+
 	async function load(silent = false) {
 		// Capture the id this request is for. A clone navigates /server/[id] ->
 		// /server/[id] (same route, reused component), so an in-flight request from
 		// the source page (initial load or silent poll) can resolve *after* the
 		// copy's load — drop it instead of clobbering `server` with the source.
 		const requestedId = id;
+		if (loadingId === requestedId) return;
+		loadingId = requestedId;
+		const revision = mutationRevision;
 		if (!silent) loadState = 'loading';
 		try {
 			const result = await getServer(requestedId);
 			if (requestedId !== id) return; // route changed mid-flight; stale response
+			if (revision !== mutationRevision) return; // an action returned newer state
 			server = result;
 			loadState = 'ready';
 			loadError = null;
@@ -59,12 +75,24 @@
 				loadState = 'error';
 				loadError = errorMessage(err);
 			}
+		} finally {
+			if (loadingId === requestedId) loadingId = null;
 		}
 	}
 
-	const wantsRun = $derived(server?.enabled ?? false);
+	const activeStartup = $derived(server ? hasActiveStartup(server) : false);
+	const action = $derived(server ? primaryServerAction(server) : 'start');
+	const startup = $derived(server?.startup_status ?? null);
+	const startupElapsed = $derived(startup ? formatElapsed(startup.activation_started_at) : null);
+	const startupCountdown = $derived(
+		startup ? formatCountdown(startup.next_retry_at ?? startup.deadline_at) : null
+	);
+	const terminalFailure = $derived(
+		!!server && !activeStartup && (server.state === 'failed' || server.state === 'unhealthy')
+	);
+	const priorityLogs = $derived(activeStartup || terminalFailure);
 
-	async function toggle() {
+	async function runPrimaryAction() {
 		if (!server || busy) return;
 		busy = true;
 		// Capture the id this action targets. Clone reuses this component (same-route
@@ -72,10 +100,14 @@
 		// *previous* server — drop it instead of clobbering the copy with the source.
 		const requestedId = id;
 		try {
-			const updated = wantsRun
-				? await disableServer(requestedId)
-				: await enableServer(requestedId);
+			const updated =
+				action === 'stop'
+					? await disableServer(requestedId)
+					: action === 'retry'
+						? await retryServer(requestedId)
+						: await enableServer(requestedId);
 			if (requestedId !== id || !server) return; // route changed mid-flight
+			mutationRevision += 1;
 			server = { ...server, ...updated };
 		} catch (err) {
 			if (requestedId === id) flashToast(errorMessage(err));
@@ -234,6 +266,7 @@
 		oauthBusy = true;
 		try {
 			const updated = await disconnectOauth(server.id);
+			mutationRevision += 1;
 			server = { ...server, ...updated };
 			flashToast(
 				updated.enabled
@@ -273,8 +306,8 @@
 		}
 	}
 
-	// Initial load + lightweight polling so live state (running/starting) stays
-	// fresh while the page is open. Polls silently to avoid flicker.
+	// Initial load and adaptive polling keep startup transitions current without
+	// overlapping requests. Poll responses older than an action are dropped in load().
 	// Consume the OAuth round-trip result in its OWN effect, keyed on the query string, so
 	// it fires on the post-callback navigation to `/server/{id}?oauth=…` even when the
 	// server id is unchanged (same page) — the load effect below only re-runs on id, and
@@ -293,14 +326,24 @@
 		oauthNonce = null;
 		clearOauthTimers();
 		oauthBusy = false;
-		load();
-		const poll = setInterval(() => {
-			if (loadState === 'ready' && !busy && !deleting) load(true);
-		}, 4000);
+		void load();
 		return () => {
-			clearInterval(poll);
 			clearTimeout(toastTimer);
 		};
+	});
+
+	let pollTick = $state(0);
+	$effect(() => {
+		void pollTick;
+		void busy;
+		void deleting;
+		void oauthBusy;
+		if (loadState !== 'ready' || !server || server.id !== id) return;
+		const timer = setTimeout(async () => {
+			if (!busy && !deleting && !oauthBusy) await load(true);
+			pollTick += 1;
+		}, pollingInterval([server]));
+		return () => clearTimeout(timer);
 	});
 
 	const envEntries = $derived(Object.entries(server?.env ?? {}));
@@ -401,21 +444,21 @@
 					>
 						{server.name}
 					</h1>
-					<StatePill state={server.state} />
+					<StatePill state={server.state} startupStatus={startup} />
 				</div>
 				<p class="mt-1 truncate font-mono text-sm text-[var(--color-ink-dim)]">
 					{server.slug}
 				</p>
 			</div>
 
-			<div class="flex items-center gap-2">
+			<div class="flex flex-wrap items-center justify-end gap-2">
 				<button
 					type="button"
-					onclick={toggle}
+					onclick={runPrimaryAction}
 					disabled={busy}
 					aria-busy={busy}
 					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
-					style={wantsRun
+					style={action === 'stop'
 						? 'color: var(--color-ink-muted); border: 1px solid var(--color-line);'
 						: 'color: var(--color-accent-ink); background-color: var(--color-accent);'}
 				>
@@ -424,12 +467,17 @@
 							<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
 							<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
 						</svg>
-						{wantsRun ? 'Stopping' : 'Starting'}
-					{:else if wantsRun}
+						{action === 'stop' ? 'Stopping' : action === 'retry' ? 'Retrying' : 'Starting'}
+					{:else if action === 'stop'}
 						<svg class="size-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 							<rect x="7" y="7" width="10" height="10" rx="1.5" />
 						</svg>
 						Stop
+					{:else if action === 'retry'}
+						<svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" />
+						</svg>
+						Retry
 					{:else}
 						<svg class="size-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 							<path d="M8 5v14l11-7z" />
@@ -490,6 +538,55 @@
 				</a>
 			</div>
 		</div>
+
+		{#if startup}
+			<div
+				class="flex flex-col gap-2 rounded-[var(--radius-card)] border px-4 py-3"
+				style="border-color: color-mix(in oklab, var(--color-state-starting) 35%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+			>
+				<div class="flex flex-wrap items-center justify-between gap-2">
+					<p class="text-sm font-semibold text-[var(--color-ink)]">
+						{startupPhaseLabel(startup.phase)}
+					</p>
+					<span class="font-mono text-xs text-[var(--color-ink-muted)]">
+						Attempt {startup.attempt} of {startup.max_attempts}
+					</span>
+				</div>
+				<div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--color-ink-dim)]">
+					{#if startupElapsed}<span>{startupElapsed} elapsed</span>{/if}
+					{#if startupCountdown}
+						<span>
+							{startup.next_retry_at
+								? `Retry in ${startupCountdown}`
+								: `${startupCountdown} until this phase times out`}
+						</span>
+					{/if}
+				</div>
+				{#if startup.message}
+					<p class="font-mono text-xs leading-relaxed text-[var(--color-ink-muted)]">
+						{startup.message}
+					</p>
+				{/if}
+			</div>
+		{/if}
+
+		{#if !activeStartup && server.last_error}
+			<p
+				class="rounded-lg border px-3.5 py-3 font-mono text-xs leading-relaxed"
+				style="border-color: color-mix(in oklab, var(--color-state-failed) 30%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 10%, transparent); color: var(--color-state-failed);"
+			>
+				{server.last_error}
+			</p>
+		{/if}
+
+		{#if priorityLogs}
+			<LogViewer
+				serverId={server.id}
+				serverState={server.state}
+				startupStatus={startup}
+				compact
+			/>
+		{/if}
 
 		<!-- Upstream OAuth: connect / status banner -->
 		{#if oauthState?.enabled}
@@ -589,16 +686,6 @@
 			{/if}
 		{/if}
 
-		<!-- last_error -->
-		{#if server.last_error}
-			<p
-				class="rounded-lg border px-3.5 py-3 font-mono text-xs leading-relaxed"
-				style="border-color: color-mix(in oklab, var(--color-state-failed) 30%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 10%, transparent); color: var(--color-state-failed);"
-			>
-				{server.last_error}
-			</p>
-		{/if}
-
 		<!-- Endpoints -->
 		<div
 			class="flex flex-col gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
@@ -682,13 +769,20 @@
 
 			<div class="flex flex-wrap items-center gap-2">
 				<RunnerBadge runner={server.runner} />
-				{#if typeof server.pid === 'number'}
+				{#if !activeStartup && typeof server.pid === 'number'}
 					<span class="font-mono text-xs text-[var(--color-ink-dim)]">pid {server.pid}</span>
 				{/if}
-				{#if typeof server.port === 'number'}
+				{#if !activeStartup && typeof server.port === 'number'}
 					<span class="font-mono text-xs text-[var(--color-ink-dim)]">port {server.port}</span>
 				{/if}
 			</div>
+
+			{#if server.setup_script}
+				<div class="flex flex-col gap-1.5">
+					<span class="text-xs font-medium text-[var(--color-ink-muted)]">Setup script</span>
+					<pre class="m-0 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5 font-mono text-xs whitespace-pre-wrap text-[var(--color-ink)]">{server.setup_script}</pre>
+				</div>
+			{/if}
 
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Command</span>
@@ -732,53 +826,61 @@
 			</div>
 		</div>
 
-		<!-- Tools -->
-		<div
-			class="flex flex-col gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
-		>
-			<div class="flex items-center justify-between">
-				<h2 class="text-sm font-semibold text-[var(--color-ink)]">Tools</h2>
-				<span class="font-mono text-xs text-[var(--color-ink-dim)]">{server.tools_count}</span>
-			</div>
-			{#if server.tools.length === 0}
-				<p class="text-xs text-[var(--color-ink-dim)]">
-					{server.state === 'running'
-						? 'No tools discovered.'
-						: 'Tools are discovered once the server is running.'}
-				</p>
-			{:else}
-				<ul class="flex flex-col divide-y divide-[var(--color-line)]">
-					{#each server.tools as tool (tool.name)}
-						<li class="flex flex-col gap-0.5 py-2 first:pt-0 last:pb-0">
-							<span class="flex flex-wrap items-center gap-1.5">
-								<span class="font-mono text-xs font-medium text-[var(--color-ink)]">
-									{tool.name}
+		<!-- Runtime tool data can belong to the previous process while startup is active. -->
+		{#if !activeStartup}
+			<div
+				class="flex flex-col gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
+			>
+				<div class="flex items-center justify-between">
+					<h2 class="text-sm font-semibold text-[var(--color-ink)]">Tools</h2>
+					<span class="font-mono text-xs text-[var(--color-ink-dim)]">{server.tools_count}</span>
+				</div>
+				{#if server.tools.length === 0}
+					<p class="text-xs text-[var(--color-ink-dim)]">
+						{server.state === 'running'
+							? 'No tools discovered.'
+							: 'Tools are discovered once the server is running.'}
+					</p>
+				{:else}
+					<ul class="flex flex-col divide-y divide-[var(--color-line)]">
+						{#each server.tools as tool (tool.name)}
+							<li class="flex flex-col gap-0.5 py-2 first:pt-0 last:pb-0">
+								<span class="flex flex-wrap items-center gap-1.5">
+									<span class="font-mono text-xs font-medium text-[var(--color-ink)]">
+										{tool.name}
+									</span>
+									{#if tool.has_output_schema === false}
+										<!-- Mirrors the hint MCP clients show for schema-less tools. The
+										     schema lives in the upstream server's tool definition and is
+										     proxied through unchanged, so this is diagnostic only. -->
+										<span
+											class="rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-dim)]"
+											title="This tool doesn't declare an outputSchema. MCP clients recommend adding one so models can better understand the tool's results. It comes from the upstream server's tool definition — mcpelevator proxies schemas through unchanged, so the fix belongs upstream."
+										>
+											no output schema
+										</span>
+									{/if}
 								</span>
-								{#if tool.has_output_schema === false}
-									<!-- Mirrors the hint MCP clients show for schema-less tools. The
-									     schema lives in the upstream server's tool definition and is
-									     proxied through unchanged, so this is diagnostic only. -->
-									<span
-										class="rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-dim)]"
-										title="This tool doesn't declare an outputSchema. MCP clients recommend adding one so models can better understand the tool's results. It comes from the upstream server's tool definition — mcpelevator proxies schemas through unchanged, so the fix belongs upstream."
-									>
-										no output schema
+								{#if tool.description}
+									<span class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+										{tool.description}
 									</span>
 								{/if}
-							</span>
-							{#if tool.description}
-								<span class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
-									{tool.description}
-								</span>
-							{/if}
-						</li>
-					{/each}
-				</ul>
-			{/if}
-		</div>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+		{/if}
 
 		<!-- Logs -->
-		<LogViewer serverId={server.id} serverState={server.state} />
+		{#if !priorityLogs}
+			<LogViewer
+				serverId={server.id}
+				serverState={server.state}
+				startupStatus={startup}
+			/>
+		{/if}
 
 		<!-- Danger zone -->
 		<div

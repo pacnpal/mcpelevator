@@ -92,6 +92,28 @@ container, add the variable, restart):
 3. For anything reachable off-host, put a **bearer token** on the server (Auth →
    `bearer`) so the endpoint isn't open to everyone on your network.
 
+### Per-server setup
+
+The `npx`, `uvx`, and `command` runners can have an optional setup script. It runs through
+`/bin/sh -e -c` before every startup attempt, with the MCP child's initial environment and
+working directory. Each retry runs it again, so keep it safe to rerun. Files remain where
+the script writes them, but `export`, `cd`, and aliases do not carry into the child.
+Docker setup belongs in the image, and remote servers have no local setup.
+
+The script is plain server configuration, and its output goes to the authenticated server
+logs. Treat both as sensitive. The official container currently runs as root, so its setup
+scripts do too. Only `/data` and any other paths you explicitly mount survive a container
+replacement; the npm and uv caches survive because they are configured under `/data`.
+Use `MCPE_APT_PACKAGES` for global Debian packages needed by every server, not as a
+per-server setup script. Those packages are installed again after container replacement.
+
+Setup and readiness each receive their own `MCPE_START_TIMEOUT_S` window per attempt.
+Failed setup, bridge launch or readiness, and exits before a stable run retry the whole
+attempt after 2, 4, 8, then 16 seconds, capped at 16. The default budget is 5 attempts.
+After 60 seconds of uninterrupted running the budget resets. Stop cancels startup or a pending retry. An
+enabled server that ends in Failed or Unhealthy can be retried from the UI without
+changing its configuration, or with `POST /api/servers/{id}/retry`.
+
 ## Docker runner (opt-in, root-equivalent)
 
 mcpelevator can also run MCP servers packaged as **Docker images** (e.g.
@@ -169,9 +191,11 @@ bearer auth, or mcpelevator's OAuth resource server with your own authorization 
 | `MCPE_PUBLIC_BASE_URL` | _(unset)_ | Absolute URL clients use when the box sits behind a tunnel/reverse proxy |
 | `MCPE_ALLOWED_HOSTS` | _(unset)_ | Extra hostnames the Host/Origin guard trusts (e.g. a reverse-proxy hostname) |
 | `MCPE_DOCKER_RUNNER` | `false` | **Root-equivalent, opt-in.** First-boot seed for the docker runner (launch image-packaged MCP servers). Needs a Docker endpoint — either the host socket mounted (sibling model) or a `DOCKER_HOST` pointing at a separate dind daemon — see [Docker runner](#docker-runner-opt-in-root-equivalent) |
-| `MCPE_APT_PACKAGES` | _(unset)_ | Space-separated extra Debian packages installed at container startup, for servers that need tools beyond the baked-in build toolchain. A failed install warns and boot continues |
+| `MCPE_APT_PACKAGES` | _(unset)_ | Global, space-separated extra Debian packages installed before mcpelevator starts, not per-server setup. A failed install warns and boot continues; packages are reinstalled after container replacement |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrently running MCP servers |
-| `MCPE_START_TIMEOUT_S` | `120` | Readiness timeout (covers npx/uvx cold-start installs) |
+| `MCPE_START_TIMEOUT_S` | `120` | Separate timeout for setup and readiness on each startup attempt |
+| `MCPE_RESTART_BUDGET` | `5` | Startup attempts before Failed; retry waits are 2/4/8/16 seconds and cap at 16 |
+| `MCPE_RESTART_STABLE_S` | `60` | Uninterrupted running time before the retry budget is restored |
 
 The full list, including reverse-proxy knobs (`MCPE_TRUSTED_PROXIES`,
 `MCPE_TRUST_DOCKER_HOST`), is in the [README](../README.md#configuration-env-vars-prefix-mcpe_).
@@ -192,4 +216,5 @@ The full list, including reverse-proxy knobs (`MCPE_TRUSTED_PROXIES`,
   `MCPE_PORT` in the template.
 - **A server is slow to start the first time** — `npx`/`uvx` download the package on
   first run. The cache persists in `/data`, so subsequent starts are fast. Raise
-  `MCPE_START_TIMEOUT_S` for very large packages.
+  `MCPE_START_TIMEOUT_S` for very large setup scripts or packages; setup and readiness
+  each receive the full timeout.

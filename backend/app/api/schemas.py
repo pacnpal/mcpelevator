@@ -14,6 +14,7 @@ from pydantic import BaseModel, StrictBool, StrictStr
 # than silently stored and then failed-closed at request time.
 AuthProvider = Literal["inherit", "none", "bearer", "oauth"]
 EffectiveAuthProvider = Literal["none", "bearer", "oauth"]
+StartupPhase = Literal["queued", "setup", "bridge", "readiness", "retry_wait"]
 
 
 class Transports(BaseModel):
@@ -24,6 +25,16 @@ class Transports(BaseModel):
 class Urls(BaseModel):
     mcp: Optional[str] = None
     rest: Optional[str] = None
+
+
+class StartupStatus(BaseModel):
+    phase: StartupPhase
+    attempt: int
+    max_attempts: int
+    activation_started_at: datetime
+    deadline_at: Optional[datetime] = None
+    next_retry_at: Optional[datetime] = None
+    message: Optional[str] = None
 
 
 class ServerSummary(BaseModel):
@@ -40,6 +51,7 @@ class ServerSummary(BaseModel):
     pid: Optional[int] = None
     port: Optional[int] = None
     tools_count: int = 0
+    startup_status: Optional[StartupStatus] = None
 
 
 class OAuthStatus(BaseModel):
@@ -58,6 +70,7 @@ class ServerDetail(ServerSummary):
     args: list[str] = []
     env: dict[str, str] = {}
     cwd: Optional[str] = None
+    setup_script: str = ""
     auth_provider: str = "inherit"
     oauth: bool = False
     oauth_scopes: str = ""
@@ -78,6 +91,7 @@ class ServerCreate(BaseModel):
     args: list[str] = []
     env: dict[str, str] = {}
     cwd: Optional[str] = None
+    setup_script: str = ""
     mcp_http: bool = True
     rest_openapi: bool = False
     auth_provider: AuthProvider = "inherit"
@@ -103,6 +117,7 @@ class ServerUpdate(BaseModel):
     args: Optional[list[str]] = None
     env: Optional[dict[str, str]] = None
     cwd: Optional[str] = None
+    setup_script: Optional[str] = None
     mcp_http: Optional[bool] = None
     rest_openapi: Optional[bool] = None
     auth_provider: Optional[AuthProvider] = None

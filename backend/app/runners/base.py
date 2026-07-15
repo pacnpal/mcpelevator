@@ -34,6 +34,7 @@ class ProcessSpec:
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)  # server-specific vars / headers
     cwd: str | None = None
+    setup_script: str = ""
     transport: str = "stdio"  # stdio | streamable-http | sse
     # For a remote runner that authenticates via OAuth: the config the bridge needs to
     # build an OAuth httpx auth on the upstream transport (server id -> token file,
@@ -74,4 +75,5 @@ def passthrough(server: Server) -> ProcessSpec:
         args=list(server.args or []),
         env=dict(server.env or {}),
         cwd=server.cwd,
+        setup_script=server.setup_script or "",
     )

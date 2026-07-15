@@ -1,10 +1,21 @@
 <script lang="ts">
 	import { ApiError, streamLogs } from '$lib/api';
-	import type { ServerState } from '$lib/types';
+	import type { ServerState, StartupStatus } from '$lib/types';
 
-	let { serverId, serverState }: { serverId: string; serverState: ServerState } = $props();
+	let {
+		serverId,
+		serverState,
+		startupStatus = null,
+		compact = false
+	}: {
+		serverId: string;
+		serverState: ServerState;
+		startupStatus?: StartupStatus | null;
+		compact?: boolean;
+	} = $props();
 
 	const MAX_LINES = 1000;
+	const TRUNCATION_MARKER = 'omitted (buffer limit)';
 	// Strip terminal color codes (fastmcp/uvicorn log in ANSI) for a clean pane.
 	const ANSI = /\x1b\[[0-9;]*m/g;
 
@@ -15,10 +26,14 @@
 	let notRunning = $state(false);
 	let stuckToBottom = $state(true);
 	let pane = $state<HTMLDivElement | undefined>(undefined);
+	let seenServerId = '';
+	let seenActivation: string | null = null;
 
-	// Only open the stream when a process likely exists (avoids reconnect storms
-	// against a stopped server).
-	const shouldConnect = $derived(serverState !== 'stopped');
+	const startupActive = $derived(startupStatus !== null);
+	const activationStartedAt = $derived(startupStatus?.activation_started_at ?? null);
+	const resetKey = $derived(`${serverId}\u0000${activationStartedAt ?? ''}`);
+	// Setup can produce logs before the bridge changes observed runtime state.
+	const shouldConnect = $derived(startupActive || serverState !== 'stopped');
 
 	const dot = $derived.by(() => {
 		if (notRunning || conn === 'idle')
@@ -32,11 +47,29 @@
 		stuckToBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 24;
 	}
 
-	// Stream lifecycle — reopens when serverId or the should-connect gate changes.
+	$effect(() => {
+		const currentServer = serverId;
+		const currentActivation = activationStartedAt;
+		if (
+			currentServer !== seenServerId ||
+			(currentActivation !== null && currentActivation !== seenActivation)
+		) {
+			lines = [];
+			notRunning = false;
+			stuckToBottom = true;
+		}
+		if (currentServer !== seenServerId) seenActivation = currentActivation;
+		else if (currentActivation !== null) seenActivation = currentActivation;
+		seenServerId = currentServer;
+	});
+
+	// Stream lifecycle reopens when the server, activation, or connection gate changes.
 	// Fetch + ReadableStream (not EventSource) so the Authorization header is sent.
 	// Reconnect is manual: a dropped stream retries after a short backoff until the
 	// effect is torn down (serverId change / unmount).
 	$effect(() => {
+		void resetKey;
+		const active = startupActive;
 		if (!shouldConnect) {
 			conn = 'idle';
 			return;
@@ -52,13 +85,26 @@
 					await streamLogs(
 						serverId,
 						{
-							onOpen: () => (conn = 'live'),
+							onOpen: () => {
+								// The endpoint replays its bounded activation backlog on every open.
+								// Replace the previous copy before accepting replayed lines.
+								lines = [];
+								notRunning = false;
+								conn = 'live';
+							},
 							onLine: (line) => {
 								lines.push(line.replace(ANSI, ''));
-								if (lines.length > MAX_LINES) lines.splice(0, lines.length - MAX_LINES);
+								if (lines.length > MAX_LINES) {
+									const removeAt = lines[0]?.includes(TRUNCATION_MARKER) ? 1 : 0;
+									lines.splice(removeAt, lines.length - MAX_LINES);
+								}
 							},
 							onInfo: () => {
-								// Server isn't running — stop instead of reconnect-looping.
+								if (active) {
+									// Setup may not have created the bridge/log source yet.
+									conn = 'reconnecting';
+									return;
+								}
 								notRunning = true;
 								conn = 'idle';
 								stopped = true;
@@ -66,6 +112,7 @@
 						},
 						ctrl.signal
 					);
+					if (!stopped && !ctrl.signal.aborted) conn = 'reconnecting';
 				} catch (err) {
 					if (stopped || ctrl.signal.aborted) return;
 					// A persistent client error (401/403/404) won't fix itself on retry, so
@@ -96,7 +143,7 @@
 </script>
 
 <div
-	class="flex flex-col gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
+	class="flex flex-col gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] {compact ? 'p-4' : 'p-5'}"
 >
 	<div class="flex items-center justify-between gap-3">
 		<div class="flex items-center gap-2">
@@ -123,16 +170,18 @@
 	<div
 		bind:this={pane}
 		onscroll={onScroll}
-		class="h-72 overflow-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] p-3 font-mono text-xs leading-relaxed"
+		role="region"
+		aria-label="Server logs"
+		class="overflow-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] p-3 font-mono text-xs leading-relaxed {compact ? 'h-44' : 'h-72'}"
 	>
-		{#if notRunning}
-			<p class="text-[var(--color-ink-dim)]">Server isn't running — no live logs.</p>
-		{:else if lines.length === 0}
-			<p class="text-[var(--color-ink-dim)]">Waiting for output…</p>
-		{:else}
+		{#if lines.length > 0}
 			{#each lines as line}
 				<div class="whitespace-pre-wrap break-all text-[var(--color-ink-muted)]">{line}</div>
 			{/each}
+		{:else if notRunning}
+			<p class="text-[var(--color-ink-dim)]">Server isn't running — no live logs.</p>
+		{:else}
+			<p class="text-[var(--color-ink-dim)]">Waiting for output…</p>
 		{/if}
 	</div>
 </div>

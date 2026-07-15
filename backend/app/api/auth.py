@@ -116,6 +116,6 @@ async def oauth_callback(
     if server.enabled:
         with contextlib.suppress(Exception):
             await sup.stop(server.id)
-        sup.nudge()
+        sup.request_activation(server.id)
 
     return _oauth_redirect(f"/server/{server.id}?oauth=connected")

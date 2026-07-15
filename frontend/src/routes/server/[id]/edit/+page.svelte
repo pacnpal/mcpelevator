@@ -36,6 +36,7 @@
 					runner: server.runner,
 					command: server.command,
 					args: server.args,
+					setup_script: server.setup_script,
 					env: server.env,
 					cwd: server.cwd,
 					mcp_http: server.transports.mcp_http,

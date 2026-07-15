@@ -44,8 +44,9 @@ untrusted output from child MCP processes shown in logs.
 
 **Operator-controlled inputs:** runtime settings (`bind_mode`, `allowed_hosts`,
 `default_auth_provider`, `control_plane_auth`, `allow_private_lan`), server launch specs
-(`runner`, `command`, `args`, `env`, `cwd`, `auth_provider`, `enabled`), `mcpServers`
-imports, token creation/revocation, Docker/env configuration (`MCPE_ADMIN_TOKEN`,
+(`runner`, `command`, `args`, `env`, `cwd`, `setup_script`, `auth_provider`,
+`enabled`), `mcpServers` imports, token creation/revocation, Docker/env configuration
+(`MCPE_ADMIN_TOKEN`,
 `MCPE_TRUSTED_PROXIES`, `MCPE_PUBLIC_BASE_URL`, etc.), and deployment topology.
 Operator/admin inputs are privileged: they may intentionally execute commands or proxy
 internal URLs.
@@ -135,8 +136,22 @@ via **Disconnect**, which clears the file store) rather than relying on on-disk 
 `backend/app/registry/service.py`, `backend/app/runners/`, `backend/app/supervisor/unit.py`,
 and `backend/app/bridge/host.py` turn stored specs into child processes. Local runners pass
 argv lists, not shell strings, and the supervisor executes the bridge module with
-`asyncio.create_subprocess_exec`. The **docker runner** is opt-in and root-equivalent: it is
-disabled by default behind the `docker_runner` setting, enforced at the service layer (a
+`asyncio.create_subprocess_exec`. The exception is the optional `setup_script` for `npx`,
+`uvx`, and `command` servers. Before every startup attempt it runs through
+`/bin/sh -e -c` as the mcpelevator process user, with the local MCP child's initial
+effective environment and working directory. Shell-local state does not reach the child,
+but files and other external effects remain according to their storage location, so setup
+must be safe to run again. Docker setup belongs in the image; remote servers have no local
+setup. `MCPE_APT_PACKAGES` is separate global container bootstrap, not a per-server hook.
+
+Setup scripts are stored as unencrypted server configuration in SQLite. Their combined
+output enters the authenticated server log stream. Both may contain credentials or other
+sensitive data and should be handled like `env` secrets. The official container currently
+runs mcpelevator and setup as root. Files outside mounted or otherwise persistent paths,
+including system changes made by setup, disappear on container replacement; only persistent
+paths and package caches configured on them survive. The **docker runner** is opt-in and
+root-equivalent: it is disabled by default behind the `docker_runner` setting, enforced
+at the service layer (a
 docker server can't be created-enabled or enabled while it's off) and again in the
 supervisor (reconcile refuses to start a docker unit while it's off). The catalog gate is
 separate — OCI installs are surfaced non-installable until the runner is enabled. When enabled it stores the canonical image+args+env shape and synthesizes a hardened

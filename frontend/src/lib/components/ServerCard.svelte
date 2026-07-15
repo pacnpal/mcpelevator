@@ -1,7 +1,20 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 
-	import { cloneServer, deleteServer, disableServer, enableServer, errorMessage } from '$lib/api';
+	import {
+		cloneServer,
+		deleteServer,
+		disableServer,
+		enableServer,
+		errorMessage,
+		retryServer
+	} from '$lib/api';
+	import {
+		formatCountdown,
+		formatElapsed,
+		primaryServerAction,
+		startupPhaseLabel
+	} from '$lib/startup';
 	import type { ServerSummary } from '$lib/types';
 	import CopyMenu from './CopyMenu.svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
@@ -14,7 +27,7 @@
 		onerror
 	}: {
 		server: ServerSummary;
-		/** Called with the updated summary after a successful toggle. */
+		/** Called with the updated summary after a successful primary action. */
 		onchange?: (next: ServerSummary) => void;
 		/** Called with the deleted server's id after a successful delete. */
 		ondelete?: (id: string) => void;
@@ -29,27 +42,28 @@
 	let cloning = $state(false);
 	let cardEl = $state<HTMLElement>();
 
-	// The action available depends on desired-state (`enabled`), not live state:
-	// an enabled-but-stopped server should still offer "Stop" to clear intent.
-	const wantsRun = $derived(server.enabled);
-	const transient = $derived(
-		server.state === 'starting' || server.state === 'stopping'
+	const startup = $derived(server.startup_status);
+	const action = $derived(primaryServerAction(server));
+	const startupElapsed = $derived(startup ? formatElapsed(startup.activation_started_at) : null);
+	const startupCountdown = $derived(
+		startup ? formatCountdown(startup.next_retry_at ?? startup.deadline_at) : null
 	);
 
 	const detailHref = $derived(`/server/${server.id}`);
 
-	async function toggle() {
+	async function runPrimaryAction() {
 		if (busy) return;
 		busy = true;
 		try {
-			const next = wantsRun
-				? await disableServer(server.id)
-				: await enableServer(server.id);
+			const next =
+				action === 'stop'
+					? await disableServer(server.id)
+					: action === 'retry'
+						? await retryServer(server.id)
+						: await enableServer(server.id);
 			onchange?.(next);
 		} catch (err) {
-			const message =
-				err instanceof Error ? err.message : 'Failed to update server';
-			onerror?.(message);
+			onerror?.(errorMessage(err));
 		} finally {
 			busy = false;
 		}
@@ -142,7 +156,7 @@
 			</p>
 		</a>
 		<div class="flex shrink-0 items-center gap-1.5">
-			<StatePill state={server.state} />
+			<StatePill state={server.state} startupStatus={startup} />
 			<div class="relative">
 				<button
 					type="button"
@@ -310,8 +324,36 @@
 		<!-- REST/OpenAPI badge omitted: the surface isn't served yet (planned, M6). -->
 	</div>
 
+	{#if startup}
+		<div
+			class="flex flex-col gap-1 rounded-lg border px-3 py-2.5"
+			style="border-color: color-mix(in oklab, var(--color-state-starting) 30%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+		>
+			<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+				<span class="text-xs font-medium text-[var(--color-ink)]">
+					{startupPhaseLabel(startup.phase)}
+				</span>
+				<span class="font-mono text-[11px] text-[var(--color-ink-dim)]">
+					attempt {startup.attempt}/{startup.max_attempts}
+				</span>
+			</div>
+			<p class="text-[11px] text-[var(--color-ink-dim)]">
+				{#if startupElapsed}{startupElapsed} elapsed{/if}
+				{#if startupElapsed && startupCountdown} · {/if}
+				{#if startupCountdown}
+					{startup.next_retry_at ? `retry in ${startupCountdown}` : `${startupCountdown} until timeout`}
+				{/if}
+			</p>
+			{#if startup.message}
+				<p class="font-mono text-[11px] leading-relaxed text-[var(--color-ink-muted)]">
+					{startup.message}
+				</p>
+			{/if}
+		</div>
+	{/if}
+
 	<!-- Error surface -->
-	{#if server.last_error}
+	{#if !startup && server.last_error}
 		<p
 			class="rounded-lg border border-[color-mix(in_oklab,var(--color-state-failed)_30%,transparent)] bg-[color-mix(in_oklab,var(--color-state-failed)_10%,transparent)] px-3 py-2 font-mono text-[11px] leading-relaxed text-[var(--color-state-failed)]"
 			title={server.last_error}
@@ -328,23 +370,28 @@
 
 		<button
 			type="button"
-			onclick={toggle}
+			onclick={runPrimaryAction}
 			disabled={busy}
 			aria-busy={busy}
 			class="inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
-			class:running={wantsRun}
-			style={wantsRun
+			class:running={action === 'stop'}
+			style={action === 'stop'
 				? 'color: var(--color-ink-muted); border: 1px solid var(--color-line);'
 				: 'color: var(--color-accent-ink); background-color: var(--color-accent);'}
 		>
 			{#if busy}
 				{@render spinner('size-3.5')}
-				{transient ? '…' : wantsRun ? 'Stopping' : 'Starting'}
-			{:else if wantsRun}
+				{action === 'stop' ? 'Stopping' : action === 'retry' ? 'Retrying' : 'Starting'}
+			{:else if action === 'stop'}
 				<svg class="size-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 					<rect x="7" y="7" width="10" height="10" rx="1.5" />
 				</svg>
 				Stop
+			{:else if action === 'retry'}
+				<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" />
+				</svg>
+				Retry
 			{:else}
 				<svg class="size-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 					<path d="M8 5v14l11-7z" />

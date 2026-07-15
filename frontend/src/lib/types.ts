@@ -12,6 +12,18 @@ export type ServerState =
 	| 'failed'
 	| 'stopping';
 
+export type StartupPhase = 'queued' | 'setup' | 'bridge' | 'readiness' | 'retry_wait';
+
+export interface StartupStatus {
+	phase: StartupPhase;
+	attempt: number;
+	max_attempts: number;
+	activation_started_at: string;
+	deadline_at: string | null;
+	next_retry_at: string | null;
+	message: string | null;
+}
+
 export interface ServerTransports {
 	mcp_http: boolean;
 	rest_openapi: boolean;
@@ -29,6 +41,7 @@ export interface ServerSummary {
 	runner: Runner;
 	enabled: boolean;
 	state: ServerState;
+	startup_status: StartupStatus | null;
 	transports: ServerTransports;
 	urls: ServerUrls;
 	/** Effective auth (per-server `inherit` resolved to the global default). */
@@ -68,6 +81,7 @@ export interface OAuthStatus {
 export interface ServerDetail extends ServerSummary {
 	command: string;
 	args: string[];
+	setup_script: string;
 	env: Record<string, string>;
 	cwd: string | null;
 	auth_provider: ServerAuthProvider;
@@ -91,6 +105,7 @@ export interface ServerCreate {
 	runner: Runner;
 	command: string;
 	args: string[];
+	setup_script?: string;
 	env: Record<string, string>;
 	cwd?: string | null;
 	mcp_http?: boolean;

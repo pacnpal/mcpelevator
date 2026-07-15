@@ -567,6 +567,7 @@ def _hash_payload(server: Server) -> dict[str, Any]:
         "args": server.args,
         "env": server.env,
         "cwd": server.cwd,
+        "setup_script": server.setup_script or "",
         "mcp_http": server.mcp_http,
         "rest_openapi": server.rest_openapi,
         # OAuth config drives how the bridge authenticates upstream, so it IS part
@@ -788,6 +789,16 @@ def _validate_slug(session: Session, raw: str, *, current_id: str) -> str:
     return slug
 
 
+def _normalize_setup_script(runner: str, setup_script: str) -> str:
+    if not setup_script.strip():
+        return ""
+    if runner == "docker":
+        raise ValueError("Setup scripts are not supported for Docker servers; add setup to the Docker image.")
+    if runner not in _LOCAL_EXEC_RUNNERS:
+        raise ValueError("Setup scripts are supported only by the npx, uvx, and command local runners.")
+    return setup_script
+
+
 @_serialized_write
 def create_server(
     session: Session,
@@ -798,6 +809,7 @@ def create_server(
     args: Optional[list[str]] = None,
     env: Optional[dict[str, str]] = None,
     cwd: Optional[str] = None,
+    setup_script: str = "",
     mcp_http: bool = True,
     rest_openapi: bool = False,
     auth_provider: str = "inherit",
@@ -819,6 +831,7 @@ def create_server(
     # env (choosing a different runner string must not sidestep the root-equivalent gate).
     if runner in _LOCAL_EXEC_RUNNERS and _is_docker_launcher(command):
         runner = "docker"
+    setup_script = _normalize_setup_script(runner, setup_script)
     # A remote server reuses command/args for the upstream URL + transport; canonicalize
     # them up front so the persisted row (and config_hash) is deterministic. There is no
     # local process, so a working directory is meaningless — drop it.
@@ -849,6 +862,7 @@ def create_server(
         args=list(args or []),
         env=dict(env or {}),
         cwd=cwd,
+        setup_script=setup_script,
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
         auth_provider=auth_provider,
@@ -870,6 +884,7 @@ _MUTABLE_FIELDS = {
     "args",
     "env",
     "cwd",
+    "setup_script",
     "mcp_http",
     "rest_openapi",
     "auth_provider",
@@ -909,6 +924,11 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     # create) — reclassify so it can't launch containers ungated/unhardened via passthrough.
     if server.runner in _LOCAL_EXEC_RUNNERS and _is_docker_launcher(server.command):
         server.runner = "docker"
+    try:
+        server.setup_script = _normalize_setup_script(server.runner, server.setup_script or "")
+    except ValueError:
+        session.rollback()
+        raise
     if server.runner == "remote":
         server.command, server.args = normalize_remote(server.command, server.args)
         # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
@@ -974,6 +994,7 @@ def clone_server(session: Session, server_id: str, *, name: Optional[str] = None
         args=list(src.args or []),
         env=dict(src.env or {}),
         cwd=src.cwd,
+        setup_script=src.setup_script or "",
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,
         auth_provider=src.auth_provider,
