@@ -88,3 +88,17 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   or remove a screen, update `shots.yml` (the shot list, source of truth) and the README gallery to
   match. Regenerate locally: `make build`, then `bash scripts/screenshots-serve.sh`, then
   `shot-scraper multi shots.yml --retina`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for `pacnpal/mcpelevator`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the canonical `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix` labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repo uses a single-context layout with `CONTEXT.md` at the root and ADRs under `docs/adr/`. See `docs/agents/domain.md`.
