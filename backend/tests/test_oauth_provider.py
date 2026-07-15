@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -90,6 +91,10 @@ def test_settings_validation():
     with Session(engine) as s:
         with pytest.raises(ValueError):  # not a URL
             runtime_settings.write(s, {"oauth_config_url": "as.example"})
+        with pytest.raises(ValueError):  # scheme without a host
+            runtime_settings.write(s, {"oauth_config_url": "https://"})
+        with pytest.raises(ValueError):  # malformed port
+            runtime_settings.write(s, {"oauth_config_url": "https://as.example:bad"})
         with pytest.raises(ValueError):  # list of non-empty strings only
             runtime_settings.write(s, {"oauth_allowed_subjects": ["ok", ""]})
         with pytest.raises(ValueError):
@@ -125,6 +130,25 @@ async def test_missing_token_401_with_resource_metadata(session, keypair):
     challenge = exc.value.headers["WWW-Authenticate"]
     assert "resource_metadata=" in challenge
     assert "/.well-known/oauth-protected-resource/s/svc/mcp" in challenge
+
+
+async def test_challenge_honors_forwarded_https(session, keypair, monkeypatch):
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
+    monkeypatch.setattr(oauth_mod, "base_url", lambda request: "http://mcp.example.com")
+    monkeypatch.setattr(
+        oauth_mod, "get_settings", lambda: SimpleNamespace(public_base_url=None)
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await OAuthProvider().authenticate(
+            _request({"X-Forwarded-Proto": "https"}), _server()
+        )
+
+    assert 'resource_metadata="https://mcp.example.com/' in (
+        exc.value.headers["WWW-Authenticate"]
+    )
 
 
 async def test_invalid_token_rejected(session, keypair):
@@ -411,16 +435,24 @@ async def test_metadata_route_advertises_issuer(session, monkeypatch):
         return {"issuer": ISSUER, "jwks_uri": f"{ISSUER}/jwks"}
 
     monkeypatch.setattr(oauth_mod, "_discovery", fake_discovery)
+    monkeypatch.setattr(oauth_mod, "base_url", lambda request: "http://mcp.example.com")
+    monkeypatch.setattr(
+        oauth_mod, "get_settings", lambda: SimpleNamespace(public_base_url=None)
+    )
     out = await protected_resource_metadata(
-        "s", "svc", _request({"Host": "127.0.0.1:8080"})
+        "s",
+        "svc",
+        _request({"Host": "127.0.0.1:8080", "X-Forwarded-Proto": "https"}),
     )
     assert out["authorization_servers"] == [ISSUER]
-    assert out["resource"].endswith("/s/svc/mcp")
+    assert out["resource"] == "https://mcp.example.com/s/svc/mcp"
     assert "scopes_supported" not in out  # empty setting -> field omitted
 
     runtime_settings.write(session, {"oauth_scopes": ["openid", "profile", "email"]})
     out = await protected_resource_metadata(
-        "s", "svc", _request({"Host": "127.0.0.1:8080"})
+        "s",
+        "svc",
+        _request({"Host": "127.0.0.1:8080", "X-Forwarded-Proto": "https"}),
     )
     assert out["scopes_supported"] == ["openid", "profile", "email"]
 

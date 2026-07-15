@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlmodel import Session
 
@@ -148,9 +149,23 @@ def write(
         if key == "groups":
             value = _normalize_groups(value)
         if key == "oauth_config_url":
-            if not isinstance(value, str) or (value and not value.startswith(("http://", "https://"))):
+            if not isinstance(value, str):
                 raise ValueError(f"invalid oauth_config_url: {value!r}")
             value = value.strip()
+            if value:
+                parsed = urlsplit(value)
+                try:
+                    parsed.port
+                    valid_port = True
+                except ValueError:
+                    valid_port = False
+                if (
+                    parsed.scheme not in ("http", "https")
+                    or not parsed.hostname
+                    or not valid_port
+                    or any(c.isspace() for c in value)
+                ):
+                    raise ValueError(f"invalid oauth_config_url: {value!r}")
         if key == "oauth_audience":
             if not isinstance(value, str):
                 raise ValueError(f"invalid oauth_audience: {value!r}")

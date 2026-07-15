@@ -46,6 +46,7 @@ from sqlmodel import Session
 from starlette.requests import Request
 
 from app.api.util import base_url
+from app.config import get_settings
 from app.db import get_engine, repo
 from app.db.models import Server
 from app.registry import settings as runtime_settings
@@ -169,6 +170,16 @@ def _metadata_url(base: str, server: Server) -> str:
     return f"{base}/.well-known/oauth-protected-resource/{_resource_kind(server)}/{server.slug}/mcp"
 
 
+def _oauth_base_url(request: Request) -> str:
+    """Use the public HTTPS scheme reported by a TLS-terminating proxy."""
+    base = base_url(request)
+    if not get_settings().public_base_url and base.startswith("http://"):
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        if forwarded == "https":
+            base = "https://" + base[len("http://"):]
+    return base
+
+
 def _challenge(base: str, server: Server, error: Optional[str] = None) -> dict[str, str]:
     parts = ["Bearer"]
     if error:
@@ -203,7 +214,7 @@ class OAuthProvider:
                 detail="oauth provider requires a config URL and audience",
             )
 
-        base = base_url(request)
+        base = _oauth_base_url(request)
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         token = token.strip()
 
@@ -306,7 +317,7 @@ async def protected_resource_metadata(kind: str, slug: str, request: Request):
         raise HTTPException(
             status_code=503, detail="authorization server metadata unavailable"
         ) from exc
-    base = base_url(request)
+    base = _oauth_base_url(request)
     meta = {
         "resource": f"{base}/{kind}/{slug}/mcp",
         "authorization_servers": [doc["issuer"]],
