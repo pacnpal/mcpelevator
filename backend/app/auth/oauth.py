@@ -53,7 +53,7 @@ _DISCOVERY_TTL_S = 3600.0
 # inside JWTVerifier, which re-fetches keys it doesn't recognize).
 _discovery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 # (config_url, audience) -> verifier. Rebuilt whenever either setting changes.
-_verifier_cache: dict[tuple[str, str], Any] = {}
+_verifier_cache: dict[tuple[str, str, str, str], Any] = {}
 
 
 def _normalize_config_url(config_url: str) -> str:
