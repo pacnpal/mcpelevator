@@ -17,14 +17,15 @@ Core configuration is stored in runtime settings (see ``app.registry.settings``)
 * ``oauth_config_url`` — the AS's OIDC discovery / RFC 8414 metadata URL. A bare
   issuer URL also works (``/.well-known/openid-configuration`` is appended).
 * ``oauth_audience`` — required ``aud`` to require in tokens.
-* ``oauth_allowed_subjects`` — optional identity allowlist, matched (case-
-  insensitively) against ``preferred_username`` / ``login`` / ``email`` / ``sub``.
+* ``oauth_allowed_subjects`` — optional identity allowlist. Friendly username,
+  login, and email claims match case-insensitively; OIDC ``sub`` matches exactly.
 
-Verification is delegated to fastmcp's ``JWTVerifier`` (already a core dependency —
-the bridges are fastmcp proxies), so JWKS fetch/cache/rotation and JWT validation
-are not reimplemented here. Discovery documents are cached for an hour; changing
-``oauth_config_url``/``oauth_audience`` takes effect immediately because the
-verifier cache is keyed by both values.
+Signature, issuer, and audience checks are delegated to fastmcp's ``JWTVerifier``
+(already a core dependency — the bridges are fastmcp proxies). This module wraps
+its JWKS path to classify authorization-server outages, bound unknown-key refreshes,
+and require current, expiring tokens. Discovery documents are cached for an hour;
+changing ``oauth_config_url``/``oauth_audience`` takes effect immediately because
+the verifier cache is keyed by both values.
 
 NOTE for clients without Dynamic Client Registration support at the AS (e.g.
 Authentik as of 2026): claude.ai custom connectors accept a manually-configured
@@ -33,11 +34,14 @@ OAuth client id/secret, which skips DCR — see docs/claude-web-exposure.md.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
+import math
 import time
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -54,6 +58,8 @@ from app.registry import settings as runtime_settings
 logger = logging.getLogger(__name__)
 
 _DISCOVERY_TTL_S = 3600.0
+_JWKS_MISS_REFRESH_COOLDOWN_S = 30.0
+_CLOCK_SKEW_S = 60.0
 
 # discovery-url -> (fetched_at, document). Small and process-local; a config change
 # uses a new key, and staleness is bounded by the TTL (JWKS rotation is handled
@@ -84,12 +90,48 @@ class _AuthorizationServerUnavailable(Exception):
 
 
 class _OAuthJWTVerifier(JWTVerifier):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._jwks_refresh_lock = asyncio.Lock()
+        self._last_miss_refresh = 0.0
+        self._last_miss_unavailable = False
+
+    async def _get_jwks_key(self, kid: str | None) -> str:
+        """Collapse unknown-key refreshes so random kids cannot hammer the AS."""
+        async with self._jwks_refresh_lock:
+            cache_hit = (kid is not None and kid in self._jwks_cache) or (
+                kid is None and len(self._jwks_cache) == 1
+            )
+            now = time.monotonic()
+            if (
+                not cache_hit
+                and now - self._last_miss_refresh < _JWKS_MISS_REFRESH_COOLDOWN_S
+            ):
+                if self._last_miss_unavailable:
+                    raise _AuthorizationServerUnavailable("JWKS refresh unavailable")
+                raise ValueError("key ID not found in cached JWKS")
+            try:
+                return await super()._get_jwks_key(kid)
+            except _AuthorizationServerUnavailable:
+                self._last_miss_refresh = time.monotonic()
+                self._last_miss_unavailable = True
+                raise
+            except ValueError:
+                # FastMCP populates its cache before reporting a genuinely unknown
+                # kid. Cool down further misses while still allowing key rotation.
+                if time.time() - self._jwks_cache_time < self._cache_ttl:
+                    self._last_miss_refresh = time.monotonic()
+                    self._last_miss_unavailable = False
+                raise
+
     async def _fetch_jwks(self) -> dict[str, Any]:
         """Preserve JWKS transport failures that FastMCP otherwise folds into None."""
         try:
             document = await super()._fetch_jwks()
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
             raise _AuthorizationServerUnavailable(str(exc)) from exc
+        if not isinstance(document, dict):
+            raise _AuthorizationServerUnavailable("JWKS response is not an object")
         keys = document.get("keys")
         if not isinstance(keys, list) or not keys:
             raise _AuthorizationServerUnavailable("JWKS contains no verification keys")
@@ -113,7 +155,7 @@ def _normalize_config_url(config_url: str) -> str:
     """Accept either a full metadata URL or a bare issuer; issuers get the OIDC
     well-known path appended (the common case for operators pasting an issuer)."""
     url = config_url.rstrip("/")
-    if ".well-known" in url:
+    if "/.well-known/" in urlsplit(url).path:
         return url
     return f"{url}/.well-known/openid-configuration"
 
@@ -128,8 +170,14 @@ async def _discovery(config_url: str) -> dict[str, Any]:
         resp = await client.get(url)
         resp.raise_for_status()
         doc = resp.json()
-    if not doc.get("issuer") or not doc.get("jwks_uri"):
-        raise ValueError(f"AS metadata at {url} lacks issuer/jwks_uri")
+    if not isinstance(doc, dict):
+        raise ValueError(f"AS metadata at {url} is not an object")
+    issuer = doc.get("issuer")
+    jwks_uri = doc.get("jwks_uri")
+    if not runtime_settings.is_valid_oauth_endpoint_url(issuer):
+        raise ValueError(f"AS metadata at {url} has an invalid issuer")
+    if not runtime_settings.is_valid_oauth_endpoint_url(jwks_uri):
+        raise ValueError(f"AS metadata at {url} has an invalid jwks_uri")
     _discovery_cache[url] = (now, doc)
     return doc
 
@@ -142,7 +190,11 @@ def _jwt_algorithm(token: str) -> str | None:
     except (ValueError, TypeError, json.JSONDecodeError):
         return None
     algorithm = header.get("alg") if isinstance(header, dict) else None
-    return algorithm if algorithm in _ALLOWED_JWT_ALGORITHMS else None
+    return (
+        algorithm
+        if isinstance(algorithm, str) and algorithm in _ALLOWED_JWT_ALGORITHMS
+        else None
+    )
 
 
 async def _verifier_for(config_url: str, audience: str, algorithm: str):
@@ -174,8 +226,10 @@ def _oauth_base_url(request: Request) -> str:
     """Use the public HTTPS scheme reported by a TLS-terminating proxy."""
     base = base_url(request)
     if not get_settings().public_base_url and base.startswith("http://"):
+        from app.auth.middleware import is_loopback_client
+
         forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
-        if forwarded == "https":
+        if forwarded == "https" and is_loopback_client(request):
             base = "https://" + base[len("http://"):]
     return base
 
@@ -188,13 +242,40 @@ def _challenge(base: str, server: Server, error: Optional[str] = None) -> dict[s
     return {"WWW-Authenticate": " ".join(parts)}
 
 
-def _identity(claims: dict[str, Any]) -> list[str]:
-    """Candidate identity strings for the allowlist check, lowercased."""
-    return [
-        str(claims[k]).lower()
-        for k in ("preferred_username", "login", "email", "sub")
-        if claims.get(k)
-    ]
+def _identity_allowed(claims: dict[str, Any], allowed: list[str]) -> bool:
+    """Match stable subjects exactly and friendly identity claims case-insensitively."""
+    exact = set(allowed)
+    subject = claims.get("sub")
+    if subject is not None and str(subject) in exact:
+        return True
+    lowered = {value.lower() for value in allowed}
+    return any(
+        str(claims[key]).lower() in lowered
+        for key in ("preferred_username", "login", "email")
+        if claims.get(key)
+    )
+
+
+def _claims_are_current(claims: dict[str, Any]) -> bool:
+    """Require a bounded JWT lifetime and honor an optional not-before claim."""
+    now = time.time()
+    exp = claims.get("exp")
+    if (
+        isinstance(exp, bool)
+        or not isinstance(exp, (int, float))
+        or not math.isfinite(exp)
+        or exp <= now
+    ):
+        return False
+    nbf = claims.get("nbf")
+    if nbf is None:
+        return True
+    return (
+        not isinstance(nbf, bool)
+        and isinstance(nbf, (int, float))
+        and math.isfinite(nbf)
+        and nbf <= now + _CLOCK_SKEW_S
+    )
 
 
 class OAuthProvider:
@@ -259,15 +340,19 @@ class OAuthProvider:
                 detail="invalid token",
                 headers=_challenge(base, server, error="invalid_token"),
             )
-        if allowed:
-            allowed_lower = {a.lower() for a in allowed}
-            claims = access.claims
-            if not allowed_lower & set(_identity(claims)):
-                raise HTTPException(
-                    status_code=403,
-                    detail="token subject not authorized for this server",
-                    headers=_challenge(base, server, error="insufficient_scope"),
-                )
+        claims = access.claims
+        if not _claims_are_current(claims):
+            raise HTTPException(
+                status_code=401,
+                detail="invalid token",
+                headers=_challenge(base, server, error="invalid_token"),
+            )
+        if allowed and not _identity_allowed(claims, allowed):
+            raise HTTPException(
+                status_code=403,
+                detail="token subject not authorized for this server",
+                headers=_challenge(base, server, error="insufficient_scope"),
+            )
 
 
 # --- Protected Resource Metadata (RFC 9728) -------------------------------------

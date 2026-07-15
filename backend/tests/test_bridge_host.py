@@ -181,3 +181,14 @@ def test_build_transport_sse_uses_url_and_headers():
     kwargs = sse.call_args.kwargs
     assert kwargs["url"] == "https://up.example/sse"
     assert kwargs["headers"] == {"X": "1"}
+
+
+def test_bridge_never_forwards_caller_headers_to_remote_upstream():
+    """The outer proxy has already authenticated the caller, so a bridge must not
+    pass that credential through to an operator-configured remote MCP server."""
+    transport = host.StreamableHttpTransport(url="https://up.example/mcp")
+    assert transport.forward_incoming_headers is False
+    # ProxyClient/create_proxy turn forwarding on; build_proxy must override them last.
+    with patch.object(host, "_build_transport", return_value=transport):
+        host.build_proxy({"name": "remote"})
+    assert transport.forward_incoming_headers is False

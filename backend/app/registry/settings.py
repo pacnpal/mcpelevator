@@ -7,6 +7,7 @@ and the default auth provider for servers set to ``inherit``.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections.abc import Callable
 from typing import Any
@@ -48,8 +49,8 @@ DEFAULTS: dict[str, Any] = {
     # ``aud`` claim required in access tokens. Empty leaves OAuth unconfigured and
     # fails closed, so a token minted for another resource is never accepted.
     "oauth_audience": "",
-    # Optional identity allowlist matched case-insensitively against the token's
-    # preferred_username / login / email / sub claims (empty = any valid token).
+    # Optional identity allowlist. Friendly username/login/email claims match
+    # case-insensitively; OIDC subject identifiers match exactly.
     "oauth_allowed_subjects": [],
     # Scopes advertised as ``scopes_supported`` in the Protected Resource Metadata.
     # MCP clients build their authorize request from this (per the MCP auth spec), so
@@ -76,6 +77,29 @@ _CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
 # alphanumerics and single hyphens (the slugify() vocabulary), non-empty. Validated here
 # so a name that couldn't be routed can never be stored.
 _GROUP_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def is_valid_oauth_endpoint_url(value: Any) -> bool:
+    """OAuth metadata and JWKS endpoints require HTTPS, except for loopback dev."""
+    if not isinstance(value, str) or not value or any(c.isspace() for c in value):
+        return False
+    parsed = urlsplit(value)
+    try:
+        _ = parsed.port  # accessing .port rejects malformed values such as ":bad"
+    except ValueError:
+        return False
+    if not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        return False
+    if parsed.scheme == "https":
+        return True
+    if parsed.scheme != "http":
+        return False
+    if parsed.hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _normalize_group_members(name: str, value: Any) -> Any:
@@ -152,20 +176,8 @@ def write(
             if not isinstance(value, str):
                 raise ValueError(f"invalid oauth_config_url: {value!r}")
             value = value.strip()
-            if value:
-                parsed = urlsplit(value)
-                try:
-                    _ = parsed.port  # accessing .port rejects malformed values
-                    valid_port = True
-                except ValueError:
-                    valid_port = False
-                if (
-                    parsed.scheme not in ("http", "https")
-                    or not parsed.hostname
-                    or not valid_port
-                    or any(c.isspace() for c in value)
-                ):
-                    raise ValueError(f"invalid oauth_config_url: {value!r}")
+            if value and not is_valid_oauth_endpoint_url(value):
+                raise ValueError(f"invalid oauth_config_url: {value!r}")
         if key == "oauth_audience":
             if not isinstance(value, str):
                 raise ValueError(f"invalid oauth_audience: {value!r}")

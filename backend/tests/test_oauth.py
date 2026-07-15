@@ -496,6 +496,37 @@ def test_update_clears_tokens_on_url_change():
             c.delete(f"/api/servers/{sid}", headers=LOOPBACK)
 
 
+def test_auth_change_stops_stale_oauth_bridge_before_group_resync(monkeypatch):
+    events: list[str] = []
+
+    with TestClient(app) as c:
+        sid = _create_oauth_server(c)
+
+        async def stop(server_id: str) -> None:
+            assert server_id == sid
+            events.append("stop")
+
+        async def sync(supervisor) -> None:
+            events.append("sync")
+
+        monkeypatch.setattr(c.app.state.supervisor, "stop", stop)
+        monkeypatch.setattr(c.app.state.supervisor, "nudge", lambda: None)
+        monkeypatch.setattr(c.app.state.groups, "sync", sync)
+        try:
+            response = c.patch(
+                f"/api/servers/{sid}",
+                json={
+                    "auth_provider": "bearer",
+                    "command": "https://other.example/mcp",
+                },
+                headers=LOOPBACK,
+            )
+            assert response.status_code == 200, response.text
+            assert events[:2] == ["stop", "sync"]
+        finally:
+            c.delete(f"/api/servers/{sid}", headers=LOOPBACK)
+
+
 def test_update_preserves_explicit_null_client_id():
     with TestClient(app) as c:
         r = c.post(

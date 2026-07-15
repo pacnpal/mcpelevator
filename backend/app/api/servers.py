@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -203,16 +204,29 @@ async def update_server(
     existing = repo.get_server(session, server_id)
     before = _oauth_signature(existing) if existing is not None else None
     auth_changed = "auth_provider" in changes
+    sup = request.app.state.supervisor
 
     try:
         # Threadpool: see create_server — the recomputed config_hash is a scrypt derivation.
-        if auth_changed:
-            # Hold the hub lock across the write so a reconcile cannot rebuild an old
-            # bundle after invalidation but before the new auth value commits.
-            async with request.app.state.groups.auth_transition():
-                server = await run_in_threadpool(service.update_server, session, server_id, changes)
-        else:
+        transition = (
+            request.app.state.groups.auth_transition() if auth_changed else nullcontext()
+        )
+        async with transition:
             server = await run_in_threadpool(service.update_server, session, server_id, changes)
+            # Remove the old endpoint before an auth transition can publish group
+            # routes under the new policy. _stop pops the endpoint before waiting for
+            # process teardown, so no request can enter with stale credentials.
+            oauth_changed = before is not None and before != _oauth_signature(server)
+            if oauth_changed:
+                oauth_flow.cancel_pending(server_id)
+                await sup.stop(server_id)
+                ServerTokenStorage(server_id).clear()
+
+            if "slug" in changes:
+                # Re-point a running unit's proxy routing without a restart (config_hash
+                # excludes slug, so the reconciler won't do it).
+                sup.rename_slug(server_id, server.slug)
+            sup.nudge()  # config_hash may have changed -> reconciler restarts if needed
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
@@ -221,31 +235,7 @@ async def update_server(
         if auth_changed:
             await resync_groups(request)
 
-    sup = request.app.state.supervisor
-    # If the OAuth config changed (upstream URL, scopes, client) or OAuth was turned off, the
-    # stored tokens belong to the old provider/resource. Clear them so a restarted bridge can't
-    # replay a stale credential and the status stops falsely reading "authenticated". Also
-    # cancel any in-flight authorization (its background flow targets the OLD config) and, if
-    # the server is enabled, restart the bridge so it drops the now-revoked in-memory token —
-    # the client secret is excluded from config_hash, so a secret-only edit wouldn't otherwise
-    # trigger a reconcile.
-    oauth_changed = before is not None and before != _oauth_signature(server)
-    if oauth_changed:
-        oauth_flow.cancel_pending(server_id)
-        # STOP the bridge before clearing: a running bridge's in-flight refresh could
-        # otherwise set_tokens() after the clear and recreate credentials for the old
-        # upstream/client, which the nudge below would then restart the server with.
-        # Unconditional — sup.stop is idempotent, and gating on ``enabled`` would miss a
-        # bridge still winding down from a just-toggled row.
-        await sup.stop(server_id)
-        ServerTokenStorage(server_id).clear()
-
-    if "slug" in changes:
-        # Re-point a running unit's proxy routing without a restart (config_hash
-        # excludes slug, so the reconciler won't do it).
-        sup.rename_slug(server_id, server.slug)
-    sup.nudge()  # config_hash may have changed -> reconciler restarts if needed
-    if changes.keys() & {"mcp_http", "slug"}:
+    if not auth_changed and changes.keys() & {"mcp_http", "slug"}:
         await resync_groups(request)  # membership/namespace changed — no async gap
     return _summary(server, sup, session, base_url(request))
 

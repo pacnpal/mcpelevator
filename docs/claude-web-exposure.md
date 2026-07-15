@@ -119,8 +119,9 @@ This is the path when you specifically want the connector to work in the
   hostname. [Managed OAuth turns Access into an OAuth 2.0 authorization server](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/):
   when a non-browser client (here, Anthropic's connector) hits the protected URL,
   Access replies **`401` with a `WWW-Authenticate` header pointing at
-  `/.well-known/oauth-authorization-server`** (RFC 8414 / RFC 9728), runs the
-  OAuth 2.1 + PKCE login, and only then forwards the request to mcpelevator. That
+  its protected-resource metadata** (RFC 9728), which then names Access's
+  authorization server metadata (RFC 8414). Access runs the OAuth 2.1 + PKCE login
+  and only then forwards the request to mcpelevator. That
   discovery metadata is precisely what Claude web's OAuth flow needs and what
   mcpelevator's bearer provider can't supply.
 
@@ -368,8 +369,9 @@ Setup:
 
    `oauth_config_url` also accepts a bare issuer URL. `oauth_audience` is required
    and pins the `aud` claim; `oauth_allowed_subjects` optionally allowlists identities
-   by `preferred_username`/`login`/`email`/`sub`. `oauth_scopes` is optional metadata
-   that tells clients what to request from the authorization server.
+   by case-insensitive `preferred_username`/`login`/`email`, or exact `sub`.
+   `oauth_scopes` is optional metadata that tells clients what to request from the
+   authorization server.
 4. Set a server's auth to `oauth` (or `default_auth_provider` to `oauth`), then add
    the connector in Claude with the `/s/<slug>/mcp` URL. Claude discovers your AS
    and drives the sign-in.
@@ -382,6 +384,8 @@ Caveats:
 - The AS must mint **JWT access tokens** verifiable via its JWKS (Authentik,
   Keycloak, Auth0 do by default; opaque-token setups won't work). RS*, PS*, and ES*
   signing algorithms are accepted; symmetric HS* and unsigned tokens are rejected.
+  Tokens must carry a future `exp`; an optional `nbf` is enforced with clock skew.
+  Discovery, issuer, and JWKS URLs must use HTTPS, except for loopback development.
 - Groups using the OAuth default publish metadata at
   `/.well-known/oauth-protected-resource/g/<name>/mcp`. A protected member is bundled
   only when it uses the same provider as the group, so bearer and OAuth credentials

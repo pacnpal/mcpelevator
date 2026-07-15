@@ -95,6 +95,12 @@ def test_settings_validation():
             runtime_settings.write(s, {"oauth_config_url": "https://"})
         with pytest.raises(ValueError):  # malformed port
             runtime_settings.write(s, {"oauth_config_url": "https://as.example:bad"})
+        with pytest.raises(ValueError):  # cleartext is safe only for loopback dev
+            runtime_settings.write(s, {"oauth_config_url": "http://as.example"})
+        loopback = runtime_settings.write(
+            s, {"oauth_config_url": "http://127.0.0.1:9000"}
+        )
+        assert loopback["oauth_config_url"] == "http://127.0.0.1:9000"
         with pytest.raises(ValueError):  # list of non-empty strings only
             runtime_settings.write(s, {"oauth_allowed_subjects": ["ok", ""]})
         with pytest.raises(ValueError):
@@ -218,6 +224,47 @@ async def test_subject_allowlist(session, keypair):
     assert exc.value.status_code == 403
 
 
+async def test_subject_allowlist_matches_sub_case_sensitively(session, keypair):
+    runtime_settings.write(
+        session,
+        {
+            "oauth_config_url": CONFIG_URL,
+            "oauth_audience": AUDIENCE,
+            "oauth_allowed_subjects": ["User-1"],
+        },
+    )
+    with pytest.raises(HTTPException) as exc:
+        await OAuthProvider().authenticate(
+            _request({"Authorization": f"Bearer {_token(keypair, subject='user-1')}"}),
+            _server(),
+        )
+    assert exc.value.status_code == 403
+
+    await OAuthProvider().authenticate(
+        _request({"Authorization": f"Bearer {_token(keypair, subject='User-1')}"}),
+        _server(),
+    )
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"exp": None},
+        {"nbf": int(time.time()) + 3600},
+    ],
+)
+async def test_token_requires_current_bounded_lifetime(session, keypair, claims):
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
+    token = _token(keypair, additional_claims=claims)
+    with pytest.raises(HTTPException) as exc:
+        await OAuthProvider().authenticate(
+            _request({"Authorization": f"Bearer {token}"}), _server()
+        )
+    assert exc.value.status_code == 401
+
+
 async def test_as_outage_is_503_not_401(session, keypair, monkeypatch, caplog):
     runtime_settings.write(
         session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
@@ -269,6 +316,7 @@ async def test_real_jwks_transport_failure_is_503(session, keypair, monkeypatch)
 @pytest.mark.parametrize(
     "jwks",
     [
+        [],
         {"keys": []},
         {"keys": [{"kty": "RSA", "kid": "broken", "alg": "RS256"}]},
     ],
@@ -365,6 +413,45 @@ async def test_unknown_kid_on_usable_jwks_is_401(session, keypair, monkeypatch):
                 _request({"Authorization": f"Bearer {token}"}), _server()
             )
     assert exc.value.status_code == 401
+
+
+async def test_unknown_kids_share_a_jwks_refresh_cooldown(session, keypair, monkeypatch):
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
+    requests = 0
+    jwk = {
+        **import_key(keypair.public_key, "RSA").as_dict(),
+        "kid": "known",
+        "alg": "RS256",
+    }
+
+    def jwks(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json={"keys": [jwk]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(jwks)) as client:
+        verifier = oauth_mod._OAuthJWTVerifier(
+            jwks_uri=f"{ISSUER}/jwks",
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            http_client=client,
+        )
+
+        async def real_verifier(config_url: str, audience: str, algorithm: str):
+            return verifier
+
+        monkeypatch.setattr(oauth_mod, "_verifier_for", real_verifier)
+        for kid in ("missing-1", "missing-2", "missing-3"):
+            token = _token(keypair, kid=kid)
+            with pytest.raises(HTTPException) as exc:
+                await OAuthProvider().authenticate(
+                    _request({"Authorization": f"Bearer {token}"}), _server()
+                )
+            assert exc.value.status_code == 401
+
+    assert requests == 1
 
 
 async def test_es256_token_is_verified_end_to_end(session, monkeypatch):
@@ -527,10 +614,22 @@ def test_config_url_normalization():
     assert oauth_mod._normalize_config_url(CONFIG_URL) == CONFIG_URL
     rfc8414 = "https://as.example/.well-known/oauth-authorization-server"
     assert oauth_mod._normalize_config_url(rfc8414) == rfc8414
+    assert oauth_mod._normalize_config_url("https://well-known.example") == (
+        "https://well-known.example/.well-known/openid-configuration"
+    )
+
+
+def test_oauth_endpoint_urls_require_https_outside_loopback():
+    assert runtime_settings.is_valid_oauth_endpoint_url("https://as.example/jwks")
+    assert runtime_settings.is_valid_oauth_endpoint_url("http://localhost:9000/jwks")
+    assert not runtime_settings.is_valid_oauth_endpoint_url("http://as.example/jwks")
+    assert not runtime_settings.is_valid_oauth_endpoint_url(
+        "https://user:secret@as.example/jwks"
+    )
 
 
 def test_jwt_algorithm_accepts_only_asymmetric_allowlist():
-    def token_for(algorithm: str) -> str:
+    def token_for(algorithm: object) -> str:
         header = base64.urlsafe_b64encode(
             json.dumps({"alg": algorithm}).encode()
         ).rstrip(b"=").decode()
@@ -540,6 +639,7 @@ def test_jwt_algorithm_accepts_only_asymmetric_allowlist():
         assert oauth_mod._jwt_algorithm(token_for(algorithm)) == algorithm
     for algorithm in ("HS256", "none", "bogus"):
         assert oauth_mod._jwt_algorithm(token_for(algorithm)) is None
+    assert oauth_mod._jwt_algorithm(token_for([])) is None
 
 
 async def test_missing_audience_fails_closed(session, keypair):
