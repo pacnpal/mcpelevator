@@ -8,6 +8,7 @@ Sits above the repo: generates identity (id/slug), computes the idempotency
 from __future__ import annotations
 
 import logging
+import shlex
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
@@ -111,6 +112,37 @@ def _is_docker_launcher(command: str) -> bool:
         return True  # a bare launcher name (no path separator) is the CLI
     # A path to the CLI: absolute/relative/home-anchored (POSIX), or a Windows drive path.
     return norm[0] in "/.~" or (len(c) >= 2 and c[1] == ":")
+
+
+def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
+    """Best-effort guard for shell-wrapped Docker CLI invocations.
+
+    Direct docker launchers are canonicalized to the docker runner. A shell wrapper cannot be
+    safely normalized without changing its semantics, but it also must not run as an ordinary
+    local command because that bypasses the docker gate, hardening, and minimal environment.
+    Detect the common /bin/sh -c / bash -lc shape and block it at enable/start time.
+    """
+    if _is_docker_launcher(command):
+        return True
+    if _launcher_basename(command) not in {"sh", "bash", "dash", "ash", "zsh", "ksh"}:
+        return False
+    tokens = list(args or [])
+    for i, tok in enumerate(tokens[:-1]):
+        if not isinstance(tok, str):
+            continue
+        # POSIX shells take the command string after -c. Options may be combined, e.g. -lc.
+        if tok == "-c" or (tok.startswith("-") and "c" in tok[1:]):
+            try:
+                words = shlex.split(str(tokens[i + 1]))
+            except ValueError:
+                words = str(tokens[i + 1]).split()
+            return any(_is_docker_launcher(word) for word in words)
+    return False
+
+
+def local_exec_invokes_docker(runner: str, command: str, args: Optional[list[str]]) -> bool:
+    """True when a local-exec server would invoke the Docker CLI outside the docker runner."""
+    return runner in _LOCAL_EXEC_RUNNERS and _shell_invokes_docker(command, args)
 
 
 # `docker run` flags that CONSUME the next token as their value (so we skip both). Kept
@@ -671,6 +703,8 @@ def create_server(
     # env (choosing a different runner string must not sidestep the root-equivalent gate).
     if runner in _LOCAL_EXEC_RUNNERS and _is_docker_launcher(command):
         runner = "docker"
+    elif enabled and local_exec_invokes_docker(runner, command, args):
+        raise ValueError("Docker CLI invocations require the docker runner")
     # A remote server reuses command/args for the upstream URL + transport; canonicalize
     # them up front so the persisted row (and config_hash) is deterministic. There is no
     # local process, so a working directory is meaningless — drop it.
@@ -742,6 +776,9 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     # create) — reclassify so it can't launch containers ungated/unhardened via passthrough.
     if server.runner in _LOCAL_EXEC_RUNNERS and _is_docker_launcher(server.command):
         server.runner = "docker"
+    elif server.enabled and local_exec_invokes_docker(server.runner, server.command, server.args):
+        session.rollback()
+        raise ValueError("Docker CLI invocations require the docker runner")
     if server.runner == "remote":
         server.command, server.args = normalize_remote(server.command, server.args)
         # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
@@ -811,6 +848,8 @@ def set_enabled(session: Session, server_id: str, enabled: bool) -> Server:
     # left it disabled and reviewable).
     if enabled and server.runner == "docker":
         _require_docker_enabled(session)
+    elif enabled and local_exec_invokes_docker(server.runner, server.command, server.args):
+        raise ValueError("Docker CLI invocations require the docker runner")
     server.enabled = enabled
     return repo.save_server(session, server)
 

@@ -20,6 +20,7 @@ from sqlmodel import Session
 
 from app.config import get_settings
 from app.db import get_engine, repo
+from app.registry import service as registry_service
 from app.registry import settings as runtime_settings
 from app.runners.docker import DOCKER_BIN, LABEL_KEY
 from app.supervisor.ports import PortAllocator
@@ -133,7 +134,10 @@ class Supervisor:
             # The docker runner is root-equivalent and opt-in: if it's off, an enabled docker
             # server must not run — collect it for a stop pass below (this also catches the
             # setting being turned off while a docker server is running, within one interval).
-            if sv.runner == "docker" and not docker_on:
+            if not docker_on and (
+                sv.runner == "docker"
+                or registry_service.local_exec_invokes_docker(sv.runner, sv.command, sv.args)
+            ):
                 disabled_docker.append(sv)
                 continue
             desired[sv.id] = sv

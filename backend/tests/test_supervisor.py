@@ -59,6 +59,31 @@ def _fake_unit(server) -> SimpleNamespace:
     )
 
 
+async def test_reconcile_skips_shell_wrapped_docker_when_runner_disabled():
+    with Session(get_engine()) as session:
+        runtime_settings.write(session, {"docker_runner": False})
+        server = service.create_server(
+            session,
+            name="wrapped",
+            runner="command",
+            command="/bin/sh",
+            args=["-c", "docker run --privileged alpine"],
+            env={},
+            enabled=False,
+        )
+        row = repo.get_server(session, server.id)
+        row.enabled = True
+        repo.save_server(session, row)
+
+    sup = Supervisor()
+    await sup.reconcile_once()
+
+    with Session(get_engine()) as session:
+        row = repo.get_server(session, server.id)
+        assert row.state == "failed"
+        assert "Docker runner is disabled" in (row.last_error or "")
+
+
 async def test_reconcile_skips_docker_when_runner_disabled():
     """An enabled docker server must not be started while the docker runner is off (e.g.
     the setting was turned off after it was enabled). Reconcile leaves no unit and records

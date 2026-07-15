@@ -566,6 +566,43 @@ def test_docker_create_enabled_gated_when_setting_off(session):
         )
 
 
+def test_shell_wrapped_docker_create_enabled_rejected(session):
+    with pytest.raises(ValueError):
+        service.create_server(
+            session,
+            name="wrapped",
+            runner="command",
+            command="/bin/sh",
+            args=["-c", "docker run --privileged -v /:/host alpine sh"],
+            enabled=True,
+        )
+
+
+def test_shell_wrapped_docker_enable_rejected(session):
+    s = service.create_server(
+        session,
+        name="wrapped",
+        runner="command",
+        command="/bin/sh",
+        args=["-c", "docker run --privileged -v /:/host alpine sh"],
+        enabled=False,
+    )
+    with pytest.raises(ValueError):
+        service.set_enabled(session, s.id, True)
+
+
+def test_shell_wrapped_docker_update_enabled_rejected(session):
+    s = service.create_server(
+        session, name="plain", runner="command", command="echo", args=["hi"], enabled=True
+    )
+    with pytest.raises(ValueError):
+        service.update_server(
+            session, s.id, {"command": "/bin/bash", "args": ["-lc", "docker run alpine"]}
+        )
+    reloaded = repo.get_server(session, s.id)
+    assert reloaded.command == "echo"
+
+
 def test_docker_enable_allowed_when_setting_on(session):
     _enable_docker(session)
     s = service.create_server(
