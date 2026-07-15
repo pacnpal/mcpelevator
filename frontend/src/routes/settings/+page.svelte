@@ -64,6 +64,11 @@
 				getAuthStatus()
 			]);
 			settings = s;
+			oauthConfigUrl = s.oauth_config_url;
+			oauthAudience = s.oauth_audience;
+			oauthAllowedSubjects = s.oauth_allowed_subjects.join(', ');
+			oauthScopes = s.oauth_scopes.join(', ');
+			oauthAcceptBearer = s.oauth_accept_bearer;
 			tokens = t;
 			servers = srv;
 			groups = grp;
@@ -195,7 +200,8 @@
 
 	const AUTH_CHOICES: { value: AuthProvider; label: string }[] = [
 		{ value: 'none', label: 'none' },
-		{ value: 'bearer', label: 'bearer' }
+		{ value: 'bearer', label: 'bearer' },
+		{ value: 'oauth', label: 'oauth' }
 	];
 	const BIND_CHOICES: { value: BindMode; label: string; hint: string }[] = [
 		{ value: 'local', label: 'local', hint: 'Loopback only' },
@@ -209,6 +215,44 @@
 	// Persist a settings patch (save-on-change), optimistically applying it and
 	// rolling back on failure so the controls never drift from the backend.
 	let savingField = $state<keyof SettingsInfo | null>(null);
+	const savingOauth = $derived(savingField === 'oauth_config_url');
+	let oauthConfigUrl = $state('');
+	let oauthAudience = $state('');
+	let oauthAllowedSubjects = $state('');
+	let oauthScopes = $state('');
+	let oauthAcceptBearer = $state(false);
+
+	function splitCommaList(value: string): string[] {
+		return value
+			.split(',')
+			.map((item) => item.trim())
+			.filter(Boolean);
+	}
+
+	async function saveOauthSettings(e: SubmitEvent) {
+		e.preventDefault();
+		if (!settings || savingField) return;
+		savingField = 'oauth_config_url';
+		try {
+			settings = await updateSettings({
+				oauth_config_url: oauthConfigUrl.trim(),
+				oauth_audience: oauthAudience.trim(),
+				oauth_allowed_subjects: splitCommaList(oauthAllowedSubjects),
+				oauth_scopes: splitCommaList(oauthScopes),
+				oauth_accept_bearer: oauthAcceptBearer
+			});
+			oauthConfigUrl = settings.oauth_config_url;
+			oauthAudience = settings.oauth_audience;
+			oauthAllowedSubjects = settings.oauth_allowed_subjects.join(', ');
+			oauthScopes = settings.oauth_scopes.join(', ');
+			oauthAcceptBearer = settings.oauth_accept_bearer;
+			flashToast('OAuth settings saved', 'info');
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			savingField = null;
+		}
+	}
 
 	async function patchSettings(patch: Partial<SettingsInfo>, field: keyof SettingsInfo) {
 		// Serialize saves: PATCH returns the full settings object, so an overlapping
@@ -386,7 +430,7 @@
 			state: 'running',
 			transports: { mcp_http: true, rest_openapi: false },
 			urls: { mcp: group.url, rest: null },
-			auth: settings?.default_auth_provider === 'bearer' ? 'bearer' : 'none',
+			auth: settings?.default_auth_provider ?? 'none',
 			last_error: null,
 			pid: null,
 			port: null,
@@ -806,7 +850,7 @@
 			<fieldset class="flex flex-col gap-2 border-0 p-0">
 				<legend class="text-sm font-medium text-[var(--color-ink)]">Default auth</legend>
 				<div
-					class="grid grid-cols-2 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1"
+					class="grid grid-cols-3 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1"
 				>
 					{#each AUTH_CHOICES as choice (choice.value)}
 						<label
@@ -821,7 +865,7 @@
 								value={choice.value}
 								checked={settings.default_auth_provider === choice.value}
 								onchange={() => setDefaultAuth(choice.value)}
-								disabled={savingField === 'default_auth_provider'}
+								disabled={savingField !== null}
 								class="sr-only"
 							/>
 							{choice.label}
@@ -832,8 +876,91 @@
 					Servers set to <code class="font-mono">inherit</code> use this.
 					<code class="font-mono">bearer</code> requires a token in
 					<code class="font-mono">Authorization: Bearer …</code>.
+					<code class="font-mono">oauth</code> validates JWTs from the authorization server below.
 				</p>
 			</fieldset>
+
+			<!-- Inbound OAuth resource server -->
+			<form class="flex flex-col gap-3" onsubmit={saveOauthSettings}>
+				<div class="flex flex-col gap-1">
+					<h3 class="text-sm font-medium text-[var(--color-ink)]">OAuth resource server</h3>
+					<p class="text-xs text-[var(--color-ink-dim)]">
+						Validates access tokens clients send to servers and groups using
+						<code class="font-mono">oauth</code>. This is separate from OAuth used to reach a remote upstream.
+					</p>
+				</div>
+				<div class="grid gap-3 sm:grid-cols-2">
+					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+						Discovery URL or issuer
+						<input
+							type="url"
+							bind:value={oauthConfigUrl}
+							disabled={savingField !== null}
+							placeholder="https://auth.example.com/application/o/mcp/"
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+					</label>
+					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+						Audience
+						<input
+							type="text"
+							bind:value={oauthAudience}
+							disabled={savingField !== null}
+							placeholder="mcp-production-api"
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+					</label>
+				</div>
+				<p class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
+					Both fields are required before OAuth endpoints serve metadata or accept tokens. Audience validation prevents a token minted for another app from being reused here.
+				</p>
+				<div class="grid gap-3 sm:grid-cols-2">
+					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+						Allowed identities <span class="font-normal text-[var(--color-ink-dim)]">(optional, comma-separated)</span>
+						<input
+							type="text"
+							bind:value={oauthAllowedSubjects}
+							disabled={savingField !== null}
+							placeholder="alice, bob@example.com"
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+					</label>
+					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+						Advertised scopes <span class="font-normal text-[var(--color-ink-dim)]">(optional, comma-separated)</span>
+						<input
+							type="text"
+							bind:value={oauthScopes}
+							disabled={savingField !== null}
+							placeholder="openid, profile, email"
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+					</label>
+				</div>
+				<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
+					<input
+						type="checkbox"
+						bind:checked={oauthAcceptBearer}
+						disabled={savingField !== null}
+						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+					/>
+					<span class="flex flex-col gap-0.5">
+						<span class="text-sm font-medium text-[var(--color-ink)]">Also accept local bearer tokens</span>
+						<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+							Lets <code class="font-mono">mcpe_…</code> automation tokens use OAuth-protected endpoints with their normal server or group scope checks.
+						</span>
+					</span>
+				</label>
+				<div class="flex justify-end">
+					<button
+						type="submit"
+						disabled={savingOauth || savingField !== null}
+						aria-busy={savingOauth}
+						class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-50"
+					>
+						{savingOauth ? 'Saving…' : 'Save OAuth settings'}
+					</button>
+				</div>
+			</form>
 
 			<!-- Bind mode -->
 			<fieldset class="flex flex-col gap-2 border-0 p-0">
@@ -856,7 +983,7 @@
 									value={choice.value}
 									checked={settings.bind_mode === choice.value}
 									onchange={() => setBindMode(choice.value)}
-									disabled={savingField === 'bind_mode'}
+									disabled={savingField !== null}
 									class="sr-only"
 								/>
 								<span
@@ -934,7 +1061,7 @@
 						type="checkbox"
 						checked={settings.allow_private_lan}
 						onchange={(e) => setAllowPrivateLan(e.currentTarget.checked, e.currentTarget)}
-						disabled={savingField === 'allow_private_lan'}
+						disabled={savingField !== null}
 						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
 					/>
 					<span class="flex flex-col gap-0.5">
@@ -1003,7 +1130,7 @@
 						type="checkbox"
 						checked={settings.docker_runner}
 						onchange={(e) => setDockerRunner(e.currentTarget.checked, e.currentTarget)}
-						disabled={savingField === 'docker_runner'}
+						disabled={savingField !== null}
 						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
 					/>
 					<span class="flex flex-col gap-0.5">
@@ -1060,9 +1187,9 @@
 					bundling its running members' tools, each prefixed by the member's slug (e.g.
 					<code class="font-mono">github_create_issue</code>). Members are
 					<code class="font-mono">all servers</code> (every registered server, including
-					future ones) or a picked list. A group uses the default auth provider above; when
-					that is <code class="font-mono">none</code>, members with stricter (bearer) auth are
-					excluded so they can't be reached auth-free. Name a group
+					future ones) or a picked list. A group uses the default auth provider above. A
+					protected member is included only when it uses that same provider; bearer and OAuth
+					credentials cannot stand in for one another. Name a group
 					<code class="font-mono">all</code> with <code class="font-mono">all servers</code>
 					for a bundle of everything.
 				</p>
@@ -1309,7 +1436,7 @@
 									value={choice.value}
 									checked={settings.control_plane_auth === choice.value}
 									onchange={() => setControlPlaneAuth(choice.value)}
-									disabled={savingField === 'control_plane_auth'}
+									disabled={savingField !== null}
 									class="sr-only"
 								/>
 								<span
@@ -1352,6 +1479,7 @@
 					<input
 						type="text"
 						bind:value={newHost}
+						disabled={savingField !== null}
 						autocomplete="off"
 						spellcheck="false"
 						placeholder="mcp.example.com"
@@ -1360,7 +1488,7 @@
 					/>
 					<button
 						type="submit"
-						disabled={newHost.trim().length === 0 || savingField === 'allowed_hosts'}
+						disabled={newHost.trim().length === 0 || savingField !== null}
 						class="inline-flex shrink-0 items-center gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
 					>
 						<svg
@@ -1394,7 +1522,7 @@
 								<button
 									type="button"
 									onclick={() => removeHost(host)}
-									disabled={savingField === 'allowed_hosts'}
+									disabled={savingField !== null}
 									aria-label={`Remove ${host}`}
 									class="rounded-md p-1 text-[var(--color-ink-dim)] transition hover:text-[var(--color-state-failed)] disabled:opacity-50"
 								>

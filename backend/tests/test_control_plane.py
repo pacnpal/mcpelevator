@@ -55,7 +55,7 @@ def test_api_rejects_spoofed_loopback_host_from_remote_client():
 
 def test_summary_exposes_effective_auth():
     """The card snippets need the effective auth, so the summary resolves
-    `inherit` to the global default and reports `none`/`bearer`."""
+    `inherit` to the global default and reports `none`/`bearer`/`oauth`."""
     with TestClient(app) as client:
         h = {"host": "127.0.0.1"}
         created: list[str] = []
@@ -71,6 +71,11 @@ def test_summary_exposes_effective_auth():
             )
             created.append(r2.json()["id"])
             assert r2.json()["auth"] == "none"
+            r3 = client.post(
+                "/api/servers", json={"name": "o", "command": "echo", "auth_provider": "oauth"}, headers=h
+            )
+            created.append(r3.json()["id"])
+            assert r3.json()["auth"] == "oauth"
         finally:
             for sid in created:
                 client.delete(f"/api/servers/{sid}", headers=h)

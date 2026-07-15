@@ -43,6 +43,11 @@ def test_settings_defaults_and_write(session):
         "allow_private_lan": False,
         "docker_runner": False,
         "groups": {},
+        "oauth_config_url": "",
+        "oauth_audience": "",
+        "oauth_allowed_subjects": [],
+        "oauth_accept_bearer": False,
+        "oauth_scopes": [],
     }
     runtime_settings.write(
         session,
@@ -414,6 +419,7 @@ def test_resolve_provider():
     assert middleware.resolve(_server("bearer"), "none").name == "bearer"
     assert middleware.resolve(_server("inherit"), "bearer").name == "bearer"  # inherit -> default
     assert middleware.resolve(_server("inherit"), "none").name == "none"
+    assert middleware.resolve(_server("oauth"), "none").name == "oauth"
 
 
 def test_resolve_unknown_provider_fails_closed():

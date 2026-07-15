@@ -12,7 +12,8 @@ from pydantic import BaseModel, StrictBool, StrictStr
 # The auth providers a server may select. Constrained here so a malformed value
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
 # than silently stored and then failed-closed at request time.
-AuthProvider = Literal["inherit", "none", "bearer"]
+AuthProvider = Literal["inherit", "none", "bearer", "oauth"]
+EffectiveAuthProvider = Literal["none", "bearer", "oauth"]
 
 
 class Transports(BaseModel):
@@ -34,7 +35,7 @@ class ServerSummary(BaseModel):
     state: str
     transports: Transports
     urls: Urls
-    auth: Literal["none", "bearer"] = "none"  # effective auth (per-server `inherit` resolved)
+    auth: EffectiveAuthProvider = "none"  # effective auth (per-server `inherit` resolved)
     last_error: Optional[str] = None
     pid: Optional[int] = None
     port: Optional[int] = None
@@ -167,6 +168,11 @@ class SettingsInfo(BaseModel):
     control_plane_auth: ControlPlaneAuthMode = "auto"
     allow_private_lan: bool = False
     docker_runner: bool = False
+    oauth_config_url: str = ""
+    oauth_audience: str = ""
+    oauth_allowed_subjects: list[str] = []
+    oauth_accept_bearer: bool = False
+    oauth_scopes: list[str] = []
 
 
 class SettingsUpdate(BaseModel):
@@ -174,6 +180,11 @@ class SettingsUpdate(BaseModel):
     allowed_hosts: Optional[list[str]] = None
     default_auth_provider: Optional[str] = None
     control_plane_auth: Optional[ControlPlaneAuthMode] = None
+    oauth_config_url: Optional[str] = None
+    oauth_audience: Optional[str] = None
+    oauth_allowed_subjects: Optional[list[str]] = None
+    oauth_accept_bearer: Optional[StrictBool] = None
+    oauth_scopes: Optional[list[str]] = None
     # StrictBool, not bool: Optional[bool] would coerce "yes"/"true"/1 to True at the
     # API boundary, so the registry's isinstance(bool) invariant would never fire for an
     # API caller. Strict keeps the bool-only contract end to end (the SPA sends a JSON bool).

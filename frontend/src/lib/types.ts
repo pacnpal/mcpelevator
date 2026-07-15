@@ -243,10 +243,10 @@ export interface CatalogDetail {
 export type BindMode = 'local' | 'expose';
 
 /** Auth provider for the *global default* and per-server `inherit` resolution. */
-export type AuthProvider = 'none' | 'bearer';
+export type AuthProvider = 'none' | 'bearer' | 'oauth';
 
 /** Per-server auth selector: `inherit` resolves to the global default. */
-export type ServerAuthProvider = 'inherit' | 'none' | 'bearer';
+export type ServerAuthProvider = 'inherit' | 'none' | 'bearer' | 'oauth';
 
 /** Control-plane auth enforcement: `auto` requires a token only when exposed,
  * `always` requires one even on loopback. */
@@ -265,6 +265,16 @@ export interface SettingsInfo {
 	 * OFF by default and root-equivalent — it runs arbitrary images on the mounted
 	 * Docker daemon. Gates docker-server enable/start and OCI catalog installs. */
 	docker_runner: boolean;
+	/** External authorization-server discovery URL for inbound OAuth. */
+	oauth_config_url: string;
+	/** Required JWT audience for inbound OAuth access tokens. */
+	oauth_audience: string;
+	/** Optional token identities allowed to use OAuth-protected endpoints. */
+	oauth_allowed_subjects: string[];
+	/** Also accept local mcpe_ bearer tokens on OAuth-protected endpoints. */
+	oauth_accept_bearer: boolean;
+	/** Scopes advertised in RFC 9728 protected-resource metadata. */
+	oauth_scopes: string[];
 }
 
 /** A group's members: the wildcard "*" (every registered server, present and

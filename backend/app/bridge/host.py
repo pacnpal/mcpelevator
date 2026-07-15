@@ -278,7 +278,13 @@ def build_proxy(spec: dict) -> FastMCP:
     # Everything else — sampling, elicitation, logging, progress forwarding, and
     # the fresh-session-per-request isolation — keeps FastMCP's proxy defaults.
     client = ProxyClient(transport, roots=_forward_roots)
-    return create_proxy(client, name=spec.get("name") or "mcpelevator-proxy")
+    proxy = create_proxy(client, name=spec.get("name") or "mcpelevator-proxy")
+    # The outer proxy already authenticated the caller. Forwarding its headers from
+    # this bridge to a remote MCP server would disclose bearer/OAuth credentials to
+    # that upstream. Static headers and upstream OAuth live on the transport itself.
+    if hasattr(transport, "forward_incoming_headers"):
+        transport.forward_incoming_headers = False
+    return proxy
 
 
 def main() -> None:
