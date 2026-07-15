@@ -419,6 +419,7 @@ def test_resolve_provider():
     assert middleware.resolve(_server("bearer"), "none").name == "bearer"
     assert middleware.resolve(_server("inherit"), "bearer").name == "bearer"  # inherit -> default
     assert middleware.resolve(_server("inherit"), "none").name == "none"
+    assert middleware.resolve(_server("oauth"), "none").name == "oauth"
 
 
 def test_resolve_unknown_provider_fails_closed():

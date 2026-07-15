@@ -14,7 +14,8 @@
 	const AUTH_OPTIONS: { value: ServerAuthProvider; label: string }[] = [
 		{ value: 'inherit', label: 'inherit' },
 		{ value: 'none', label: 'none' },
-		{ value: 'bearer', label: 'bearer' }
+		{ value: 'bearer', label: 'bearer' },
+		{ value: 'oauth', label: 'oauth' }
 	];
 
 	let {
@@ -1010,7 +1011,7 @@
 	<fieldset class="flex flex-col gap-2 border-0 p-0">
 		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Auth</legend>
 		<div
-			class="grid grid-cols-3 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1"
+			class="grid grid-cols-2 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1 sm:grid-cols-4"
 		>
 			{#each AUTH_OPTIONS as opt (opt.value)}
 				<label
@@ -1032,7 +1033,8 @@
 			{/each}
 		</div>
 		<p class="text-xs text-[var(--color-ink-dim)]">
-			<code class="font-mono">inherit</code> = use the global default. Set it on the
+			<code class="font-mono">inherit</code> = use the global default. Configure bearer or
+			OAuth resource-server settings on the
 			<a
 				href="/settings"
 				class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"

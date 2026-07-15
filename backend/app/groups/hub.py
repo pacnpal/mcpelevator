@@ -15,11 +15,10 @@ A mounted-but-dead upstream is not fatal: fastmcp skips a provider that errors
 during ``list_tools`` (logging a warning), and per-request proxy sessions mean
 only that slug's tools fail — the next reconcile unmounts it anyway.
 
-One security rule sits on top of membership: a member whose EFFECTIVE auth is
-stricter than the group's is never mounted — when the default provider is
-``none``, a bearer-protected server's tools must not be reachable auth-free
-through any ``/g`` endpoint. (When the default is ``bearer``, the group itself
-requires a matching token — see ``group_server``.)
+One security rule sits on top of membership: a protected member is mounted only
+when the group uses the same provider. ``bearer`` and ``oauth`` are separate
+credential systems, so neither can stand in for the other. An explicitly open
+member is safe behind any group provider.
 
 The Streamable-HTTP apps run stateless (a fresh transport per request), so
 swapping instances never strands client sessions. Starlette does NOT run a
@@ -33,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from typing import Callable, Optional
 
 from fastmcp import FastMCP
@@ -183,9 +183,11 @@ class GroupHub:
                         continue
                     if effective == "inherit":
                         effective = default
-                    # Anti-downgrade: never mount a member whose own auth is stricter
-                    # than the group's, or /g/<name> would bypass its bearer protection.
-                    if default == "none" and effective != "none":
+                    # Anti-downgrade: a protected member must use the group's provider.
+                    # Bearer and OAuth are incomparable credential systems; authenticating
+                    # with one must not bypass a member protected by the other. An open
+                    # member is safe behind any group provider.
+                    if effective != "none" and effective != default:
                         continue
                     entries.append((slug, host, port))
 
@@ -243,6 +245,19 @@ class GroupHub:
         if old is not None:
             await old.runner.close()
 
+    async def _close_all_unlocked(self) -> None:
+        instances = list(self._instances.values())
+        self._instances.clear()
+        for instance in instances:
+            await instance.runner.close()
+
+    @asynccontextmanager
+    async def auth_transition(self):
+        """Keep every group unavailable while an auth-affecting row is written."""
+        async with self._lock:
+            await self._close_all_unlocked()
+            yield
+
     async def close(self) -> None:
         """Shutdown: stop every session manager cleanly (called from the app lifespan)."""
         async with self._lock:
@@ -250,7 +265,4 @@ class GroupHub:
             # runner close can block or fail, but no stale group app may remain
             # reachable while shutdown is in progress (including fail-closed shutdown
             # after a broad sync failure).
-            instances = list(self._instances.values())
-            self._instances.clear()
-            for instance in instances:
-                await instance.runner.close()
+            await self._close_all_unlocked()

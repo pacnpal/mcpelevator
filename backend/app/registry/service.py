@@ -677,7 +677,7 @@ def normalize_docker_servers(session: Session) -> int:
     return changed
 
 
-_AUTH_PROVIDERS = {"inherit", "none", "bearer"}
+_AUTH_PROVIDERS = {"inherit", "none", "bearer", "oauth"}
 
 
 def normalize_auth_providers(session: Session) -> int:

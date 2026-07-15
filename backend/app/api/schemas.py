@@ -13,6 +13,7 @@ from pydantic import BaseModel, StrictBool, StrictStr
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
 # than silently stored and then failed-closed at request time.
 AuthProvider = Literal["inherit", "none", "bearer", "oauth"]
+EffectiveAuthProvider = Literal["none", "bearer", "oauth"]
 
 
 class Transports(BaseModel):
@@ -34,7 +35,7 @@ class ServerSummary(BaseModel):
     state: str
     transports: Transports
     urls: Urls
-    auth: Literal["none", "bearer"] = "none"  # effective auth (per-server `inherit` resolved)
+    auth: EffectiveAuthProvider = "none"  # effective auth (per-server `inherit` resolved)
     last_error: Optional[str] = None
     pid: Optional[int] = None
     port: Optional[int] = None

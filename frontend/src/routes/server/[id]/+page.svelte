@@ -328,9 +328,8 @@
 
 	// Effective auth for the endpoint hint: `inherit` resolves to the global
 	// default. `null` while the default is still unknown for an inherit server.
-	const effectiveBearer = $derived(
-		server?.auth_provider === 'bearer' ||
-			(server?.auth_provider === 'inherit' && defaultAuth === 'bearer')
+	const effectiveAuth = $derived(
+		server?.auth_provider === 'inherit' ? defaultAuth : (server?.auth_provider ?? null)
 	);
 
 	// Render the stored command + args as a single shell-ish line, quoting any
@@ -630,7 +629,7 @@
 				</div>
 				<!-- REST/OpenAPI endpoint omitted: the surface isn't served yet (planned, M6). -->
 			</div>
-			{#if effectiveBearer}
+			{#if effectiveAuth === 'bearer'}
 				<p
 					class="flex items-center gap-1.5 border-t border-[var(--color-line)] pt-2.5 text-xs text-[var(--color-ink-dim)]"
 				>
@@ -650,6 +649,33 @@
 					<span>
 						Requests need <code class="font-mono text-[var(--color-ink-muted)]">Authorization: Bearer &lt;token&gt;</code>.
 						Manage tokens in
+						<a
+							href="/settings"
+							class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
+						>
+							Settings
+						</a>.
+					</span>
+				</p>
+			{:else if effectiveAuth === 'oauth'}
+				<p
+					class="flex items-center gap-1.5 border-t border-[var(--color-line)] pt-2.5 text-xs text-[var(--color-ink-dim)]"
+				>
+					<svg
+						class="size-3.5 shrink-0 text-[var(--color-accent)]"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<rect x="5" y="11" width="14" height="10" rx="2" />
+						<path d="M8 11V7a4 4 0 0 1 8 0v4" />
+					</svg>
+					<span>
+						Requests need an access token from the OAuth authorization server configured in
 						<a
 							href="/settings"
 							class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"

@@ -44,7 +44,8 @@ DEFAULTS: dict[str, Any] = {
     # (a bare issuer URL also works). Empty = oauth provider unconfigured; servers
     # set to oauth then fail closed (403).
     "oauth_config_url": "",
-    # Optional ``aud`` claim to require in access tokens (empty = don't check).
+    # ``aud`` claim required in access tokens. Empty leaves OAuth unconfigured and
+    # fails closed, so a token minted for another resource is never accepted.
     "oauth_audience": "",
     # Optional identity allowlist matched case-insensitively against the token's
     # preferred_username / login / email / sub claims (empty = any valid token).
@@ -150,8 +151,10 @@ def write(
             if not isinstance(value, str) or (value and not value.startswith(("http://", "https://"))):
                 raise ValueError(f"invalid oauth_config_url: {value!r}")
             value = value.strip()
-        if key == "oauth_audience" and not isinstance(value, str):
-            raise ValueError(f"invalid oauth_audience: {value!r}")
+        if key == "oauth_audience":
+            if not isinstance(value, str):
+                raise ValueError(f"invalid oauth_audience: {value!r}")
+            value = value.strip()
         if key == "oauth_allowed_subjects":
             if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
                 raise ValueError(f"invalid oauth_allowed_subjects: {value!r}")

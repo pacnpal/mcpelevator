@@ -43,12 +43,23 @@ async def update_settings(
                 detail="authenticate with an admin token before enabling control-plane auth",
             )
 
+    auth_changed = "default_auth_provider" in changes
     try:
-        # Invariants (enum settings + the host allowlist) are enforced in the SSOT
-        # writer; the guard runs under its write lock. Surface ValueError as a 400.
-        result = _info(runtime_settings.write(session, changes, guard=guard))
+        if auth_changed:
+            # Hold the hub lock across the write so the reconciler cannot rebuild an
+            # old bundle between invalidation and commit. Requests see 503 until the
+            # new provider's member set is ready.
+            async with request.app.state.groups.auth_transition():
+                result = _info(runtime_settings.write(session, changes, guard=guard))
+        else:
+            # Invariants (enum settings + the host allowlist) are enforced in the SSOT
+            # writer; the guard runs under its write lock. Surface ValueError as a 400.
+            result = _info(runtime_settings.write(session, changes, guard=guard))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        if auth_changed:
+            await resync_groups(request)
     # Gate changes apply at once instead of waiting for the next poll interval (which an
     # operator may have lengthened): docker_runner stops running docker units via the
     # nudged reconcile.
@@ -59,6 +70,4 @@ async def update_settings(
     # request, so a bearer->none downgrade must not leave a group's OLD mounted set
     # (which may include bearer-only members) serveable in the gap. sync() is
     # lock-serialized and its lifespans run in their own tasks, so calling it here is safe.
-    if "default_auth_provider" in changes:
-        await resync_groups(request)
     return result

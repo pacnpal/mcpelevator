@@ -121,6 +121,9 @@ def test_normalize_auth_providers_canonicalizes_legacy():
     with Session(eng) as s:
         a = service.create_server(s, name="a", runner="npx", command="npx", auth_provider="bearer")
         b = service.create_server(s, name="b", runner="npx", command="npx")
+        oauth = service.create_server(
+            s, name="oauth", runner="npx", command="npx", auth_provider="oauth"
+        )
         # legacy free-text values the old `str` schema would have allowed
         s.execute(text("UPDATE server SET auth_provider='Bearer ' WHERE id=:i"), {"i": a.id})
         s.execute(text("UPDATE server SET auth_provider='basic' WHERE id=:i"), {"i": b.id})
@@ -128,4 +131,5 @@ def test_normalize_auth_providers_canonicalizes_legacy():
         assert service.normalize_auth_providers(s) == 2
         assert repo.get_server(s, a.id).auth_provider == "bearer"   # case/space canonicalized
         assert repo.get_server(s, b.id).auth_provider == "inherit"  # unresolvable -> default
+        assert repo.get_server(s, oauth.id).auth_provider == "oauth"  # supported values survive restart
         assert service.normalize_auth_providers(s) == 0  # idempotent

@@ -327,29 +327,36 @@ async def test_hub_removed_group_is_torn_down(clean_settings):
             repo.delete_server(session, a.id)
 
 
-async def test_hub_excludes_stricter_auth_members_when_default_is_none(clean_settings):
-    """Anti-downgrade: with default auth 'none' a group is unauthenticated, so a
-    bearer-protected member must not be mounted (its tools would bypass auth)."""
+async def test_hub_excludes_members_with_incompatible_auth(clean_settings):
+    """Protected members require the same provider as the group. Bearer and OAuth
+    credentials are not interchangeable; open members are safe behind either."""
     with Session(get_engine()) as session:
         open_srv = _mk_server(session, "Open One")
         locked = _mk_server(session, "Locked One", auth_provider="bearer")
+        oauth = _mk_server(session, "OAuth One", auth_provider="oauth")
     _write_groups({"all": "*"}, default_auth_provider="none")
     try:
         hub = _hub_for({"up-open-one": _make_upstream("o", "free"),
-                        "up-locked-one": _make_upstream("l", "secret")})
-        await hub.sync(_endpoints(open_srv, locked))
+                        "up-locked-one": _make_upstream("l", "secret"),
+                        "up-oauth-one": _make_upstream("x", "oauth")})
+        await hub.sync(_endpoints(open_srv, locked, oauth))
         assert await _list_tool_names(hub.app_for("all")) == ["open-one_free"]
 
-        # under default 'bearer' the group itself requires a matching token, which
-        # authorizes every member — so both are mounted
+        # Bearer protects the open and bearer members, but cannot stand in for OAuth.
         _write_groups({"all": "*"}, default_auth_provider="bearer")
-        await hub.sync(_endpoints(open_srv, locked))
+        await hub.sync(_endpoints(open_srv, locked, oauth))
         assert await _list_tool_names(hub.app_for("all")) == ["locked-one_secret", "open-one_free"]
+
+        # OAuth protects the open and OAuth members, but cannot stand in for bearer.
+        _write_groups({"all": "*"}, default_auth_provider="oauth")
+        await hub.sync(_endpoints(open_srv, locked, oauth))
+        assert await _list_tool_names(hub.app_for("all")) == ["oauth-one_oauth", "open-one_free"]
         await hub.close()
     finally:
         with Session(get_engine()) as session:
             repo.delete_server(session, open_srv.id)
             repo.delete_server(session, locked.id)
+            repo.delete_server(session, oauth.id)
 
 
 async def test_hub_unchanged_topology_is_a_noop_swap(clean_settings):
@@ -367,6 +374,31 @@ async def test_hub_unchanged_topology_is_a_noop_swap(clean_settings):
     finally:
         with Session(get_engine()) as session:
             repo.delete_server(session, a.id)
+
+
+async def test_auth_transition_blocks_reconcile_and_serves_no_stale_bundle(clean_settings):
+    with Session(get_engine()) as session:
+        server = _mk_server(session, "Transition")
+    _write_groups({"g": "*"})
+    hub = _hub_for({"up-transition": _make_upstream("t", "ready")})
+    supervisor = _endpoints(server)
+    try:
+        await hub.sync(supervisor)
+        assert hub.app_for("g") is not None
+
+        async with hub.auth_transition():
+            assert hub.app_for("g") is None
+            reconcile = asyncio.create_task(hub.sync(supervisor))
+            await asyncio.sleep(0)
+            assert not reconcile.done()  # the old auth state cannot rebuild mid-write
+
+        assert hub.app_for("g") is None  # fail closed until the queued reconcile finishes
+        await reconcile
+        assert hub.app_for("g") is not None
+        await hub.close()
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, server.id)
 
 
 async def test_hub_dead_upstream_is_skipped_not_fatal(clean_settings):

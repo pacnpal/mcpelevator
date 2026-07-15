@@ -2,7 +2,7 @@
 
 This guide explains how to reach your mcpelevator instance from Claude — and why
 "Claude **web**" (claude.ai in a browser) is a special, harder case than the
-other Claude surfaces. It then walks two concrete, secure paths end-to-end, with
+other Claude surfaces. It then walks three concrete, secure paths end-to-end, with
 real commands and dashboard steps, and helps you pick.
 
 > TL;DR
@@ -18,13 +18,16 @@ real commands and dashboard steps, and helps you pick.
 >   OAuth** in front. Access becomes the OAuth provider mcpelevator doesn't have.
 > - **Path B** (Claude Code / Desktop via local config): a public HTTPS tunnel **+
 >   mcpelevator's built-in bearer auth**. Simplest, works today.
+> - **Path C** (claude.ai web/mobile with your own identity provider): mcpelevator's
+>   `oauth` resource server validates JWTs from your authorization server. The JWT
+>   audience is required so tokens minted for another app cannot be reused here.
 
 ## The constraint, in one picture
 
 ```text
 Claude Code / Desktop (local cfg) ─┐  can send Authorization: Bearer  ──►  Path B
                                    │
-web / mobile / Desktop remote ─────┘  OAuth or no-auth ONLY (no headers) ──►  Path A
+web / mobile / Desktop remote ─────┘  OAuth or no-auth ONLY ──►  Path A or C
                                           │
                                           ▼
                           public HTTPS endpoint (Anthropic's IPs dial OUT to it)
@@ -97,8 +100,9 @@ your public hostname will be `mcp.example.com` — substitute your own throughou
    credential so you can't lock yourself out. **To flip to `expose` from the UI you
    must mint a token first** — by design.
 6. **Set per-server auth.** For **Path B**, set each server to `bearer` and mint a
-   token (scope `all` or one server). For **Path A**, the Access edge handles user
-   auth; choose `none` or `bearer` per the trade-off in Path A step 4.
+   token (scope `all` or one server). For **Path C**, configure the OAuth resource
+   server in Settings and set each server to `oauth`. For **Path A**, the Access edge
+   handles user auth; choose `none` or `bearer` per the trade-off in Path A step 4.
 
 At this point the instance is hardened but still loopback-only. The tunnel makes it
 reachable.
@@ -356,13 +360,16 @@ Setup:
      -H "Authorization: Bearer <admin token>" -H 'Content-Type: application/json' \
      -d '{
        "oauth_config_url": "https://auth.example.com/application/o/mcp/.well-known/openid-configuration",
+       "oauth_audience": "mcp-production-api",
+       "oauth_scopes": ["openid", "profile", "email"],
        "oauth_allowed_subjects": ["alice", "bob"]
      }'
    ```
 
-   `oauth_config_url` also accepts a bare issuer URL. `oauth_audience` (optional)
-   pins the `aud` claim; `oauth_allowed_subjects` (optional) allowlists identities
-   by `preferred_username`/`login`/`email`/`sub`.
+   `oauth_config_url` also accepts a bare issuer URL. `oauth_audience` is required
+   and pins the `aud` claim; `oauth_allowed_subjects` optionally allowlists identities
+   by `preferred_username`/`login`/`email`/`sub`. `oauth_scopes` is optional metadata
+   that tells clients what to request from the authorization server.
 4. Set a server's auth to `oauth` (or `default_auth_provider` to `oauth`), then add
    the connector in Claude with the `/s/<slug>/mcp` URL. Claude discovers your AS
    and drives the sign-in.
@@ -373,7 +380,12 @@ Caveats:
   support it (e.g. Authentik), use the connector's advanced settings to supply the
   client id/secret of the static client you created in step 2.
 - The AS must mint **JWT access tokens** verifiable via its JWKS (Authentik,
-  Keycloak, Auth0 do by default; opaque-token setups won't work).
+  Keycloak, Auth0 do by default; opaque-token setups won't work). RS*, PS*, and ES*
+  signing algorithms are accepted; symmetric HS* and unsigned tokens are rejected.
+- Groups using the OAuth default publish metadata at
+  `/.well-known/oauth-protected-resource/g/<name>/mcp`. A protected member is bundled
+  only when it uses the same provider as the group, so bearer and OAuth credentials
+  cannot bypass one another.
 - Need OAuth humans AND token-carrying automation on the same endpoints? Set
   `oauth_accept_bearer: true` — local `mcpe_...` tokens then get the bearer
   provider's verdict (including its per-server scoping) on oauth-protected

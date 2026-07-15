@@ -202,4 +202,11 @@ describe('installOptions', () => {
 			});
 		});
 	});
+
+	it('lets OAuth-capable clients discover auth without a static bearer header', () => {
+		const opts = installOptions({ ...pub, auth: 'oauth' });
+		expect(byLabel(opts, 'Claude Code').value).not.toContain('--header');
+		expect(byLabel(opts, 'Claude web / mobile').hint).not.toContain('bearer auth not supported');
+		expect(JSON.parse(byLabel(opts, 'mcpServers').value).mcpServers.memory.headers).toBeUndefined();
+	});
 });

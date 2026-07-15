@@ -12,11 +12,11 @@ discover it and drive the flow themselves:
            -> authorization_servers: [<issuer>]  -> AS metadata / DCR / PKCE at the AS
            -> Bearer <jwt> -> verified here against the AS's JWKS
 
-Configuration is three runtime settings (see ``app.registry.settings``):
+Core configuration is stored in runtime settings (see ``app.registry.settings``):
 
 * ``oauth_config_url`` — the AS's OIDC discovery / RFC 8414 metadata URL. A bare
   issuer URL also works (``/.well-known/openid-configuration`` is appended).
-* ``oauth_audience`` — optional ``aud`` to require in tokens.
+* ``oauth_audience`` — required ``aud`` to require in tokens.
 * ``oauth_allowed_subjects`` — optional identity allowlist, matched (case-
   insensitively) against ``preferred_username`` / ``login`` / ``email`` / ``sub``.
 
@@ -33,11 +33,14 @@ OAuth client id/secret, which skips DCR — see docs/claude-web-exposure.md.
 
 from __future__ import annotations
 
+import base64
+import json
 import time
 from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException
+from fastmcp.server.auth.providers.jwt import JWTVerifier, _jwk_to_pem
 from sqlmodel import Session
 from starlette.requests import Request
 
@@ -52,8 +55,46 @@ _DISCOVERY_TTL_S = 3600.0
 # uses a new key, and staleness is bounded by the TTL (JWKS rotation is handled
 # inside JWTVerifier, which re-fetches keys it doesn't recognize).
 _discovery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-# (config_url, audience) -> verifier. Rebuilt whenever either setting changes.
-_verifier_cache: dict[tuple[str, str, str, str], Any] = {}
+# (config_url, audience, jwks_uri, issuer, algorithm) -> verifier. The algorithm
+# comes from a strict asymmetric allowlist, so providers using ES*/PS*/RS* work
+# without accepting symmetric or unsigned tokens.
+_verifier_cache: dict[tuple[str, str, str, str, str], Any] = {}
+
+_ALLOWED_JWT_ALGORITHMS = frozenset(
+    {
+        "RS256",
+        "RS384",
+        "RS512",
+        "ES256",
+        "ES384",
+        "ES512",
+        "PS256",
+        "PS384",
+        "PS512",
+    }
+)
+
+
+class _AuthorizationServerUnavailable(Exception):
+    pass
+
+
+class _OAuthJWTVerifier(JWTVerifier):
+    async def _fetch_jwks(self) -> dict[str, Any]:
+        """Preserve JWKS transport failures that FastMCP otherwise folds into None."""
+        try:
+            document = await super()._fetch_jwks()
+        except (httpx.HTTPError, json.JSONDecodeError) as exc:
+            raise _AuthorizationServerUnavailable(str(exc)) from exc
+        keys = document.get("keys")
+        if not isinstance(keys, list) or not keys:
+            raise _AuthorizationServerUnavailable("JWKS contains no verification keys")
+        try:
+            for key in keys:
+                _jwk_to_pem(key)
+        except Exception as exc:
+            raise _AuthorizationServerUnavailable("JWKS contains an unusable key") from exc
+        return document
 
 
 def _normalize_config_url(config_url: str) -> str:
@@ -81,33 +122,47 @@ async def _discovery(config_url: str) -> dict[str, Any]:
     return doc
 
 
-async def _verifier_for(config_url: str, audience: str):
+def _jwt_algorithm(token: str) -> str | None:
+    try:
+        encoded = token.split(".", 1)[0]
+        padding = "=" * (-len(encoded) % 4)
+        header = json.loads(base64.urlsafe_b64decode(encoded + padding))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+    algorithm = header.get("alg") if isinstance(header, dict) else None
+    return algorithm if algorithm in _ALLOWED_JWT_ALGORITHMS else None
+
+
+async def _verifier_for(config_url: str, audience: str, algorithm: str):
     """Build (or reuse) a JWTVerifier bound to the AS's issuer + JWKS."""
     doc = await _discovery(config_url)
-    key = (config_url, audience, doc["jwks_uri"], doc["issuer"])
+    key = (config_url, audience, doc["jwks_uri"], doc["issuer"], algorithm)
     verifier = _verifier_cache.get(key)
     if verifier is None:
-        from fastmcp.server.auth.providers.jwt import JWTVerifier
-
-        verifier = JWTVerifier(
+        verifier = _OAuthJWTVerifier(
             jwks_uri=doc["jwks_uri"],
             issuer=doc["issuer"],
-            audience=audience or None,
+            audience=audience,
+            algorithm=algorithm,
         )
         _verifier_cache[key] = verifier
     return verifier
 
 
-def _metadata_url(base: str, slug: str) -> str:
+def _resource_kind(server: Server) -> str:
+    return "g" if server.id.startswith("group:") else "s"
+
+
+def _metadata_url(base: str, server: Server) -> str:
     # RFC 9728 §3: well-known inserted between host and the resource path.
-    return f"{base}/.well-known/oauth-protected-resource/s/{slug}/mcp"
+    return f"{base}/.well-known/oauth-protected-resource/{_resource_kind(server)}/{server.slug}/mcp"
 
 
-def _challenge(base: str, slug: str, error: Optional[str] = None) -> dict[str, str]:
+def _challenge(base: str, server: Server, error: Optional[str] = None) -> dict[str, str]:
     parts = ["Bearer"]
     if error:
         parts[0] += f' error="{error}",'
-    parts.append(f'resource_metadata="{_metadata_url(base, slug)}"')
+    parts.append(f'resource_metadata="{_metadata_url(base, server)}"')
     return {"WWW-Authenticate": " ".join(parts)}
 
 
@@ -131,8 +186,11 @@ class OAuthProvider:
             accept_bearer = runtime_settings.oauth_accept_bearer(session)
         # Fail closed, like resolve() does for an unknown provider: a server marked
         # oauth with no AS configured must not fall through to unauthenticated.
-        if not config_url:
-            raise HTTPException(status_code=403, detail="oauth provider not configured")
+        if not config_url or not audience:
+            raise HTTPException(
+                status_code=403,
+                detail="oauth provider requires a config URL and audience",
+            )
 
         base = base_url(request)
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
@@ -152,10 +210,17 @@ class OAuthProvider:
             raise HTTPException(
                 status_code=401,
                 detail="missing bearer token",
-                headers=_challenge(base, server.slug),
+                headers=_challenge(base, server),
+            )
+        algorithm = _jwt_algorithm(token)
+        if algorithm is None:
+            raise HTTPException(
+                status_code=401,
+                detail="invalid token",
+                headers=_challenge(base, server, error="invalid_token"),
             )
         try:
-            verifier = await _verifier_for(config_url, audience)
+            verifier = await _verifier_for(config_url, audience, algorithm)
             access = await verifier.verify_token(token)
         except HTTPException:
             raise
@@ -169,7 +234,7 @@ class OAuthProvider:
             raise HTTPException(
                 status_code=401,
                 detail="invalid token",
-                headers=_challenge(base, server.slug, error="invalid_token"),
+                headers=_challenge(base, server, error="invalid_token"),
             )
         if allowed:
             allowed_lower = {a.lower() for a in allowed}
@@ -178,7 +243,7 @@ class OAuthProvider:
                 raise HTTPException(
                     status_code=403,
                     detail="token subject not authorized for this server",
-                    headers=_challenge(base, server.slug, error="insufficient_scope"),
+                    headers=_challenge(base, server, error="insufficient_scope"),
                 )
 
 
@@ -190,16 +255,19 @@ class OAuthProvider:
 wellknown = APIRouter()
 
 
-def _effective_oauth(slug: str) -> bool:
-    from app.aggregate.hub import AGGREGATE_SLUG  # local: avoid import cycle
-
+def _effective_oauth(kind: str, slug: str) -> bool:
     with Session(get_engine()) as session:
         default = runtime_settings.default_auth_provider(session)
         config_url = runtime_settings.oauth_config_url(session)
-        if not config_url:
+        audience = runtime_settings.oauth_audience(session)
+        if not config_url or not audience:
             return False
-        if slug == AGGREGATE_SLUG:
-            return runtime_settings.unified_endpoint(session) and default == "oauth"
+        if kind == "g":
+            from app.groups import registry
+
+            return registry.exists(session, slug) and default == "oauth"
+        if kind != "s":
+            return False
         server = repo.get_server_by_slug(session, slug)
         if server is None:
             return False
@@ -207,9 +275,9 @@ def _effective_oauth(slug: str) -> bool:
         return name == "oauth"
 
 
-@wellknown.get("/.well-known/oauth-protected-resource/s/{slug}/mcp")
-async def protected_resource_metadata(slug: str, request: Request):
-    if not _effective_oauth(slug):
+@wellknown.get("/.well-known/oauth-protected-resource/{kind}/{slug}/mcp")
+async def protected_resource_metadata(kind: str, slug: str, request: Request):
+    if not _effective_oauth(kind, slug):
         raise HTTPException(status_code=404, detail="not found")
     with Session(get_engine()) as session:
         config_url = runtime_settings.oauth_config_url(session)
@@ -222,7 +290,7 @@ async def protected_resource_metadata(slug: str, request: Request):
         ) from exc
     base = base_url(request)
     meta = {
-        "resource": f"{base}/s/{slug}/mcp",
+        "resource": f"{base}/{kind}/{slug}/mcp",
         "authorization_servers": [doc["issuer"]],
         "bearer_methods_supported": ["header"],
     }

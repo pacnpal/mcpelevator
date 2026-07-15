@@ -10,9 +10,18 @@ RSA keypair (fastmcp's test helper), and discovery is faked where needed.
 
 from __future__ import annotations
 
+import base64
+import json
+import time
+
+import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import HTTPException
 from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
+from joserfc import jwt
+from joserfc.jwk import import_key
 from sqlmodel import Session, SQLModel, create_engine
 from starlette.requests import Request
 
@@ -43,7 +52,7 @@ def keypair(monkeypatch):
     kp = RSAKeyPair.generate()
     verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
 
-    async def fake_verifier_for(config_url: str, audience: str):
+    async def fake_verifier_for(config_url: str, audience: str, algorithm: str):
         return verifier
 
     monkeypatch.setattr(oauth_mod, "_verifier_for", fake_verifier_for)
@@ -90,11 +99,13 @@ def test_settings_validation():
             {
                 "default_auth_provider": "oauth",  # now a valid enum member
                 "oauth_config_url": f"{CONFIG_URL} ",  # trailing space is trimmed
+                "oauth_audience": " mcp ",
                 "oauth_allowed_subjects": ["Kyle", "kyle", "ada"],  # deduped, order kept
             },
         )
         assert out["default_auth_provider"] == "oauth"
         assert out["oauth_config_url"] == CONFIG_URL
+        assert out["oauth_audience"] == AUDIENCE
         assert out["oauth_allowed_subjects"] == ["Kyle", "kyle", "ada"]
 
 
@@ -105,7 +116,9 @@ async def test_unconfigured_fails_closed(session):
 
 
 async def test_missing_token_401_with_resource_metadata(session, keypair):
-    runtime_settings.write(session, {"oauth_config_url": CONFIG_URL})
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
     with pytest.raises(HTTPException) as exc:
         await OAuthProvider().authenticate(_request(), _server())
     assert exc.value.status_code == 401
@@ -115,7 +128,9 @@ async def test_missing_token_401_with_resource_metadata(session, keypair):
 
 
 async def test_invalid_token_rejected(session, keypair):
-    runtime_settings.write(session, {"oauth_config_url": CONFIG_URL})
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
     req = _request({"Authorization": "Bearer not-a-jwt"})
     with pytest.raises(HTTPException) as exc:
         await OAuthProvider().authenticate(req, _server())
@@ -124,7 +139,9 @@ async def test_invalid_token_rejected(session, keypair):
 
 
 async def test_wrong_issuer_rejected(session, keypair):
-    runtime_settings.write(session, {"oauth_config_url": CONFIG_URL})
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
     bad = _token(keypair, issuer="https://evil.example")
     with pytest.raises(HTTPException) as exc:
         await OAuthProvider().authenticate(
@@ -133,8 +150,22 @@ async def test_wrong_issuer_rejected(session, keypair):
     assert exc.value.status_code == 401
 
 
+async def test_wrong_audience_rejected(session, keypair):
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
+    bad = _token(keypair, audience="another-api")
+    with pytest.raises(HTTPException) as exc:
+        await OAuthProvider().authenticate(
+            _request({"Authorization": f"Bearer {bad}"}), _server()
+        )
+    assert exc.value.status_code == 401
+
+
 async def test_valid_token_accepted(session, keypair):
-    runtime_settings.write(session, {"oauth_config_url": CONFIG_URL})
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
     tok = _token(keypair)
     # no exception = authorized
     await OAuthProvider().authenticate(
@@ -145,7 +176,11 @@ async def test_valid_token_accepted(session, keypair):
 async def test_subject_allowlist(session, keypair):
     runtime_settings.write(
         session,
-        {"oauth_config_url": CONFIG_URL, "oauth_allowed_subjects": ["Kyle"]},
+        {
+            "oauth_config_url": CONFIG_URL,
+            "oauth_audience": AUDIENCE,
+            "oauth_allowed_subjects": ["Kyle"],
+        },
     )
     ok = _token(keypair, subject="ignored", additional_claims={"preferred_username": "kyle"})
     await OAuthProvider().authenticate(
@@ -159,18 +194,172 @@ async def test_subject_allowlist(session, keypair):
     assert exc.value.status_code == 403
 
 
-async def test_as_outage_is_503_not_401(session, monkeypatch):
-    runtime_settings.write(session, {"oauth_config_url": CONFIG_URL})
+async def test_as_outage_is_503_not_401(session, keypair, monkeypatch):
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
 
-    async def boom(config_url: str, audience: str):
+    async def boom(config_url: str, audience: str, algorithm: str):
         raise RuntimeError("jwks fetch failed")
 
     monkeypatch.setattr(oauth_mod, "_verifier_for", boom)
+    token = _token(keypair)
     with pytest.raises(HTTPException) as exc:
         await OAuthProvider().authenticate(
-            _request({"Authorization": "Bearer whatever"}), _server()
+            _request({"Authorization": f"Bearer {token}"}), _server()
         )
     assert exc.value.status_code == 503
+
+
+async def test_real_jwks_transport_failure_is_503(session, keypair, monkeypatch):
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
+
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("jwks unavailable", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unavailable)) as client:
+        verifier = oauth_mod._OAuthJWTVerifier(
+            jwks_uri=f"{ISSUER}/jwks",
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            http_client=client,
+        )
+
+        async def real_verifier(config_url: str, audience: str, algorithm: str):
+            return verifier
+
+        monkeypatch.setattr(oauth_mod, "_verifier_for", real_verifier)
+        token = _token(keypair, kid="current")
+        with pytest.raises(HTTPException) as exc:
+            await OAuthProvider().authenticate(
+                _request({"Authorization": f"Bearer {token}"}), _server()
+            )
+    assert exc.value.status_code == 503
+
+
+@pytest.mark.parametrize(
+    "jwks",
+    [
+        {"keys": []},
+        {"keys": [{"kty": "RSA", "kid": "broken", "alg": "RS256"}]},
+    ],
+)
+async def test_unusable_jwks_is_503(session, keypair, monkeypatch, jwks):
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=jwks))
+    ) as client:
+        verifier = oauth_mod._OAuthJWTVerifier(
+            jwks_uri=f"{ISSUER}/jwks",
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            http_client=client,
+        )
+
+        async def real_verifier(config_url: str, audience: str, algorithm: str):
+            return verifier
+
+        monkeypatch.setattr(oauth_mod, "_verifier_for", real_verifier)
+        token = _token(keypair, kid="current")
+        with pytest.raises(HTTPException) as exc:
+            await OAuthProvider().authenticate(
+                _request({"Authorization": f"Bearer {token}"}), _server()
+            )
+    assert exc.value.status_code == 503
+
+
+async def test_unknown_kid_on_usable_jwks_is_401(session, keypair, monkeypatch):
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
+    jwk = {
+        **import_key(keypair.public_key, "RSA").as_dict(),
+        "kid": "known",
+        "alg": "RS256",
+    }
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"keys": [jwk]})
+        )
+    ) as client:
+        verifier = oauth_mod._OAuthJWTVerifier(
+            jwks_uri=f"{ISSUER}/jwks",
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            http_client=client,
+        )
+
+        async def real_verifier(config_url: str, audience: str, algorithm: str):
+            return verifier
+
+        monkeypatch.setattr(oauth_mod, "_verifier_for", real_verifier)
+        token = _token(keypair, kid="missing")
+        with pytest.raises(HTTPException) as exc:
+            await OAuthProvider().authenticate(
+                _request({"Authorization": f"Bearer {token}"}), _server()
+            )
+    assert exc.value.status_code == 401
+
+
+async def test_es256_token_is_verified_end_to_end(session, monkeypatch):
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    token = jwt.encode(
+        {"alg": "ES256", "kid": "ec-key"},
+        {
+            "sub": "user-1",
+            "iss": ISSUER,
+            "aud": AUDIENCE,
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 3600,
+        },
+        import_key(private_pem, "EC"),
+        algorithms=["ES256"],
+    )
+    jwk = {
+        **import_key(public_pem, "EC").as_dict(),
+        "kid": "ec-key",
+        "alg": "ES256",
+    }
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"keys": [jwk]})
+        )
+    ) as client:
+        verifier = oauth_mod._OAuthJWTVerifier(
+            jwks_uri=f"{ISSUER}/jwks",
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            algorithm="ES256",
+            http_client=client,
+        )
+
+        async def real_verifier(config_url: str, audience: str, algorithm: str):
+            assert algorithm == "ES256"
+            return verifier
+
+        monkeypatch.setattr(oauth_mod, "_verifier_for", real_verifier)
+        await OAuthProvider().authenticate(
+            _request({"Authorization": f"Bearer {token}"}), _server()
+        )
 
 
 async def test_metadata_route_advertises_issuer(session, monkeypatch):
@@ -178,27 +367,70 @@ async def test_metadata_route_advertises_issuer(session, monkeypatch):
 
     session.add(_server())
     session.commit()
-    runtime_settings.write(session, {"oauth_config_url": CONFIG_URL})
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
 
     async def fake_discovery(config_url: str):
         return {"issuer": ISSUER, "jwks_uri": f"{ISSUER}/jwks"}
 
     monkeypatch.setattr(oauth_mod, "_discovery", fake_discovery)
-    out = await protected_resource_metadata("svc", _request({"Host": "box.local:8080"}))
+    out = await protected_resource_metadata(
+        "s", "svc", _request({"Host": "box.local:8080"})
+    )
     assert out["authorization_servers"] == [ISSUER]
     assert out["resource"].endswith("/s/svc/mcp")
     assert "scopes_supported" not in out  # empty setting -> field omitted
 
     runtime_settings.write(session, {"oauth_scopes": ["openid", "profile", "email"]})
-    out = await protected_resource_metadata("svc", _request({"Host": "box.local:8080"}))
+    out = await protected_resource_metadata(
+        "s", "svc", _request({"Host": "box.local:8080"})
+    )
     assert out["scopes_supported"] == ["openid", "profile", "email"]
+
+
+async def test_metadata_route_supports_oauth_groups(session, monkeypatch):
+    from app.auth.oauth import protected_resource_metadata
+
+    runtime_settings.write(
+        session,
+        {
+            "groups": {"team": []},
+            "default_auth_provider": "oauth",
+            "oauth_config_url": CONFIG_URL,
+            "oauth_audience": AUDIENCE,
+        },
+    )
+
+    async def fake_discovery(config_url: str):
+        return {"issuer": ISSUER, "jwks_uri": f"{ISSUER}/jwks"}
+
+    monkeypatch.setattr(oauth_mod, "_discovery", fake_discovery)
+    out = await protected_resource_metadata(
+        "g", "team", _request({"Host": "box.local:8080"})
+    )
+    assert out["resource"].endswith("/g/team/mcp")
+
+
+async def test_group_challenge_points_to_group_metadata(session):
+    from app.groups.hub import group_server
+
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
+    with pytest.raises(HTTPException) as exc:
+        await OAuthProvider().authenticate(_request(), group_server("team"))
+    assert exc.value.status_code == 401
+    assert "/.well-known/oauth-protected-resource/g/team/mcp" in (
+        exc.value.headers["WWW-Authenticate"]
+    )
 
 
 async def test_metadata_route_404_for_non_oauth_server(session):
     from app.auth.oauth import protected_resource_metadata
 
     with pytest.raises(HTTPException) as exc:
-        await protected_resource_metadata("missing", _request())
+        await protected_resource_metadata("s", "missing", _request())
     assert exc.value.status_code == 404
 
 
@@ -209,6 +441,29 @@ def test_config_url_normalization():
     assert oauth_mod._normalize_config_url(CONFIG_URL) == CONFIG_URL
     rfc8414 = "https://as.example/.well-known/oauth-authorization-server"
     assert oauth_mod._normalize_config_url(rfc8414) == rfc8414
+
+
+def test_jwt_algorithm_accepts_only_asymmetric_allowlist():
+    def token_for(algorithm: str) -> str:
+        header = base64.urlsafe_b64encode(
+            json.dumps({"alg": algorithm}).encode()
+        ).rstrip(b"=").decode()
+        return f"{header}.payload.signature"
+
+    for algorithm in ("RS256", "PS256", "ES256"):
+        assert oauth_mod._jwt_algorithm(token_for(algorithm)) == algorithm
+    for algorithm in ("HS256", "none", "bogus"):
+        assert oauth_mod._jwt_algorithm(token_for(algorithm)) is None
+
+
+async def test_missing_audience_fails_closed(session, keypair):
+    runtime_settings.write(session, {"oauth_config_url": CONFIG_URL})
+    token = _token(keypair)
+    with pytest.raises(HTTPException) as exc:
+        await OAuthProvider().authenticate(
+            _request({"Authorization": f"Bearer {token}"}), _server()
+        )
+    assert exc.value.status_code == 403
 
 
 async def test_accept_bearer_delegates_local_tokens(session, keypair, monkeypatch):
@@ -222,7 +477,12 @@ async def test_accept_bearer_delegates_local_tokens(session, keypair, monkeypatc
 
     monkeypatch.setattr(bearer_mod, "get_engine", oauth_mod.get_engine)
     runtime_settings.write(
-        session, {"oauth_config_url": CONFIG_URL, "oauth_accept_bearer": True}
+        session,
+        {
+            "oauth_config_url": CONFIG_URL,
+            "oauth_audience": AUDIENCE,
+            "oauth_accept_bearer": True,
+        },
     )
     session.add(
         Token(id="t1", name="auto", token_hash=hash_token("mcpe_localtoken"), prefix="mcpe_loc", scope="all")

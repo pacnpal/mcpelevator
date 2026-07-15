@@ -62,7 +62,7 @@ def _summary(server: Server, sup, session: Session, base: str) -> ServerSummary:
     # Legacy DBs (the old schema accepted any string) may hold e.g. "Bearer"; coerce
     # to the response model's Literal so a single bad row can't 500 the whole dashboard.
     auth = (auth or "").strip().lower()
-    if auth not in ("none", "bearer"):
+    if auth not in ("none", "bearer", "oauth"):
         auth = "none"
     return ServerSummary(
         id=server.id,
@@ -202,14 +202,24 @@ async def update_server(
     # Signature of the OAuth-relevant config before the edit, to decide token cleanup below.
     existing = repo.get_server(session, server_id)
     before = _oauth_signature(existing) if existing is not None else None
+    auth_changed = "auth_provider" in changes
 
     try:
         # Threadpool: see create_server — the recomputed config_hash is a scrypt derivation.
-        server = await run_in_threadpool(service.update_server, session, server_id, changes)
+        if auth_changed:
+            # Hold the hub lock across the write so a reconcile cannot rebuild an old
+            # bundle after invalidation but before the new auth value commits.
+            async with request.app.state.groups.auth_transition():
+                server = await run_in_threadpool(service.update_server, session, server_id, changes)
+        else:
+            server = await run_in_threadpool(service.update_server, session, server_id, changes)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        if auth_changed:
+            await resync_groups(request)
 
     sup = request.app.state.supervisor
     # If the OAuth config changed (upstream URL, scopes, client) or OAuth was turned off, the
@@ -235,7 +245,7 @@ async def update_server(
         # excludes slug, so the reconciler won't do it).
         sup.rename_slug(server_id, server.slug)
     sup.nudge()  # config_hash may have changed -> reconciler restarts if needed
-    if changes.keys() & {"auth_provider", "mcp_http", "slug"}:
+    if changes.keys() & {"mcp_http", "slug"}:
         await resync_groups(request)  # membership/namespace changed — no async gap
     return _summary(server, sup, session, base_url(request))
 
