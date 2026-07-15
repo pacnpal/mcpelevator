@@ -93,7 +93,7 @@ class _OAuthJWTVerifier(JWTVerifier):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._jwks_refresh_lock = asyncio.Lock()
-        self._last_miss_refresh = 0.0
+        self._last_miss_refresh = float("-inf")
         self._last_miss_unavailable = False
 
     async def _get_jwks_key(self, kid: str | None) -> str:
@@ -162,6 +162,8 @@ def _normalize_config_url(config_url: str) -> str:
 
 async def _discovery(config_url: str) -> dict[str, Any]:
     url = _normalize_config_url(config_url)
+    if not runtime_settings.is_valid_oauth_endpoint_url(url):
+        raise ValueError(f"invalid oauth_config_url: {url!r}")
     cached = _discovery_cache.get(url)
     now = time.monotonic()
     if cached and now - cached[0] < _DISCOVERY_TTL_S:

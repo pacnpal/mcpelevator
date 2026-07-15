@@ -367,9 +367,10 @@ Setup:
      }'
    ```
 
-   `oauth_config_url` also accepts a bare issuer URL. `oauth_audience` is required
-   and pins the `aud` claim; `oauth_allowed_subjects` optionally allowlists identities
-   by case-insensitive `preferred_username`/`login`/`email`, or exact `sub`.
+   `oauth_config_url` also accepts a bare issuer URL. HTTPS is required except for
+   explicit loopback development URLs. `oauth_audience` is required and pins the
+   `aud` claim; `oauth_allowed_subjects` optionally allowlists identities by
+   case-insensitive `preferred_username`/`login`/`email`, or exact `sub`.
    `oauth_scopes` is optional metadata that tells clients what to request from the
    authorization server.
 4. Set a server's auth to `oauth` (or `default_auth_provider` to `oauth`), then add

@@ -85,6 +85,20 @@ def _token(kp: RSAKeyPair, **kwargs) -> str:
     return kp.create_token(**defaults)
 
 
+def _token_without_exp(kp: RSAKeyPair) -> str:
+    return jwt.encode(
+        {"alg": "RS256"},
+        {
+            "sub": "user-1",
+            "iss": ISSUER,
+            "aud": AUDIENCE,
+            "iat": int(time.time()),
+        },
+        import_key(kp.private_key.get_secret_value(), "RSA"),
+        algorithms=["RS256"],
+    )
+
+
 def test_settings_validation():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(engine)
@@ -261,6 +275,18 @@ async def test_token_requires_current_bounded_lifetime(session, keypair, claims)
     with pytest.raises(HTTPException) as exc:
         await OAuthProvider().authenticate(
             _request({"Authorization": f"Bearer {token}"}), _server()
+        )
+    assert exc.value.status_code == 401
+
+
+async def test_token_without_expiry_is_rejected(session, keypair):
+    runtime_settings.write(
+        session, {"oauth_config_url": CONFIG_URL, "oauth_audience": AUDIENCE}
+    )
+    with pytest.raises(HTTPException) as exc:
+        await OAuthProvider().authenticate(
+            _request({"Authorization": f"Bearer {_token_without_exp(keypair)}"}),
+            _server(),
         )
     assert exc.value.status_code == 401
 
@@ -626,6 +652,30 @@ def test_oauth_endpoint_urls_require_https_outside_loopback():
     assert not runtime_settings.is_valid_oauth_endpoint_url(
         "https://user:secret@as.example/jwks"
     )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("issuer", "http://as.example"),
+        ("jwks_uri", "http://as.example/jwks"),
+    ],
+)
+async def test_discovery_rejects_insecure_metadata_urls(monkeypatch, field, value):
+    document = {"issuer": ISSUER, "jwks_uri": f"{ISSUER}/jwks", field: value}
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json=document, request=request)
+    )
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        oauth_mod.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=transport),
+    )
+    oauth_mod._discovery_cache.clear()
+
+    with pytest.raises(ValueError):
+        await oauth_mod._discovery(CONFIG_URL)
 
 
 def test_jwt_algorithm_accepts_only_asymmetric_allowlist():

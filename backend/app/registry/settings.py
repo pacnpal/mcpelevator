@@ -83,8 +83,8 @@ def is_valid_oauth_endpoint_url(value: Any) -> bool:
     """OAuth metadata and JWKS endpoints require HTTPS, except for loopback dev."""
     if not isinstance(value, str) or not value or any(c.isspace() for c in value):
         return False
-    parsed = urlsplit(value)
     try:
+        parsed = urlsplit(value)
         _ = parsed.port  # accessing .port rejects malformed values such as ":bad"
     except ValueError:
         return False
