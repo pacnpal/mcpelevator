@@ -83,12 +83,12 @@ async def _discovery(config_url: str) -> dict[str, Any]:
 
 async def _verifier_for(config_url: str, audience: str):
     """Build (or reuse) a JWTVerifier bound to the AS's issuer + JWKS."""
-    key = (config_url, audience)
+    doc = await _discovery(config_url)
+    key = (config_url, audience, doc["jwks_uri"], doc["issuer"])
     verifier = _verifier_cache.get(key)
     if verifier is None:
         from fastmcp.server.auth.providers.jwt import JWTVerifier
 
-        doc = await _discovery(config_url)
         verifier = JWTVerifier(
             jwks_uri=doc["jwks_uri"],
             issuer=doc["issuer"],
