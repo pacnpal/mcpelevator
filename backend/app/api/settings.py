@@ -7,6 +7,7 @@ from sqlmodel import Session
 from starlette.requests import Request
 
 from app.api.schemas import SettingsInfo, SettingsUpdate
+from app.api.util import resync_groups
 from app.auth.control_plane import would_lock_out
 from app.db import get_session
 from app.registry import settings as runtime_settings
@@ -14,9 +15,15 @@ from app.registry import settings as runtime_settings
 router = APIRouter()
 
 
+def _info(values: dict) -> SettingsInfo:
+    # SettingsInfo declares the SPA-facing subset; the group registry is served by its
+    # own /api/groups router, so drop any keys (e.g. "groups") not in the model.
+    return SettingsInfo(**{k: values[k] for k in SettingsInfo.model_fields if k in values})
+
+
 @router.get("/settings", response_model=SettingsInfo)
 async def get_settings(session: Session = Depends(get_session)):
-    return SettingsInfo(**runtime_settings.read_all(session))
+    return _info(runtime_settings.read_all(session))
 
 
 @router.patch("/settings", response_model=SettingsInfo)
@@ -36,15 +43,31 @@ async def update_settings(
                 detail="authenticate with an admin token before enabling control-plane auth",
             )
 
+    auth_changed = "default_auth_provider" in changes
     try:
-        # Invariants (enum settings + the host allowlist) are enforced in the SSOT
-        # writer; the guard runs under its write lock. Surface ValueError as a 400.
-        result = SettingsInfo(**runtime_settings.write(session, changes, guard=guard))
+        if auth_changed:
+            # Hold the hub lock across the write so the reconciler cannot rebuild an
+            # old bundle between invalidation and commit. Requests see 503 until the
+            # new provider's member set is ready.
+            async with request.app.state.groups.auth_transition():
+                result = _info(runtime_settings.write(session, changes, guard=guard))
+        else:
+            # Invariants (enum settings + the host allowlist) are enforced in the SSOT
+            # writer; the guard runs under its write lock. Surface ValueError as a 400.
+            result = _info(runtime_settings.write(session, changes, guard=guard))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # Toggling the root-equivalent docker runner is a gate change — nudge the reconciler so it
-    # applies at once (stop running docker units when turned off) instead of waiting for the
-    # next poll interval, which an operator may have lengthened.
+    finally:
+        if auth_changed:
+            await resync_groups(request)
+    # Gate changes apply at once instead of waiting for the next poll interval (which an
+    # operator may have lengthened): docker_runner stops running docker units via the
+    # nudged reconcile.
     if "docker_runner" in changes:
         request.app.state.supervisor.nudge()
+    # A default-auth change must converge the group hub BEFORE this returns, not on the
+    # next reconcile: every /g dispatcher enforces the NEW default auth on the very next
+    # request, so a bearer->none downgrade must not leave a group's OLD mounted set
+    # (which may include bearer-only members) serveable in the gap. sync() is
+    # lock-serialized and its lifespans run in their own tasks, so calling it here is safe.
     return result

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from sqlmodel import Session
 from starlette.responses import Response
 
@@ -11,6 +12,8 @@ from app.auth.control_plane import enforcement_enabled
 from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Token
+from app.groups import registry as group_registry
+from app.registry import service
 from app.util import hash_token, new_id, new_token
 
 router = APIRouter()
@@ -26,14 +29,22 @@ async def list_tokens(session: Session = Depends(get_session)):
 
 @router.post("/tokens", response_model=TokenCreated, status_code=201)
 async def create_token(payload: TokenCreate, session: Session = Depends(get_session)):
-    # scope is the access boundary: "all" (every bearer-protected server), a specific
-    # server id, or "control" (a control-plane admin token). Reject a blank or dangling
-    # value rather than silently widening or minting a token that authorizes nothing.
+    # scope is the access boundary: "all" (every bearer-protected server + every group),
+    # a specific server id, "group:<name>" (one /g/<name> bundle), or "control" (a
+    # control-plane admin token). Reject a blank or dangling value rather than silently
+    # widening or minting a token that authorizes nothing.
     scope = payload.scope.strip()
     if not scope:
-        raise HTTPException(status_code=400, detail="scope must be 'all', 'control', or a server id")
-    if scope not in ("all", "control") and repo.get_server(session, scope) is None:
-        raise HTTPException(status_code=400, detail=f"unknown server scope {scope!r}")
+        raise HTTPException(
+            status_code=400,
+            detail="scope must be 'all', 'control', 'group:<name>', or a server id",
+        )
+    # A server-id scope is validated here (a fast read, no lock). A group scope is
+    # validated at INSERT time under the config write lock instead (see _persist below),
+    # so it can't race a concurrent group delete.
+    if not scope.startswith("group:") and scope not in ("all", "control"):
+        if repo.get_server(session, scope) is None:
+            raise HTTPException(status_code=400, detail=f"unknown server scope {scope!r}")
     raw = new_token()
     token = Token(
         id=new_id(),
@@ -42,7 +53,25 @@ async def create_token(payload: TokenCreate, session: Session = Depends(get_sess
         prefix=raw[:12],
         scope=scope,
     )
-    repo.create_token(session, token)
+
+    def _persist() -> bool:
+        """Insert the token. For a group scope, re-check the group exists and insert under
+        the config write lock — the SAME lock DELETE /api/groups/{name} holds while it
+        revokes the group's tokens and removes it — so a token can't be minted for a group
+        being deleted and survive the revocation (which would re-authorize a same-named
+        group recreated later). The lock also keeps the wait off the event loop. Returns
+        False when the group no longer exists (-> 400)."""
+        if scope.startswith("group:"):
+            with service.config_write_lock():
+                if not group_registry.exists(session, scope[len("group:"):]):
+                    return False
+                repo.create_token(session, token)
+                return True
+        repo.create_token(session, token)
+        return True
+
+    if not await run_in_threadpool(_persist):
+        raise HTTPException(status_code=400, detail=f"unknown group scope {scope!r}")
     return TokenCreated(
         id=token.id, name=token.name, prefix=token.prefix,
         scope=token.scope, created_at=token.created_at, token=raw,

@@ -1,18 +1,23 @@
 <script lang="ts">
 	import {
 		createToken,
+		deleteGroup,
 		deleteToken,
 		errorMessage,
 		getAuthStatus,
 		getSettings,
+		listGroups,
 		listServers,
 		listTokens,
+		putGroup,
 		updateSettings
 	} from '$lib/api';
 	import type {
 		AuthProvider,
 		BindMode,
 		ControlPlaneAuth,
+		GroupInfo,
+		GroupMembers,
 		ServerSummary,
 		SettingsInfo,
 		TokenCreated,
@@ -21,6 +26,7 @@
 	import { clearToken, setToken } from '$lib/auth';
 	import { isLoopbackHost, isPrivateIpHost, normalizeHost } from '$lib/host';
 	import CopyButton from '$lib/components/CopyButton.svelte';
+	import CopyMenu from '$lib/components/CopyMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 
 	type LoadState = 'loading' | 'ready' | 'error';
@@ -41,6 +47,7 @@
 	let settings = $state<SettingsInfo | null>(null);
 	let tokens = $state<TokenInfo[]>([]);
 	let servers = $state<ServerSummary[]>([]);
+	let groups = $state<GroupInfo[]>([]);
 	// Whether THIS browser holds a working control token (not just whether one exists
 	// in the backend). That's what decides if enabling enforcement would lock us out.
 	let hasUsableAdminCredential = $state(false);
@@ -49,15 +56,22 @@
 		loadState = 'loading';
 		loadError = null;
 		try {
-			const [s, t, srv, auth] = await Promise.all([
+			const [s, t, srv, grp, auth] = await Promise.all([
 				getSettings(),
 				listTokens(),
 				listServers(),
+				listGroups(),
 				getAuthStatus()
 			]);
 			settings = s;
+			oauthConfigUrl = s.oauth_config_url;
+			oauthAudience = s.oauth_audience;
+			oauthAllowedSubjects = s.oauth_allowed_subjects.join(', ');
+			oauthScopes = s.oauth_scopes.join(', ');
+			oauthAcceptBearer = s.oauth_accept_bearer;
 			tokens = t;
 			servers = srv;
+			groups = grp;
 			hasUsableAdminCredential = auth.authenticated;
 			loadState = 'ready';
 		} catch (err) {
@@ -109,10 +123,14 @@
 		return collides ? `${server.name} (${server.slug})` : server.name;
 	}
 
-	/** Human label for a token's scope: 'All servers', the server's label, or a
-	 * fallback when the scoped server no longer exists. */
+	/** Human label for a token's scope: 'All servers', a group, the server's label, or
+	 * a fallback when the scoped server/group no longer exists. */
 	function scopeLabel(scope: string): string {
-		if (scope === 'all') return 'All servers';
+		if (scope === 'all') return 'All servers & groups';
+		if (scope.startsWith('group:')) {
+			const name = scope.slice('group:'.length);
+			return groups.some((g) => g.name === name) ? `Group: ${name}` : 'Unknown group';
+		}
 		const server = servers.find((s) => s.id === scope);
 		return server ? serverLabel(server) : 'Unknown server';
 	}
@@ -182,7 +200,8 @@
 
 	const AUTH_CHOICES: { value: AuthProvider; label: string }[] = [
 		{ value: 'none', label: 'none' },
-		{ value: 'bearer', label: 'bearer' }
+		{ value: 'bearer', label: 'bearer' },
+		{ value: 'oauth', label: 'oauth' }
 	];
 	const BIND_CHOICES: { value: BindMode; label: string; hint: string }[] = [
 		{ value: 'local', label: 'local', hint: 'Loopback only' },
@@ -196,6 +215,44 @@
 	// Persist a settings patch (save-on-change), optimistically applying it and
 	// rolling back on failure so the controls never drift from the backend.
 	let savingField = $state<keyof SettingsInfo | null>(null);
+	const savingOauth = $derived(savingField === 'oauth_config_url');
+	let oauthConfigUrl = $state('');
+	let oauthAudience = $state('');
+	let oauthAllowedSubjects = $state('');
+	let oauthScopes = $state('');
+	let oauthAcceptBearer = $state(false);
+
+	function splitCommaList(value: string): string[] {
+		return value
+			.split(',')
+			.map((item) => item.trim())
+			.filter(Boolean);
+	}
+
+	async function saveOauthSettings(e: SubmitEvent) {
+		e.preventDefault();
+		if (!settings || savingField) return;
+		savingField = 'oauth_config_url';
+		try {
+			settings = await updateSettings({
+				oauth_config_url: oauthConfigUrl.trim(),
+				oauth_audience: oauthAudience.trim(),
+				oauth_allowed_subjects: splitCommaList(oauthAllowedSubjects),
+				oauth_scopes: splitCommaList(oauthScopes),
+				oauth_accept_bearer: oauthAcceptBearer
+			});
+			oauthConfigUrl = settings.oauth_config_url;
+			oauthAudience = settings.oauth_audience;
+			oauthAllowedSubjects = settings.oauth_allowed_subjects.join(', ');
+			oauthScopes = settings.oauth_scopes.join(', ');
+			oauthAcceptBearer = settings.oauth_accept_bearer;
+			flashToast('OAuth settings saved', 'info');
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			savingField = null;
+		}
+	}
 
 	async function patchSettings(patch: Partial<SettingsInfo>, field: keyof SettingsInfo) {
 		// Serialize saves: PATCH returns the full settings object, so an overlapping
@@ -337,6 +394,140 @@
 	function confirmEnableDockerRunner() {
 		confirmEnableDocker = false;
 		patchSettings({ docker_runner: true }, 'docker_runner');
+	}
+
+	// ---- Groups (the /g/<name> registry) ----------------------------------------
+	// A group is a named bundle served at /g/<name>/mcp — the union of its running
+	// members' tools, namespaced by slug. Membership is "*" (every registered server,
+	// present and future) or an explicit list of server ids. There is no special-case
+	// name; add a group named "all" with members "*" for a bundle of everything.
+	let newGroupName = $state('');
+	let newGroupMode = $state<'all' | 'selected'>('all');
+	let newGroupSelection = $state<string[]>([]);
+	let savingGroup = $state(false);
+	let deletingGroup = $state<string | null>(null);
+
+	// A group name is the URL routing key, so mirror the backend grammar (lowercase
+	// alphanumerics + single hyphens) — reject anything that couldn't be routed.
+	const groupNameValid = $derived(/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(newGroupName.trim()));
+
+	/** Human label for a group's membership: "all servers" for the wildcard, else a
+	 * count. */
+	function membersLabel(members: GroupMembers): string {
+		if (members === '*') return 'all servers';
+		return members.length === 1 ? '1 server' : `${members.length} servers`;
+	}
+
+	/** Synthetic summary so the existing CopyMenu (client-config snippets) works for a
+	 * group's /g/<name>/mcp URL without any changes to install.ts. */
+	function groupSummary(group: GroupInfo): ServerSummary {
+		return {
+			id: `group:${group.name}`,
+			slug: group.name,
+			name: `Group: ${group.name}`,
+			runner: 'remote',
+			enabled: true,
+			state: 'running',
+			startup_status: null,
+			transports: { mcp_http: true, rest_openapi: false },
+			urls: { mcp: group.url, rest: null },
+			auth: settings?.default_auth_provider ?? 'none',
+			last_error: null,
+			pid: null,
+			port: null,
+			tools_count: 0
+		} satisfies ServerSummary;
+	}
+
+	function toggleNewGroupServer(id: string, included: boolean) {
+		newGroupSelection = included
+			? [...newGroupSelection, id]
+			: newGroupSelection.filter((x) => x !== id);
+	}
+
+	async function refreshGroups() {
+		try {
+			groups = await listGroups();
+		} catch (err) {
+			flashToast(errorMessage(err));
+		}
+	}
+
+	// A pending replace: set when the entered name matches an existing group, so the
+	// create form doubles as an in-place editor (putGroup replaces membership) WITHOUT
+	// silently overwriting — the operator confirms first. Cleared automatically once the
+	// name no longer matches (the banner's condition re-checks it).
+	let confirmReplaceName = $state<string | null>(null);
+
+	async function submitGroup() {
+		const name = newGroupName.trim();
+		const members: GroupMembers = newGroupMode === 'all' ? '*' : newGroupSelection;
+		savingGroup = true;
+		try {
+			await putGroup(name, members);
+			await refreshGroups();
+			newGroupName = '';
+			newGroupMode = 'all';
+			newGroupSelection = [];
+			confirmReplaceName = null;
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			savingGroup = false;
+		}
+	}
+
+	// The existing group a submit would replace (name matches), or null for a create.
+	const replaceTarget = $derived(
+		groups.find((g) => g.name === newGroupName.trim()) ?? null
+	);
+
+	// Load an existing group's CURRENT membership into the form so the operator edits
+	// from its real state — never from the default 'all'/[] — which would otherwise let
+	// an in-place replace silently broaden a group's (and its tokens') authorization.
+	function editGroup(group: GroupInfo) {
+		newGroupName = group.name;
+		newGroupMode = group.members === '*' ? 'all' : 'selected';
+		newGroupSelection = group.members === '*' ? [] : [...group.members];
+		confirmReplaceName = null;
+		confirmDeleteGroup = null;
+	}
+
+	function handleCreateGroup(e: SubmitEvent) {
+		e.preventDefault();
+		if (savingGroup || !groupNameValid) return;
+		const name = newGroupName.trim();
+		// putGroup has replace semantics. If the name is taken, require an explicit
+		// confirm so membership is never *silently* overwritten — but still allow editing
+		// an existing group in place, rather than forcing a delete+recreate that would
+		// take /g/<name>/mcp offline and revoke its group:<name> tokens.
+		if (replaceTarget) {
+			confirmReplaceName = name;
+			return;
+		}
+		void submitGroup();
+	}
+
+	// Delete needs an explicit confirm (it takes a live /g/<name>/mcp endpoint offline),
+	// mirroring the per-row token-revoke gate.
+	let confirmDeleteGroup = $state<string | null>(null);
+
+	async function handleDeleteGroup(name: string) {
+		if (deletingGroup) return;
+		deletingGroup = name;
+		try {
+			await deleteGroup(name);
+			groups = groups.filter((g) => g.name !== name);
+			// The backend revokes this group's tokens on delete; drop them from the list too
+			// so a revoked group:<name> token can't keep looking valid (and a same-named
+			// group recreated later won't make the stale rows appear to work again).
+			tokens = tokens.filter((t) => t.scope !== `group:${name}`);
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			deletingGroup = null;
+			confirmDeleteGroup = null;
+		}
 	}
 
 	// ---- Allowed hosts editor -------------------------------------------------
@@ -500,7 +691,7 @@
 						autocomplete="off"
 						spellcheck="false"
 						placeholder="e.g. claude-desktop"
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 					/>
 				</div>
 				<div class="flex min-w-0 flex-col gap-1.5">
@@ -510,12 +701,21 @@
 					<select
 						id="token-scope"
 						bind:value={newTokenScope}
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
 					>
-						<option value="all">All servers</option>
-						{#each servers as server (server.id)}
-							<option value={server.id}>{serverLabel(server)}</option>
-						{/each}
+						<option value="all">All servers &amp; groups</option>
+						{#if groups.length > 0}
+							<optgroup label="Groups">
+								{#each groups as group (group.name)}
+									<option value={`group:${group.name}`}>Group: {group.name}</option>
+								{/each}
+							</optgroup>
+						{/if}
+						<optgroup label="Servers">
+							{#each servers as server (server.id)}
+								<option value={server.id}>{serverLabel(server)}</option>
+							{/each}
+						</optgroup>
 					</select>
 				</div>
 				<button
@@ -581,8 +781,10 @@
 										<span
 											class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
 											title={token.scope === 'all'
-												? 'Authorizes every bearer-protected server'
-												: 'Authorizes only this server'}
+												? 'Authorizes every bearer-protected server and group'
+												: token.scope.startsWith('group:')
+													? 'Authorizes only this group'
+													: 'Authorizes only this server'}
 											style={token.scope === 'all'
 												? 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'
 												: 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'}
@@ -649,7 +851,7 @@
 			<fieldset class="flex flex-col gap-2 border-0 p-0">
 				<legend class="text-sm font-medium text-[var(--color-ink)]">Default auth</legend>
 				<div
-					class="grid grid-cols-2 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1"
+					class="grid grid-cols-3 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1"
 				>
 					{#each AUTH_CHOICES as choice (choice.value)}
 						<label
@@ -664,7 +866,7 @@
 								value={choice.value}
 								checked={settings.default_auth_provider === choice.value}
 								onchange={() => setDefaultAuth(choice.value)}
-								disabled={savingField === 'default_auth_provider'}
+								disabled={savingField !== null}
 								class="sr-only"
 							/>
 							{choice.label}
@@ -675,8 +877,91 @@
 					Servers set to <code class="font-mono">inherit</code> use this.
 					<code class="font-mono">bearer</code> requires a token in
 					<code class="font-mono">Authorization: Bearer …</code>.
+					<code class="font-mono">oauth</code> validates JWTs from the authorization server below.
 				</p>
 			</fieldset>
+
+			<!-- Inbound OAuth resource server -->
+			<form class="flex flex-col gap-3" onsubmit={saveOauthSettings}>
+				<div class="flex flex-col gap-1">
+					<h3 class="text-sm font-medium text-[var(--color-ink)]">OAuth resource server</h3>
+					<p class="text-xs text-[var(--color-ink-dim)]">
+						Validates access tokens clients send to servers and groups using
+						<code class="font-mono">oauth</code>. This is separate from OAuth used to reach a remote upstream.
+					</p>
+				</div>
+				<div class="grid gap-3 sm:grid-cols-2">
+					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+						Discovery URL or issuer
+						<input
+							type="url"
+							bind:value={oauthConfigUrl}
+							disabled={savingField !== null}
+							placeholder="https://auth.example.com/application/o/mcp/"
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+					</label>
+					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+						Audience
+						<input
+							type="text"
+							bind:value={oauthAudience}
+							disabled={savingField !== null}
+							placeholder="mcp-production-api"
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+					</label>
+				</div>
+				<p class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
+					Both fields are required before OAuth endpoints serve metadata or accept tokens. Audience validation prevents a token minted for another app from being reused here.
+				</p>
+				<div class="grid gap-3 sm:grid-cols-2">
+					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+						Allowed identities <span class="font-normal text-[var(--color-ink-dim)]">(optional, comma-separated)</span>
+						<input
+							type="text"
+							bind:value={oauthAllowedSubjects}
+							disabled={savingField !== null}
+							placeholder="alice, bob@example.com"
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+					</label>
+					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+						Advertised scopes <span class="font-normal text-[var(--color-ink-dim)]">(optional, comma-separated)</span>
+						<input
+							type="text"
+							bind:value={oauthScopes}
+							disabled={savingField !== null}
+							placeholder="openid, profile, email"
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+					</label>
+				</div>
+				<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
+					<input
+						type="checkbox"
+						bind:checked={oauthAcceptBearer}
+						disabled={savingField !== null}
+						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+					/>
+					<span class="flex flex-col gap-0.5">
+						<span class="text-sm font-medium text-[var(--color-ink)]">Also accept local bearer tokens</span>
+						<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+							Lets <code class="font-mono">mcpe_…</code> automation tokens use OAuth-protected endpoints with their normal server or group scope checks.
+						</span>
+					</span>
+				</label>
+				<div class="flex justify-end">
+					<button
+						type="submit"
+						disabled={savingOauth || savingField !== null}
+						aria-busy={savingOauth}
+						class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-50"
+					>
+						{savingOauth ? 'Saving…' : 'Save OAuth settings'}
+					</button>
+				</div>
+			</form>
 
 			<!-- Bind mode -->
 			<fieldset class="flex flex-col gap-2 border-0 p-0">
@@ -699,7 +984,7 @@
 									value={choice.value}
 									checked={settings.bind_mode === choice.value}
 									onchange={() => setBindMode(choice.value)}
-									disabled={savingField === 'bind_mode'}
+									disabled={savingField !== null}
 									class="sr-only"
 								/>
 								<span
@@ -777,7 +1062,7 @@
 						type="checkbox"
 						checked={settings.allow_private_lan}
 						onchange={(e) => setAllowPrivateLan(e.currentTarget.checked, e.currentTarget)}
-						disabled={savingField === 'allow_private_lan'}
+						disabled={savingField !== null}
 						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
 					/>
 					<span class="flex flex-col gap-0.5">
@@ -846,7 +1131,7 @@
 						type="checkbox"
 						checked={settings.docker_runner}
 						onchange={(e) => setDockerRunner(e.currentTarget.checked, e.currentTarget)}
-						disabled={savingField === 'docker_runner'}
+						disabled={savingField !== null}
 						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
 					/>
 					<span class="flex flex-col gap-0.5">
@@ -895,6 +1180,242 @@
 				{/if}
 			</fieldset>
 
+			<!-- Groups -->
+			<fieldset class="flex flex-col gap-3 border-0 p-0">
+				<legend class="text-sm font-medium text-[var(--color-ink)]">Groups</legend>
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					A group is served at <code class="font-mono">/g/&lt;name&gt;/mcp</code> — one URL
+					bundling its running members' tools, each prefixed by the member's slug (e.g.
+					<code class="font-mono">github_create_issue</code>). Members are
+					<code class="font-mono">all servers</code> (every registered server, including
+					future ones) or a picked list. A group uses the default auth provider above. A
+					protected member is included only when it uses that same provider; bearer and OAuth
+					credentials cannot stand in for one another. Name a group
+					<code class="font-mono">all</code> with <code class="font-mono">all servers</code>
+					for a bundle of everything.
+				</p>
+
+				<!-- Existing groups -->
+				{#if groups.length === 0}
+					<p
+						class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-4 text-center text-xs text-[var(--color-ink-dim)]"
+					>
+						No groups yet. Create one below to serve a bundle at
+						<code class="font-mono">/g/&lt;name&gt;/mcp</code>.
+					</p>
+				{:else}
+					<ul class="flex flex-col gap-2">
+						{#each groups as group (group.name)}
+							<li
+								class="flex flex-col gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5"
+							>
+								<div class="flex items-center justify-between gap-2">
+									<div class="flex min-w-0 flex-col gap-0.5">
+										<span class="truncate font-mono text-sm font-semibold text-[var(--color-ink)]">
+											{group.name}
+										</span>
+										<span class="text-[11px] text-[var(--color-ink-dim)]">
+											{membersLabel(group.members)}
+										</span>
+									</div>
+									<div class="flex shrink-0 items-center gap-1.5">
+										<CopyMenu server={groupSummary(group)} />
+										{#if confirmDeleteGroup !== group.name}
+											<button
+												type="button"
+												onclick={() => editGroup(group)}
+												aria-label={`Edit group ${group.name}`}
+												class="shrink-0 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+											>
+												Edit
+											</button>
+										{/if}
+										{#if confirmDeleteGroup === group.name}
+											<button
+												type="button"
+												onclick={() => handleDeleteGroup(group.name)}
+												disabled={deletingGroup === group.name}
+												aria-busy={deletingGroup === group.name}
+												class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+												style="background-color: var(--color-state-failed);"
+											>
+												Delete
+											</button>
+											<button
+												type="button"
+												onclick={() => (confirmDeleteGroup = null)}
+												disabled={deletingGroup === group.name}
+												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+											>
+												Cancel
+											</button>
+										{:else}
+											<button
+												type="button"
+												onclick={() => (confirmDeleteGroup = group.name)}
+												aria-label={`Delete group ${group.name}`}
+												class="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium transition active:translate-y-px"
+												style="border-color: color-mix(in oklab, var(--color-state-failed) 35%, transparent); color: var(--color-state-failed);"
+											>
+												Delete
+											</button>
+										{/if}
+									</div>
+								</div>
+								{#if confirmDeleteGroup === group.name}
+									<p class="text-[11px] leading-tight text-[var(--color-state-failed)]">
+										This takes <code class="font-mono">{group.url}</code> offline and revokes tokens
+										scoped to this group.
+									</p>
+								{/if}
+								<code class="min-w-0 truncate font-mono text-[11px] text-[var(--color-ink-dim)]">
+									{group.url}
+								</code>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+
+				<!-- New group -->
+				<form
+					onsubmit={handleCreateGroup}
+					class="flex flex-col gap-2 rounded-lg border border-dashed border-[var(--color-line)] p-3"
+				>
+					<div class="flex flex-wrap items-end gap-2">
+						<div class="flex min-w-0 flex-1 basis-40 flex-col gap-1.5">
+							<label for="group-name" class="text-xs font-medium text-[var(--color-ink-muted)]">
+								New group
+							</label>
+							<input
+								id="group-name"
+								type="text"
+								bind:value={newGroupName}
+								autocomplete="off"
+								spellcheck="false"
+								placeholder="e.g. all, dev-tools"
+								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							/>
+						</div>
+						<button
+							type="submit"
+							disabled={!groupNameValid || savingGroup}
+							aria-busy={savingGroup}
+							class="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+						>
+							{groups.some((g) => g.name === newGroupName.trim()) ? 'Update group' : 'Create group'}
+						</button>
+					</div>
+					{#if newGroupName.trim().length > 0 && !groupNameValid}
+						<p class="text-[11px] text-[var(--color-state-failed)]">
+							Use lowercase letters, digits, and single hyphens (the URL routing key).
+						</p>
+					{/if}
+					{#if confirmReplaceName !== null && confirmReplaceName === newGroupName.trim()}
+						<div
+							role="alert"
+							class="flex flex-col gap-2.5 rounded-lg border p-3"
+							style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+						>
+							<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+								A group named <code class="font-mono text-[var(--color-ink)]">{confirmReplaceName}</code>
+								already exists{#if replaceTarget} (currently <strong>{membersLabel(replaceTarget.members)}</strong>){/if}.
+								Replace its members with your selection above? Its
+								<code class="font-mono">/g/{confirmReplaceName}/mcp</code> endpoint stays up and its
+								tokens keep working — only the membership changes. Use <strong>Edit</strong> on the
+								group above to start from its current members.
+							</p>
+							<div class="flex items-center gap-1.5">
+								<button
+									type="button"
+									onclick={() => submitGroup()}
+									disabled={savingGroup}
+									aria-busy={savingGroup}
+									class="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-70"
+								>
+									Replace members
+								</button>
+								<button
+									type="button"
+									onclick={() => (confirmReplaceName = null)}
+									disabled={savingGroup}
+									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+								>
+									Cancel
+								</button>
+							</div>
+						</div>
+					{/if}
+
+					<div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Group members">
+						{#each [
+							{ value: 'all', label: 'All servers', hint: 'every registered server, including future ones' },
+							{ value: 'selected', label: 'Selected servers', hint: 'only the servers you pick below' }
+						] as const as choice (choice.value)}
+							<label
+								class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+								style={newGroupMode === choice.value
+									? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+									: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+							>
+								<span class="flex items-center gap-2">
+									<input
+										type="radio"
+										name="new-group-mode"
+										value={choice.value}
+										checked={newGroupMode === choice.value}
+										onchange={() => (newGroupMode = choice.value)}
+										class="sr-only"
+									/>
+									<span
+										class="text-sm font-semibold"
+										style={newGroupMode === choice.value
+											? 'color: var(--color-accent);'
+											: 'color: var(--color-ink);'}
+									>
+										{choice.label}
+									</span>
+								</span>
+								<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+									{choice.hint}
+								</span>
+							</label>
+						{/each}
+					</div>
+					{#if newGroupMode === 'selected'}
+						{#if servers.length === 0}
+							<p class="text-xs text-[var(--color-ink-dim)]">No servers yet — add one first.</p>
+						{:else}
+							<div
+								class="flex flex-col gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-2"
+							>
+								{#each servers as server (server.id)}
+									<label
+										class="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition hover:bg-[var(--color-surface)]"
+										class:opacity-60={!server.enabled}
+									>
+										<input
+											type="checkbox"
+											checked={newGroupSelection.includes(server.id)}
+											onchange={(e) => toggleNewGroupServer(server.id, e.currentTarget.checked)}
+											class="size-4 shrink-0 accent-[var(--color-accent)]"
+										/>
+										<span class="min-w-0 flex-1 truncate text-sm text-[var(--color-ink)]">
+											{serverLabel(server)}
+										</span>
+										{#if !server.enabled}
+											<span class="text-[10px] text-[var(--color-ink-dim)]">disabled</span>
+										{/if}
+									</label>
+								{/each}
+							</div>
+							<p class="text-xs text-[var(--color-ink-dim)]">
+								Only running members appear in the bundle; a disabled pick joins when it starts.
+							</p>
+						{/if}
+					{/if}
+				</form>
+			</fieldset>
+
 			<!-- Control-plane auth -->
 			<fieldset class="flex flex-col gap-2 border-0 p-0">
 				<legend class="text-sm font-medium text-[var(--color-ink)]">Control-plane auth</legend>
@@ -916,7 +1437,7 @@
 									value={choice.value}
 									checked={settings.control_plane_auth === choice.value}
 									onchange={() => setControlPlaneAuth(choice.value)}
-									disabled={savingField === 'control_plane_auth'}
+									disabled={savingField !== null}
 									class="sr-only"
 								/>
 								<span
@@ -959,15 +1480,16 @@
 					<input
 						type="text"
 						bind:value={newHost}
+						disabled={savingField !== null}
 						autocomplete="off"
 						spellcheck="false"
 						placeholder="mcp.example.com"
 						aria-label="Add allowed host"
-						class="min-w-0 flex-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						class="min-w-0 flex-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 					/>
 					<button
 						type="submit"
-						disabled={newHost.trim().length === 0 || savingField === 'allowed_hosts'}
+						disabled={newHost.trim().length === 0 || savingField !== null}
 						class="inline-flex shrink-0 items-center gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
 					>
 						<svg
@@ -1001,7 +1523,7 @@
 								<button
 									type="button"
 									onclick={() => removeHost(host)}
-									disabled={savingField === 'allowed_hosts'}
+									disabled={savingField !== null}
 									aria-label={`Remove ${host}`}
 									class="rounded-md p-1 text-[var(--color-ink-dim)] transition hover:text-[var(--color-state-failed)] disabled:opacity-50"
 								>

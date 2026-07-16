@@ -2,9 +2,10 @@
 
 These let a load balancer / client check whether a specific proxied server is
 accepting requests. The responses are deliberately COARSE — only pass/fail
-readiness, never state/last_error/inventory detail — because the endpoints are
-public (unauthenticated). Servers are created disabled (no subprocess); the
-supervisor endpoint is stubbed to simulate running/not-running deterministically.
+readiness, never state/last_error/inventory detail. The inventory-bearing
+endpoints are control-plane gated when auth enforcement is on. Servers are
+created disabled (no subprocess); the supervisor endpoint is stubbed to
+simulate running/not-running deterministically.
 """
 
 from __future__ import annotations
@@ -81,7 +82,7 @@ def test_health_slug_200_and_503_share_a_flat_coarse_schema():
 
 
 def test_public_health_does_not_leak_privileged_fields():
-    """Security: the public (unauthenticated) health surface must not expose server
+    """Security: per-server health responses must not expose privileged
     state, raw last_error, enabled, pid, or port — those stay behind the gated
     control plane. Checked on the per-server 200/503 and the summary rows."""
     with TestClient(app) as client:
@@ -139,14 +140,6 @@ def test_health_summary_all_enabled_running_is_ok():
 
 
 def test_health_endpoint_is_public_not_gated():
-    """All three health endpoints must be reachable without any auth token,
-    even when the control plane enforces bearer auth on other routes."""
+    """The top-level liveness endpoint must stay reachable without auth."""
     with TestClient(app) as client:
-        # /api/health — liveness
         assert client.get("/api/health", headers=LOOPBACK).status_code == 200
-        # /api/health/summary — should not 401/403 even with no token
-        r = client.get("/api/health/summary", headers=LOOPBACK)
-        assert r.status_code == 200
-        # /api/health/<unknown-slug> — 404 is a legitimate response, not 401/403
-        r2 = client.get("/api/health/nonexistent-slug-xyz", headers=LOOPBACK)
-        assert r2.status_code == 404

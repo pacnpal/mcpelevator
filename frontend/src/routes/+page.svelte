@@ -1,5 +1,8 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { listServers } from '$lib/api';
+	import { hasActiveStartup, pollingInterval } from '$lib/startup';
 	import type { ServerSummary } from '$lib/types';
 	import ServerCard from '$lib/components/ServerCard.svelte';
 	import Toast from '$lib/components/Toast.svelte';
@@ -12,7 +15,7 @@
 	let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
 	const runningCount = $derived(
-		servers.filter((s) => s.state === 'running').length
+		servers.filter((s) => !hasActiveStartup(s) && s.state === 'running').length
 	);
 
 	function flashToast(message: string) {
@@ -21,33 +24,79 @@
 		toastTimer = setTimeout(() => (toast = null), 6000);
 	}
 
-	async function load() {
-		loadState = 'loading';
+	let loadInFlight = false;
+	let mutationRevision = 0;
+	let pollTimer: ReturnType<typeof setTimeout> | undefined;
+	let pollingStopped = false;
+
+	async function load(silent = false) {
+		if (loadInFlight) return;
+		loadInFlight = true;
+		const revision = mutationRevision;
+		if (!silent) loadState = 'loading';
 		try {
-			servers = await listServers();
+			const result = await listServers();
+			if (revision !== mutationRevision) return;
+			servers = result;
 			loadState = 'ready';
 		} catch (err) {
-			loadState = 'error';
-			const detail = err instanceof Error ? err.message : 'Unknown error';
-			flashToast(`Could not reach the backend — ${detail}`);
+			if (!silent) {
+				loadState = 'error';
+				const detail = err instanceof Error ? err.message : 'Unknown error';
+				flashToast(`Could not reach the backend — ${detail}`);
+			}
+		} finally {
+			loadInFlight = false;
 		}
+	}
+
+	function schedulePoll() {
+		clearTimeout(pollTimer);
+		if (pollingStopped) return;
+		pollTimer = setTimeout(async () => {
+			await load(true);
+			schedulePoll();
+		}, pollingInterval(servers));
 	}
 
 	// Replace a single server in-place after a toggle returns its fresh state.
 	function applyUpdate(next: ServerSummary) {
+		mutationRevision += 1;
 		servers = servers.map((s) => (s.id === next.id ? next : s));
+		schedulePoll();
 	}
 
 	// Drop a server from the list after it's deleted from a card's menu.
 	function removeServer(id: string) {
+		mutationRevision += 1;
 		const removed = servers.find((s) => s.id === id);
 		servers = servers.filter((s) => s.id !== id);
 		flashToast(removed ? `Deleted ${removed.name}` : 'Server deleted');
+		schedulePoll();
 	}
 
 	$effect(() => {
-		load();
-		return () => clearTimeout(toastTimer);
+		pollingStopped = false;
+		void load().finally(schedulePoll);
+		return () => {
+			pollingStopped = true;
+			clearTimeout(pollTimer);
+			clearTimeout(toastTimer);
+		};
+	});
+
+	// The OAuth callback's failure redirect lands HERE (`/?oauth=error` — a fixed,
+	// literal target; see backend/app/api/auth.py). The popup flow consumes it via the
+	// root layout before this page ever shows, but the full-tab fallback (popup blocked,
+	// or a cross-origin callback) arrives as a regular navigation — surface the failure
+	// instead of silently dumping the operator on the server list, then strip the query
+	// so a refresh doesn't re-toast.
+	$effect(() => {
+		void page.url.search;
+		if (page.url.searchParams.get('oauth') !== 'error') return;
+		const reason = page.url.searchParams.get('reason');
+		flashToast(reason ? `OAuth failed: ${reason}` : 'OAuth sign-in failed.');
+		void goto('/', { replaceState: true, noScroll: true, keepFocus: true });
 	});
 </script>
 
@@ -70,7 +119,7 @@
 		<div class="flex items-center gap-2">
 			<button
 				type="button"
-				onclick={load}
+				onclick={() => load()}
 				class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition active:translate-y-px hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
 			>
 				<svg
@@ -152,7 +201,7 @@
 			</div>
 			<button
 				type="button"
-				onclick={load}
+				onclick={() => load()}
 				class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-2 text-sm font-medium text-[var(--color-ink)] transition active:translate-y-px hover:border-[var(--color-line-strong)]"
 			>
 				Retry

@@ -108,7 +108,14 @@ def reset_all_runtime(session: Session) -> None:
     already 'stopped' to the API, so updating existing rows is sufficient."""
     session.execute(
         update(ServerRuntime).values(
-            state="stopped", pid=None, port=None, last_error=None, tools=[], updated_at=utcnow()
+            state="stopped",
+            pid=None,
+            port=None,
+            last_error=None,
+            restart_count=0,
+            last_health=None,
+            tools=[],
+            updated_at=utcnow(),
         )
     )
     session.commit()
@@ -184,6 +191,21 @@ def list_tokens(session: Session) -> list[Token]:
 
 def get_token_by_hash(session: Session, token_hash: str) -> Optional[Token]:
     return session.exec(select(Token).where(Token.token_hash == token_hash)).first()
+
+
+def delete_tokens_by_scope(session: Session, scope: str) -> int:
+    """Hard-delete every token carrying exactly ``scope``; returns the count removed.
+
+    Used when a group is deleted: a ``group:<name>`` scope is a deterministic string
+    (unlike a random server id), so leaving its tokens behind would let them silently
+    re-authorize a *different* group later recreated under the same name. Revoking them
+    on delete keeps "delete the group" meaning "revoke access to it"."""
+    tokens = list(session.exec(select(Token).where(Token.scope == scope)).all())
+    for token in tokens:
+        session.delete(token)
+    if tokens:
+        session.commit()
+    return len(tokens)
 
 
 def delete_token(

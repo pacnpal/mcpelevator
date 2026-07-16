@@ -34,7 +34,14 @@ class ProcessSpec:
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)  # server-specific vars / headers
     cwd: str | None = None
+    setup_script: str = ""
     transport: str = "stdio"  # stdio | streamable-http | sse
+    # For a remote runner that authenticates via OAuth: the config the bridge needs to
+    # build an OAuth httpx auth on the upstream transport (server id -> token file,
+    # url, scopes, static client creds). None for every other server. The tokens
+    # themselves are NOT here — the bridge reads/refreshes them from the shared file
+    # store keyed by server id (see app.auth.oauth_store).
+    oauth: dict | None = None
     # When True the bridge host does NOT merge the control plane's full os.environ into
     # the child; it passes only a minimal allowlist (PATH/HOME/DOCKER_*) plus ``env``.
     # The docker runner sets this so a container's ``-e KEY`` passthrough can only ever
@@ -68,4 +75,5 @@ def passthrough(server: Server) -> ProcessSpec:
         args=list(server.args or []),
         env=dict(server.env or {}),
         cwd=server.cwd,
+        setup_script=server.setup_script or "",
     )

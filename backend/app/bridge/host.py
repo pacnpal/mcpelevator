@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import os
 
-import uvicorn
 from fastmcp import FastMCP
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
 from fastmcp.server import create_proxy
@@ -110,19 +109,153 @@ def _child_env(spec: dict) -> dict[str, str]:
     return {**os.environ, **server_env}
 
 
+def _build_oauth_auth(oauth: dict):
+    """Build a refresh-only OAuth httpx auth for a remote upstream.
+
+    The interactive authorization already happened in the control plane (see
+    ``app.auth.oauth_flow``); the tokens + DCR client info live in the shared file
+    store. Here the bridge only needs an ``OAuthClientProvider`` that reads those
+    tokens and refreshes them automatically as the access token expires. Discovery
+    metadata is preloaded from the store so refresh targets the real token endpoint
+    rather than the SDK's ``<server-url>/token`` fallback.
+
+    The redirect/callback handlers raise: a bridge can't run an interactive sign-in.
+    If the refresh token itself has lapsed, the upstream 401 leads here, the request
+    fails, and the server goes unhealthy — the operator re-authenticates from the UI.
+    """
+    from app.auth.oauth_store import ServerTokenStorage  # local import: keeps bridge import light
+
+    from mcp.client.auth import OAuthClientProvider, TokenStorage
+    from mcp.shared.auth import OAuthClientMetadata
+    from pydantic import AnyHttpUrl
+
+    async def _no_interactive(*_args, **_kwargs):
+        raise RuntimeError(
+            "this upstream needs OAuth sign-in — re-authenticate it from the mcpelevator UI"
+        )
+
+    class _RefreshOnlyStorage(TokenStorage):
+        """Bridge-side storage: reads tokens/client info and writes back REFRESHED tokens,
+        but never persists a client REGISTRATION. Client registration is the control plane's
+        interactive job. The primary guard against a probe-time DCR is the no-tokens early
+        return in ``_build_oauth_auth`` (an unauthenticated server gets no provider at all);
+        this no-op ``set_client_info`` is defense in depth for the residual case where tokens
+        exist but a refresh has failed, so the SDK re-enters the 401 path — we still refuse to
+        write a bridge-side registration (which would recreate a cleared file for the dummy
+        loopback redirect)."""
+
+        def __init__(self, inner: ServerTokenStorage):
+            self._inner = inner
+
+        async def get_tokens(self):
+            return await self._inner.get_tokens()
+
+        async def set_tokens(self, tokens) -> None:
+            await self._inner.set_tokens(tokens)  # a real refresh must persist
+
+        async def get_client_info(self):
+            return await self._inner.get_client_info()
+
+        async def set_client_info(self, client_info) -> None:
+            return  # no-op: the bridge never registers a client
+
+    url = oauth["url"]
+    storage = ServerTokenStorage(oauth["server_id"])
+    if not storage.status().get("authenticated"):
+        # No stored access token yet (fresh create / post-Disconnect / lapsed refresh). Do
+        # NOT attach an OAuth provider at all: with no stored client_info the SDK's 401 path
+        # performs Dynamic Client Registration against the UPSTREAM on every readiness probe —
+        # creating a throwaway client and burning the provider's registration quota — before
+        # ``_no_interactive`` can stop it. (The no-op ``set_client_info`` below only blocks
+        # LOCAL persistence of that registration, not the upstream call.) Returning ``None``
+        # means the probe just gets a clean 401 with no OAuth requests at all, and the server
+        # surfaces as needing sign-in. Re-authenticating from the UI restarts the bridge, which
+        # rebuilds this with tokens present and a real refresh-capable provider.
+        return None
+    client_metadata = OAuthClientMetadata(
+        client_name="mcpelevator",
+        # Never used for refresh, but the model requires a redirect URI; a loopback
+        # placeholder is fine (the bridge never performs an interactive grant).
+        redirect_uris=[AnyHttpUrl("http://127.0.0.1/callback")],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        scope=oauth.get("scopes") or None,
+    )
+    provider = OAuthClientProvider(
+        server_url=url,
+        client_metadata=client_metadata,
+        storage=_RefreshOnlyStorage(storage),
+        redirect_handler=_no_interactive,
+        callback_handler=_no_interactive,
+    )
+    # Preload the discovered auth-server metadata so refresh knows the token endpoint
+    # without a fresh 401/discovery round-trip (see ServerTokenStorage.set_metadata).
+    metadata = storage.get_metadata()
+    if metadata is not None:
+        provider.context.oauth_metadata = metadata
+    # Preload the protected-resource metadata too: if the auth server bound the tokens to
+    # the PRM ``resource`` (a parent of the MCP URL), refresh must use that same resource,
+    # not one recomputed from the URL — otherwise a resource-bound refresh is rejected.
+    prm = storage.get_protected_resource_metadata()
+    if prm is not None:
+        provider.context.protected_resource_metadata = prm
+    # Preload the stored token expiry so a lapsed access token is *refreshed* (silent)
+    # rather than mistaken for valid and driven into the interactive 401 path.
+    expiry = storage.get_token_expiry()
+    if expiry is not None:
+        provider.context.token_expiry_time = expiry
+    # The SDK resets context.token_expiry_time from each refresh response's expires_in via
+    # calculate_token_expiry(); when the provider OMITS expires_in that becomes None and
+    # is_token_valid() then treats the access token as valid FOREVER — so a token that actually
+    # lapses is sent stale and 401s into the (headless-impossible) interactive path until the
+    # bridge restarts. Mirror the file store's default-TTL policy in memory (see
+    # ServerTokenStorage._expires_at_for) so a running bridge keeps refreshing proactively:
+    # when a refresh carries a refresh token but no expires_in, stamp the same modest fallback.
+    import time as _time
+
+    from mcp.shared.auth_utils import calculate_token_expiry
+
+    from app.auth.oauth_store import _DEFAULT_REFRESHABLE_TTL
+
+    _context = provider.context
+
+    def _update_token_expiry(token) -> None:
+        if token.expires_in is None and token.refresh_token:
+            _context.token_expiry_time = _time.time() + _DEFAULT_REFRESHABLE_TTL
+        else:
+            _context.token_expiry_time = calculate_token_expiry(token.expires_in)
+
+    # Instance-level override: the SDK calls ``self.context.update_token_expiry(token)`` from
+    # both token-exchange and refresh handlers, so shadowing it on the instance covers both. If
+    # a future SDK inlines the calc this simply stops applying (no breakage).
+    _context.update_token_expiry = _update_token_expiry
+    return provider
+
+
 def _build_transport(spec: dict):
     """Pick the upstream transport from the spec's ``transport`` discriminator.
 
     ``stdio`` (the default) spawns the local command; ``streamable-http`` / ``sse``
     front an already-remote MCP URL. For the remote kinds ``command`` is the URL and
     ``env`` is the upstream HTTP headers — so they are NOT merged into ``os.environ``
-    (that merge is only meaningful for a real child process).
+    (that merge is only meaningful for a real child process). When ``oauth`` is set the
+    upstream authenticates via an OAuth token (auto-refreshed) instead of static headers.
     """
     kind = spec.get("transport") or "stdio"
+    oauth = spec.get("oauth")
+    auth = _build_oauth_auth(oauth) if oauth else None
+    headers = dict(spec.get("env") or {})
+    if oauth:
+        # OAuth owns the Authorization header. Drop any static one left over from a
+        # Headers→OAuth switch: when there's no/expired OAuth token (startup, post-
+        # disconnect, lapsed refresh) the auth object adds no bearer, and a stale static
+        # token would otherwise still authenticate the upstream despite the UI saying
+        # the server needs to re-authenticate.
+        headers = {k: v for k, v in headers.items() if k.strip().lower() != "authorization"}
     if kind in ("streamable-http", "http"):
-        return StreamableHttpTransport(url=spec["command"], headers=dict(spec.get("env") or {}))
+        return StreamableHttpTransport(url=spec["command"], headers=headers, auth=auth)
     if kind == "sse":
-        return SSETransport(url=spec["command"], headers=dict(spec.get("env") or {}))
+        return SSETransport(url=spec["command"], headers=headers, auth=auth)
     return StdioTransport(
         command=spec["command"],
         args=list(spec.get("args") or []),
@@ -145,7 +278,13 @@ def build_proxy(spec: dict) -> FastMCP:
     # Everything else — sampling, elicitation, logging, progress forwarding, and
     # the fresh-session-per-request isolation — keeps FastMCP's proxy defaults.
     client = ProxyClient(transport, roots=_forward_roots)
-    return create_proxy(client, name=spec.get("name") or "mcpelevator-proxy")
+    proxy = create_proxy(client, name=spec.get("name") or "mcpelevator-proxy")
+    # The outer proxy already authenticated the caller. Forwarding its headers from
+    # this bridge to a remote MCP server would disclose bearer/OAuth credentials to
+    # that upstream. Static headers and upstream OAuth live on the transport itself.
+    if hasattr(transport, "forward_incoming_headers"):
+        transport.forward_incoming_headers = False
+    return proxy
 
 
 def main() -> None:

@@ -12,6 +12,18 @@ export type ServerState =
 	| 'failed'
 	| 'stopping';
 
+export type StartupPhase = 'queued' | 'setup' | 'bridge' | 'readiness' | 'retry_wait';
+
+export interface StartupStatus {
+	phase: StartupPhase;
+	attempt: number;
+	max_attempts: number;
+	activation_started_at: string;
+	deadline_at: string | null;
+	next_retry_at: string | null;
+	message: string | null;
+}
+
 export interface ServerTransports {
 	mcp_http: boolean;
 	rest_openapi: boolean;
@@ -29,6 +41,7 @@ export interface ServerSummary {
 	runner: Runner;
 	enabled: boolean;
 	state: ServerState;
+	startup_status: StartupStatus | null;
 	transports: ServerTransports;
 	urls: ServerUrls;
 	/** Effective auth (per-server `inherit` resolved to the global default). */
@@ -50,13 +63,36 @@ export interface ServerTool {
 	has_output_schema?: boolean;
 }
 
+/** Upstream-OAuth state for a remote server (GET /api/servers/{id}). */
+export interface OAuthStatus {
+	/** Is this server configured to authenticate upstream via OAuth? */
+	enabled: boolean;
+	/** Are tokens currently stored (the operator has signed in)? */
+	authenticated: boolean;
+	/** OAuth is on but no tokens yet — the operator must connect the provider. */
+	needs_auth: boolean;
+	/** Access-token expiry (unix seconds), if known. */
+	expires_at: number | null;
+	/** A refresh token exists — renewal is silent until it lapses. */
+	has_refresh_token: boolean;
+}
+
 // Superset of ServerSummary returned by GET /api/servers/{id}.
 export interface ServerDetail extends ServerSummary {
 	command: string;
 	args: string[];
+	setup_script: string;
 	env: Record<string, string>;
 	cwd: string | null;
 	auth_provider: ServerAuthProvider;
+	/** Remote runner: authenticate to the upstream via OAuth instead of static headers. */
+	oauth: boolean;
+	oauth_scopes: string;
+	oauth_client_id: string | null;
+	/** Whether a static client secret is stored. The secret itself is write-only —
+	 * accepted on create/patch but never returned. */
+	oauth_has_client_secret: boolean;
+	oauth_status: OAuthStatus;
 	config_hash: string;
 	source: string;
 	tools: ServerTool[];
@@ -69,11 +105,17 @@ export interface ServerCreate {
 	runner: Runner;
 	command: string;
 	args: string[];
+	setup_script?: string;
 	env: Record<string, string>;
 	cwd?: string | null;
 	mcp_http?: boolean;
 	rest_openapi?: boolean;
 	auth_provider?: ServerAuthProvider;
+	/** Remote runner: authenticate upstream via OAuth (forced off for other runners). */
+	oauth?: boolean;
+	oauth_scopes?: string;
+	oauth_client_id?: string | null;
+	oauth_client_secret?: string | null;
 	enabled?: boolean;
 	/** Provenance. Only a `catalog:<id>` value is honored server-side (a registry install). */
 	source?: string | null;
@@ -216,10 +258,10 @@ export interface CatalogDetail {
 export type BindMode = 'local' | 'expose';
 
 /** Auth provider for the *global default* and per-server `inherit` resolution. */
-export type AuthProvider = 'none' | 'bearer';
+export type AuthProvider = 'none' | 'bearer' | 'oauth';
 
 /** Per-server auth selector: `inherit` resolves to the global default. */
-export type ServerAuthProvider = 'inherit' | 'none' | 'bearer';
+export type ServerAuthProvider = 'inherit' | 'none' | 'bearer' | 'oauth';
 
 /** Control-plane auth enforcement: `auto` requires a token only when exposed,
  * `always` requires one even on loopback. */
@@ -238,6 +280,28 @@ export interface SettingsInfo {
 	 * OFF by default and root-equivalent — it runs arbitrary images on the mounted
 	 * Docker daemon. Gates docker-server enable/start and OCI catalog installs. */
 	docker_runner: boolean;
+	/** External authorization-server discovery URL for inbound OAuth. */
+	oauth_config_url: string;
+	/** Required JWT audience for inbound OAuth access tokens. */
+	oauth_audience: string;
+	/** Optional token identities allowed to use OAuth-protected endpoints. */
+	oauth_allowed_subjects: string[];
+	/** Also accept local mcpe_ bearer tokens on OAuth-protected endpoints. */
+	oauth_accept_bearer: boolean;
+	/** Scopes advertised in RFC 9728 protected-resource metadata. */
+	oauth_scopes: string[];
+}
+
+/** A group's members: the wildcard "*" (every registered server, present and
+ * future) or an explicit, ordered list of server ids. */
+export type GroupMembers = '*' | string[];
+
+/** A named group served at /g/<name>/mcp (GET/PUT /api/groups). */
+export interface GroupInfo {
+	name: string;
+	members: GroupMembers;
+	/** Read-only, derived by the backend: the copyable /g/<name>/mcp URL. */
+	url: string;
 }
 
 /** Shape of GET /api/auth/status — the SPA polls this to decide whether to show login. */

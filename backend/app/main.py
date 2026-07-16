@@ -11,7 +11,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from sqlmodel import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -21,6 +21,7 @@ from starlette.staticfiles import StaticFiles
 from app import __version__
 from app.api import auth as auth_api
 from app.api import catalog as catalog_api
+from app.api import groups as groups_api
 from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
@@ -31,14 +32,12 @@ from app.auth.control_plane import (
     mint_control_token,
     require_control_plane,
 )
-from app.auth.middleware import (
-    host_allowed,
-    is_loopback_client,
-    private_lan_allowed,
-    request_allowlist,
-)
+from app.auth.middleware import enforce_host
 from app.config import get_settings
 from app.db import get_engine, init_db, repo
+from app.groups import registry as group_registry
+from app.groups.hub import GroupHub
+from app.groups.route import GroupDispatch
 from app.proxy.router import router as proxy_router
 from app.registry import service
 from app.registry import settings as runtime_settings
@@ -133,7 +132,12 @@ async def lifespan(app: FastAPI):
     with Session(get_engine()) as session:
         service.normalize_auth_providers(session)  # canonicalize legacy auth_provider values
         service.normalize_docker_servers(session)  # canonicalize legacy docker rows before enable
+        service.normalize_reserved_slugs(session)  # rename rows a reserved slug would shadow
         service.backfill_config_hashes(session)  # rehash upgraded rows -> no spurious restarts
+        # The group registry is the single source of truth for /g/<name>. Validate it
+        # against the server table before serving: an unknown member id means an
+        # inconsistent (hand-edited) config, and we refuse to boot rather than serve it.
+        group_registry.validate_at_startup(session)
     _bootstrap_private_lan()  # seed LAN access from env before deciding auth enforcement
     _bootstrap_docker_runner()  # seed docker-runner enable from env (headless)
     _bootstrap_control_plane_auth()
@@ -141,6 +145,9 @@ async def lifespan(app: FastAPI):
     supervisor = Supervisor()
     await supervisor.boot_reset()  # observed runtime from a prior process is stale
     app.state.supervisor = supervisor
+    # The group hub (constructed in create_app) tracks the running topology: every
+    # reconcile pass converges each group's mounted set.
+    supervisor.on_converged = lambda: app.state.groups.sync(supervisor)
     reconciler = asyncio.create_task(supervisor.run_forever())
     try:
         yield
@@ -151,6 +158,7 @@ async def lifespan(app: FastAPI):
             await reconciler
         except asyncio.CancelledError:
             pass
+        await app.state.groups.close()  # stop each group's session manager
         await app.state.http.aclose()
 
 
@@ -189,28 +197,33 @@ def create_app() -> FastAPI:
         # adds per-request bearer auth when enforcement is on.
         if request.url.path == "/api" or request.url.path.startswith("/api/"):
             with Session(get_engine()) as session:
-                allowed = request_allowlist(session)
-                allow_private = private_lan_allowed(request, session)
-            ok, reason = host_allowed(
-                request.headers.get("host", ""),
-                request.headers.get("origin"),
-                allowed,
-                client_is_loopback=is_loopback_client(request),
-                allow_private=allow_private,
-            )
-            if not ok:
-                return JSONResponse({"detail": reason}, status_code=403)
+                try:
+                    enforce_host(request, session)
+                except HTTPException as exc:
+                    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
         return await call_next(request)
 
     # health and auth-status stay public; the sensitive routers require a control
     # token when enforcement is on (require_control_plane is a no-op otherwise).
     app.include_router(health_api.router, prefix="/api")
     app.include_router(auth_api.router, prefix="/api")
+    # RFC 9728 Protected Resource Metadata for oauth-protected servers — public by
+    # design (clients fetch it pre-auth), no /api prefix, registered before the SPA.
+    from app.auth.oauth import wellknown as oauth_wellknown
+
+    app.include_router(oauth_wellknown)
     gated = [Depends(require_control_plane)]
     app.include_router(servers_api.router, prefix="/api", dependencies=gated)
     app.include_router(catalog_api.router, prefix="/api", dependencies=gated)
     app.include_router(tokens_api.router, prefix="/api", dependencies=gated)
     app.include_router(settings_api.router, prefix="/api", dependencies=gated)
+    app.include_router(groups_api.router, prefix="/api", dependencies=gated)
+    # Group endpoints (/g/<name>/mcp) BEFORE the proxy catch-all and the SPA mount:
+    # registration order wins. The hub is constructed here (state for the dispatcher)
+    # but only starts serving groups once the lifespan wires it to the supervisor.
+    hub = GroupHub()
+    app.state.groups = hub
+    app.mount("/g", GroupDispatch(hub))
     app.include_router(proxy_router)  # /s/{slug}/...
 
     fe = settings.frontend_dir

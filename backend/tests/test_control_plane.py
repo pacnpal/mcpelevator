@@ -55,7 +55,7 @@ def test_api_rejects_spoofed_loopback_host_from_remote_client():
 
 def test_summary_exposes_effective_auth():
     """The card snippets need the effective auth, so the summary resolves
-    `inherit` to the global default and reports `none`/`bearer`."""
+    `inherit` to the global default and reports `none`/`bearer`/`oauth`."""
     with TestClient(app) as client:
         h = {"host": "127.0.0.1"}
         created: list[str] = []
@@ -71,6 +71,11 @@ def test_summary_exposes_effective_auth():
             )
             created.append(r2.json()["id"])
             assert r2.json()["auth"] == "none"
+            r3 = client.post(
+                "/api/servers", json={"name": "o", "command": "echo", "auth_provider": "oauth"}, headers=h
+            )
+            created.append(r3.json()["id"])
+            assert r3.json()["auth"] == "oauth"
         finally:
             for sid in created:
                 client.delete(f"/api/servers/{sid}", headers=h)
@@ -290,7 +295,7 @@ def test_base_url_prefers_request_host_for_copy_links(monkeypatch):
     URLs), unless an operator-declared public URL is set, which always wins."""
     from types import SimpleNamespace
 
-    from app.api import servers
+    from app.api import util as api_util
 
     def req(host: str | None, scheme: str = "http"):
         headers = {"host": host} if host is not None else {}
@@ -298,15 +303,15 @@ def test_base_url_prefers_request_host_for_copy_links(monkeypatch):
 
     # No public URL: use the request Host (LAN address, port preserved).
     monkeypatch.setattr(
-        servers, "get_settings",
+        api_util, "get_settings",
         lambda: SimpleNamespace(public_base_url=None, base_url="http://127.0.0.1:8080"),
     )
-    assert servers._base_url(req("192.168.1.50:8080")) == "http://192.168.1.50:8080"
+    assert api_util.base_url(req("192.168.1.50:8080")) == "http://192.168.1.50:8080"
     # No Host header -> fall back to the derived settings URL.
-    assert servers._base_url(req(None)) == "http://127.0.0.1:8080"
+    assert api_util.base_url(req(None)) == "http://127.0.0.1:8080"
     # A configured public URL always wins, regardless of the request Host.
     monkeypatch.setattr(
-        servers, "get_settings",
+        api_util, "get_settings",
         lambda: SimpleNamespace(public_base_url="https://mcp.example.com", base_url="https://mcp.example.com"),
     )
-    assert servers._base_url(req("192.168.1.50:8080")) == "https://mcp.example.com"
+    assert api_util.base_url(req("192.168.1.50:8080")) == "https://mcp.example.com"

@@ -32,15 +32,74 @@ def test_unique_slugs(session):
     assert b.slug == "memory-2"
 
 
+def test_concurrent_creates_get_unique_slugs(tmp_path):
+    """Slug allocation is check-then-insert; API handlers now run registry writes in
+    the threadpool, so without the service write lock two same-name creates could both
+    pick the base slug and one would die on the unique constraint instead of getting
+    the -2 suffix. File-backed DB so every thread's connection sees the same data."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.db import models  # noqa: F401 — register tables
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path}/reg.db", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+
+    def make(_):
+        with Session(engine) as s:
+            return service.create_server(s, name="Same Name", runner="npx", command="npx").slug
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        slugs = sorted(ex.map(make, range(4)))
+    assert slugs == ["same-name", "same-name-2", "same-name-3", "same-name-4"]
+
+
+def test_update_through_stale_session_hashes_the_fresh_row(tmp_path):
+    """The PATCH handler pre-reads the row into its request session before the locked
+    update runs; if another request commits in between, the update must re-read the row
+    (not trust its identity map) or it stores a config_hash describing a stale snapshot."""
+    from app.db import models  # noqa: F401 — register tables
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path}/reg.db", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s1, Session(engine) as s2:
+        sid = service.create_server(s1, name="x", runner="npx", command="npx").id
+        # Request B primes its session, as the API handler does. The binding matters:
+        # the handler holds this object in a local across its await, and SQLAlchemy's
+        # identity map is weak — an unreferenced row would be GC'd and re-fetched fresh,
+        # hiding the staleness this test exists to catch.
+        primed = repo.get_server(s2, sid)
+        service.update_server(s1, sid, {"args": ["-y", "pkg"]})  # request A lands first
+        # B edits a different hash-bearing field: without the locked re-read, B would
+        # merge onto its stale snapshot and store a hash over (old args, new env).
+        service.update_server(s2, sid, {"env": {"K": "v"}})
+        del primed
+    with Session(engine) as s3:
+        row = repo.get_server(s3, sid)
+        assert row.args == ["-y", "pkg"]  # A's edit survived B's disjoint PATCH
+        assert row.env == {"K": "v"}
+        assert row.config_hash == service.compute_hash(row)  # hash describes the final row
+
+
 def test_reserved_slug_is_not_assigned(session):
     """A server named "summary" must not get the slug "summary" — that would shadow
     the static /api/health/summary route so its own /api/health/{slug} is unreachable.
-    It's disambiguated instead, leaving the reserved word free for the aggregate route."""
+    It's disambiguated instead."""
     a = _mk(session, name="summary")
     assert a.slug == "summary-2"
     # the reserved word stays free no matter how the name is cased/spaced
     b = _mk(session, name="Summary")
     assert b.slug == "summary-3"
+
+
+def test_all_slug_is_allowed(session):
+    """"all" is NOT reserved: group endpoints live under /g/<name>, so a server may be
+    slugged "all" and served at /s/all without any collision."""
+    a = _mk(session, name="all")
+    assert a.slug == "all"
 
 
 def test_config_hash_changes_on_edit(session):
@@ -49,6 +108,55 @@ def test_config_hash_changes_on_edit(session):
     service.update_server(session, a.id, {"args": ["-y", "z"]})
     after = repo.get_server(session, a.id).config_hash
     assert after != before
+
+
+def test_setup_script_round_trips_hashes_and_clones(session):
+    script = "printf 'installing\\n'\nmkdir -p .cache/setup\n"
+    server = _mk(session, setup_script=script)
+    assert server.setup_script == script
+
+    before = server.config_hash
+    updated = service.update_server(session, server.id, {"setup_script": "printf 'updated\\n'\n"})
+    assert updated.setup_script == "printf 'updated\\n'\n"
+    assert updated.config_hash != before
+
+    clone = service.clone_server(session, server.id)
+    assert clone.setup_script == updated.setup_script
+    assert clone.config_hash == updated.config_hash
+
+
+def test_setup_script_blank_is_canonical_and_local_only(session):
+    blank = _mk(session, setup_script="  \n\t")
+    assert blank.setup_script == ""
+
+    with pytest.raises(ValueError, match="Docker image"):
+        service.create_server(
+            session,
+            name="Docker",
+            runner="docker",
+            command="img:1",
+            setup_script="echo no",
+        )
+    with pytest.raises(ValueError, match="local runners"):
+        service.create_server(
+            session,
+            name="Remote",
+            runner="remote",
+            command="https://up.example/mcp",
+            setup_script="echo no",
+        )
+
+
+def test_setup_script_cannot_bypass_docker_runner_reclassification(session):
+    with pytest.raises(ValueError, match="Docker image"):
+        service.create_server(
+            session,
+            name="Docker",
+            runner="command",
+            command="docker",
+            args=["run", "img:1"],
+            setup_script="echo no",
+        )
 
 
 def test_config_hash_is_order_independent(session):
@@ -787,6 +895,44 @@ def test_env_split_and_deep_nesting_rejected(session, command, args):
         service.create_server(
             session, name="env-s-deep", runner="command", command=command, args=args, enabled=True
         )
+
+
+@pytest.mark.parametrize(
+    "command, args",
+    [
+        # env -S split value re-enters env's grammar: a leading -- or NAME=VALUE still execs docker.
+        ("/usr/bin/env", ["-S", "-- docker run alpine"]),
+        ("/usr/bin/env", ["-S", "FOO=bar docker run alpine"]),
+    ],
+)
+def test_env_split_string_grammar_rejected(session, command, args):
+    """A ``--`` or assignment at the start of an ``env -S`` split string must not hide the docker
+    command behind it."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="env-s-grammar", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "command, args",
+    [
+        # `docker` here is a script argument / comment / loop variable / arithmetic operand — never
+        # a command the shell executes, so none of these should be rejected.
+        ("/bin/bash", ["script.sh", "-c", "docker run alpine"]),   # script operand, not a -c string
+        ("/bin/sh", ["-c", "echo ok # $(docker run alpine)"]),     # docker inside a comment
+        ("/bin/sh", ["-c", "for docker in 1; do echo \"$docker\"; done"]),  # loop variable name
+        ("/bin/sh", ["-c", "echo $((docker + 1))"]),               # arithmetic expansion operand
+    ],
+)
+def test_shell_docker_non_command_positions_allowed(session, command, args):
+    """A shell script operand, comment text, loop variable, or arithmetic operand named ``docker``
+    must not trigger a false rejection."""
+    s = service.create_server(
+        session, name="non-cmd", runner="command", command=command, args=args, enabled=True
+    )
+    assert s.enabled is True
 
 
 def test_shell_wrapped_docker_second_c_positional_allowed(session):

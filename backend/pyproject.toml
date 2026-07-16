@@ -1,6 +1,9 @@
 [project]
 name = "mcpelevator"
-version = "0.1.0"
+# Source-metadata version (the importlib fallback in app.__init__ reads this for pip/uv installs
+# from source). The published image derives its version from the release tag via MCPE_VERSION —
+# see the Dockerfile / .github/workflows/docker-image.yml — so this need only track the dev line.
+version = "1.1.0"
 description = "Elevate stdio MCP servers into authenticated HTTP endpoints — self-hosted control plane."
 requires-python = ">=3.11"
 dependencies = [

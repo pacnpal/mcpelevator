@@ -14,12 +14,14 @@
 	const AUTH_OPTIONS: { value: ServerAuthProvider; label: string }[] = [
 		{ value: 'inherit', label: 'inherit' },
 		{ value: 'none', label: 'none' },
-		{ value: 'bearer', label: 'bearer' }
+		{ value: 'bearer', label: 'bearer' },
+		{ value: 'oauth', label: 'oauth' }
 	];
 
 	let {
 		mode = 'create',
 		initial,
+		oauthHasSecret = false,
 		busy = false,
 		error = null,
 		submitLabel,
@@ -30,6 +32,10 @@
 		/** Prefill values (edit) or partial defaults (create). `slug` is only used
 		 * in edit mode, where it's surfaced as an editable identity field. */
 		initial?: (Partial<ServerCreate> & { slug?: string }) | null;
+		/** Edit mode: whether a static OAuth client secret is already stored. The secret
+		 * value is never returned, so the field starts blank and, if left blank, is omitted
+		 * from the PATCH (kept) rather than cleared. */
+		oauthHasSecret?: boolean;
 		busy?: boolean;
 		/** API error text to surface inline, if any. */
 		error?: string | null;
@@ -109,11 +115,16 @@
 			pkg: pkg0,
 			extraArgsText: extra0,
 			transport: transport0,
+			setupScript: init.setup_script ?? '',
 			cwd: init.cwd ?? '',
 			mcpHttp: init.mcp_http ?? true,
 			restOpenapi: init.rest_openapi ?? false,
 			startAfter: init.enabled ?? true,
 			authProvider: init.auth_provider ?? 'inherit',
+			oauth: init.oauth ?? false,
+			oauthScopes: init.oauth_scopes ?? '',
+			oauthClientId: init.oauth_client_id ?? '',
+			oauthClientSecret: init.oauth_client_secret ?? '',
 			envRows: envToRows(init.env)
 		};
 	});
@@ -137,13 +148,28 @@
 
 	// Remote runner: the upstream transport (command holds the URL; args = [transport]).
 	let transport = $state(seed.transport);
+	let setupScript = $state(seed.setupScript);
+
+	// Remote runner upstream auth: static Headers (the default) vs OAuth. When OAuth is
+	// on, mcpelevator runs the provider sign-in and stores/refreshes tokens; scopes and
+	// static client credentials are optional (empty client id = Dynamic Client Registration).
+	let oauth = $state(seed.oauth);
+	let oauthScopes = $state(seed.oauthScopes);
+	let oauthClientId = $state(seed.oauthClientId);
+	let oauthClientSecret = $state(seed.oauthClientSecret);
+	// Open the client-credentials disclosure when there's already an id or a stored secret.
+	// Initial capture only (uncontrolled form), so untrack the prop read.
+	let oauthClientOpen = $state(untrack(() => !!seed.oauthClientId || oauthHasSecret));
+	// Edit mode only: explicitly remove a stored (write-only) secret while keeping the client id
+	// — e.g. switching a confidential client to a public one. Blank alone means "keep".
+	let oauthRemoveSecret = $state(false);
 
 	let cwd = $state(seed.cwd);
 	let mcpHttp = $state(seed.mcpHttp);
 	let restOpenapi = $state(seed.restOpenapi);
 	let authProvider = $state<ServerAuthProvider>(seed.authProvider);
 	let startAfter = $state(seed.startAfter);
-	let advancedOpen = $state(false);
+	let advancedOpen = $state(seed.setupScript.trim().length > 0);
 
 	let envRows = $state<EnvRow[]>(seed.envRows);
 	let envSeq = seed.envRows.length;
@@ -178,6 +204,14 @@
 		} else {
 			syncFromFriendly();
 		}
+		if ((runner === 'docker' || runner === 'remote') && setupScript.trim()) {
+			advancedOpen = true;
+		}
+	}
+
+	function onCommandInput(event: Event) {
+		const value = (event.currentTarget as HTMLInputElement).value;
+		if (setupScript.trim() && isDockerLauncher(value)) advancedOpen = true;
 	}
 
 	function addEnvRow() {
@@ -203,6 +237,12 @@
 
 	const isRemote = $derived(runner === 'remote');
 	const isDocker = $derived(runner === 'docker');
+	const commandUsesDocker = $derived(
+		(runner === 'npx' || runner === 'uvx' || runner === 'command') && isDockerLauncher(command)
+	);
+	const setupUsesDocker = $derived(isDocker || commandUsesDocker);
+	const setupAllowed = $derived(!isRemote && !setupUsesDocker);
+	const setupBlocked = $derived(!setupAllowed && setupScript.trim().length > 0);
 	// A docker server is only *started* when created with "Start after creating" on; editing
 	// or saving a disabled docker server is always allowed (the backend gates on enable, not
 	// on storing a disabled row) so an imported config can be reviewed first.
@@ -235,6 +275,15 @@
 			return false;
 		}
 	}
+
+	function isDockerLauncher(value: string): boolean {
+		const command = value.trim();
+		const normalized = command.replaceAll('\\', '/');
+		const basename = normalized.split('/').at(-1)?.toLowerCase();
+		if (basename !== 'docker' && basename !== 'docker.exe') return false;
+		if (!normalized.includes('/')) return true;
+		return /^[/.~]/.test(normalized) || /^[a-zA-Z]:/.test(command);
+	}
 	const remoteUrlValid = $derived(!isRemote || isValidRemoteUrl(command));
 
 	// Mirror the backend's slugify so the operator sees the value that will actually
@@ -252,7 +301,7 @@
 	const slugChanged = $derived(mode === 'edit' && normalizedSlug !== originalSlug);
 
 	const canSubmit = $derived(
-		nameValid && commandValid && remoteUrlValid && !dockerBlocked && !busy
+		nameValid && commandValid && remoteUrlValid && !dockerBlocked && !setupBlocked && !busy
 	);
 
 	function buildEnv(): Record<string, string> {
@@ -262,6 +311,29 @@
 			if (k) out[k] = row.value;
 		}
 		return out;
+	}
+
+	// The client secret is write-only: not returned by the API, so the field starts blank.
+	// A typed value is sent; blank in edit mode with an existing secret is OMITTED (kept),
+	// otherwise null (no secret).
+	function oauthSecretPayload(): string | null | undefined {
+		if (!(isRemote && oauth)) return null;
+		// A secret is only meaningful with a client id. If the id is cleared (switching a
+		// static client back to Dynamic Client Registration), clear the secret too —
+		// otherwise the PATCH would omit it, the backend would keep the old secret, and it
+		// would reject the update as a secret-without-id.
+		if (!oauthClientId.trim()) return null;
+		// "Remove" wins over any typed value FIRST: the field is disabled while the box is
+		// ticked, but a secret typed before ticking it would otherwise linger in state and
+		// get sent — resurrecting the very secret the operator asked to drop.
+		if (mode === 'edit' && oauthHasSecret && oauthRemoveSecret) return null;
+		// Send the secret VERBATIM — it's an opaque credential, so don't .trim() the value
+		// (a provider secret may legitimately carry edge whitespace); only use a trimmed
+		// check to tell "typed something" from "left blank".
+		if (oauthClientSecret.trim()) return oauthClientSecret;
+		// Blank: keep the stored secret in edit mode; otherwise no secret.
+		if (mode === 'edit' && oauthHasSecret) return undefined;
+		return null;
 	}
 
 	function handleSubmit(e: SubmitEvent) {
@@ -274,11 +346,19 @@
 			// remote stores [transport] in args; there's no local process, so no cwd.
 			// docker stores command=image + args=container args, and cwd is meaningless.
 			args: isRemote ? [transport] : resolvedArgs,
+			// Preserve executable text byte-for-byte; canonicalize whitespace-only input to blank.
+			setup_script: setupScript.trim() ? setupScript : '',
 			env: buildEnv(),
 			cwd: isRemote || isDocker ? null : cwd.trim() ? cwd.trim() : null,
 			mcp_http: mcpHttp,
 			rest_openapi: restOpenapi,
-			auth_provider: authProvider
+			auth_provider: authProvider,
+			// Upstream OAuth only applies to remote; the backend forces it off elsewhere,
+			// but keep the payload honest so a runner switch clears it client-side too.
+			oauth: isRemote && oauth,
+			oauth_scopes: isRemote && oauth ? oauthScopes.trim() : '',
+			oauth_client_id: isRemote && oauth ? oauthClientId.trim() || null : null,
+			oauth_client_secret: oauthSecretPayload()
 		};
 		if (mode === 'create') payload.enabled = startAfter;
 		// Only send a slug when it's actually a rename, so an unchanged edit doesn't
@@ -481,9 +561,142 @@
 				</svg>
 			</div>
 			<p class="text-xs text-[var(--color-ink-dim)]">
-				mcpelevator proxies this endpoint and fronts it with its own auth. Add any
-				upstream auth as <span class="font-medium">Headers</span> below.
+				mcpelevator proxies this endpoint and fronts it with its own auth. Choose how it
+				authenticates <span class="font-medium">to the upstream</span> below.
 			</p>
+
+			<!-- Upstream authentication: static Headers vs OAuth sign-in. -->
+			<span class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
+				Upstream authentication
+			</span>
+			<div class="grid grid-cols-2 gap-2">
+				<label
+					class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+					style={!oauth
+						? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+				>
+					<span class="flex items-center gap-2">
+						<input type="radio" name="upstream-auth" checked={!oauth} onchange={() => (oauth = false)} />
+						<span class="text-sm font-medium text-[var(--color-ink)]">Headers</span>
+					</span>
+					<span class="text-xs text-[var(--color-ink-dim)]">API key / static bearer token</span>
+				</label>
+				<label
+					class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+					style={oauth
+						? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+				>
+					<span class="flex items-center gap-2">
+						<input type="radio" name="upstream-auth" checked={oauth} onchange={() => (oauth = true)} />
+						<span class="text-sm font-medium text-[var(--color-ink)]">OAuth</span>
+					</span>
+					<span class="text-xs text-[var(--color-ink-dim)]">Sign in with the provider</span>
+				</label>
+			</div>
+
+			<!-- Which to pick: most servers support both, but not all. -->
+			<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+				Most remote MCP servers accept <span class="font-medium">both</span> a static token
+				header and OAuth, but some support only one — check the server's docs to be sure. A
+				long-lived <span class="font-medium">token/API key</span> (under Headers) is the more
+				permanent option; <span class="font-medium">OAuth</span> is best when the provider
+				requires it or doesn't issue static tokens.
+			</p>
+
+			{#if oauth}
+				<div class="mt-1 flex flex-col gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-3">
+					<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+						{#if mode === 'create'}
+							After you create this server, open it and click
+							<span class="font-medium text-[var(--color-ink)]">Authenticate with provider</span>
+							to sign in — mcpelevator stores the tokens and refreshes them automatically.
+						{:else}
+							Use <span class="font-medium text-[var(--color-ink)]">Authenticate with provider</span>
+							on the server page to sign in — mcpelevator stores the tokens and refreshes them
+							automatically.
+						{/if}
+					</p>
+					<p
+						class="flex items-start gap-2 text-xs leading-relaxed text-[var(--color-ink-muted)]"
+					>
+						<svg class="mt-0.5 size-4 shrink-0 text-[var(--color-ink-dim)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
+						</svg>
+						<span>
+							OAuth sessions can expire. Refresh is automatic, but if the provider's refresh
+							window lapses you'll need to re-authenticate here to keep the server working —
+							check on it periodically.
+						</span>
+					</p>
+
+					<div class="flex flex-col gap-2">
+						<label for="srv-oauth-scopes" class="text-xs font-medium text-[var(--color-ink-muted)]">
+							Scopes <span class="text-[var(--color-ink-dim)]">(optional, space-separated)</span>
+						</label>
+						<input
+							id="srv-oauth-scopes"
+							type="text"
+							bind:value={oauthScopes}
+							autocomplete="off"
+							spellcheck="false"
+							placeholder="read write"
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+						<p class="text-xs text-[var(--color-ink-dim)]">
+							Leave blank to request whatever scopes the provider advertises.
+						</p>
+					</div>
+
+					<!-- Static client credentials: optional. Blank = Dynamic Client Registration. -->
+					<div class="flex flex-col gap-2">
+						<button
+							type="button"
+							onclick={() => (oauthClientOpen = !oauthClientOpen)}
+							class="flex w-fit items-center gap-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
+						>
+							<svg class="size-3.5 transition-transform" style={oauthClientOpen ? 'transform: rotate(90deg);' : ''} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<path d="m9 18 6-6-6-6" />
+							</svg>
+							Client credentials (advanced)
+						</button>
+						{#if oauthClientOpen}
+							<div class="flex flex-col gap-2">
+								<input
+									type="text"
+									aria-label="OAuth client ID"
+									bind:value={oauthClientId}
+									autocomplete="off"
+									spellcheck="false"
+									placeholder="Client ID — optional, blank auto-registers"
+									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								/>
+								<input
+									type="password"
+									aria-label="OAuth client secret"
+									bind:value={oauthClientSecret}
+									disabled={mode === 'edit' && oauthHasSecret && oauthRemoveSecret}
+									autocomplete="off"
+									spellcheck="false"
+									placeholder={oauthHasSecret ? 'Set — leave blank to keep current' : 'Client secret — optional'}
+									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								/>
+								<p class="text-xs text-[var(--color-ink-dim)]">
+									Leave blank to register automatically (Dynamic Client Registration). Fill these
+									in only if the provider issued you a pre-registered client.
+								</p>
+								{#if mode === 'edit' && oauthHasSecret}
+									<label class="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+										<input type="checkbox" bind:checked={oauthRemoveSecret} />
+										Remove the stored client secret (switch to a public client)
+									</label>
+								{/if}
+							</div>
+						{/if}
+					</div>
+				</div>
+			{/if}
 		</div>
 	{:else if isDocker}
 		<!-- runner === docker: command = OCI image ref, args = the container's own args.
@@ -552,6 +765,7 @@
 				id="srv-command"
 				type="text"
 				bind:value={command}
+				oninput={onCommandInput}
 				autocomplete="off"
 				spellcheck="false"
 				placeholder="/usr/local/bin/my-mcp-server"
@@ -599,7 +813,26 @@
 			</div>
 		</div>
 	{:else}
-	<!-- Advanced disclosure: resolved raw command + args -->
+		<!-- Resolved command preview -->
+		<div class="flex flex-col gap-1.5">
+			<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
+			<div
+				class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5"
+			>
+				{#if previewCommand}
+					<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
+						{previewCommand}
+					</code>
+				{:else}
+					<code class="font-mono text-xs text-[var(--color-ink-dim)]">
+						(command not set)
+					</code>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Advanced disclosure: raw launch config + optional pre-start setup. -->
 	<div
 		class="overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]"
 	>
@@ -612,7 +845,7 @@
 			<span class="flex flex-col gap-0.5">
 				<span class="text-sm font-medium text-[var(--color-ink)]">Advanced</span>
 				<span class="text-xs text-[var(--color-ink-dim)]">
-					Resolved <code class="font-mono">command</code> + <code class="font-mono">args</code> as stored
+					Setup script{setupAllowed ? ' and raw launch configuration' : ''}
 				</span>
 			</span>
 			<svg
@@ -635,70 +868,87 @@
 				class="flex flex-col gap-3 border-t border-[var(--color-line)] px-3.5 py-3.5"
 			>
 				<div class="flex flex-col gap-1.5">
-					<label
-						for="adv-command"
-						class="text-xs font-medium text-[var(--color-ink-muted)]"
-					>
-						command
-					</label>
-					<input
-						id="adv-command"
-						type="text"
-						bind:value={command}
-						autocomplete="off"
-						spellcheck="false"
-						class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
-					/>
-				</div>
-				<div class="flex flex-col gap-1.5">
-					<label
-						for="adv-args"
-						class="text-xs font-medium text-[var(--color-ink-muted)]"
-					>
-						args <span class="text-[var(--color-ink-dim)]">(one per line)</span>
+					<label for="srv-setup-script" class="text-xs font-medium text-[var(--color-ink-muted)]">
+						Setup script <span class="text-[var(--color-ink-dim)]">(optional)</span>
 					</label>
 					<textarea
-						id="adv-args"
-						bind:value={argsText}
-						rows="4"
+						id="srv-setup-script"
+						bind:value={setupScript}
+						rows="5"
 						spellcheck="false"
-						class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						placeholder="npm install @playwright/test&#10;npx playwright install"
+						aria-describedby={setupBlocked ? 'setup-warning setup-validation' : 'setup-warning'}
+						aria-invalid={setupBlocked}
+						class="resize-y rounded-md border bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						style={setupBlocked
+							? 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'
+							: 'border-color: var(--color-line);'}
 					></textarea>
-				</div>
-				{#if friendly}
-					<p class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
-						Editing here overrides the friendly fields above. Changing the
-						package field again will rebuild these.
+					{#if setupBlocked}
+						<p id="setup-validation" role="alert" class="text-xs text-[var(--color-state-failed)]">
+							{setupUsesDocker
+								? 'Setup scripts are not supported for Docker servers. Put setup in the image, or clear this field.'
+								: 'Setup scripts are not supported for remote servers. Clear this field.'}
+						</p>
+					{/if}
+					<p id="setup-warning" class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
+						Scripts run with <code class="font-mono text-[var(--color-ink-muted)]">/bin/sh -e -c</code>
+						as the mcpelevator process user. They receive the effective server environment and
+						working directory, are stored as plain config, can modify mounted data, may
+						rerun during recovery, and output appears in logs. Shell-local changes do not carry
+						into the MCP process.
 					</p>
+				</div>
+
+				{#if setupAllowed}
+					<div class="flex flex-col gap-1.5 border-t border-[var(--color-line)] pt-3">
+						<label
+							for="adv-command"
+							class="text-xs font-medium text-[var(--color-ink-muted)]"
+						>
+							command
+						</label>
+						<input
+							id="adv-command"
+							type="text"
+							bind:value={command}
+							oninput={onCommandInput}
+							autocomplete="off"
+							spellcheck="false"
+							class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						/>
+					</div>
+					<div class="flex flex-col gap-1.5">
+						<label
+							for="adv-args"
+							class="text-xs font-medium text-[var(--color-ink-muted)]"
+						>
+							args <span class="text-[var(--color-ink-dim)]">(one per line)</span>
+						</label>
+						<textarea
+							id="adv-args"
+							bind:value={argsText}
+							rows="4"
+							spellcheck="false"
+							class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						></textarea>
+					</div>
+					{#if friendly}
+						<p class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
+							Editing here overrides the friendly fields above. Changing the
+							package field again will rebuild these.
+						</p>
+					{/if}
 				{/if}
 			</div>
 		{/if}
 	</div>
 
-	<!-- Resolved command preview -->
-	<div class="flex flex-col gap-1.5">
-		<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
-		<div
-			class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5"
-		>
-			{#if previewCommand}
-				<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
-					{previewCommand}
-				</code>
-			{:else}
-				<code class="font-mono text-xs text-[var(--color-ink-dim)]">
-					(command not set)
-				</code>
-			{/if}
-		</div>
-	</div>
-	{/if}
-
 	<!-- Environment variables (upstream headers when remote) -->
 	<fieldset class="flex flex-col gap-2 border-0 p-0">
 		<div class="flex items-center justify-between">
 			<legend class="text-sm font-medium text-[var(--color-ink)]">
-				{isRemote ? 'Headers' : 'Environment'}
+				{isRemote ? (oauth ? 'Extra headers' : 'Headers') : 'Environment'}
 			</legend>
 			<button
 				type="button"
@@ -724,7 +974,9 @@
 				class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-3 text-xs text-[var(--color-ink-dim)]"
 			>
 				{isRemote
-					? 'No headers. Add upstream auth (e.g. Authorization) the remote endpoint needs.'
+					? oauth
+						? 'No extra headers. OAuth supplies the Authorization header; add others only if the upstream needs them.'
+						: 'No headers. Add upstream auth (e.g. Authorization) the remote endpoint needs.'
 					: 'No environment variables. Add API keys or config the server needs.'}
 			</p>
 		{:else}
@@ -823,7 +1075,7 @@
 	<fieldset class="flex flex-col gap-2 border-0 p-0">
 		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Auth</legend>
 		<div
-			class="grid grid-cols-3 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1"
+			class="grid grid-cols-2 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1 sm:grid-cols-4"
 		>
 			{#each AUTH_OPTIONS as opt (opt.value)}
 				<label
@@ -845,7 +1097,8 @@
 			{/each}
 		</div>
 		<p class="text-xs text-[var(--color-ink-dim)]">
-			<code class="font-mono">inherit</code> = use the global default. Set it on the
+			<code class="font-mono">inherit</code> = use the global default. Configure bearer or
+			OAuth resource-server settings on the
 			<a
 				href="/settings"
 				class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"

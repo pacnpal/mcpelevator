@@ -8,19 +8,26 @@ Sits above the repo: generates identity (id/slug), computes the idempotency
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 import shlex
+import tempfile
+import threading
+from contextlib import contextmanager
+from functools import lru_cache, wraps
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from sqlmodel import Session
 
+from app.config import get_settings
 from app.db import repo
 from app.db.models import RUNNERS, Server
 from app.registry import settings as runtime_settings
 from app.runners import remote as remote_runner
 from app.runners.docker import is_forbidden_container_env, is_reserved_docker_env
 from app.runners.remote import canonical_transport
-from app.util import config_hash, new_id, slugify
+from app.util import config_hash, config_hash_tag, new_id, slugify
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +79,36 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
             f"(got {args[0]!r})"
         )
     return url, [transport]
+
+
+def normalize_oauth(
+    runner: str,
+    oauth: bool,
+    scopes: Optional[str],
+    client_id: Optional[str],
+    client_secret: Optional[str],
+) -> tuple[bool, str, Optional[str], Optional[str]]:
+    """Canonicalize a server's upstream-OAuth config.
+
+    OAuth only applies to the ``remote`` runner (there's no upstream URL to authenticate
+    against otherwise), so it is forced off for every other runner and the fields are
+    cleared — keeping ``config_hash`` stable and preventing a stray secret from riding
+    along on a local server. Blank strings collapse to ``""`` / ``None`` so the stored
+    shape is deterministic. A client secret without a client id is meaningless (there's
+    no static client to authenticate) — reject it rather than silently drop it.
+    """
+    if runner != "remote" or not oauth:
+        return False, "", None, None
+    scopes = (scopes or "").strip()
+    client_id = (client_id or "").strip() or None
+    # A client secret is an OPAQUE credential — never .strip() it. A provider-issued
+    # secret can legitimately begin or end with whitespace, and trimming would store a
+    # different value, so the token exchange would authenticate with the wrong secret and
+    # be rejected. Only an empty string counts as "absent".
+    client_secret = client_secret or None
+    if client_secret and not client_id:
+        raise ValueError("an OAuth client secret requires a client id")
+    return True, scopes, client_id, client_secret
 
 
 # --- docker (OCI image) normalization ------------------------------------------
@@ -206,15 +243,18 @@ def _normalize_env_split(value: str) -> str:
 
 def _split_string_command(value: str, rest: list[str]) -> tuple[str, list[str]]:
     """Parse env ``-S``'s split-string value (a whole command line env splits and execs) into
-    (command, args), appending any tokens that followed the ``-S`` option."""
+    (command, args), appending any tokens that followed the ``-S`` option.
+
+    The split words are env's OWN remaining argv, so they re-enter env's grammar: a leading ``--``
+    or ``NAME=VALUE`` assignment must be honored (``env -S '-- docker …'`` /
+    ``env -S 'FOO=bar docker …'`` both exec docker). Returning ``("env", words)`` lets the wrapper
+    peel loop reprocess them rather than taking ``words[0]`` as the command verbatim."""
     normalized = _normalize_env_split(value)
     try:
         words = shlex.split(normalized)
     except ValueError:
         words = normalized.split()
-    if not words:
-        return "env", []  # nothing wrapped — resolves to neither a docker nor a shell launcher
-    return words[0], list(words[1:]) + list(rest)
+    return "env", list(words) + list(rest)
 
 
 def _preprocess_shell_string(command_string: str) -> str:
@@ -223,12 +263,17 @@ def _preprocess_shell_string(command_string: str) -> str:
     - line continuations (``\\`` immediately before a newline) are removed, as POSIX shells do
       before tokenizing, so ``docker\\<newline> run`` reads as ``docker run``;
     - the ``$`` before ``$'…'`` (bash ANSI-C) / ``$"…"`` (locale) quoting is dropped so the quoted
-      fragment concatenates onto its neighbours (``doc$'ker'`` → ``docker``).
+      fragment concatenates onto its neighbours (``doc$'ker'`` → ``docker``);
+    - ``#`` comments (at a word boundary) are dropped to end-of-line, so a docker example in a
+      comment isn't mistaken for a command;
+    - ``$((…))`` arithmetic expansion is dropped — its parens are not a subshell and its contents
+      are not commands (``echo $((docker + 1))`` references a variable, it doesn't run docker).
 
-    Only applied outside single quotes, where these are literal."""
+    All applied only outside single quotes, where these are literal."""
     out: list[str] = []
     i, n = 0, len(command_string)
     quote: Optional[str] = None
+    at_boundary = True  # start of string / just after an unquoted separator = a command position
     while i < n:
         ch = command_string[i]
         if quote == "'":
@@ -244,6 +289,7 @@ def _preprocess_shell_string(command_string: str) -> str:
             out.append(ch)
             out.append(command_string[i + 1])
             i += 2
+            at_boundary = False
             continue
         if quote == '"':
             out.append(ch)
@@ -251,12 +297,27 @@ def _preprocess_shell_string(command_string: str) -> str:
                 quote = None
             i += 1
             continue
+        # --- unquoted ---
+        if ch == "#" and at_boundary:  # comment — drop to end of line
+            while i < n and command_string[i] != "\n":
+                i += 1
+            continue
+        if ch == "$" and i + 2 < n and command_string[i + 1] == "(" and command_string[i + 2] == "(":
+            _body, i = _read_delimited(command_string, i + 2, ")")  # $((…)) arithmetic — drop it
+            out.append(" ")
+            at_boundary = True
+            continue
         if ch == "$" and i + 1 < n and command_string[i + 1] in ("'", '"'):
             i += 1  # drop the $, let the quote open on the next iteration
             continue
         if ch in ("'", '"'):
             quote = ch
+            out.append(ch)
+            at_boundary = False
+            i += 1
+            continue
         out.append(ch)
+        at_boundary = ch in " \t\n;&|()"
         i += 1
     return "".join(out)
 
@@ -479,6 +540,10 @@ def _segment_invokes_docker(segment: str) -> bool:
     idx = 0
     while idx < len(words) and (words[idx] in _SHELL_RESERVED_WORDS
                                 or _looks_like_assignment(words[idx])):
+        # `for`/`select` are followed by a loop VARIABLE name, not a command — skip it so
+        # ``for docker in …`` isn't misread as launching docker.
+        if words[idx] in ("for", "select") and idx + 1 < len(words):
+            idx += 1
         idx += 1
     if idx >= len(words):
         return False
@@ -524,17 +589,22 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
     if _launcher_basename(command) not in _SHELL_LAUNCHERS:
         return False
     tokens = list(args or [])
-    for i, tok in enumerate(tokens[:-1]):
+    for i, tok in enumerate(tokens):
         if not isinstance(tok, str):
             continue
         # POSIX shells take the command string after -c. Options may be combined (e.g. -lc), but a
         # long option that merely contains 'c' (--norc, --noprofile) is NOT -c: only single-dash
-        # option groups carry -c (sh/bash have no other 'c' short option). The FIRST such option
-        # wins — the shell reads exactly one command string; a later -c is a positional ($0) whose
-        # args are never executed — so decide on it and stop (avoids false-rejecting
-        # ``sh -c 'echo ok' -c 'docker …'`` where the second string never runs).
+        # option groups carry -c (sh/bash have no other 'c' short option). The FIRST -c wins — the
+        # shell reads exactly one command string; a later -c is a positional ($0) whose args are
+        # never executed (so ``sh -c 'echo ok' -c 'docker …'`` isn't false-rejected).
         if tok == "-c" or (tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]):
-            return _shell_command_invokes_docker(str(tokens[i + 1]))
+            return i + 1 < len(tokens) and _shell_command_invokes_docker(str(tokens[i + 1]))
+        # The first non-option operand is the SCRIPT FILE (``bash script.sh …``); everything after
+        # it is the script's own argv, not a shell command string — so any later -c is irrelevant.
+        if not tok.startswith("-") and tok != "--":
+            return False
+        if tok == "--":  # explicit end of options — next token is the script file
+            return False
     return False
 
 
@@ -926,20 +996,61 @@ def _require_docker_enabled(session: Session) -> None:
         )
 
 
+@lru_cache
+def _config_hash_salt() -> bytes:
+    """Random per-install salt keying ``config_hash``, persisted 0600 in the data dir
+    (like the OAuth token store: secret material lives off the DB). Without this file a
+    leaked anchor can't be dictionary-attacked for config secrets at all. Losing the
+    file is harmless — the boot backfill just rehashes every row once under a fresh salt."""
+    path = get_settings().data_dir / "config_hash.salt"
+    try:
+        salt = path.read_bytes()
+        if len(salt) >= 16:
+            return salt
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    salt = secrets.token_bytes(32)
+    # Atomic + 0600 from birth (mkstemp), same idiom as the OAuth token store.
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix="config_hash.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(salt)
+    except BaseException:
+        os.unlink(tmp_name)
+        raise
+    os.replace(tmp_name, path)
+    return salt
+
+
+def _hash_payload(server: Server) -> dict[str, Any]:
+    return {
+        "runner": server.runner,
+        "command": server.command,
+        "args": server.args,
+        "env": server.env,
+        "cwd": server.cwd,
+        "setup_script": server.setup_script or "",
+        "mcp_http": server.mcp_http,
+        "rest_openapi": server.rest_openapi,
+        # OAuth config drives how the bridge authenticates upstream, so it IS part
+        # of the launch spec — a change must restart the bridge. (The tokens live in
+        # a file store, not the row, so *authenticating* leaves the hash untouched.)
+        # The client SECRET is deliberately NOT read here: it's a credential that
+        # doesn't belong in the anchor at all, and the bridge doesn't consume it from the
+        # spec anyway (it reads the DCR/static client_info from the token store, and a
+        # secret change re-runs auth via the API which clears the tokens). The static
+        # client is already tracked by the non-sensitive client_id below.
+        "oauth": server.oauth,
+        "oauth_scopes": server.oauth_scopes,
+        "oauth_client_id": server.oauth_client_id,
+        # auth_provider is intentionally excluded: it's enforced at the proxy
+        # per-request, so changing it must NOT restart the bridge process.
+    }
+
+
 def compute_hash(server: Server) -> str:
-    return config_hash(
-        {
-            "runner": server.runner,
-            "command": server.command,
-            "args": server.args,
-            "env": server.env,
-            "cwd": server.cwd,
-            "mcp_http": server.mcp_http,
-            "rest_openapi": server.rest_openapi,
-            # auth_provider is intentionally excluded: it's enforced at the proxy
-            # per-request, so changing it must NOT restart the bridge process.
-        }
-    )
+    return config_hash(_hash_payload(server), salt=_config_hash_salt())
 
 
 def backfill_config_hashes(session: Session) -> int:
@@ -948,9 +1059,19 @@ def backfill_config_hashes(session: Session) -> int:
     included) are rehashed to the current shape. Without this, the first
     non-hash-affecting PATCH on an upgraded server would change the stored hash and
     trigger a spurious bridge restart. Idempotent — only writes rows whose hash
-    actually changed. Returns how many were updated."""
+    actually changed. Returns how many were updated.
+
+    Rows already carrying the current scheme tag (see ``config_hash_tag``) are
+    trusted as-is — every config write recomputes the hash, so a current-scheme row
+    can't be stale — which keeps steady-state boots from paying one scrypt
+    derivation per stored server."""
     changed = 0
+    salt = _config_hash_salt()
     for server in repo.list_servers(session):
+        tag = config_hash_tag(_hash_payload(server), salt=salt)
+        # `or ""`: a legacy/hand-edited row can hold NULL — treat it as stale, not a crash.
+        if (server.config_hash or "").startswith(f"{tag}."):
+            continue
         new_hash = compute_hash(server)
         if new_hash != server.config_hash:
             repo.set_config_hash(session, server.id, new_hash)
@@ -1020,7 +1141,7 @@ def normalize_docker_servers(session: Session) -> int:
     return changed
 
 
-_AUTH_PROVIDERS = {"inherit", "none", "bearer"}
+_AUTH_PROVIDERS = {"inherit", "none", "bearer", "oauth"}
 
 
 def normalize_auth_providers(session: Session) -> int:
@@ -1040,12 +1161,68 @@ def normalize_auth_providers(session: Session) -> int:
     return changed
 
 
-# Slugs that would collide with a sibling literal segment on the proxy/API routes
-# and shadow it. A server slugged "summary" would capture GET /api/health/summary
-# (the aggregate route) so its own /api/health/{slug} could never be reached, and a
-# load balancer would read the aggregate instead of that server's status. Reserved
-# here so such a name is disambiguated (e.g. "summary" -> "summary-2") at creation.
+def normalize_reserved_slugs(session: Session) -> int:
+    """Rename servers whose slug has since become reserved (e.g. ``summary``, which would
+    shadow the static ``/api/health/summary`` route) via the standard creation-time
+    disambiguation (``summary`` -> ``summary-2``). Without this a pre-existing row would
+    be silently shadowed by the sibling literal route. Slug is excluded from
+    ``config_hash``, so the rename never bounces a running bridge; the reconciler
+    converges the routing key within one pass. Idempotent. Returns the count changed."""
+    changed = 0
+    for server in repo.list_servers(session):
+        if server.slug not in _RESERVED_SLUGS:
+            continue
+        old = server.slug
+        server.slug = _unique_slug(session, server.slug)
+        repo.save_server(session, server)
+        print(
+            f"[mcpelevator] slug {old!r} is now reserved — "
+            f"server {server.name!r} renamed to {server.slug!r}",
+            flush=True,
+        )
+        changed += 1
+    return changed
+
+
+# Slugs that would collide with a sibling literal segment on the proxy/API routes and
+# shadow it. A server slugged "summary" would capture GET /api/health/summary (the
+# per-server-readiness aggregate for load balancers) so its own /api/health/{slug}
+# could never be reached, and a load balancer would read that summary instead of the
+# server's status. Reserved here so such a name is disambiguated (e.g. "summary" ->
+# "summary-2") at creation. Note: "all" is NOT reserved — group endpoints live under
+# their own /g/<name> prefix, so a server may be slugged "all" and served at /s/all.
 _RESERVED_SLUGS = frozenset({"summary"})
+
+# Registry writes were implicitly serialized when the sync service ran inline on the
+# event loop; now that the API handlers run them in the threadpool (to keep the scrypt
+# config_hash derivation off the loop) they can genuinely interleave, and the write
+# paths are read-modify-write: ``_unique_slug`` is check-then-insert, and a concurrent
+# partial PATCH could commit a hash computed from a snapshot that no longer describes
+# the final row. One process-wide lock restores the old serialization — config writes
+# are rare admin actions, so holding it across a ~70ms derivation is irrelevant.
+# RLock because ``import_mcp_servers`` re-enters ``create_server``.
+_write_lock = threading.RLock()
+
+
+def _serialized_write(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _write_lock:
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
+@contextmanager
+def config_write_lock():
+    """Public access to the process-wide config write lock so a sibling registry (the
+    group registry, ``app.groups.registry``) can serialize its referential
+    validate-then-write against server create/update/delete. Without it a server delete
+    can land between a group write's ``validate_members`` and its commit, persisting a
+    group that references a now-deleted server — which the startup validation would then
+    refuse to boot on. The lock is an ``RLock``, so re-entering it (same thread) is safe."""
+    with _write_lock:
+        yield
 
 
 def _unique_slug(session: Session, name: str) -> str:
@@ -1075,6 +1252,17 @@ def _validate_slug(session: Session, raw: str, *, current_id: str) -> str:
     return slug
 
 
+def _normalize_setup_script(runner: str, setup_script: str) -> str:
+    if not setup_script.strip():
+        return ""
+    if runner == "docker":
+        raise ValueError("Setup scripts are not supported for Docker servers; add setup to the Docker image.")
+    if runner not in _LOCAL_EXEC_RUNNERS:
+        raise ValueError("Setup scripts are supported only by the npx, uvx, and command local runners.")
+    return setup_script
+
+
+@_serialized_write
 def create_server(
     session: Session,
     *,
@@ -1084,9 +1272,14 @@ def create_server(
     args: Optional[list[str]] = None,
     env: Optional[dict[str, str]] = None,
     cwd: Optional[str] = None,
+    setup_script: str = "",
     mcp_http: bool = True,
     rest_openapi: bool = False,
     auth_provider: str = "inherit",
+    oauth: bool = False,
+    oauth_scopes: str = "",
+    oauth_client_id: Optional[str] = None,
+    oauth_client_secret: Optional[str] = None,
     enabled: bool = False,
     source: str = "manual",
     warnings_sink: Optional[list[str]] = None,
@@ -1103,12 +1296,17 @@ def create_server(
         runner = "docker"
     elif enabled and local_exec_invokes_docker(runner, command, args):
         raise ValueError("Docker CLI invocations require the docker runner")
+    setup_script = _normalize_setup_script(runner, setup_script)
     # A remote server reuses command/args for the upstream URL + transport; canonicalize
     # them up front so the persisted row (and config_hash) is deterministic. There is no
     # local process, so a working directory is meaningless — drop it.
     if runner == "remote":
         command, args = normalize_remote(command, args)
         cwd = None
+    # OAuth applies only to remote; normalize (and force-off elsewhere) before hashing.
+    oauth, oauth_scopes, oauth_client_id, oauth_client_secret = normalize_oauth(
+        runner, oauth, oauth_scopes, oauth_client_id, oauth_client_secret
+    )
     # A docker server is stored in canonical (image, container_args, env) shape; a pasted
     # `docker run …` invocation is parsed down to it. The gate bites only when the server
     # is created already enabled — a disabled import stays reviewable.
@@ -1129,9 +1327,14 @@ def create_server(
         args=list(args or []),
         env=dict(env or {}),
         cwd=cwd,
+        setup_script=setup_script,
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
         auth_provider=auth_provider,
+        oauth=oauth,
+        oauth_scopes=oauth_scopes,
+        oauth_client_id=oauth_client_id,
+        oauth_client_secret=oauth_client_secret,
         enabled=enabled,
         source=source,
     )
@@ -1146,16 +1349,28 @@ _MUTABLE_FIELDS = {
     "args",
     "env",
     "cwd",
+    "setup_script",
     "mcp_http",
     "rest_openapi",
     "auth_provider",
+    "oauth",
+    "oauth_scopes",
+    "oauth_client_id",
+    "oauth_client_secret",
 }
 
 
+@_serialized_write
 def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> Server:
     server = repo.get_server(session, server_id)
     if server is None:
         raise KeyError(server_id)
+    # The API handler pre-reads this row (for its OAuth signature) BEFORE entering the
+    # lock, priming the request session's identity map — so a concurrent PATCH committed
+    # while we waited would otherwise be invisible here, and the merge + config_hash
+    # below would run on a stale snapshot that no longer describes the final row.
+    # Re-read from the DB now that we hold the write lock.
+    session.refresh(server)
     # Pre-edit runner: converting a NON-docker server INTO a docker one newly grants the
     # root-equivalent runner, so it must be gated like create/enable. Merely editing a row that
     # was ALREADY docker is not gated (so a broken image/env can be fixed while the runner is
@@ -1181,11 +1396,27 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         # commit on this session — without tearing down unrelated work in the same transaction.
         session.expire(server)
         raise ValueError("Docker CLI invocations require the docker runner")
+    try:
+        server.setup_script = _normalize_setup_script(server.runner, server.setup_script or "")
+    except ValueError:
+        session.rollback()
+        raise
     if server.runner == "remote":
         server.command, server.args = normalize_remote(server.command, server.args)
         # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
         # the stale working directory here (remote has no process) to keep the row canonical.
         server.cwd = None
+    # Normalize OAuth (and force it off for any non-remote runner) so a stray secret can't
+    # ride along on a converted server and the hash stays deterministic.
+    server.oauth, server.oauth_scopes, server.oauth_client_id, server.oauth_client_secret = (
+        normalize_oauth(
+            server.runner,
+            bool(server.oauth),
+            server.oauth_scopes,
+            server.oauth_client_id,
+            server.oauth_client_secret,
+        )
+    )
     if server.runner == "docker":
         server.command, server.args, server.env, _ = _normalize_validate_docker(
             server.command, server.args, server.env, name=server.name
@@ -1214,6 +1445,7 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     return repo.save_server(session, server)
 
 
+@_serialized_write
 def clone_server(session: Session, server_id: str, *, name: Optional[str] = None) -> Server:
     """Create a new server from an existing one's launch + exposure config.
 
@@ -1236,14 +1468,20 @@ def clone_server(session: Session, server_id: str, *, name: Optional[str] = None
         args=list(src.args or []),
         env=dict(src.env or {}),
         cwd=src.cwd,
+        setup_script=src.setup_script or "",
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,
         auth_provider=src.auth_provider,
+        oauth=bool(src.oauth),
+        oauth_scopes=src.oauth_scopes or "",
+        oauth_client_id=src.oauth_client_id,
+        oauth_client_secret=src.oauth_client_secret,
         enabled=False,
         source="clone",
     )
 
 
+@_serialized_write
 def set_enabled(session: Session, server_id: str, enabled: bool) -> Server:
     server = repo.get_server(session, server_id)
     if server is None:
@@ -1256,6 +1494,14 @@ def set_enabled(session: Session, server_id: str, enabled: bool) -> Server:
         raise ValueError("Docker CLI invocations require the docker runner")
     server.enabled = enabled
     return repo.save_server(session, server)
+
+
+@_serialized_write
+def delete_server(session: Session, server_id: str) -> bool:
+    """Thin serialized wrapper over ``repo.delete_server``: a delete racing a threaded
+    update that already loaded the row would otherwise make the update's commit blow up
+    with a StaleDataError (UPDATE matching 0 rows) instead of ordering deterministically."""
+    return repo.delete_server(session, server_id)
 
 
 # Node/Python launchers we recognize so the runner badge is meaningful. Anything
@@ -1277,6 +1523,7 @@ def _infer_runner(command: str) -> str:
     return "command"
 
 
+@_serialized_write
 def import_mcp_servers(
     session: Session, data: dict
 ) -> tuple[list[Server], list[dict], list[dict]]:

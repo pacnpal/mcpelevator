@@ -1,0 +1,109 @@
+name: Scheduled Security Scan
+
+# Re-scans the latest published image (ghcr.io/pacnpal/mcpelevator:latest) with
+# Trivy on a schedule (and on demand via workflow_dispatch) and uploads the
+# results to the Security tab against refs/heads/main — the same analysis
+# stream the release-time Security Scan job in docker-image.yml feeds (same
+# tool, no category, same ref), so the two reconcile one alert set.
+#
+# Why this exists in addition to the release-time scan: that scan only fires on
+# release:published, so between releases the default-branch alert set is frozen.
+# Concretely that means (a) a suppression merged to .trivyignore.yaml after a
+# release can't close the alerts it suppresses until the NEXT release, (b) the
+# self-expiring suppressions never resurface on expiry unless a release happens
+# to be cut afterwards, and (c) newly-disclosed CVEs in the already-published
+# image go unnoticed. This workflow closes all three gaps: each run checks out
+# main's current .trivyignore.yaml, scans the image users are actually pulling,
+# and re-reconciles the main alert set.
+#
+# This is a scan-only workflow — it never builds or publishes an image. It
+# scans :latest, which only a published stable release moves; docker-image.yml's
+# manual dev/beta builds publish channel-prefixed tags this scan never sees.
+
+on:
+  schedule:
+    # Weekly, Monday 06:17 UTC (off the hour to dodge the scheduler rush).
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      packages: read
+
+    steps:
+      # Always scan against main's checkout, whatever ref a manual dispatch
+      # picked: the .trivyignore.yaml consumed below and the ref/sha the SARIF
+      # is uploaded to must agree, or a dispatch from a branch would reconcile
+      # main's alert set using that branch's suppressions.
+      - name: Checkout main
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Resolve scanned commit
+        id: main
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Mirror the release-time scan's settings exactly (severity,
+      # ignore-unfixed, ignore file) so the two produce comparable result sets;
+      # only the image reference differs (:latest here, the just-pushed digest
+      # there — :latest points at the newest stable release image).
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.GHCR_IMAGE }}:latest
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          # Without this, trivy-action's SARIF mode deliberately ignores the
+          # severity filter above and reports ALL severities.
+          limit-severities-for-sarif: true
+          # Narrowly-scoped, self-expiring suppressions for findings we can't act
+          # on yet (e.g. Go stdlib CVEs baked into the upstream-built docker CLI
+          # binary, pending a docker-ce-cli rebuild). See the file for rationale.
+          trivyignores: .trivyignore.yaml
+
+      - name: Upload Trivy results to the Security tab
+        uses: github/codeql-action/upload-sarif@ab28d5ce09b08e4700b2296d39d684a7ac71d1e7 # v4
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        with:
+          sarif_file: trivy-results.sarif
+          # Pin to main (matching the checkout above) so this analysis lands in
+          # the same per-ref alert stream the release-time scan uploads to —
+          # that's what lets a run here close alerts a release scan opened.
+          ref: refs/heads/main
+          sha: ${{ steps.main.outputs.sha }}
+          # Code-scanning analyses are matched per (ref, category); when no
+          # category is given, upload-sarif derives one from "<workflow
+          # path>:<job id>", which would silo this workflow's uploads away from
+          # the release scan's and leave its alerts open forever. This value is
+          # NOT arbitrary: it must stay byte-identical to the category in
+          # docker-image.yml's upload step, and it deliberately spells the
+          # release scan's original auto-derived category so it also matches
+          # the analyses (and open alerts) uploaded before the category was
+          # made explicit.
+          category: ".github/workflows/docker-image.yml:scan"

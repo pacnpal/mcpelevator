@@ -33,18 +33,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 
-# docker CLI ONLY (docker-ce-cli, not the daemon) from Docker's official apt repo, so the
-# opt-in `docker` runner can launch image-packaged MCP servers against a mounted daemon —
-# either the host's socket (sibling containers) or an isolated dind sidecar via DOCKER_HOST.
-# CLI only: the daemon is never run in-image. The runner stays root-equivalent and disabled
-# by default (see the docker_runner setting), so shipping the CLI is inert until enabled.
-RUN install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
-    && chmod a+r /etc/apt/keyrings/docker.asc \
-    && arch="$(dpkg --print-architecture)" \
-    && echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends docker-ce-cli \
+# Common native build toolchain, baked in (issue #81): plenty of npx/uvx MCP servers
+# compile native extensions on install (node-gyp, cmake-based wheels, Go/Rust builds)
+# and expect these to exist. Debian's go/rust are the distro-pinned versions; a server
+# that needs a newer toolchain can add it at startup via MCPE_APT_PACKAGES (see
+# docker-entrypoint.sh) or a derived image. Kept as its own early layer so it caches
+# independently of the app/dependency layers below.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake pkg-config golang rustc cargo \
     && rm -rf /var/lib/apt/lists/*
 
 # uv + uvx (Python MCP servers) from the official image
@@ -59,11 +55,38 @@ RUN uv sync --no-dev --frozen 2>/dev/null || uv sync --no-dev
 COPY backend/ ./
 COPY --from=frontend /fe/build /app/frontend/build
 
-# Stamp the release version (passed by CI as APP_VERSION) into the package metadata.
-ARG APP_VERSION=0.1.0
-RUN sed -i "s/^__version__ = .*/__version__ = \"${APP_VERSION}\"/" app/__init__.py
+# Derive the running version from the GitHub release tag: CI passes the tag as APP_VERSION
+# (see .github/workflows/docker-image.yml), and app.__version__ reads MCPE_VERSION first (see
+# backend/app/__init__.py). A non-release/local build gets the honest 0.0.0-dev default rather
+# than a fake number. No source stamping — the env var is the single injection point.
+ARG APP_VERSION=0.0.0-dev
+
+# docker CLI ONLY (docker-ce-cli, not the daemon) from Docker's official apt repo, so the
+# opt-in `docker` runner can launch image-packaged MCP servers against a mounted daemon —
+# either the host's socket (sibling containers) or an isolated dind sidecar via DOCKER_HOST.
+# CLI only: the daemon is never run in-image. The runner stays root-equivalent and disabled
+# by default (see the docker_runner setting), so shipping the CLI is inert until enabled.
+#
+# Deliberately installed here, AFTER the cached dependency layers above, and keyed on
+# APP_VERSION (referenced in the RUN, so the arg's value is part of this layer's cache key).
+# Every release build carries a fresh APP_VERSION, so this layer always re-runs and reinstalls
+# the LATEST published docker-ce-cli .deb — picking up a Go-patched rebuild the moment Docker
+# ships one — without invalidating the expensive uv-sync/arm64 layers before it. That is what
+# lets the Go stdlib CVEs suppressed in .trivyignore.yaml clear automatically on the next
+# release once a fixed .deb exists, instead of a durably-cached layer re-shipping a
+# now-fixable binary while the suppression hides it.
+RUN echo "docker-ce-cli refresh for mcpelevator ${APP_VERSION}" \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && arch="$(dpkg --print-architecture)" \
+    && echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/app/backend/.venv/bin:${PATH}" \
+    MCPE_VERSION=${APP_VERSION} \
     MCPE_HOST=0.0.0.0 \
     MCPE_PORT=8080 \
     MCPE_DATA_DIR=/data \
@@ -74,8 +97,13 @@ ENV PATH="/app/backend/.venv/bin:${PATH}" \
 VOLUME ["/data"]
 EXPOSE 8080
 
-# tini as PID 1 reaps the bridge/npx/uvx subprocess trees (no zombies/orphans).
-ENTRYPOINT ["tini", "--"]
+# Entrypoint wrapper: installs MCPE_APT_PACKAGES (extra Debian packages beyond the
+# baked toolchain above) at startup, then execs the CMD. Install failures warn and
+# boot continues. tini stays PID 1 and the script exec's, so uvicorn remains tini's
+# direct child and the bridge/npx/uvx subprocess trees are still reaped (no zombies).
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 # Bind where MCPE_HOST/MCPE_PORT say, not a hardcoded 8080: under host networking
 # (the recommended Unraid/NAS setup) there is no port mapping, so the env var is
 # the only way to move the port. `exec` keeps uvicorn as tini's direct child.

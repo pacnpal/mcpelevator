@@ -5,12 +5,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, StrictBool
+from typing import Union
+
+from pydantic import BaseModel, StrictBool, StrictStr
 
 # The auth providers a server may select. Constrained here so a malformed value
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
 # than silently stored and then failed-closed at request time.
-AuthProvider = Literal["inherit", "none", "bearer"]
+AuthProvider = Literal["inherit", "none", "bearer", "oauth"]
+EffectiveAuthProvider = Literal["none", "bearer", "oauth"]
+StartupPhase = Literal["queued", "setup", "bridge", "readiness", "retry_wait"]
 
 
 class Transports(BaseModel):
@@ -23,6 +27,16 @@ class Urls(BaseModel):
     rest: Optional[str] = None
 
 
+class StartupStatus(BaseModel):
+    phase: StartupPhase
+    attempt: int
+    max_attempts: int
+    activation_started_at: datetime
+    deadline_at: Optional[datetime] = None
+    next_retry_at: Optional[datetime] = None
+    message: Optional[str] = None
+
+
 class ServerSummary(BaseModel):
     id: str
     slug: str
@@ -32,11 +46,23 @@ class ServerSummary(BaseModel):
     state: str
     transports: Transports
     urls: Urls
-    auth: Literal["none", "bearer"] = "none"  # effective auth (per-server `inherit` resolved)
+    auth: EffectiveAuthProvider = "none"  # effective auth (per-server `inherit` resolved)
     last_error: Optional[str] = None
     pid: Optional[int] = None
     port: Optional[int] = None
     tools_count: int = 0
+    startup_status: Optional[StartupStatus] = None
+
+
+class OAuthStatus(BaseModel):
+    """Upstream-OAuth state for a remote server, surfaced so the UI can prompt the
+    operator to authenticate (and warn when a re-auth is due)."""
+
+    enabled: bool = False  # is this server configured to authenticate upstream via OAuth?
+    authenticated: bool = False  # are tokens currently stored?
+    needs_auth: bool = False  # OAuth is on but no tokens yet — the operator must connect
+    expires_at: Optional[float] = None  # access-token expiry (unix seconds), if known
+    has_refresh_token: bool = False  # a refresh token exists (silent renewal until it lapses)
 
 
 class ServerDetail(ServerSummary):
@@ -44,7 +70,15 @@ class ServerDetail(ServerSummary):
     args: list[str] = []
     env: dict[str, str] = {}
     cwd: Optional[str] = None
+    setup_script: str = ""
     auth_provider: str = "inherit"
+    oauth: bool = False
+    oauth_scopes: str = ""
+    oauth_client_id: Optional[str] = None
+    # The client secret is write-only: accepted on create/patch but never echoed back
+    # (this response is polled by the UI), so only its presence is exposed.
+    oauth_has_client_secret: bool = False
+    oauth_status: OAuthStatus = OAuthStatus()
     config_hash: str = ""
     source: str = "manual"
     tools: list[dict] = []
@@ -57,9 +91,15 @@ class ServerCreate(BaseModel):
     args: list[str] = []
     env: dict[str, str] = {}
     cwd: Optional[str] = None
+    setup_script: str = ""
     mcp_http: bool = True
     rest_openapi: bool = False
     auth_provider: AuthProvider = "inherit"
+    # Upstream OAuth (remote runner only; forced off elsewhere server-side).
+    oauth: bool = False
+    oauth_scopes: str = ""
+    oauth_client_id: Optional[str] = None
+    oauth_client_secret: Optional[str] = None
     enabled: bool = False
     # Provenance. Only a "catalog:<id>" value is honored (a registry install);
     # anything else falls back to "manual" server-side. See servers.create_server.
@@ -77,9 +117,17 @@ class ServerUpdate(BaseModel):
     args: Optional[list[str]] = None
     env: Optional[dict[str, str]] = None
     cwd: Optional[str] = None
+    setup_script: Optional[str] = None
     mcp_http: Optional[bool] = None
     rest_openapi: Optional[bool] = None
     auth_provider: Optional[AuthProvider] = None
+    # StrictBool (unlike mcp_http/rest_openapi above): oauth gates a security-sensitive
+    # upstream-auth mode, so a truthy-coerced "yes"/1 must never silently flip it on — the
+    # SPA sends a real JSON bool.
+    oauth: Optional[StrictBool] = None
+    oauth_scopes: Optional[str] = None
+    oauth_client_id: Optional[str] = None
+    oauth_client_secret: Optional[str] = None
 
 
 class ServerClone(BaseModel):
@@ -135,6 +183,11 @@ class SettingsInfo(BaseModel):
     control_plane_auth: ControlPlaneAuthMode = "auto"
     allow_private_lan: bool = False
     docker_runner: bool = False
+    oauth_config_url: str = ""
+    oauth_audience: str = ""
+    oauth_allowed_subjects: list[str] = []
+    oauth_accept_bearer: bool = False
+    oauth_scopes: list[str] = []
 
 
 class SettingsUpdate(BaseModel):
@@ -142,6 +195,11 @@ class SettingsUpdate(BaseModel):
     allowed_hosts: Optional[list[str]] = None
     default_auth_provider: Optional[str] = None
     control_plane_auth: Optional[ControlPlaneAuthMode] = None
+    oauth_config_url: Optional[str] = None
+    oauth_audience: Optional[str] = None
+    oauth_allowed_subjects: Optional[list[str]] = None
+    oauth_accept_bearer: Optional[StrictBool] = None
+    oauth_scopes: Optional[list[str]] = None
     # StrictBool, not bool: Optional[bool] would coerce "yes"/"true"/1 to True at the
     # API boundary, so the registry's isinstance(bool) invariant would never fire for an
     # API caller. Strict keeps the bool-only contract end to end (the SPA sends a JSON bool).
@@ -149,6 +207,24 @@ class SettingsUpdate(BaseModel):
     # StrictBool for the same reason — the docker runner is root-equivalent, so a coerced
     # truthy value must never flip it on.
     docker_runner: Optional[StrictBool] = None
+
+
+# ---- Groups (the /g/<name> registry) ----------------------------------------
+
+# A group's members: the wildcard "*" (every registered server, present and future)
+# or an explicit, ordered list of server ids. StrictStr so a non-string can't slip in.
+GroupMembers = Union[Literal["*"], list[StrictStr]]
+
+
+class GroupInfo(BaseModel):
+    name: str
+    members: GroupMembers
+    # read-only, derived: the copyable /g/<name>/mcp URL
+    url: str
+
+
+class GroupUpsert(BaseModel):
+    members: GroupMembers
 
 
 class AuthStatus(BaseModel):

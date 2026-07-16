@@ -43,7 +43,7 @@ echo "==> Starting backend on ${BASE} (data dir: ${DATA_DIR})"
 # `run:` is its own shell); disown drops it from the job table so the shell won't
 # signal it on exit. cwd must be backend/ (frontend_dir is ../frontend/build).
 pushd backend >/dev/null
-nohup uv run uvicorn app.main:app --host 127.0.0.1 --port "${PORT}" \
+MCPE_RESTART_BUDGET=1 nohup uv run uvicorn app.main:app --host 127.0.0.1 --port "${PORT}" \
   >/tmp/mcpe-backend.log 2>&1 &
 BACKEND_PID=$!
 disown "${BACKEND_PID}"

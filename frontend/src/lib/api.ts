@@ -16,6 +16,8 @@ import type {
 	CatalogList,
 	CatalogSource,
 	CatalogVersions,
+	GroupInfo,
+	GroupMembers,
 	HealthResponse,
 	ImportResult,
 	ServerCreate,
@@ -242,6 +244,25 @@ export function cloneServer(id: string, name?: string): Promise<ServerSummary> {
 	);
 }
 
+/**
+ * Begin the interactive upstream-OAuth flow for a remote server. Returns the
+ * provider authorization URL the caller should navigate the browser to; the flow
+ * finishes at `/api/oauth/callback`, which redirects back to the server page.
+ */
+export function startOauth(id: string): Promise<{ authorize_url: string }> {
+	return request<{ authorize_url: string }>(
+		`/servers/${encodeURIComponent(id)}/oauth/authorize`,
+		{ method: 'POST' }
+	);
+}
+
+/** Forget a remote server's stored upstream OAuth tokens (so it can be re-authenticated). */
+export function disconnectOauth(id: string): Promise<ServerDetail> {
+	return request<ServerDetail>(`/servers/${encodeURIComponent(id)}/oauth/disconnect`, {
+		method: 'POST'
+	});
+}
+
 export function enableServer(id: string): Promise<ServerSummary> {
 	return request<ServerSummary>(`/servers/${encodeURIComponent(id)}/enable`, {
 		method: 'POST'
@@ -250,6 +271,12 @@ export function enableServer(id: string): Promise<ServerSummary> {
 
 export function disableServer(id: string): Promise<ServerSummary> {
 	return request<ServerSummary>(`/servers/${encodeURIComponent(id)}/disable`, {
+		method: 'POST'
+	});
+}
+
+export function retryServer(id: string): Promise<ServerSummary> {
+	return request<ServerSummary>(`/servers/${encodeURIComponent(id)}/retry`, {
 		method: 'POST'
 	});
 }
@@ -368,4 +395,26 @@ export function deleteToken(id: string): Promise<void> {
 	return request<void>(`/tokens/${encodeURIComponent(id)}`, {
 		method: 'DELETE'
 	});
+}
+
+// ---- Groups (the /g/<name> registry) ----------------------------------------
+
+/** List the configured groups (each with its members and copyable /g/<name>/mcp URL). */
+export function listGroups(): Promise<GroupInfo[]> {
+	return request<GroupInfo[]>('/groups');
+}
+
+/** Create or replace a group. `members` is `'*'` (every registered server) or an
+ * ordered list of server ids. A 400 surfaces an unknown member id or a bad name. */
+export function putGroup(name: string, members: GroupMembers): Promise<GroupInfo> {
+	// Guard an empty name here: an empty path segment would resolve to `/groups/` and
+	// hit the collection route (405/unexpected) instead of failing clearly.
+	if (!name) return Promise.reject(new Error('group name is required'));
+	return jsonRequest<GroupInfo>(`/groups/${encodeURIComponent(name)}`, 'PUT', { members });
+}
+
+/** Delete a group by name. */
+export function deleteGroup(name: string): Promise<void> {
+	if (!name) return Promise.reject(new Error('group name is required'));
+	return request<void>(`/groups/${encodeURIComponent(name)}`, { method: 'DELETE' });
 }

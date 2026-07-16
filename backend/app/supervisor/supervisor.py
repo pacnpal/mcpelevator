@@ -6,20 +6,23 @@ That indirection is what makes the system idempotent and deterministic: re-runni
 ``reconcile_once`` with unchanged desired state is a no-op, and ``config_hash`` is
 the anchor that decides when a restart is actually needed.
 
-M1 scope: start desired, stop undesired, restart on config change, persist observed
-state. Health probing + restart budgets land in M2.
+The supervisor starts desired Servers, stops undesired ones, replaces activations
+on launch-config changes, and persists observed state. Each ServerUnit owns its
+bounded retry policy; this reconciler replaces it after a Stable run ends.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import Optional
+from datetime import datetime
+from typing import Awaitable, Callable, Optional
 
 from sqlmodel import Session
 
 from app.config import get_settings
 from app.db import get_engine, repo
+from app.db.models import Server, utcnow
 from app.registry import service as registry_service
 from app.registry import settings as runtime_settings
 from app.runners.docker import DOCKER_BIN, LABEL_KEY
@@ -62,8 +65,13 @@ class Supervisor:
         self.max_running = settings.max_running
         self.interval = settings.health_interval_s
         self.units: dict[str, ServerUnit] = {}
+        self._activation_requests: dict[str, datetime] = {}
+        self._unit_lock = asyncio.Lock()
         self._nudge = asyncio.Event()
         self._stopping = False
+        # Fired after each reconcile pass so a dependent (the group hub) can
+        # converge on the new topology. The supervisor stays group-unaware.
+        self.on_converged: Optional[Callable[[], Awaitable[None]]] = None
 
     # --- lookups (used by the reverse proxy + API) ----------------------- #
 
@@ -79,6 +87,15 @@ class Supervisor:
             return (u.host, u.port)
         return None
 
+    def running_endpoints(self) -> list[tuple[str, str, str, int]]:
+        """``(server_id, slug, host, port)`` for every unit currently running —
+        the live topology the group hub mounts from."""
+        return [
+            (server_id, u.slug, u.host, u.port)
+            for server_id, u in self.units.items()
+            if u.state == "running" and u.port is not None
+        ]
+
     def rename_slug(self, server_id: str, slug: str) -> None:
         """Update a live unit's routing slug in place (no restart).
 
@@ -91,31 +108,69 @@ class Supervisor:
         if unit is not None:
             unit.slug = slug
 
+    def activation_requested_at(self, server_id: str):
+        return self._activation_requests.get(server_id)
+
+    def request_activation(self, server_id: str) -> None:
+        self._activation_requests[server_id] = utcnow()
+        self.nudge()
+
+    def cancel_activation_request(self, server_id: str) -> None:
+        self._activation_requests.pop(server_id, None)
+
     # --- start/stop a single unit ---------------------------------------- #
 
-    async def _start(self, server) -> None:
-        if len(self.units) >= self.max_running:
+    async def _start(self, server, *, activation_started_at=None) -> None:
+        if sum(unit.port is not None for unit in self.units.values()) >= self.max_running:
             raise RuntimeError(f"max_running ({self.max_running}) reached")
+        unit = ServerUnit(
+            server,
+            on_state_change=self.nudge,
+            release_port=self.ports.release,
+        )
         port = self.ports.allocate()
-        unit = ServerUnit(server)
         self.units[server.id] = unit
-        await unit.start(port)
+        try:
+            await unit.start(port, activation_started_at=activation_started_at)
+        except BaseException:
+            self.units.pop(server.id, None)
+            self.ports.release(port)
+            raise
 
     async def _stop(self, server_id: str) -> None:
         unit = self.units.pop(server_id, None)
         if unit is not None:
-            port = unit.port
             await unit.stop()
-            if port is not None:
-                self.ports.release(port)
 
     async def stop(self, server_id: str) -> None:
         """Public stop (e.g. API-driven delete). Steady state is still reconciled."""
-        await self._stop(server_id)
+        async with self._unit_lock:
+            await self._stop(server_id)
+
+    async def retry(self, server_id: str) -> bool:
+        async with self._unit_lock:
+            unit = self.units.get(server_id)
+            if unit is not None and (
+                unit.state not in ("failed", "unhealthy")
+                or unit.startup_status is not None
+            ):
+                return False
+            await self._stop(server_id)
+        self.request_activation(server_id)
+        return True
 
     # --- reconcile ------------------------------------------------------- #
 
     async def reconcile_once(self) -> None:
+        async with self._unit_lock:
+            await self._reconcile_once_unlocked()
+        if self.on_converged is not None:
+            try:
+                await self.on_converged()
+            except Exception as exc:  # a hub bug must never kill the reconcile loop
+                print(f"[mcpelevator] post-reconcile hook error: {exc}")
+
+    async def _reconcile_once_unlocked(self) -> None:
         # Snapshot desired state under a short-lived session, then RELEASE it before the slow
         # start/stop/reap I/O below. A single docker ``_stop`` can spend tens of seconds
         # reaping containers off a wedged daemon; holding this session open across the whole
@@ -125,11 +180,28 @@ class Supervisor:
         with Session(get_engine()) as session:
             docker_on = runtime_settings.docker_runner(session)
             servers = list(repo.list_servers(session))
+            disabled_runtime_stale = {}
+            for server in servers:
+                if server.enabled:
+                    continue
+                runtime = repo.get_runtime(session, server.id)
+                disabled_runtime_stale[server.id] = runtime is not None and (
+                    runtime.state != "stopped"
+                    or runtime.pid is not None
+                    or runtime.port is not None
+                    or runtime.last_error is not None
+                    or runtime.restart_count != 0
+                    or runtime.last_health is not None
+                    or bool(runtime.tools)
+                )
 
-        desired: dict[str, object] = {}
-        forbidden_docker: list[tuple[object, str]] = []
+        desired: dict[str, Server] = {}
+        disabled: list[Server] = []
+        forbidden_docker: list[tuple[Server, str]] = []
         for sv in servers:
             if not sv.enabled:
+                disabled.append(sv)
+                self.cancel_activation_request(sv.id)
                 continue
             # The docker runner is root-equivalent and opt-in: if it's off, an enabled docker
             # server must not run — collect it for a stop pass below (this also catches the
@@ -154,31 +226,57 @@ class Supervisor:
         # gate: stop any docker unit now forbidden (runner off, or an unhardenable shell wrapper),
         # and surface why
         for sv, reason in forbidden_docker:
+            self.cancel_activation_request(sv.id)
             if sv.id in self.units:
                 await self._stop(sv.id)
             self._write_runtime(
                 sv.id, state="failed", pid=None, port=None,
-                last_error=reason, tools=[],
+                last_error=reason, restart_count=0, last_health=None, tools=[],
             )
 
         # stop anything running that is no longer desired
+        stopped_runtime: set[str] = set()
         for server_id in list(self.units):
             if server_id not in desired:
+                self.cancel_activation_request(server_id)
                 await self._stop(server_id)
                 self._write_runtime(
                     server_id, state="stopped", pid=None, port=None,
-                    last_error=None, tools=[],
+                    last_error=None, restart_count=0, last_health=None, tools=[],
+                )
+                stopped_runtime.add(server_id)
+
+        # A queued activation may have no unit yet. Disabling it still has to
+        # converge a stale persisted runtime row to stopped.
+        for sv in disabled:
+            if sv.id not in stopped_runtime and disabled_runtime_stale.get(sv.id, False):
+                self._write_runtime(
+                    sv.id,
+                    state="stopped",
+                    pid=None,
+                    port=None,
+                    last_error=None,
+                    restart_count=0,
+                    last_health=None,
+                    tools=[],
                 )
 
         # start / restart desired
         for server_id, server in desired.items():
             unit = self.units.get(server_id)
+            requested_at = self._activation_requests.pop(server_id, None)
             start_error: Optional[str] = None
             if unit is None:
-                start_error = await self._try_start(server)
-            elif unit.config_hash != server.config_hash:
+                start_error = await self._try_start(server, activation_started_at=requested_at)
+            elif (
+                requested_at is not None
+                or unit.config_hash != server.config_hash
+                or unit.state == "unhealthy"
+            ):
                 await self._stop(server_id)
-                start_error = await self._try_start(server)
+                start_error = await self._try_start(
+                    server, activation_started_at=requested_at or utcnow()
+                )
 
             unit = self.units.get(server_id)
             if unit is not None:
@@ -194,6 +292,8 @@ class Supervisor:
                     server_id,
                     state=unit.state, pid=unit.pid, port=unit.port,
                     last_error=unit.last_error, tools=unit.tools,
+                    restart_count=getattr(unit, "restart_count", 0),
+                    last_health=getattr(unit, "last_health", None),
                 )
             elif start_error is not None:
                 # _start raised before creating a unit (port exhaustion / max_running). On the
@@ -202,7 +302,7 @@ class Supervisor:
                 # failed server never advertises a pid/port it no longer owns.
                 self._write_runtime(
                     server_id, state="failed", pid=None, port=None,
-                    last_error=start_error, tools=[],
+                    last_error=start_error, restart_count=0, last_health=None, tools=[],
                 )
 
     def _write_runtime(self, server_id: str, **fields) -> None:
@@ -211,12 +311,12 @@ class Supervisor:
         with Session(get_engine()) as session:
             repo.upsert_runtime(session, server_id, **fields)
 
-    async def _try_start(self, server) -> Optional[str]:
+    async def _try_start(self, server, *, activation_started_at=None) -> Optional[str]:
         """Start a unit; return a truncated error string on failure (the caller persists it),
         or ``None`` on success. Kept free of any DB session so the slow spawn stays off the
         reconcile write lock."""
         try:
-            await self._start(server)
+            await self._start(server, activation_started_at=activation_started_at)
             return None
         except Exception as exc:  # port exhaustion, max_running, spawn failure
             return str(exc)[:300]
@@ -283,5 +383,7 @@ class Supervisor:
     async def shutdown(self) -> None:
         self._stopping = True
         self.nudge()
-        for server_id in list(self.units):
-            await self._stop(server_id)
+        self._activation_requests.clear()
+        async with self._unit_lock:
+            for server_id in list(self.units):
+                await self._stop(server_id)

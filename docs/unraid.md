@@ -92,12 +92,68 @@ container, add the variable, restart):
 3. For anything reachable off-host, put a **bearer token** on the server (Auth →
    `bearer`) so the endpoint isn't open to everyone on your network.
 
+### Per-server setup
+
+The `npx`, `uvx`, and `command` runners can have an optional setup script. It runs through
+`/bin/sh -e -c` before every startup attempt, with the MCP child's initial environment and
+working directory. Each retry runs it again, so keep it safe to rerun. Files remain where
+the script writes them, but `export`, `cd`, and aliases do not carry into the child.
+Docker setup belongs in the image, and remote servers have no local setup.
+
+The script is plain server configuration, and its output goes to the authenticated server
+logs. Treat both as sensitive. The official container currently runs as root, so its setup
+scripts do too. Only `/data` and any other paths you explicitly mount survive a container
+replacement; the npm and uv caches survive because they are configured under `/data`.
+Use `MCPE_APT_PACKAGES` for global Debian packages needed by every server, not as a
+per-server setup script. Those packages are installed again after container replacement.
+
+Setup and readiness each receive their own `MCPE_START_TIMEOUT_S` window per attempt.
+Failed setup, bridge launch or readiness, and exits before a stable run retry the whole
+attempt after 2, 4, 8, then 16 seconds, capped at 16. The default budget is 5 attempts.
+After 60 seconds of uninterrupted running the budget resets. Stop cancels startup or a pending retry. An
+enabled server that ends in Failed or Unhealthy can be retried from the UI without
+changing its configuration, or with `POST /api/servers/{id}/retry`.
+
+## Docker runner (opt-in, root-equivalent)
+
+mcpelevator can also run MCP servers packaged as **Docker images** (e.g.
+`ghcr.io/github/github-mcp-server`). This is **OFF by default and root-equivalent**: it
+launches images on a Docker daemon, and anything that can reach the Docker socket is
+effectively root on the host. Only enable it if you trust every image you run.
+
+To turn it on in the template (both steps are required):
+
+1. Set **Docker Runner (root-equivalent)** (`MCPE_DOCKER_RUNNER`) to `true`. This seeds the
+   `docker_runner` setting on first boot; the Settings toggle is authoritative afterwards.
+2. Add the **Docker socket mount** manually — in the container's edit page click **Add another
+   Path, Port, Variable, Label or Device**, choose **Path**, and set both **Container Path** and
+   **Host Path** to `/var/run/docker.sock`. This is the *sibling-container* model: launched
+   images talk to Unraid's own Docker daemon. (The template deliberately doesn't ship this mount —
+   an empty socket path would generate an invalid bind and fail the container for everyone.)
+
+Once enabled, paste an `mcpServers` docker config (e.g. `docker run … <image>`) or install
+an **OCI** catalog entry, then start it like any other server. mcpelevator stores the
+canonical shape and synthesizes a **hardened** `docker run` (`--rm --init --cap-drop ALL
+--security-opt no-new-privileges --pids-limit` + a memory cap, secrets passed by name, and a
+label it uses to reap orphaned containers). Import surfaces a warning for any `docker run`
+option it drops (host mounts, `--network`, `--env-file`, `--platform`, …).
+
+**Stronger isolation:** instead of the host socket, run a separate `docker:dind` daemon and
+point mcpelevator at it with `DOCKER_HOST` — launched images then never touch Unraid's own
+daemon. **Security:** a plaintext `tcp://…:2375` endpoint is *unauthenticated* — anyone who can
+reach it controls that daemon (root-equivalent). Only use `2375` on a strictly private,
+non-routable Docker network shared by just these two containers, and **never publish or
+port-forward it**. For anything less contained, front dind with **TLS on `2376`**
+(`DOCKER_HOST=tcp://<dind-host>:2376` + `DOCKER_TLS_VERIFY=1` and certs). See the project's
+`docker-compose.yml` and [docs/security.md](security.md) for the full model and both isolation
+options.
+
 ## Updating
 
 The template tracks `ghcr.io/pacnpal/mcpelevator:latest`. Unraid's built-in update check
 (**Docker → Check for Updates**) picks up new releases; apply the update and the
 reconciler restarts your enabled servers automatically. Pin a specific version by
-changing the repository tag (e.g. `ghcr.io/pacnpal/mcpelevator:0.1.0`) — published tags
+changing the repository tag (e.g. `ghcr.io/pacnpal/mcpelevator:1.1.0`) — published tags
 are listed on the [GHCR package page](https://github.com/pacnpal/mcpelevator/pkgs/container/mcpelevator).
 
 ## Backup
@@ -119,9 +175,9 @@ port as usual; leave `MCPE_PORT` at `8080` and remap on the host side instead.
 
 Don't port-forward the raw port. To reach the box from outside (e.g. Claude web/mobile
 away from home), use a tunnel that terminates auth — see
-[claude-web-exposure.md](claude-web-exposure.md) for two concrete recipes (Cloudflare
-Tunnel + Access with Managed OAuth for claude.ai web/mobile, or a public HTTPS tunnel +
-mcpelevator's built-in bearer auth for Claude Code / locally-configured Desktop). Set
+[claude-web-exposure.md](claude-web-exposure.md) for three concrete recipes (Cloudflare
+Tunnel + Access with Managed OAuth, a public HTTPS tunnel + mcpelevator's built-in
+bearer auth, or mcpelevator's OAuth resource server with your own authorization server). Set
 `MCPE_PUBLIC_BASE_URL` to the tunnel URL so the copy menu hands out the right addresses.
 
 ## Environment variables (template reference)
@@ -134,8 +190,12 @@ mcpelevator's built-in bearer auth for Claude Code / locally-configured Desktop)
 | `MCPE_MINT_ADMIN_TOKEN` | `false` | Mint + print a fresh admin token on boot (recovery); unset after use |
 | `MCPE_PUBLIC_BASE_URL` | _(unset)_ | Absolute URL clients use when the box sits behind a tunnel/reverse proxy |
 | `MCPE_ALLOWED_HOSTS` | _(unset)_ | Extra hostnames the Host/Origin guard trusts (e.g. a reverse-proxy hostname) |
+| `MCPE_DOCKER_RUNNER` | `false` | **Root-equivalent, opt-in.** First-boot seed for the docker runner (launch image-packaged MCP servers). Needs a Docker endpoint — either the host socket mounted (sibling model) or a `DOCKER_HOST` pointing at a separate dind daemon — see [Docker runner](#docker-runner-opt-in-root-equivalent) |
+| `MCPE_APT_PACKAGES` | _(unset)_ | Global, space-separated extra Debian packages installed before mcpelevator starts, not per-server setup. A failed install warns and boot continues; packages are reinstalled after container replacement |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrently running MCP servers |
-| `MCPE_START_TIMEOUT_S` | `120` | Readiness timeout (covers npx/uvx cold-start installs) |
+| `MCPE_START_TIMEOUT_S` | `120` | Separate timeout for setup and readiness on each startup attempt |
+| `MCPE_RESTART_BUDGET` | `5` | Startup attempts before Failed; retry waits are 2/4/8/16 seconds and cap at 16 |
+| `MCPE_RESTART_STABLE_S` | `60` | Uninterrupted running time before the retry budget is restored |
 
 The full list, including reverse-proxy knobs (`MCPE_TRUSTED_PROXIES`,
 `MCPE_TRUST_DOCKER_HOST`), is in the [README](../README.md#configuration-env-vars-prefix-mcpe_).
@@ -156,4 +216,5 @@ The full list, including reverse-proxy knobs (`MCPE_TRUSTED_PROXIES`,
   `MCPE_PORT` in the template.
 - **A server is slow to start the first time** — `npx`/`uvx` download the package on
   first run. The cache persists in `/data`, so subsequent starts are fast. Raise
-  `MCPE_START_TIMEOUT_S` for very large packages.
+  `MCPE_START_TIMEOUT_S` for very large setup scripts or packages; setup and readiness
+  each receive the full timeout.

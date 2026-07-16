@@ -15,7 +15,8 @@ The protocol bridging is done by [FastMCP](https://gofastmcp.com); mcpelevator i
                                                     ▼
   FastAPI ─ /            SvelteKit SPA              (one container, one port)
           ─ /api/*       control plane (SSOT in SQLite)
-          ─ /s/<slug>/mcp   reverse-proxy ─┐  auth + Host/Origin enforced here
+          ─ /s/<slug>/mcp   one server   ─┐  auth + Host/Origin enforced here
+          ─ /g/<name>/mcp   a group       │  (a registry-declared bundle of servers)
                                            ▼
   per enabled server: 1 supervised bridge process (own uvicorn on a loopback port)
       FastMCP proxy(stdio command — or a remote HTTP/SSE URL) → Streamable HTTP   ← fault-isolated, real PID/logs
@@ -54,7 +55,7 @@ docker compose up --build
 # open http://127.0.0.1:8080
 ```
 
-The image is batteries-included (Node/npx + Python/uv preinstalled), so `npx`/`uvx` servers run with no extra setup. Data (SQLite + package caches) persists in the `mcpe-data` volume. By default the port is published to host loopback only. See **Security**.
+The image is batteries-included (Node/npx + Python/uv preinstalled, plus a native build toolchain — `build-essential`, `cmake`, `pkg-config`, Go, Rust — for servers that compile native extensions on install), so `npx`/`uvx` servers run with no extra setup. Need a tool beyond that (or a newer toolchain than Debian ships)? Set `MCPE_APT_PACKAGES` to install extra Debian packages at container startup (see **Configuration**), or derive your own image (`FROM ghcr.io/pacnpal/mcpelevator`). Data (SQLite + package caches) persists in the `mcpe-data` volume. By default the port is published to host loopback only. See **Security**.
 
 ## Quickstart (Unraid)
 
@@ -86,11 +87,46 @@ Via the API (the UI add-flow wraps this):
 ```bash
 curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/json' -d '{
   "name": "Memory", "runner": "npx", "command": "npx",
-  "args": ["-y", "@modelcontextprotocol/server-memory"], "enabled": true
+  "args": ["-y", "@modelcontextprotocol/server-memory"],
+  "setup_script": "command -v node >/dev/null", "enabled": true
 }'
 ```
 
 Then point any MCP client at `http://127.0.0.1:8080/s/memory/mcp`.
+
+### Per-server setup and startup retries
+
+`setup_script` is optional and supported only by the `npx`, `uvx`, and `command`
+local runners. Before every startup attempt, mcpelevator runs it with
+`/bin/sh -e -c` as the mcpelevator process user, using the local MCP child's initial
+effective environment and working directory. Files and other external effects persist
+according to where the script writes them. Shell-local changes such as `export`, `cd`,
+and aliases end with the setup shell and do not carry into the MCP child. Scripts must
+be safe to run again. Docker setup belongs in the image, and a `remote` server has no
+local setup process.
+
+The script is stored as plain server configuration, and its combined stdout/stderr goes
+to the authenticated server logs. Treat both the script and its output as sensitive.
+The official container currently runs as root, so setup scripts in that container do
+too. Across a container replacement, only mounted or otherwise persistent paths and
+package caches configured on those paths survive. `MCPE_APT_PACKAGES` is different: it
+is global container bootstrap for extra Debian packages before mcpelevator starts, not
+per-server setup.
+
+Each startup attempt runs setup, launches the bridge, and checks readiness. Setup and
+readiness each get a separate `MCPE_START_TIMEOUT_S` window. Failed setup, bridge launch
+or readiness, and exits before a stable run retry the full attempt, including setup.
+`MCPE_RESTART_BUDGET` defaults to 5 attempts, with waits of 2, 4, 8, then 16 seconds;
+further waits stay at 16 seconds. After `MCPE_RESTART_STABLE_S` (60 seconds by default)
+of uninterrupted running, the retry budget is restored. Stop cancels startup and any
+pending retry.
+
+An enabled server in `failed` or `unhealthy` state can be retried in the UI without
+changing its saved configuration, or through the API:
+
+```bash
+curl -X POST "http://127.0.0.1:8080/api/servers/<server-id>/retry"
+```
 
 **Already remote?** Use the `remote` runner to proxy an existing Streamable-HTTP/SSE MCP URL — no local process. The launch spec reuses the same fields: `command` is the upstream URL, `args[0]` is the transport (`streamable-http` or `sse`), and `env` is the upstream HTTP headers.
 
@@ -103,6 +139,57 @@ curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/jso
 ```
 
 Pasting an `mcpServers` config with remote entries now imports them as `remote` servers instead of skipping: a `url` (or Gemini CLI's `httpUrl`) becomes the upstream, and a `type` / `transport` field selects the transport (defaulting to `streamable-http`).
+
+**One URL for a bundle of servers (groups).** Declare a **group** in Settings (or `PUT /api/groups/<name>`) and `http://…/g/<name>/mcp` serves the tools of that group's running members as a single MCP bundle — each tool prefixed by the member's slug (e.g. `memory_create_entities`), so one client entry covers the whole set. A group's members are **all servers** (`"*"` — every registered server, present and future) or a **picked list** of server ids. There's no special name: create a group called `all` with members `"*"` for a bundle of everything. Groups follow the default auth provider; see **Security** for the exclusion rule that keeps bearer-protected servers out of an unauthenticated bundle, and **Route reference** below for the full grammar and the registry config format.
+
+### Upstream authentication: token headers vs OAuth
+
+A `remote` server authenticates **to the upstream** one of two ways:
+
+- **Headers** (default) — a static API key or bearer token you put under `env`
+  (e.g. `{"Authorization": "Bearer <token>"}`). Long-lived and the more permanent
+  option; nothing expires as long as the token is valid.
+- **OAuth** — mcpelevator runs the provider's OAuth 2.1 sign-in (Dynamic Client
+  Registration + PKCE authorization-code grant), stores the tokens, and **refreshes
+  them automatically**. Set `"oauth": true` on the server; leave `env` empty (OAuth
+  supplies the `Authorization` header). Optional `oauth_scopes` and static
+  `oauth_client_id`/`oauth_client_secret` (blank = auto-register).
+
+> **Most remote MCP servers accept both**, but some support only one — **check the
+> server's docs** to be sure. Prefer a static token/API key when the server issues
+> one: it's more permanent. Choose OAuth when the provider requires it or doesn't
+> hand out static tokens. OAuth sessions can lapse; refresh is automatic, but if the
+> provider's refresh window expires you'll need to re-authenticate — check on OAuth
+> servers periodically.
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/json' -d '{
+  "name": "OAuth MCP", "runner": "remote",
+  "command": "https://example.com/mcp", "args": ["streamable-http"],
+  "oauth": true, "oauth_scopes": "read write"
+}'
+```
+
+Then open the server in the UI — it shows **“This server uses OAuth to authenticate”**
+with an **Authenticate with provider** button. Clicking it sends you to the provider
+to sign in; on return the tokens are stored and, if the server is enabled, its bridge
+restarts to pick them up. The server page then shows the connection status with
+**Re-authenticate** / **Disconnect** controls. The OAuth handshake runs in the control
+plane (it needs a browser); the per-server bridge only reads and refreshes the stored
+tokens. The OAuth **tokens** live in `<data_dir>/oauth/<server-id>.json` (created `0600`),
+never in the database, so authenticating never restarts the bridge on its own.
+
+> **⚠️ Stored unencrypted at rest.** OAuth access/refresh tokens live in
+> `<data_dir>/oauth/<server-id>.json`; a static `oauth_client_secret` you supply is stored
+> in the **SQLite database** (the `server` row, like any `env`/header secret) and, after a
+> successful sign-in, is also copied into the client registration in that same JSON file.
+> All of it is stored **in the clear** — protected by file permissions and control of the
+> data directory, **not** encryption, because the bridge subprocess has to read and refresh
+> it. Anyone who can read the data directory *or a database backup* (host root, an
+> unprotected volume mount, a copied backup) can read these credentials. Keep `<data_dir>`,
+> the SQLite file, and any backups on encrypted, access-controlled storage, and revoke a
+> leaked grant at the provider (or via **Disconnect**) rather than relying on on-disk
+> secrecy. Full rationale: [docs/security.md](docs/security.md) § *Credentials at rest*.
 
 ## Install from a registry (catalog)
 
@@ -145,21 +232,27 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_MINT_ADMIN_TOKEN` | `false` | Force-mint a fresh admin token on boot and print it (recovery for a lost token); unset after grabbing it |
 | `MCPE_ALLOW_PRIVATE_LAN` | `false` | First-boot seed for the LAN-access setting (headless bootstrap); see **Security** |
 | `MCPE_DOCKER_RUNNER` | `false` | First-boot seed for the (root-equivalent) docker-runner setting; needs the Docker socket mounted or a dind sidecar |
+| `MCPE_APT_PACKAGES` | _(none)_ | Global, space-separated extra Debian packages installed before mcpelevator starts (Docker image only), not per-server `setup_script`. A failed install warns and boot continues; packages must be reinstalled after container replacement |
 | `MCPE_DATA_DIR` | `./data` | SQLite + caches |
 | `MCPE_FRONTEND_DIR` | `../frontend/build` | Built SPA to serve |
 | `MCPE_PORT_RANGE_START` / `_END` | `49200` / `49400` | Loopback ports for bridge processes |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrent running servers |
-| `MCPE_START_TIMEOUT_S` | `120` | Readiness timeout (covers npx/uvx cold start) |
+| `MCPE_START_TIMEOUT_S` | `120` | Separate timeout for setup and for readiness on each startup attempt (covers npx/uvx cold start) |
+| `MCPE_RESTART_BUDGET` | `5` | Startup attempts before `failed`; retry waits are 2/4/8/16 seconds and cap at 16 |
+| `MCPE_RESTART_STABLE_S` | `60` | Uninterrupted running time before the retry budget is restored |
+| `MCPE_VERSION` | _(image: release tag)_ | Version the instance reports (`/api/health`, UI badge). Set by the published image from the release tag; you don't normally set it. Unset → derived from the adjacent `pyproject.toml` (source tree), else installed package metadata |
 
 ## Security
 
 > **Want to expose this over the internet — e.g. to reach it from Claude?** See
 > [docs/claude-web-exposure.md](docs/claude-web-exposure.md)
-> for two concrete, secure recipes: **Path A** (claude.ai **web/mobile**) —
+> for three concrete, secure recipes: **Path A** (claude.ai **web/mobile**) —
 > a Cloudflare Tunnel plus a Cloudflare Access self-hosted app with **Managed OAuth**,
 > since web/mobile and Desktop's account-UI **remote connectors** are OAuth-only and
 > can't send a bearer; and **Path B** (Claude **Code** / **locally-configured**
-> Desktop) — a public HTTPS tunnel plus mcpelevator's built-in **bearer** auth.
+> Desktop) — a public HTTPS tunnel plus mcpelevator's built-in **bearer** auth; and
+> **Path C** (claude.ai **web/mobile**) — mcpelevator's `oauth` provider backed by
+> your own authorization server.
 > The guide has the exact `cloudflared`/Access steps, `curl` checks, and the
 > connector caveats to test before relying on web/mobile.
 
@@ -174,14 +267,18 @@ Two independent layers guard the system, and a request must pass both.
 
 *Getting in the first time* (the token-vs-access chicken-and-egg): on a fresh install `/api` is open from **loopback** with no token, so the simplest path is to mint the admin token on the box itself — or over an SSH tunnel (`ssh -L 8080:127.0.0.1:8080 you@box`, then open `http://localhost:8080`) — which logs that browser in, and *then* turn LAN access on. For a **headless** box with no loopback browser, set `MCPE_ALLOW_PRIVATE_LAN=true` (and optionally `MCPE_ADMIN_TOKEN`): it seeds the setting on first boot, and because that turns control-plane auth on, the startup bootstrap mints an admin token and **prints it once to the container logs** (`docker compose logs`, or Unraid's log viewer) for you to log in with from the LAN. The env var only seeds the initial value — the Settings toggle is authoritative afterwards.
 
-**Per-request bearer auth**, on both planes:
+**Per-request auth**, on both planes:
 
-- The **proxy data plane** (`/s`) uses a pluggable per-server auth provider. v1 ships `none` and `bearer` (SHA-256-hashed tokens); a server set to `bearer` needs a token in `Authorization: Bearer <token>`. A token authorizes every bearer-protected server by default, or you can scope it to a single server when you create it.
+- The **proxy data plane** (`/s`) uses a pluggable per-server auth provider: `none`, `bearer` (SHA-256-hashed local tokens), or `oauth` (JWT access tokens from an external authorization server). A local token authorizes every bearer-protected server by default, or you can scope it to a single server when you create it. OAuth requires an issuer/discovery URL and audience in Settings and publishes RFC 9728 metadata for clients. See [Exposing mcpelevator to Claude securely](docs/claude-web-exposure.md#path-c--bring-your-own-authorization-server-the-oauth-provider).
 - The **control plane** (`/api`) requires an admin token with the `control` scope. Enforcement follows the `control_plane_auth` setting: `auto` (the default) requires it when `bind_mode=expose` or `MCPE_PUBLIC_BASE_URL` is set (either way the instance is reachable off-host), so a plain local install stays zero-config; `always` requires it even on loopback. `/api/health` (control-plane liveness), `/api/health/{slug}` and `/api/health/summary` (per-server readiness, for load balancers), and `/api/auth/status` stay public.
+
+**Upstream OAuth callback.** `/api/oauth/callback` is public — it's a top-level browser redirect from the upstream authorization server and carries no admin token. It's safe because it only completes a flow the operator themselves started: the unguessable OAuth `state` (bound to that pending authorization) is the anchor, and an unknown/expired state is rejected. Obtained upstream tokens are written to `<data_dir>/oauth/<server-id>.json` (`0600`), shared with the server's bridge for automatic refresh, and never stored in the database.
 
 When control-plane auth is enforced, the SPA shows a login screen. The admin token is printed once to the container logs on first boot (look for "control-plane auth is ON"), and the Settings page can generate one (which logs you in immediately). To switch to `expose` or `always` from the UI you have to generate an admin token first, so you can't lock yourself out.
 
 `MCPE_ADMIN_TOKEN` is a break-glass credential: when set, it's always accepted on `/api`. Use it to recover a lost token, or for CI and automation. A minted token is shown only once (only its hash is stored), so if you lose it and haven't set `MCPE_ADMIN_TOKEN`, set that var and restart to get back in, then generate a fresh token. Alternatively, set `MCPE_MINT_ADMIN_TOKEN=true` and restart: the bootstrap mints a fresh control token and prints it to the logs (existing tokens keep working) — unset the var afterwards so it doesn't mint a new one on every restart.
+
+**Groups** — a group served at `/g/<name>/mcp` bundles the tools of its running members (see **Route reference** for how a group is declared). No groups exist by default (one URL reaching many servers' tools widens exposure, so you declare each one deliberately). A group sits behind the same Host/Origin guard as every `/s` route and authenticates with the **default auth provider**. Under `bearer`, only a `group:<name>`-scoped token (or an *all*-scoped one) is accepted. A protected member is included only when it uses the same provider as the group; `bearer` and `oauth` credentials are not interchangeable. Explicitly open members may sit behind either protected group provider.
 
 **Docker runner** — launch MCP servers packaged as Docker/OCI images (e.g. `ghcr.io/github/github-mcp-server`). It is **opt-in and root-equivalent**: OFF by default behind a Settings toggle (`docker_runner`, or `MCPE_DOCKER_RUNNER=true` to seed it headless), because it runs arbitrary images on a Docker daemon. Enable it, then paste an `mcpServers` docker config or install an **OCI catalog** entry. mcpelevator stores the canonical shape (image + container args + env) and synthesizes a hardened `docker run` (`--rm --init --cap-drop ALL --security-opt no-new-privileges --pids-limit` + a memory cap, secrets passed by name so a value never enters mcpelevator's own argv/`ps` (Docker still resolves it into the container env, readable via `docker inspect` by anyone with daemon access), and a label the supervisor uses to reap orphaned containers). Two isolation models, selected by `docker-compose.yml` config only (identical runner code): **sibling containers** via the mounted host socket (simplest, hands the host daemon to containers) or an isolated **`docker:dind` sidecar** via `DOCKER_HOST` (blast-radius isolation, privileged sidecar). Networking and the root filesystem stay at Docker's defaults so egress-needing servers work.
 
@@ -195,9 +292,39 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 ## Status / roadmap
 
-**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: bearer tokens for `/s` (scope each to all servers or one), control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes.
+**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop / retry, with optional setup scripts for local runners. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: local bearer tokens or external-AS OAuth JWTs for `/s` and `/g`, control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
 
 **Planned:** REST/OpenAPI surface per server · more catalog directories · polish.
+
+## Route reference
+
+Two request grammars, both behind the same Host/Origin guard and per-request auth (see **Security**):
+
+| Route | Serves |
+| --- | --- |
+| `/s/<slug>/mcp` | **One server.** `<slug>` is the server's routing key (operator-renameable). |
+| `/g/<name>/mcp` | **A group.** `<name>` is a registry entry; the URL serves the union of the group's running members' tools, each namespaced by the member's slug (`<slug>_<tool>`). |
+
+There is no `/s/all` or any other reserved slug beyond `summary` (which would shadow `/api/health/summary`) — single servers live only under `/s`, groups only under `/g`, so `all` is now an ordinary server slug if you want one.
+
+**The group registry** is the `groups` setting (SQLite, edited in Settings or via `PUT /api/groups/<name>` / `DELETE /api/groups/<name>`), a map from group name to its members. A member value is either `"*"` (every registered server, present and future) or an ordered list of server ids. Group names are URL-safe (lowercase letters, digits, single hyphens). Example registry:
+
+```jsonc
+{
+  "all":    "*",                       // every server — the bundle-of-everything
+  "search": ["srv_a1b2c3", "srv_d4e5"] // just these two, in this order
+}
+```
+
+Determinism:
+
+- **Unknown group name** at request time → `404` (same shape as an unknown `/s` slug), never a 500.
+- **Empty group** (declared but no running members) → a valid, tool-less bundle: `initialize` succeeds and `tools/list` is `[]`; members appear as they start.
+- **Unknown member id** → rejected when you write the group (`400`), and the registry is re-validated at **startup** — an id that references no registered server (only reachable by hand-editing the database, since writes validate and deletes prune) **fails the boot loudly**, naming the offending group and server id.
+
+Scope a bearer token to a group with `group:<name>` (in the token's scope field). Such a token authorizes `/g/<name>` and nothing else; an `all`-scoped token authorizes every server and every group.
+
+> **Changelog:** the previous single unified endpoint at `/s/all/mcp` (the `unified_endpoint` / `unified_servers` settings) has been **removed** in favor of the group registry above. Recreate its behavior by declaring a group named `all` with members `"*"`.
 
 ## License
 
