@@ -47,6 +47,7 @@ class Server(SQLModel, table=True):
     # HTTP headers (e.g. {"Authorization": "Bearer …"}), not process env.
     env: dict = Field(sa_column=Column(JSON))
     cwd: Optional[str] = None
+    setup_script: str = ""
 
     # exposure (folded 1:1)
     mcp_http: bool = True

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import nullcontext
+from datetime import timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -27,6 +28,7 @@ from app.api.schemas import (
     ServerDetail,
     ServerSummary,
     ServerUpdate,
+    StartupStatus,
     Transports,
     Urls,
 )
@@ -43,20 +45,51 @@ from app.registry import settings as runtime_settings
 router = APIRouter()
 
 
+def _queued_status(server: Server, started_at=None) -> StartupStatus:
+    started_at = started_at or server.updated_at
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    return StartupStatus(
+        phase="queued",
+        attempt=1,
+        max_attempts=get_settings().restart_budget,
+        activation_started_at=started_at,
+    )
+
+
 def _live_state(server: Server, sup, session: Session):
     unit = sup.unit(server.id)
-    if unit is not None:
-        return unit.state, unit.last_error, unit.pid, unit.port, unit.tools
+    requested_at = sup.activation_requested_at(server.id)
     runtime = repo.get_runtime(session, server.id)
+    if server.enabled:
+        if requested_at is not None:
+            return "starting", None, None, None, [], _queued_status(server, requested_at)
+        if unit is not None and (
+            unit.config_hash != server.config_hash or unit.state in ("stopped", "stopping")
+        ):
+            return "starting", None, None, None, [], _queued_status(server)
+        if unit is None:
+            if runtime is not None and runtime.state in ("failed", "unhealthy"):
+                return runtime.state, runtime.last_error, None, None, runtime.tools, None
+            started_at = runtime.updated_at if runtime is not None else server.updated_at
+            return "starting", None, None, None, [], _queued_status(server, started_at)
+    else:
+        if unit is not None and unit.state != "stopped":
+            return "stopping", None, None, None, [], None
+        if runtime is not None and runtime.state != "stopped":
+            return "stopping", None, None, None, [], None
+    if unit is not None:
+        status = StartupStatus(**vars(unit.startup_status)) if unit.startup_status else None
+        return unit.state, unit.last_error, unit.pid, unit.port, unit.tools, status
     if runtime is not None:
-        return runtime.state, runtime.last_error, runtime.pid, runtime.port, runtime.tools
-    return "stopped", None, None, None, []
+        return runtime.state, runtime.last_error, runtime.pid, runtime.port, runtime.tools, None
+    return "stopped", None, None, None, [], None
 
 
 
 
 def _summary(server: Server, sup, session: Session, base: str) -> ServerSummary:
-    state, last_error, pid, port, tools = _live_state(server, sup, session)
+    state, last_error, pid, port, tools, startup_status = _live_state(server, sup, session)
     auth = server.auth_provider
     if auth == "inherit":
         auth = runtime_settings.default_auth_provider(session)
@@ -82,6 +115,7 @@ def _summary(server: Server, sup, session: Session, base: str) -> ServerSummary:
         pid=pid,
         port=port,
         tools_count=len(tools or []),
+        startup_status=startup_status,
     )
 
 
@@ -113,13 +147,14 @@ def _oauth_status(server: Server) -> OAuthStatus:
 
 def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
     summary = _summary(server, sup, session, base)
-    _, _, _, _, tools = _live_state(server, sup, session)
+    _, _, _, _, tools, _ = _live_state(server, sup, session)
     return ServerDetail(
         **summary.model_dump(),
         command=server.command,
         args=server.args,
         env=server.env,
         cwd=server.cwd,
+        setup_script=server.setup_script or "",
         auth_provider=server.auth_provider,
         oauth=bool(server.oauth),
         oauth_scopes=server.oauth_scopes or "",
@@ -171,7 +206,7 @@ async def create_server(
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
     if server.enabled:
-        sup.nudge()
+        sup.request_activation(server.id)
     return _summary(server, sup, session, base_url(request))
 
 
@@ -203,6 +238,7 @@ async def update_server(
     # Signature of the OAuth-relevant config before the edit, to decide token cleanup below.
     existing = repo.get_server(session, server_id)
     before = _oauth_signature(existing) if existing is not None else None
+    before_hash = existing.config_hash if existing is not None else None
     auth_changed = "auth_provider" in changes
     sup = request.app.state.supervisor
 
@@ -226,7 +262,10 @@ async def update_server(
                 # Re-point a running unit's proxy routing without a restart (config_hash
                 # excludes slug, so the reconciler won't do it).
                 sup.rename_slug(server_id, server.slug)
-            sup.nudge()  # config_hash may have changed -> reconciler restarts if needed
+            if server.enabled and before_hash != server.config_hash:
+                sup.request_activation(server_id)
+            else:
+                sup.nudge()
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
@@ -262,6 +301,7 @@ def _prune_then_delete(session: Session, server_id: str) -> bool:
 @router.delete("/servers/{server_id}", status_code=204)
 async def delete_server(server_id: str, request: Request, session: Session = Depends(get_session)):
     sup = request.app.state.supervisor
+    sup.cancel_activation_request(server_id)
     await sup.stop(server_id)  # tear down the process before removing desired state
     # Prune + delete in the worker thread (see _prune_then_delete): both take the config
     # write lock, so the wait must not sit on the event loop.
@@ -341,7 +381,7 @@ async def disconnect_oauth(
     # authenticate upstream and surfaces as needing re-auth — the intended "disconnected"
     # state (matches the connect path, which also restarts to pick up fresh tokens).
     if server.enabled:
-        sup.nudge()
+        sup.request_activation(server_id)
     return _detail(server, sup, session, base_url(request))
 
 
@@ -367,6 +407,8 @@ async def clone_server(
 
 @router.post("/servers/{server_id}/enable", response_model=ServerSummary)
 async def enable_server(server_id: str, request: Request, session: Session = Depends(get_session)):
+    existing = repo.get_server(session, server_id)
+    was_enabled = bool(existing.enabled) if existing is not None else False
     try:
         # Threadpool: set_enabled takes the registry write lock, and an import in a worker
         # can hold that lock across many derivations — don't wait for it on the event loop.
@@ -377,7 +419,10 @@ async def enable_server(server_id: str, request: Request, session: Session = Dep
         # e.g. enabling a docker server while the (root-equivalent) docker runner is off.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     sup = request.app.state.supervisor
-    sup.nudge()
+    if not was_enabled:
+        sup.request_activation(server_id)
+    else:
+        sup.nudge()
     return _summary(server, sup, session, base_url(request))
 
 
@@ -389,7 +434,24 @@ async def disable_server(server_id: str, request: Request, session: Session = De
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     sup = request.app.state.supervisor
+    sup.cancel_activation_request(server_id)
     sup.nudge()
+    return _summary(server, sup, session, base_url(request))
+
+
+@router.post("/servers/{server_id}/retry", response_model=ServerSummary)
+async def retry_server(server_id: str, request: Request, session: Session = Depends(get_session)):
+    server = repo.get_server(session, server_id)
+    if server is None:
+        raise HTTPException(status_code=404, detail="server not found")
+    if not server.enabled:
+        raise HTTPException(status_code=409, detail="disabled servers cannot be retried")
+    sup = request.app.state.supervisor
+    state, _, _, _, _, startup_status = _live_state(server, sup, session)
+    if startup_status is not None or state not in ("failed", "unhealthy"):
+        raise HTTPException(status_code=409, detail="server is not in a retryable state")
+    if not await sup.retry(server_id):
+        raise HTTPException(status_code=409, detail="server is no longer retryable")
     return _summary(server, sup, session, base_url(request))
 
 
@@ -424,9 +486,10 @@ def _sse(obj: dict) -> str:
 async def stream_logs(server_id: str, request: Request, session: Session = Depends(get_session)):
     """SSE stream of a server's live bridge logs.
 
-    Replays the in-memory backlog, then tails new lines until the client
-    disconnects or the server stops (a server's LogBuffer lives only while its
-    unit is running). 404 if the server row doesn't exist.
+    Replays the current activation's bounded in-memory backlog, then tails new
+    lines until the client disconnects or that activation is replaced. Terminal
+    activation logs remain available until Retry, edit, disable, or delete.
+    404 if the server row doesn't exist.
     """
     if repo.get_server(session, server_id) is None:
         raise HTTPException(status_code=404, detail="server not found")

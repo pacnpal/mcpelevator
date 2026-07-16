@@ -37,10 +37,12 @@ def test_add_missing_columns_backfills_new_column():
     _add_missing_columns(eng)  # the upgrade step
 
     cols = {c["name"] for c in inspect(eng).get_columns("server")}
-    assert "auth_provider" in cols
+    assert {"auth_provider", "setup_script"} <= cols
     with eng.begin() as c:
-        val = c.execute(text("SELECT auth_provider FROM server WHERE id='a'")).scalar()
-    assert val == "inherit"  # the model default, backfilled onto the existing row
+        row = c.execute(
+            text("SELECT auth_provider, setup_script FROM server WHERE id='a'")
+        ).one()
+    assert row == ("inherit", "")  # model defaults, backfilled onto the existing row
 
 
 def test_add_missing_columns_is_idempotent():

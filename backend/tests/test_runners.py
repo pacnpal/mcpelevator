@@ -24,12 +24,19 @@ def test_build_spec_is_deterministic():
 
 
 def test_build_spec_passthrough():
-    s = _server(command="npx", args=["-y", "@scope/pkg", "--flag"], env={"K": "v"}, cwd="/tmp")
+    s = _server(
+        command="npx",
+        args=["-y", "@scope/pkg", "--flag"],
+        env={"K": "v"},
+        cwd="/tmp",
+        setup_script="echo ready",
+    )
     spec = build_spec(s)
     assert spec.command == "npx"
     assert spec.args == ["-y", "@scope/pkg", "--flag"]
     assert spec.env == {"K": "v"}
     assert spec.cwd == "/tmp"
+    assert spec.setup_script == "echo ready"
 
 
 @pytest.mark.parametrize("runner", ["npx", "uvx", "command"])
@@ -100,6 +107,7 @@ def test_remote_runner_maps_url_transport_headers():
     assert spec.command == "https://up.example/mcp"  # upstream URL
     assert spec.transport == "sse"  # from args[0]
     assert spec.env == {"Authorization": "Bearer t"}  # upstream headers
+    assert spec.setup_script == ""
 
 
 def test_remote_runner_defaults_transport_when_args_empty():

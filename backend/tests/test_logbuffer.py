@@ -18,7 +18,12 @@ def test_ring_cap_drops_oldest():
     buf = LogBuffer(maxlen=3)
     for i in range(5):
         buf.append(f"l{i}")
-    assert buf.snapshot() == ["l2", "l3", "l4"]
+    assert buf.snapshot() == [
+        "[mcpelevator] 2 earlier log line(s) omitted (buffer limit)",
+        "l2",
+        "l3",
+        "l4",
+    ]
 
 
 async def test_subscriber_receives_lines_appended_after_subscribe():

@@ -108,7 +108,14 @@ def reset_all_runtime(session: Session) -> None:
     already 'stopped' to the API, so updating existing rows is sufficient."""
     session.execute(
         update(ServerRuntime).values(
-            state="stopped", pid=None, port=None, last_error=None, tools=[], updated_at=utcnow()
+            state="stopped",
+            pid=None,
+            port=None,
+            last_error=None,
+            restart_count=0,
+            last_health=None,
+            tools=[],
+            updated_at=utcnow(),
         )
     )
     session.commit()

@@ -33,6 +33,7 @@ const devProxy: ProxyOptions['configure'] = (proxy) => {
 
 export default defineConfig({
 	plugins: [tailwindcss(), sveltekit()],
+	resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
 	test: {
 		environment: 'jsdom',
 		environmentOptions: { jsdom: { url: 'http://localhost:5173/' } },
@@ -51,7 +52,7 @@ export default defineConfig({
 			},
 			// /s carries SSE / streaming responses. Disable buffering so events
 			// flush to the client as they arrive instead of being held back.
-			'/s': {
+			'^/s/': {
 				target: BACKEND,
 				changeOrigin: true,
 				ws: true,

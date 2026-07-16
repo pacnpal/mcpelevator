@@ -428,6 +428,7 @@
 			runner: 'remote',
 			enabled: true,
 			state: 'running',
+			startup_status: null,
 			transports: { mcp_http: true, rest_openapi: false },
 			urls: { mcp: group.url, rest: null },
 			auth: settings?.default_auth_provider ?? 'none',

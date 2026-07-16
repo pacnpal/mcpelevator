@@ -56,6 +56,9 @@ def _fake_unit(server) -> SimpleNamespace:
         port=9999,
         last_error=None,
         tools=[],
+        restart_count=0,
+        last_health=None,
+        startup_status=None,
     )
 
 
@@ -89,6 +92,42 @@ async def test_reconcile_skips_docker_when_runner_disabled():
             repo.delete_server(session, sid)
 
 
+async def test_reconcile_clears_queued_runtime_when_server_is_disabled():
+    sup = Supervisor()
+    with Session(get_engine()) as session:
+        server = service.create_server(
+            session, name="Queued", runner="npx", command="npx", enabled=False
+        )
+        sid = server.id
+        repo.upsert_runtime(
+            session,
+            sid,
+            state="queued",
+            pid=1234,
+            port=9999,
+            last_error="stale",
+            restart_count=2,
+            tools=[{"name": "stale"}],
+        )
+    sup.request_activation(sid)
+    try:
+        await sup.reconcile_once()
+
+        assert sup.activation_requested_at(sid) is None
+        with Session(get_engine()) as session:
+            runtime = repo.get_runtime(session, sid)
+        assert runtime is not None
+        assert runtime.state == "stopped"
+        assert runtime.pid is None
+        assert runtime.port is None
+        assert runtime.last_error is None
+        assert runtime.restart_count == 0
+        assert runtime.tools == []
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, sid)
+
+
 async def test_reconcile_converges_renamed_slug_onto_live_unit():
     sup = Supervisor()
     with Session(get_engine()) as session:
@@ -116,3 +155,47 @@ async def test_reconcile_converges_renamed_slug_onto_live_unit():
         sup.units.pop(sid, None)
         with Session(get_engine()) as session:
             repo.delete_server(session, sid)
+
+
+async def test_reconcile_replaces_unhealthy_but_keeps_failed_terminal(monkeypatch):
+    sup = Supervisor()
+    with Session(get_engine()) as session:
+        unhealthy_server = service.create_server(
+            session, name="Unhealthy", runner="npx", command="npx", enabled=True
+        )
+        failed_server = service.create_server(
+            session, name="Failed", runner="npx", command="npx", enabled=True
+        )
+        session.refresh(unhealthy_server)
+        unhealthy_data = vars(_fake_unit(unhealthy_server))
+        failed = _fake_unit(failed_server)
+        unhealthy_id = unhealthy_server.id
+        failed_id = failed_server.id
+
+    class StoppableUnit(SimpleNamespace):
+        async def stop(self):
+            self.state = "stopped"
+
+    unhealthy = StoppableUnit(**unhealthy_data)
+    unhealthy.state = "unhealthy"
+    failed.state = "failed"
+    sup.units[unhealthy_id] = unhealthy
+    sup.units[failed_id] = failed
+    restarted: list[str] = []
+
+    async def fake_start(server, *, activation_started_at=None):
+        restarted.append(server.id)
+        sup.units[server.id] = _fake_unit(server)
+        return None
+
+    monkeypatch.setattr(sup, "_try_start", fake_start)
+    try:
+        await sup.reconcile_once()
+        assert restarted == [unhealthy_id]
+        assert sup.units[unhealthy_id] is not unhealthy
+        assert sup.units[failed_id] is failed
+    finally:
+        sup.units.clear()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, unhealthy_id)
+            repo.delete_server(session, failed_id)

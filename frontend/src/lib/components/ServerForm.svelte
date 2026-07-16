@@ -115,6 +115,7 @@
 			pkg: pkg0,
 			extraArgsText: extra0,
 			transport: transport0,
+			setupScript: init.setup_script ?? '',
 			cwd: init.cwd ?? '',
 			mcpHttp: init.mcp_http ?? true,
 			restOpenapi: init.rest_openapi ?? false,
@@ -147,6 +148,7 @@
 
 	// Remote runner: the upstream transport (command holds the URL; args = [transport]).
 	let transport = $state(seed.transport);
+	let setupScript = $state(seed.setupScript);
 
 	// Remote runner upstream auth: static Headers (the default) vs OAuth. When OAuth is
 	// on, mcpelevator runs the provider sign-in and stores/refreshes tokens; scopes and
@@ -167,7 +169,7 @@
 	let restOpenapi = $state(seed.restOpenapi);
 	let authProvider = $state<ServerAuthProvider>(seed.authProvider);
 	let startAfter = $state(seed.startAfter);
-	let advancedOpen = $state(false);
+	let advancedOpen = $state(seed.setupScript.trim().length > 0);
 
 	let envRows = $state<EnvRow[]>(seed.envRows);
 	let envSeq = seed.envRows.length;
@@ -202,6 +204,14 @@
 		} else {
 			syncFromFriendly();
 		}
+		if ((runner === 'docker' || runner === 'remote') && setupScript.trim()) {
+			advancedOpen = true;
+		}
+	}
+
+	function onCommandInput(event: Event) {
+		const value = (event.currentTarget as HTMLInputElement).value;
+		if (setupScript.trim() && isDockerLauncher(value)) advancedOpen = true;
 	}
 
 	function addEnvRow() {
@@ -227,6 +237,12 @@
 
 	const isRemote = $derived(runner === 'remote');
 	const isDocker = $derived(runner === 'docker');
+	const commandUsesDocker = $derived(
+		(runner === 'npx' || runner === 'uvx' || runner === 'command') && isDockerLauncher(command)
+	);
+	const setupUsesDocker = $derived(isDocker || commandUsesDocker);
+	const setupAllowed = $derived(!isRemote && !setupUsesDocker);
+	const setupBlocked = $derived(!setupAllowed && setupScript.trim().length > 0);
 	// A docker server is only *started* when created with "Start after creating" on; editing
 	// or saving a disabled docker server is always allowed (the backend gates on enable, not
 	// on storing a disabled row) so an imported config can be reviewed first.
@@ -259,6 +275,15 @@
 			return false;
 		}
 	}
+
+	function isDockerLauncher(value: string): boolean {
+		const command = value.trim();
+		const normalized = command.replaceAll('\\', '/');
+		const basename = normalized.split('/').at(-1)?.toLowerCase();
+		if (basename !== 'docker' && basename !== 'docker.exe') return false;
+		if (!normalized.includes('/')) return true;
+		return /^[/.~]/.test(normalized) || /^[a-zA-Z]:/.test(command);
+	}
 	const remoteUrlValid = $derived(!isRemote || isValidRemoteUrl(command));
 
 	// Mirror the backend's slugify so the operator sees the value that will actually
@@ -276,7 +301,7 @@
 	const slugChanged = $derived(mode === 'edit' && normalizedSlug !== originalSlug);
 
 	const canSubmit = $derived(
-		nameValid && commandValid && remoteUrlValid && !dockerBlocked && !busy
+		nameValid && commandValid && remoteUrlValid && !dockerBlocked && !setupBlocked && !busy
 	);
 
 	function buildEnv(): Record<string, string> {
@@ -321,6 +346,8 @@
 			// remote stores [transport] in args; there's no local process, so no cwd.
 			// docker stores command=image + args=container args, and cwd is meaningless.
 			args: isRemote ? [transport] : resolvedArgs,
+			// Preserve executable text byte-for-byte; canonicalize whitespace-only input to blank.
+			setup_script: setupScript.trim() ? setupScript : '',
 			env: buildEnv(),
 			cwd: isRemote || isDocker ? null : cwd.trim() ? cwd.trim() : null,
 			mcp_http: mcpHttp,
@@ -738,6 +765,7 @@
 				id="srv-command"
 				type="text"
 				bind:value={command}
+				oninput={onCommandInput}
 				autocomplete="off"
 				spellcheck="false"
 				placeholder="/usr/local/bin/my-mcp-server"
@@ -785,7 +813,26 @@
 			</div>
 		</div>
 	{:else}
-	<!-- Advanced disclosure: resolved raw command + args -->
+		<!-- Resolved command preview -->
+		<div class="flex flex-col gap-1.5">
+			<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
+			<div
+				class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5"
+			>
+				{#if previewCommand}
+					<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
+						{previewCommand}
+					</code>
+				{:else}
+					<code class="font-mono text-xs text-[var(--color-ink-dim)]">
+						(command not set)
+					</code>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Advanced disclosure: raw launch config + optional pre-start setup. -->
 	<div
 		class="overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]"
 	>
@@ -798,7 +845,7 @@
 			<span class="flex flex-col gap-0.5">
 				<span class="text-sm font-medium text-[var(--color-ink)]">Advanced</span>
 				<span class="text-xs text-[var(--color-ink-dim)]">
-					Resolved <code class="font-mono">command</code> + <code class="font-mono">args</code> as stored
+					Setup script{setupAllowed ? ' and raw launch configuration' : ''}
 				</span>
 			</span>
 			<svg
@@ -821,64 +868,81 @@
 				class="flex flex-col gap-3 border-t border-[var(--color-line)] px-3.5 py-3.5"
 			>
 				<div class="flex flex-col gap-1.5">
-					<label
-						for="adv-command"
-						class="text-xs font-medium text-[var(--color-ink-muted)]"
-					>
-						command
-					</label>
-					<input
-						id="adv-command"
-						type="text"
-						bind:value={command}
-						autocomplete="off"
-						spellcheck="false"
-						class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
-					/>
-				</div>
-				<div class="flex flex-col gap-1.5">
-					<label
-						for="adv-args"
-						class="text-xs font-medium text-[var(--color-ink-muted)]"
-					>
-						args <span class="text-[var(--color-ink-dim)]">(one per line)</span>
+					<label for="srv-setup-script" class="text-xs font-medium text-[var(--color-ink-muted)]">
+						Setup script <span class="text-[var(--color-ink-dim)]">(optional)</span>
 					</label>
 					<textarea
-						id="adv-args"
-						bind:value={argsText}
-						rows="4"
+						id="srv-setup-script"
+						bind:value={setupScript}
+						rows="5"
 						spellcheck="false"
-						class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						placeholder="npm install @playwright/test&#10;npx playwright install"
+						aria-describedby={setupBlocked ? 'setup-warning setup-validation' : 'setup-warning'}
+						aria-invalid={setupBlocked}
+						class="resize-y rounded-md border bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						style={setupBlocked
+							? 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'
+							: 'border-color: var(--color-line);'}
 					></textarea>
-				</div>
-				{#if friendly}
-					<p class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
-						Editing here overrides the friendly fields above. Changing the
-						package field again will rebuild these.
+					{#if setupBlocked}
+						<p id="setup-validation" role="alert" class="text-xs text-[var(--color-state-failed)]">
+							{setupUsesDocker
+								? 'Setup scripts are not supported for Docker servers. Put setup in the image, or clear this field.'
+								: 'Setup scripts are not supported for remote servers. Clear this field.'}
+						</p>
+					{/if}
+					<p id="setup-warning" class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
+						Scripts run with <code class="font-mono text-[var(--color-ink-muted)]">/bin/sh -e -c</code>
+						as the mcpelevator process user. They receive the effective server environment and
+						working directory, are stored as plain config, can modify mounted data, may
+						rerun during recovery, and output appears in logs. Shell-local changes do not carry
+						into the MCP process.
 					</p>
+				</div>
+
+				{#if setupAllowed}
+					<div class="flex flex-col gap-1.5 border-t border-[var(--color-line)] pt-3">
+						<label
+							for="adv-command"
+							class="text-xs font-medium text-[var(--color-ink-muted)]"
+						>
+							command
+						</label>
+						<input
+							id="adv-command"
+							type="text"
+							bind:value={command}
+							oninput={onCommandInput}
+							autocomplete="off"
+							spellcheck="false"
+							class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						/>
+					</div>
+					<div class="flex flex-col gap-1.5">
+						<label
+							for="adv-args"
+							class="text-xs font-medium text-[var(--color-ink-muted)]"
+						>
+							args <span class="text-[var(--color-ink-dim)]">(one per line)</span>
+						</label>
+						<textarea
+							id="adv-args"
+							bind:value={argsText}
+							rows="4"
+							spellcheck="false"
+							class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						></textarea>
+					</div>
+					{#if friendly}
+						<p class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
+							Editing here overrides the friendly fields above. Changing the
+							package field again will rebuild these.
+						</p>
+					{/if}
 				{/if}
 			</div>
 		{/if}
 	</div>
-
-	<!-- Resolved command preview -->
-	<div class="flex flex-col gap-1.5">
-		<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
-		<div
-			class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5"
-		>
-			{#if previewCommand}
-				<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
-					{previewCommand}
-				</code>
-			{:else}
-				<code class="font-mono text-xs text-[var(--color-ink-dim)]">
-					(command not set)
-				</code>
-			{/if}
-		</div>
-	</div>
-	{/if}
 
 	<!-- Environment variables (upstream headers when remote) -->
 	<fieldset class="flex flex-col gap-2 border-0 p-0">

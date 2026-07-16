@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { goto } from '$app/navigation';
 
-import { ApiError, cloneServer, getHealth, streamLogs } from './api';
+import { ApiError, cloneServer, getHealth, retryServer, streamLogs } from './api';
 import { getToken, setToken } from './auth';
 
 // api.ts imports goto at module load; mock the SvelteKit module so the 401 path
@@ -65,6 +65,14 @@ describe('api request()', () => {
 		await cloneServer('src-id', 'Memory staging');
 		const init = fetchMock.mock.calls[0][1] as RequestInit;
 		expect(init.body).toBe(JSON.stringify({ name: 'Memory staging' }));
+	});
+
+	it('retryServer POSTs to the retry endpoint', async () => {
+		const fetchMock = stubFetch(200, { id: 'srv', state: 'starting' });
+		await retryServer('server/id');
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/servers/server%2Fid/retry');
+		expect(init.method).toBe('POST');
 	});
 
 	it('parses both CRLF- and LF-framed SSE log frames', async () => {

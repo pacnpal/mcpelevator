@@ -1,8 +1,7 @@
-"""In-memory ring buffer of a server's bridge-host log lines.
+"""In-memory ring buffer for one Server activation.
 
-Holds a bounded backlog (for the UI to show on open) and supports live
-subscribers (for the SSE tail endpoint added in M2). All access happens on the
-event-loop thread (the log pump and the API run on the same loop).
+Holds setup, bridge, readiness, and retry output in one bounded backlog and
+supports live subscribers. All access happens on the event-loop thread.
 """
 
 from __future__ import annotations
@@ -14,9 +13,12 @@ from collections import deque
 class LogBuffer:
     def __init__(self, maxlen: int = 2000):
         self.lines: deque[str] = deque(maxlen=maxlen)
+        self.dropped = 0
         self._subscribers: set[asyncio.Queue[str]] = set()
 
     def append(self, line: str) -> None:
+        if self.lines.maxlen is not None and len(self.lines) == self.lines.maxlen:
+            self.dropped += 1
         self.lines.append(line)
         for q in list(self._subscribers):
             try:
@@ -25,7 +27,13 @@ class LogBuffer:
                 pass
 
     def snapshot(self) -> list[str]:
-        return list(self.lines)
+        lines = list(self.lines)
+        if self.dropped:
+            lines.insert(
+                0,
+                f"[mcpelevator] {self.dropped} earlier log line(s) omitted (buffer limit)",
+            )
+        return lines
 
     def subscribe(self) -> asyncio.Queue[str]:
         q: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)

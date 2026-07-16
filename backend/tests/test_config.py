@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from app.config import Settings
 
 
@@ -45,3 +48,27 @@ def test_env_values_tolerate_surrounding_whitespace(monkeypatch):
     assert settings.allow_private_lan is True
     assert settings.admin_token == "secret"
     assert settings.host == "0.0.0.0"
+
+
+def test_activation_settings_defaults_and_environment(monkeypatch):
+    defaults = Settings(_env_file=None)
+    assert defaults.start_timeout_s == 120
+    assert defaults.restart_budget == 5
+    assert defaults.restart_stable_s == 60
+
+    monkeypatch.setenv("MCPE_START_TIMEOUT_S", "3.5")
+    monkeypatch.setenv("MCPE_RESTART_BUDGET", "2")
+    monkeypatch.setenv("MCPE_RESTART_STABLE_S", "9")
+    configured = Settings(_env_file=None)
+    assert configured.start_timeout_s == 3.5
+    assert configured.restart_budget == 2
+    assert configured.restart_stable_s == 9
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("start_timeout_s", 0), ("restart_budget", 0), ("restart_stable_s", -1)],
+)
+def test_activation_settings_reject_invalid_bounds(field, value):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: value})

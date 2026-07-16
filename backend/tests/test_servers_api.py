@@ -6,11 +6,187 @@ when a disabled docker server is enabled while the root-equivalent runner is sti
 
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
+import asyncio
 
+from fastapi.testclient import TestClient
+from sqlmodel import Session
+
+from app.db import get_engine, repo
 from app.main import app
+from app.registry import service
+from app.supervisor.supervisor import Supervisor
+from app.supervisor.unit import ServerUnit
 
 LOOPBACK = {"host": "127.0.0.1"}
+
+
+def test_setup_script_api_round_trip_and_runner_validation():
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "Prepared",
+                "runner": "command",
+                "command": "/bin/true",
+                "setup_script": "printf 'ready\\n'\n",
+            },
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.status_code == 200
+            assert detail.json()["setup_script"] == "printf 'ready\\n'\n"
+
+            rejected = c.patch(
+                f"/api/servers/{server_id}",
+                json={"runner": "remote", "command": "https://up.example/mcp"},
+                headers=LOOPBACK,
+            )
+            assert rejected.status_code == 400
+            assert "local runners" in rejected.json()["detail"]
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_enabled_create_returns_queued_without_stale_runtime(monkeypatch):
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "Queued",
+                "runner": "command",
+                "command": "/bin/true",
+                "enabled": True,
+            },
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        body = created.json()
+        try:
+            assert body["state"] == "starting"
+            assert body["startup_status"]["phase"] == "queued"
+            assert body["startup_status"]["attempt"] == 1
+            assert body["pid"] is None
+            assert body["port"] is None
+        finally:
+            c.delete(f"/api/servers/{body['id']}", headers=LOOPBACK)
+
+
+def test_retry_starts_fresh_activation_without_changing_config(monkeypatch):
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Retry", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            with Session(get_engine()) as session:
+                server = service.set_enabled(session, server_id, True)
+                before = (server.config_hash, server.updated_at)
+                repo.upsert_runtime(
+                    session,
+                    server_id,
+                    state="failed",
+                    pid=None,
+                    port=None,
+                    last_error="setup exited with code 7",
+                    tools=[],
+                )
+
+            retried = c.post(f"/api/servers/{server_id}/retry", headers=LOOPBACK)
+            assert retried.status_code == 200, retried.text
+            body = retried.json()
+            assert body["state"] == "starting"
+            assert body["startup_status"]["phase"] == "queued"
+            assert body["last_error"] is None
+
+            with Session(get_engine()) as session:
+                current = repo.get_server(session, server_id)
+                assert current is not None
+                assert (current.config_hash, current.updated_at) == before
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_launch_edit_returns_queued_instead_of_old_running_unit(monkeypatch):
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Edit", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            with Session(get_engine()) as session:
+                server = service.set_enabled(session, server_id, True)
+                old_unit = ServerUnit(server)
+                old_unit.state = "running"
+                old_unit.port = 49999
+                c.app.state.supervisor.units[server_id] = old_unit
+
+            edited = c.patch(
+                f"/api/servers/{server_id}",
+                json={"setup_script": "printf 'new setup\\n'\n"},
+                headers=LOOPBACK,
+            )
+            assert edited.status_code == 200, edited.text
+            body = edited.json()
+            assert body["state"] == "starting"
+            assert body["startup_status"]["phase"] == "queued"
+            assert body["port"] is None
+            assert body["tools_count"] == 0
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_disable_returns_stopping_instead_of_stale_running_runtime(monkeypatch):
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Stop", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            with Session(get_engine()) as session:
+                service.set_enabled(session, server_id, True)
+                repo.upsert_runtime(
+                    session,
+                    server_id,
+                    state="running",
+                    pid=123,
+                    port=49999,
+                    last_error=None,
+                    tools=[],
+                )
+
+            stopped = c.post(f"/api/servers/{server_id}/disable", headers=LOOPBACK)
+            assert stopped.status_code == 200, stopped.text
+            body = stopped.json()
+            assert body["state"] == "stopping"
+            assert body["pid"] is None
+            assert body["port"] is None
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
 def test_enable_docker_server_gated_returns_400():

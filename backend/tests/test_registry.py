@@ -110,6 +110,55 @@ def test_config_hash_changes_on_edit(session):
     assert after != before
 
 
+def test_setup_script_round_trips_hashes_and_clones(session):
+    script = "printf 'installing\\n'\nmkdir -p .cache/setup\n"
+    server = _mk(session, setup_script=script)
+    assert server.setup_script == script
+
+    before = server.config_hash
+    updated = service.update_server(session, server.id, {"setup_script": "printf 'updated\\n'\n"})
+    assert updated.setup_script == "printf 'updated\\n'\n"
+    assert updated.config_hash != before
+
+    clone = service.clone_server(session, server.id)
+    assert clone.setup_script == updated.setup_script
+    assert clone.config_hash == updated.config_hash
+
+
+def test_setup_script_blank_is_canonical_and_local_only(session):
+    blank = _mk(session, setup_script="  \n\t")
+    assert blank.setup_script == ""
+
+    with pytest.raises(ValueError, match="Docker image"):
+        service.create_server(
+            session,
+            name="Docker",
+            runner="docker",
+            command="img:1",
+            setup_script="echo no",
+        )
+    with pytest.raises(ValueError, match="local runners"):
+        service.create_server(
+            session,
+            name="Remote",
+            runner="remote",
+            command="https://up.example/mcp",
+            setup_script="echo no",
+        )
+
+
+def test_setup_script_cannot_bypass_docker_runner_reclassification(session):
+    with pytest.raises(ValueError, match="Docker image"):
+        service.create_server(
+            session,
+            name="Docker",
+            runner="command",
+            command="docker",
+            args=["run", "img:1"],
+            setup_script="echo no",
+        )
+
+
 def test_config_hash_is_order_independent(session):
     """Same logical config -> same hash, regardless of env key order.
 

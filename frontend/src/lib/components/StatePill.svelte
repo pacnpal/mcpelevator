@@ -1,7 +1,11 @@
 <script lang="ts">
-	import type { ServerState } from '$lib/types';
+	import { startupPhaseLabel } from '$lib/startup';
+	import type { ServerState, StartupStatus } from '$lib/types';
 
-	let { state }: { state: ServerState } = $props();
+	let {
+		state,
+		startupStatus = null
+	}: { state: ServerState; startupStatus?: StartupStatus | null } = $props();
 
 	const META: Record<
 		ServerState,
@@ -15,7 +19,15 @@
 		stopped: { label: 'Stopped', color: 'var(--color-state-stopped)', pulse: false }
 	};
 
-	const meta = $derived(META[state] ?? META.stopped);
+	const meta = $derived(
+		startupStatus
+			? {
+					label: startupPhaseLabel(startupStatus.phase),
+					color: 'var(--color-state-starting)',
+					pulse: true
+				}
+			: (META[state] ?? META.stopped)
+	);
 </script>
 
 <span
