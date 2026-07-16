@@ -1674,6 +1674,47 @@ def test_function_body_prlimit_npm_alias_and_procsub_non_docker_allowed(
 @pytest.mark.parametrize(
     "inner",
     [
+        "source <(printf 'docker run alpine\\n')",      # source executes a process-sub script
+        ". <(printf 'docker run\\n')",
+        'D=docker sh -c \'"$D" run alpine\'',           # inline assignment reaches the child shell
+        "D=docker bash -c '${D} run'",
+        "printf 'docker run alpine\\n' | cat | sh",     # static literal survives a pass-through cat
+        "echo docker run | tee /dev/null | sh",         # ...and tee
+        "printf 'docker run\\n' | cat | cat | sh",      # ...chained pass-throughs
+    ],
+)
+def test_sourced_procsub_inline_assignment_and_passthrough_pipe_rejected(session, inner):
+    """``source`` of a process substitution, a leading ``NAME=VALUE`` that reaches a child shell, and
+    a static literal piped through pass-through filters (``cat``/``tee``) into a shell must be
+    gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="src-inline-pipe", runner="command", command="/bin/bash",
+            args=["-c", inner], enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "source <(printf 'echo hi\\n')",         # sourced process-sub output isn't docker
+        "D=python sh -c '\"$D\" -m srv'",        # inline assignment resolves to non-docker
+        "printf hi | cat /etc/hostname | sh",    # ``cat FILE`` reads the file, not the piped stdin
+    ],
+)
+def test_sourced_procsub_inline_assignment_and_passthrough_non_docker_allowed(session, inner):
+    """The sourced-procsub / inline-assignment / pass-through-pipe machinery must not reject the
+    non-docker cases."""
+    s = service.create_server(
+        session, name="src-inline-ok", runner="command", command="/bin/bash", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
         "docker() { printf fake; }; docker run alpine",   # POSIX definition shadows the later call
         "docker () { printf fake; }; docker run alpine",  # ...with a space before the ``()``
         "source /etc/init.sh <<'EOF'\ndocker run alpine\nEOF",  # source reads a real file, not stdin

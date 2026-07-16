@@ -878,8 +878,9 @@ def _process_subst_invokes_docker(command_string: str,
 
 
 def _preceding_command_is_shell(command_string: str, pos: int) -> bool:
-    """True when the simple command containing ``pos`` starts with a shell launcher — used to tell
-    whether a process substitution at ``pos`` is a script fed to a shell (``bash <(…)``)."""
+    """True when the simple command containing ``pos`` executes a script FILE as shell input — a
+    shell launcher (``bash <(…)``) or ``source``/``.`` (``source <(…)``). Used to tell whether a
+    process substitution at ``pos`` is a script run by that command."""
     segment = _split_shell_commands(command_string[:pos])[-1]
     try:
         words = shlex.split(segment)
@@ -892,7 +893,8 @@ def _preceding_command_is_shell(command_string: str, pos: int) -> bool:
     if idx >= len(words):
         return False
     cmd, _ = _strip_wrappers(words[idx], words[idx + 1:])
-    return _launcher_basename(cmd) in _SHELL_LAUNCHERS
+    base = _launcher_basename(cmd)
+    return base in _SHELL_LAUNCHERS or base in _SOURCE_BUILTINS
 
 
 def _preserve_substitutions(text: str) -> str:
@@ -1254,6 +1256,7 @@ def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset(),
     except ValueError:
         words = segment.split()
     idx = 0
+    inline_env: dict[str, str] = {}
     while idx < len(words):
         w = words[idx]
         span = _redirection_span(w)
@@ -1278,12 +1281,19 @@ def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset(),
             while idx < len(words) and words[idx] in ("-p", "--portability", "--"):
                 idx += 1
             break
-        if w in _SHELL_RESERVED_WORDS or _looks_like_assignment(w):
+        if _looks_like_assignment(w):  # ``D=docker cmd`` scopes D to cmd's environment — carry it
+            name, value = w.split("=", 1)
+            inline_env[name] = value
+            idx += 1
+            continue
+        if w in _SHELL_RESERVED_WORDS:
             idx += 1
             continue
         break
     if idx >= len(words):
         return False
+    if inline_env:  # a leading ``NAME=VALUE`` prefix reaches the command's environment (e.g. a shell)
+        env = {**(env or {}), **inline_env}
     if _declared_function_name(words, idx) is not None:
         return False  # a POSIX ``NAME () { … }`` declaration in command position — not a launch
     cmd = words[idx]
@@ -1737,14 +1747,39 @@ def _printf_output(fmt: str, args: list[str]) -> str:
     return "".join(out)
 
 
+def _is_passthrough_filter(stage: str) -> bool:
+    """True when ``stage`` forwards its stdin to stdout unchanged (``cat`` with no file, ``tee``), so
+    a static literal survives it on the way to a stdin-reading shell (``printf … | cat | sh``)."""
+    try:
+        words = shlex.split(stage)
+    except ValueError:
+        return False
+    idx = 0
+    while idx < len(words) and _looks_like_assignment(words[idx]):
+        idx += 1
+    if idx >= len(words):
+        return False
+    base = _launcher_basename(words[idx])
+    rest = words[idx + 1:]
+    if base == "tee":  # tee always copies stdin to stdout (plus its file args)
+        return True
+    if base == "cat":  # cat forwards stdin only with no real file operand (``-`` is stdin)
+        return all(w == "-" or w.startswith("-") for w in rest)
+    return False
+
+
 def _pipe_into_stdin_shell_invokes_docker(command_string: str,
                                           env: Optional[dict[str, str]] = None) -> bool:
     """True when a static ``echo``/``printf`` is piped into a stdin-reading shell that then launches
-    docker (``printf 'docker run\\n' | sh``) — the piped literal IS the shell's script."""
+    docker (``printf 'docker run\\n' | sh``, even through pass-through filters like
+    ``… | cat | sh``) — the piped literal IS the shell's script."""
     for pipeline in _split_pipelines(command_string):
         for k in range(1, len(pipeline)):
             if _is_stdin_reading_shell(pipeline[k]):
-                literal = _static_command_output(pipeline[k - 1])
+                j = k - 1  # walk back through pass-through filters to the static source
+                while j > 0 and _is_passthrough_filter(pipeline[j]):
+                    j -= 1
+                literal = _static_command_output(pipeline[j])
                 if literal is not None and _shell_command_invokes_docker(literal, env):
                     return True
     return False
