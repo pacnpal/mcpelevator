@@ -226,12 +226,16 @@ _MAX_WRAPPER_PEELS = 64
 _SHELL_LAUNCHERS = {"sh", "bash", "dash", "ash", "zsh", "ksh"}
 
 # Shell reserved words / keywords that can PRECEDE the real command in a simple-command position
-# (``if docker …``, ``time docker …``, ``! docker …``). Skipping them keeps the scan on the command
-# the shell actually executes.
+# (``if docker …``, ``! docker …``). Skipping them keeps the scan on the command the shell actually
+# executes. ``time`` and ``coproc`` are handled explicitly (they take options / an optional name);
+# ``for``/``select``/``case`` are in _SHELL_DECL_KEYWORDS (their next word is a name/subject).
 _SHELL_RESERVED_WORDS = {
     "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "case", "esac",
-    "select", "function", "time", "!", "{", "}", "[[", "]]", "coproc", "in",
+    "select", "function", "!", "{", "}", "[[", "]]", "in",
 }
+
+# Keywords immediately followed by a NAME (loop variable) or SUBJECT (case value) — not a command.
+_SHELL_DECL_KEYWORDS = {"for", "select", "case"}
 
 # Per-wrapper VALUE-taking options, listed as long forms and as bare short letters (for clustered
 # short options like ``-Eu``). Arity is wrapper-specific: ``nice -n 10`` / ``exec -a name`` take a
@@ -317,6 +321,65 @@ def _split_string_command(value: str, rest: list[str]) -> tuple[str, list[str]]:
     return "env", list(words) + list(rest)
 
 
+_ANSI_C_SIMPLE = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v",
+                  "\\": "\\", "'": "'", '"': '"', "?": "?", "e": "\x1b", "E": "\x1b"}
+_HEXDIGITS = set("0123456789abcdefABCDEF")
+
+
+def _decode_ansi_c(body: str) -> str:
+    """Decode bash ANSI-C ``$'…'`` escapes (``\\xHH``, ``\\NNN`` octal, ``\\uHHHH``, ``\\n`` …) to the
+    literal characters bash would produce, so ``doc$'\\x6b\\x65\\x72'`` resolves to ``docker``."""
+    out: list[str] = []
+    i, n = 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch != "\\" or i + 1 >= n:
+            out.append(ch)
+            i += 1
+            continue
+        nxt = body[i + 1]
+        if nxt in _ANSI_C_SIMPLE:
+            out.append(_ANSI_C_SIMPLE[nxt])
+            i += 2
+        elif nxt == "x":
+            j, hexs = i + 2, ""
+            while j < n and len(hexs) < 2 and body[j] in _HEXDIGITS:
+                hexs += body[j]
+                j += 1
+            if hexs:
+                out.append(chr(int(hexs, 16)))
+                i = j
+            else:
+                out.append(nxt)
+                i += 2
+        elif nxt in "01234567":
+            j, octs = i + 1, ""
+            while j < n and len(octs) < 3 and body[j] in "01234567":
+                octs += body[j]
+                j += 1
+            out.append(chr(int(octs, 8) & 0xFF))
+            i = j
+        elif nxt in ("u", "U"):
+            width = 4 if nxt == "u" else 8
+            j, hexs = i + 2, ""
+            while j < n and len(hexs) < width and body[j] in _HEXDIGITS:
+                hexs += body[j]
+                j += 1
+            if hexs:
+                try:
+                    out.append(chr(int(hexs, 16)))
+                except (ValueError, OverflowError):
+                    pass
+                i = j
+            else:
+                out.append(nxt)
+                i += 2
+        else:
+            out.append(nxt)
+            i += 2
+    return "".join(out)
+
+
 def _preprocess_shell_string(command_string: str) -> str:
     """Apply shell pre-tokenization rewrites the parser can't see through otherwise, quote-aware:
 
@@ -374,8 +437,33 @@ def _preprocess_shell_string(command_string: str) -> str:
                 at_boundary = True
             i = end
             continue
-        if ch == "$" and i + 1 < n and command_string[i + 1] in ("'", '"'):
-            i += 1  # drop the $, let the quote open on the next iteration
+        if ch == "$" and i + 1 < n and command_string[i + 1] == "'":
+            # bash ANSI-C quoting: read to the closing ', decode escapes, and re-emit shell-safe
+            # single-quoted so the (decoded) fragment stays one word (``doc$'\x6b…'`` → docker).
+            j, buf = i + 2, []
+            while j < n and command_string[j] != "'":
+                if command_string[j] == "\\" and j + 1 < n:
+                    buf.append(command_string[j])
+                    buf.append(command_string[j + 1])
+                    j += 2
+                    continue
+                buf.append(command_string[j])
+                j += 1
+            decoded = _decode_ansi_c("".join(buf))
+            out.append("'" + decoded.replace("'", "'\\''") + "'")
+            at_boundary = False
+            i = j + 1  # past the closing '
+            continue
+        if ch == "$" and i + 1 < n and command_string[i + 1] == '"':
+            i += 1  # locale $"…": drop the $, let the quote open on the next iteration
+            continue
+        if ch in "<>":
+            # a redirection can be glued to the command word (``docker</dev/null``) or open a
+            # process substitution (``<(docker …)``); split it off so the command word is seen.
+            out.append(" ")
+            out.append(ch)
+            at_boundary = True
+            i += 1
             continue
         if ch in ("'", '"'):
             quote = ch
@@ -611,25 +699,49 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
 def _segment_invokes_docker(segment: str) -> bool:
     """True when a single simple-command segment launches the docker CLI as its command word.
 
-    Leading ``NAME=VALUE`` assignments and shell reserved words (``if``/``time``/…) are skipped to
-    reach the real command; ``eval`` re-parses its joined arguments as a fresh shell command."""
+    Leading ``NAME=VALUE`` assignments and shell reserved words are skipped to reach the real
+    command; ``eval``/``trap`` re-parse their argument as fresh shell input; ``coproc`` may carry an
+    optional name before the command."""
     try:
         words = shlex.split(segment)
     except ValueError:
         words = segment.split()
     idx = 0
-    while idx < len(words) and (words[idx] in _SHELL_RESERVED_WORDS
-                                or _looks_like_assignment(words[idx])):
-        # `for`/`select` are followed by a loop VARIABLE name, not a command — skip it so
-        # ``for docker in …`` isn't misread as launching docker.
-        if words[idx] in ("for", "select") and idx + 1 < len(words):
+    while idx < len(words):
+        w = words[idx]
+        if w == "in":
+            # after ``in`` (of ``for``/``case``) the rest of this segment is a word-list / case
+            # pattern, not a command — ``case docker in docker) …`` / ``for x in docker …``.
+            return False
+        if w in _SHELL_DECL_KEYWORDS:  # for/select/case: the NEXT word is a var/subject, not a cmd
+            idx += 2
+            continue
+        if w == "time":  # `time [-p] pipeline` — skip the keyword and its options
             idx += 1
-        idx += 1
+            while idx < len(words) and words[idx] in ("-p", "--portability", "--"):
+                idx += 1
+            break
+        if w in _SHELL_RESERVED_WORDS or _looks_like_assignment(w):
+            idx += 1
+            continue
+        break
     if idx >= len(words):
         return False
-    if words[idx] == "eval":  # eval joins its args and executes them as shell input
+    cmd = words[idx]
+    if cmd == "eval":  # eval joins its args and executes them as shell input
         return _shell_command_invokes_docker(" ".join(words[idx + 1:]))
-    return _shell_invokes_docker(words[idx], words[idx + 1:])
+    if cmd == "trap":  # `trap [OPTS] ACTION [SIG…]` — the first non-option arg is shell input
+        for arg in words[idx + 1:]:
+            if arg.startswith("-"):
+                continue
+            return _shell_command_invokes_docker(arg)
+        return False
+    if cmd == "coproc":  # `coproc [NAME] command …` — command is at +1 (no name) or +2 (named)
+        rest = words[idx + 1:]
+        if rest and _shell_invokes_docker(rest[0], rest[1:]):
+            return True
+        return len(rest) >= 2 and _shell_invokes_docker(rest[1], rest[2:])
+    return _shell_invokes_docker(cmd, words[idx + 1:])
 
 
 def _shell_command_invokes_docker(command_string: str) -> bool:

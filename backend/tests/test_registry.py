@@ -999,6 +999,49 @@ def test_command_lookup_and_arg_brace_allowed(session, inner):
     assert s.enabled is True
 
 
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "trap 'docker run alpine' EXIT",       # trap action is executable shell input
+        "coproc job docker run alpine",        # coproc with an optional NAME before the command
+        "coproc docker run alpine",            # coproc without a name
+        "time -p docker run alpine",           # `time -p` options before the pipeline
+        "docker</dev/null run alpine",         # a redirection glued to the command word
+        "<(docker run alpine) cat",            # process substitution
+        r"doc$'\x6b\x65\x72' run alpine",      # ANSI-C hex escapes decode to `docker`
+        r"doc$'\153\145\162' run alpine",      # ...octal escapes
+        "case x in *) docker run;; esac",      # docker in a case BODY (a real command)
+        "for x in a; do docker run; done",     # docker in a loop BODY
+    ],
+)
+def test_shell_keywords_and_quoting_rejected(session, inner):
+    """trap/coproc/time options, glued redirections, process substitution, ANSI-C escapes, and
+    docker inside a case/loop body must all be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="kw", runner="command", command="/bin/sh", args=["-c", inner],
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "case docker in docker) echo ok;; esac",   # `docker` is the case SUBJECT/pattern, not a cmd
+        "for docker in 1 2 3; do echo hi; done",    # `docker` is the loop variable
+        "for x in docker podman; do echo hi; done",  # `docker` is a list item
+    ],
+)
+def test_case_subject_and_loop_list_allowed(session, inner):
+    """A `case` subject/pattern or `for` list item named ``docker`` is data, not a launched command,
+    and must not be rejected."""
+    s = service.create_server(
+        session, name="kw-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
 def test_deeply_nested_shell_command_fails_closed_without_error(session):
     """Pathologically nested ``$(…)`` must not raise (RecursionError) out of the guard; it fails
     closed and rejects the malformed config instead of 500-ing the create path."""
