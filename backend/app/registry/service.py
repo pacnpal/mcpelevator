@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import shlex
 import tempfile
@@ -224,8 +225,8 @@ def _brace_expand(word: str, _depth: int = 0) -> tuple[list[str], bool]:
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "builtin",
-                       "nice", "ionice", "taskset", "unshare", "timeout", "xargs", "stdbuf",
-                       "flock", "chroot", "runuser", "su", "watch"}
+                       "nice", "ionice", "taskset", "unshare", "prlimit", "timeout", "xargs",
+                       "stdbuf", "flock", "chroot", "runuser", "su", "watch"}
 
 # Builtins that BOTH persist a ``NAME=VALUE`` assignment to the shell and are a command word
 # (``export D=docker`` / ``declare D=docker``). ``_segment_assignments`` mines their operands so a
@@ -284,6 +285,9 @@ _WRAPPER_VALUE_LONG = {
     # space-separated one), so they don't swallow the command; only these take a required value.
     "unshare": {"--map-user", "--map-group", "--map-users", "--map-groups", "--setgroups",
                 "--propagation", "--setuid", "--setgid", "--root", "--wd"},
+    # prlimit's ``--<resource>=<limit>`` options are inline ``=`` forms (no swallowed operand); only
+    # ``--pid``/``--output`` take a separate value. ``--pid`` targets an existing process (no child).
+    "prlimit": {"--pid", "--output"},
     "exec": set(),
     "timeout": {"--signal", "--kill-after"},
     "xargs": {"--replace", "--max-args", "--max-procs", "--max-chars", "--delimiter",
@@ -303,6 +307,7 @@ _WRAPPER_VALUE_SHORT = {
     "ionice": set("cnp"),  # -c class, -n classdata, -p pid
     "taskset": set("cp"),  # -c cpu-list, -p pid
     "unshare": set("SGRw"),  # -S setuid, -G setgid, -R root, -w wd (namespace flags are boolean)
+    "prlimit": set("po"),    # -p pid, -o output
     "exec": set("a"),
     "timeout": set("sk"),
     # -I replstr, -n num, -P procs, -s size, -d delim, -a file, -E eof, -L/-l num
@@ -834,6 +839,62 @@ def _command_substitutions(command_string: str) -> list[str]:
     return subs
 
 
+def _process_subst_invokes_docker(command_string: str,
+                                  env: Optional[dict[str, str]] = None) -> bool:
+    """True when a process substitution ``<(…)``/``>(…)`` reaches docker: its inner command runs
+    (``<(docker run)``), or — when it feeds a shell as a script file (``bash <(printf 'docker …')``)
+    — the inner's static output is the script that shell executes."""
+    i, n = 0, len(command_string)
+    quote: Optional[str] = None
+    while i < n:
+        ch = command_string[i]
+        if quote is not None:
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch in ("<", ">") and i + 1 < n and command_string[i + 1] == "(":
+            inner, end = _read_delimited(command_string, i + 2, ")")
+            if _shell_command_invokes_docker(inner, env):  # the substituted command itself runs
+                return True
+            literal = _static_command_output(inner)  # its static output, if fed to a shell, is script
+            if literal is not None and _preceding_command_is_shell(command_string, i):
+                if _shell_command_invokes_docker(literal, env):
+                    return True
+            i = end
+            continue
+        i += 1
+    return False
+
+
+def _preceding_command_is_shell(command_string: str, pos: int) -> bool:
+    """True when the simple command containing ``pos`` starts with a shell launcher — used to tell
+    whether a process substitution at ``pos`` is a script fed to a shell (``bash <(…)``)."""
+    segment = _split_shell_commands(command_string[:pos])[-1]
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        words = segment.split()
+    idx = 0
+    while idx < len(words) and (_looks_like_assignment(words[idx])
+                                or _redirection_span(words[idx])):
+        idx += 1
+    if idx >= len(words):
+        return False
+    cmd, _ = _strip_wrappers(words[idx], words[idx + 1:])
+    return _launcher_basename(cmd) in _SHELL_LAUNCHERS
+
+
 def _preserve_substitutions(text: str) -> str:
     """Return just the command substitutions of ``text`` (re-wrapped as ``$(…)``), dropping the
     surrounding operands/data. Used to keep the executable substitutions of a construct we otherwise
@@ -1177,14 +1238,17 @@ def _segment_declares_function(segment: str) -> Optional[str]:
 
 
 def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset(),
-                            env: Optional[dict[str, str]] = None) -> bool:
+                            env: Optional[dict[str, str]] = None,
+                            func_bodies: Optional[dict[str, str]] = None,
+                            inspecting: frozenset[str] = frozenset()) -> bool:
     """True when a single simple-command segment launches the docker CLI as its command word.
 
     Leading redirections, ``NAME=VALUE`` assignments, and shell reserved words are skipped to reach
     the real command; ``eval``/``trap`` re-parse their argument as fresh shell input; ``coproc`` may
-    carry an optional name; ``builtin`` re-inspects its operand; a command word that names a defined
-    shell function (``funcs``) is not the CLI. ``env`` carries deterministic variable values (from
-    the configured server environment / prior assignments) for nested shell inputs."""
+    carry an optional name; ``builtin`` re-inspects its operand. A command word that names a defined
+    shell function (``funcs``) is not the CLI directly — but its recorded body (``func_bodies``) is
+    inspected, since executing the call runs it (``f() { docker run; }; f``); ``inspecting`` guards
+    against recursion. ``env`` carries deterministic variable values for nested shell inputs."""
     try:
         words = shlex.split(segment)
     except ValueError:
@@ -1223,8 +1287,16 @@ def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset(),
     if _declared_function_name(words, idx) is not None:
         return False  # a POSIX ``NAME () { … }`` declaration in command position — not a launch
     cmd = words[idx]
-    if cmd in funcs:  # a call to a locally-defined shell function, not the docker CLI
-        return False
+    if cmd in funcs:  # a call to a locally-defined shell function
+        bodies = func_bodies or {}
+        if cmd in bodies and cmd not in inspecting:
+            # executing the call runs the function's body — inspect it, keeping the function's own
+            # name shadowed (a self-call recurses, it doesn't reach the CLI). ``command docker``
+            # inside the body still bypasses the shadow (handled by the ``command`` branch).
+            return _shell_command_invokes_docker(
+                bodies[cmd], env, seed_funcs=funcs, func_bodies=bodies,
+                inspecting=inspecting | {cmd})
+        return False  # no recorded body, or already being inspected (recursion) — not the CLI
     if _launcher_basename(cmd) in _SOURCE_BUILTINS:
         # ``source``/``.`` reading a stdin path executes whatever feeds fd 0; a ``<<<`` here-string
         # is that stdin, so ``source /dev/stdin <<< 'docker run'`` runs the payload as shell script.
@@ -1236,7 +1308,9 @@ def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset(),
                 return _shell_command_invokes_docker(str(rest[k + 1]), env)
         return False
     if cmd == "eval":  # eval joins its args and executes them as shell input
-        return _shell_command_invokes_docker(" ".join(words[idx + 1:]), env)
+        return _shell_command_invokes_docker(
+            " ".join(words[idx + 1:]), env, seed_funcs=funcs, func_bodies=func_bodies or {},
+            inspecting=inspecting)
     if cmd == "command":  # `command [-pvV] name …` — -v/-V only look up (no launch); skip -p/--
         rest = words[idx + 1:]
         j = 0
@@ -1250,7 +1324,8 @@ def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset(),
         # shadow the CLI here: ``function docker { :; }; command docker run`` runs the real docker.
         return bool(rest[j:]) and _segment_invokes_docker(" ".join(rest[j:]), frozenset(), env)
     if cmd == "builtin" and words[idx + 1:]:  # run the named builtin
-        return _segment_invokes_docker(" ".join(words[idx + 1:]), funcs, env)
+        return _segment_invokes_docker(
+            " ".join(words[idx + 1:]), funcs, env, func_bodies, inspecting)
     if cmd == "trap":  # `trap [OPTS] ACTION [SIG…]` — the first non-option arg is shell input
         for arg in words[idx + 1:]:
             if arg.startswith("-"):
@@ -1290,6 +1365,96 @@ def _segment_assignments(segment: str) -> dict[str, str]:
         name, value = w.split("=", 1)
         result[name] = value
     return result
+
+
+def _collect_aliases(segment: str) -> dict[str, str]:
+    """The aliases an ``alias NAME=VALUE …`` segment defines, so a later command word that is an
+    alias name resolves (``alias d=docker`` → a later ``d run`` launches docker)."""
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        return {}
+    if not words or words[0] != "alias":
+        return {}
+    result: dict[str, str] = {}
+    for w in words[1:]:
+        if w.startswith("-"):  # options like ``-p`` (print) carry no definition
+            continue
+        if "=" in w:
+            name, value = w.split("=", 1)
+            if _is_shell_name(name):
+                result[name] = value
+    return result
+
+
+def _expand_alias(segment: str, aliases: dict[str, str], _depth: int = 0) -> str:
+    """Rewrite a segment whose command word is an alias to its definition (``d run`` → ``docker
+    run``), following chained aliases up to a small depth bound."""
+    if not aliases or _depth > 8:
+        return segment
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        return segment
+    idx = 0
+    while idx < len(words):
+        span = _redirection_span(words[idx])
+        if span == "attached":
+            idx += 1
+        elif span == "bare":
+            idx += 2
+        elif _looks_like_assignment(words[idx]):
+            idx += 1
+        else:
+            break
+    if idx >= len(words) or words[idx] not in aliases:
+        return segment
+    prefix = " ".join(words[:idx])
+    suffix = " ".join(words[idx + 1:])
+    rebuilt = f"{prefix} {aliases[words[idx]]} {suffix}".strip()
+    return _expand_alias(rebuilt, aliases, _depth + 1)
+
+
+_FUNC_HEADER_RE = re.compile(
+    r"(?:\bfunction\s+([A-Za-z_]\w*)\s*(?:\(\s*\))?|([A-Za-z_]\w*)\s*\(\s*\))\s*\{")
+
+
+def _extract_function_bodies(command_string: str) -> dict[str, str]:
+    """Map each shell function NAME to its brace-delimited body text (bash ``function NAME { … }`` or
+    POSIX ``NAME () { … }``), so a call to the function can be inspected — its body may launch docker
+    (``f() { docker run; }; f``). Quote- and nesting-aware brace matching."""
+    bodies: dict[str, str] = {}
+    for m in _FUNC_HEADER_RE.finditer(command_string):
+        name = m.group(1) or m.group(2)
+        brace = m.end() - 1
+        depth, j, n = 0, brace, len(command_string)
+        quote: Optional[str] = None
+        while j < n:
+            ch = command_string[j]
+            if quote is not None:
+                if ch == "\\" and quote == '"' and j + 1 < n:
+                    j += 2
+                    continue
+                if ch == quote:
+                    quote = None
+                j += 1
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+                j += 1
+                continue
+            if ch == "\\" and j + 1 < n:
+                j += 2
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    bodies[name] = command_string[brace + 1:j]
+                    break
+            j += 1
+    return bodies
 
 
 def _set_positionals(segment: str) -> Optional[list[str]]:
@@ -1534,11 +1699,42 @@ def _static_command_output(stage: str) -> Optional[str]:
     if cmd == "printf":
         if not rest:
             return None
-        text = _decode_ansi_c(rest[0])  # the format string
-        if "%" in rest[0] and len(rest) > 1:  # rough %-substitution: append the operands
-            text += " " + " ".join(rest[1:])
-        return text
+        return _printf_output(rest[0], rest[1:])
     return None
+
+
+def _printf_output(fmt: str, args: list[str]) -> str:
+    """Best-effort ``printf`` emulation for the static-pipeline guard: substitute conversion specs
+    (``%s``/``%d``/…) with the operands, repeating the format until the operands are exhausted (as
+    printf does), so ``printf '%s ' docker run alpine`` yields ``docker run alpine``."""
+    fmt = _decode_ansi_c(fmt)
+    if "%" not in fmt or not args:
+        return fmt
+    out: list[str] = []
+    ai = 0
+    while True:
+        consumed_before = ai
+        i, n = 0, len(fmt)
+        while i < n:
+            c = fmt[i]
+            if c == "%" and i + 1 < n:
+                j = i + 1
+                while j < n and fmt[j] in "-+ 0#123456789.*":  # flags/width/precision
+                    j += 1
+                if j < n:
+                    conv = fmt[j]
+                    if conv == "%":
+                        out.append("%")
+                    else:
+                        out.append(args[ai] if ai < len(args) else "")
+                        ai += 1
+                    i = j + 1
+                    continue
+            out.append(c)
+            i += 1
+        if ai >= len(args) or ai == consumed_before:  # all operands used, or no conversion consumed
+            break
+    return "".join(out)
 
 
 def _pipe_into_stdin_shell_invokes_docker(command_string: str,
@@ -1554,38 +1750,47 @@ def _pipe_into_stdin_shell_invokes_docker(command_string: str,
     return False
 
 
-def _shell_command_invokes_docker(command_string: str,
-                                  env: Optional[dict[str, str]] = None) -> bool:
+def _shell_command_invokes_docker(command_string: str, env: Optional[dict[str, str]] = None,
+                                  seed_funcs: frozenset[str] = frozenset(),
+                                  func_bodies: Optional[dict[str, str]] = None,
+                                  inspecting: frozenset[str] = frozenset()) -> bool:
     """True when any simple command in a shell ``-c`` command string launches the docker CLI.
 
     The string is first normalized for line continuations and ANSI-C/locale ``$'…'`` quoting.
-    Command substitutions (``$(…)``/backticks, executed even inside double quotes) are inspected
-    next, then the string is split into segments at unquoted shell operators and each segment's
-    command word is checked. This catches ``foo && docker run`` / ``echo "$(docker …)"`` while still
-    allowing ``docker`` to appear merely as an argument (``python -m srv --backend docker``).
-    ``env`` seeds deterministic variable values (the configured server environment merged into the
-    child by the bridge), so ``"$D" run`` with ``env={"D": "docker"}`` resolves to a launch."""
+    Command/process substitutions (``$(…)``/backticks/``<(…)``, executed even inside double quotes)
+    are inspected next, then the string is split into segments at unquoted shell operators and each
+    segment's command word is checked. This catches ``foo && docker run`` / ``echo "$(docker …)"``
+    while still allowing ``docker`` to appear merely as an argument (``python -m srv --backend
+    docker``). ``env`` seeds deterministic variable values (the configured server environment merged
+    into the child by the bridge), so ``"$D" run`` with ``env={"D": "docker"}`` resolves to a launch.
+    ``seed_funcs``/``func_bodies``/``inspecting`` carry the enclosing scope when inspecting a called
+    function's body."""
     command_string = _preprocess_shell_string(_strip_heredocs(command_string))
     if any(_shell_command_invokes_docker(sub, env)
            for sub in _command_substitutions(command_string)):
         return True
     if _pipe_into_stdin_shell_invokes_docker(command_string, env):
         return True
-    # Walk segments in order, growing the set of declared shell functions, simple variable
-    # assignments, and ``set --`` positionals as we go: a ``function docker { … }`` only shadows the
-    # CLI for commands AFTER it, ``D=docker`` only resolves ``$D`` for later segments, and ``set --``
-    # installs ``$@`` for what follows — so an earlier ``docker run`` is still a launch. Configured-
-    # env values are the deterministic baseline; a same-named in-script assignment overrides them.
-    funcs: set[str] = set()
+    if _process_subst_invokes_docker(command_string, env):
+        return True
+    # Walk segments in order, growing the declared shell functions (and their bodies), aliases,
+    # simple variable assignments, and ``set --`` positionals as we go: a ``function docker { … }``
+    # only shadows the CLI for commands AFTER it, ``D=docker`` only resolves ``$D`` for later
+    # segments, and ``set --`` installs ``$@`` for what follows — so an earlier ``docker run`` is
+    # still a launch. Function bodies (present anywhere in the string) let a call be inspected.
+    funcs: set[str] = set(seed_funcs)
+    bodies: dict[str, str] = {**(func_bodies or {}), **_extract_function_bodies(command_string)}
+    aliases: dict[str, str] = {}
     assignments: dict[str, str] = {k: v for k, v in (env or {}).items() if isinstance(v, str)}
     positionals: list[str] = []
     for seg in _split_shell_commands(command_string):
-        if _segment_invokes_docker(
-                _expand_known_vars(seg, assignments, positionals), frozenset(funcs), env):
+        expanded = _expand_alias(_expand_known_vars(seg, assignments, positionals), aliases)
+        if _segment_invokes_docker(expanded, frozenset(funcs), env, bodies, inspecting):
             return True
         declared = _segment_declares_function(seg)
         if declared:
             funcs.add(declared)
+        aliases.update(_collect_aliases(seg))
         assignments.update(_segment_assignments(seg))
         set_pos = _set_positionals(seg)
         if set_pos is not None:
@@ -1599,11 +1804,12 @@ def _npm_call_invokes_docker(base: str, tokens: list[str],
     is a command string executed through a shell (``npx -c 'docker run …'`` == ``npm exec -c``)."""
     i = 0
     if base == "npm":  # the call form is ``npm exec``/``npm x`` — require that subcommand
-        while i < len(tokens) and tokens[i].startswith("-"):
-            i += 1
-        if i >= len(tokens) or tokens[i] not in ("exec", "x"):
+        # Global options (``--prefix /tmp``, ``--registry …``) may precede ``exec`` and some consume
+        # a following token, so scan for the subcommand token anywhere rather than assuming arity.
+        try:
+            i = next(k for k, t in enumerate(tokens) if t in ("exec", "x")) + 1
+        except StopIteration:
             return False
-        i += 1
     while i < len(tokens):
         tok = tokens[i]
         if tok in ("-c", "--call"):

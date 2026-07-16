@@ -1613,6 +1613,65 @@ def test_env_assignment_expanded_command_allowed_when_non_docker(session):
 
 
 @pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # A called function whose body launches docker (bash keyword and POSIX forms, and nested).
+        (None, None, "f() { docker run alpine; }; f"),
+        (None, None, "function f { docker run; }; f"),
+        (None, None, "g() { docker run; }; f() { g; }; f"),
+        (None, None, "docker() { command docker run; }; docker"),  # command bypasses the shadow
+        # ``prlimit`` runs its trailing command after resource limits.
+        ("prlimit", ["--nofile=1024", "docker", "run", "alpine"], None),
+        # ``npm`` global options may precede the ``exec`` subcommand.
+        ("npm", ["--prefix", "/tmp", "exec", "-c", "docker run alpine"], None),
+        # A Bash alias resolves a benign command word to docker.
+        (None, None, "shopt -s expand_aliases\nalias d=docker\nd run alpine"),
+        (None, None, "alias d='docker run'; d alpine"),
+        # ``printf`` conversion specs substitute the operands the piped shell then runs.
+        (None, None, "printf '%s ' docker run alpine | sh"),
+        # Process substitution feeding a shell (static output) or running docker directly.
+        (None, None, "bash <(printf 'docker run alpine\\n')"),
+        (None, None, "cat <(docker run alpine)"),
+    ],
+)
+def test_function_body_prlimit_npm_alias_printf_and_procsub_rejected(
+        session, command, args, inner):
+    """A called function's docker body, ``prlimit``, ``npm`` global options before ``exec``, Bash
+    aliases, ``printf`` operand substitution piped to a shell, and process substitution must all be
+    gated."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="fn-prlimit-alias", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        (None, None, "f() { docker run alpine; }; echo hi"),  # function defined but never called
+        (None, None, "docker() { :; }; docker run"),          # shadow with a benign body
+        ("prlimit", ["--nofile=1024", "python", "-m", "srv"], None),
+        ("npm", ["exec", "somepkg"], None),                   # npm exec without -c/--call
+        (None, None, "alias d=python; d -m srv"),             # alias resolves to non-docker
+        (None, None, "bash <(printf 'echo hi\\n')"),          # process subst output isn't docker
+    ],
+)
+def test_function_body_prlimit_npm_alias_and_procsub_non_docker_allowed(
+        session, command, args, inner):
+    """The body/wrapper/alias/procsub machinery must not reject the non-docker cases: an uncalled
+    function, a benign shadow, and non-docker prlimit/npm/alias/process-substitution forms."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    s = service.create_server(
+        session, name="fn-alias-ok", runner="command", command=command, args=args, enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
     "inner",
     [
         "docker() { printf fake; }; docker run alpine",   # POSIX definition shadows the later call
