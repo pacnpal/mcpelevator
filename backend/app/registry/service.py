@@ -523,6 +523,9 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
         # ``su``/``runuser`` take a USER positional before their ``-c COMMAND`` (``su root -c …``);
         # skip it (and a leading login ``-``) so the ``-c`` shell command is still reached.
         shell_c_user_seen = False
+        # ``runuser -u USER [--] COMMAND`` gives the user via ``-u``/``--user`` instead of a
+        # positional, so in that mode the first bare operand is the COMMAND, not the user.
+        runuser_user_opt_seen = False
         i = 0
         while i < len(tokens):
             tok = tokens[i]
@@ -575,6 +578,8 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
                     taskset_pid = True
                 if base == "chrt" and name == "--pid":
                     chrt_pid = True
+                if base == "runuser" and name == "--user":
+                    runuser_user_opt_seen = True
                 if "=" not in tok and name in _WRAPPER_VALUE_LONG.get(base, frozenset()):
                     i += 2  # separate value
                 else:
@@ -596,6 +601,8 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
                     taskset_pid = True
                 if base == "chrt" and "p" in letters:
                     chrt_pid = True
+                if base == "runuser" and "u" in letters:
+                    runuser_user_opt_seen = True
                 short_vals = _WRAPPER_VALUE_SHORT.get(base, frozenset())
                 handled = False
                 for k, c in enumerate(letters):
@@ -663,9 +670,12 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
                 else:
                     peeled = ("sh", ["-c", " ".join(str(t) for t in operands)])
                 break
-            if base in _WRAPPERS_WITH_SHELL_C and (tok == "-" or not shell_c_user_seen):
+            if base in _WRAPPERS_WITH_SHELL_C and (
+                    tok == "-" or (not shell_c_user_seen and not runuser_user_opt_seen)):
                 # ``su [-] USER -c COMMAND`` / ``runuser -l USER -c COMMAND`` — the login dash and the
-                # USER positional precede the ``-c`` shell command, so skip them to reach it.
+                # USER positional precede the ``-c`` shell command, so skip them to reach it. But when
+                # ``runuser -u USER`` already supplied the user, no positional user precedes the
+                # command, so this bare token IS the command (fall through below).
                 if tok != "-":
                     shell_c_user_seen = True
                 i += 1

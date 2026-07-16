@@ -806,6 +806,8 @@ def test_shell_wrapped_docker_via_wrapper_options_rejected(session, inner):
         ("systemd-run", ["--scope", "docker", "run", "alpine"]),  # transient-unit wrapper
         ("systemd-run", ["-M", "container", "docker", "run"]),    # -M consumes its machine value
         ("script", ["-q", "-c", "docker run alpine", "/dev/null"]),  # script -c COMMAND typescript
+        ("runuser", ["-u", "root", "docker", "run", "alpine"]),   # runuser -u USER direct-exec form
+        ("runuser", ["--user", "root", "docker", "run"]),         # ...long form gives the user too
     ],
 )
 def test_top_level_wrapper_docker_rejected(session, command, args):
