@@ -114,6 +114,74 @@ def _is_docker_launcher(command: str) -> bool:
     return norm[0] in "/.~" or (len(c) >= 2 and c[1] == ":")
 
 
+# Prefixes that stand in FRONT of the real command inside a shell command string without being
+# the command themselves: env assignments (``FOO=bar``) and thin wrappers that exec their argv.
+# Skipping them keeps the state machine on the actual command position (``sudo docker …`` is a
+# docker launch; ``python --backend docker`` is not).
+_SHELL_CMD_PREFIXES = {"exec", "sudo", "env", "nohup", "setsid", "command", "time"}
+
+# Shell operators that begin a new command position (so the next word is a command again).
+_SHELL_CMD_SEPARATORS = {"&&", "||", ";", "|", "&", "(", "{"}
+
+# env value-taking short options (separate form): they consume the following token, so it must
+# not be mistaken for the wrapped command. Combined (``-uPATH``) and ``--long=VALUE`` forms carry
+# their value inline and are skipped as ordinary options.
+_ENV_VALUE_OPTS = {"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}
+
+
+def _strip_env_wrapper(command: str, args: Optional[list[str]]) -> tuple[str, Optional[list[str]]]:
+    """Peel an ``env`` wrapper down to the command it actually execs.
+
+    ``/usr/bin/env bash -c '…'`` (or ``env FOO=bar docker run …``) would otherwise slip past the
+    shell/docker check because its basename is ``env``. env runs
+    ``env [OPTION]... [NAME=VALUE]... [COMMAND [ARG]...]``; return the wrapped command and its args
+    so the caller can inspect the real invocation. Not an env wrapper (or nothing to run) → unchanged."""
+    if _launcher_basename(command) != "env":
+        return command, args
+    tokens = list(args or [])
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if not isinstance(tok, str):
+            return command, args
+        if tok in _ENV_VALUE_OPTS:  # separate-form value option: skip the option and its value
+            i += 2
+            continue
+        if tok.startswith("-"):  # any other option (incl. inline-value long/combined short forms)
+            i += 1
+            continue
+        if "=" in tok:  # NAME=VALUE assignment
+            i += 1
+            continue
+        return tok, list(tokens[i + 1:])  # first bare token is the wrapped command
+    return command, args
+
+
+def _shell_command_invokes_docker(command_string: str) -> bool:
+    """True when a shell ``-c`` command string launches the docker CLI in a command position.
+
+    Only words in an actual command position count: the start of the string and anything right
+    after a shell operator (``&&``, ``|``, ``;``, …), skipping leading env assignments and thin
+    wrappers (``sudo``/``env``/``exec``/…). This avoids false positives where ``docker`` is a mere
+    argument (``python -m srv --backend docker``) while still catching ``sudo docker run`` and
+    ``foo && docker run``."""
+    try:
+        words = shlex.split(command_string)
+    except ValueError:
+        words = command_string.split()
+    at_command = True
+    for word in words:
+        if at_command:
+            if "=" in word or word in _SHELL_CMD_PREFIXES:
+                continue  # env assignment / wrapper — the real command is still ahead
+            if _is_docker_launcher(word):
+                return True
+            at_command = False
+        elif word in _SHELL_CMD_SEPARATORS:
+            at_command = True
+    return False
+
+
 def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
     """Best-effort guard for shell-wrapped Docker CLI invocations.
 
@@ -122,6 +190,7 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
     local command because that bypasses the docker gate, hardening, and minimal environment.
     Detect the common /bin/sh -c / bash -lc shape and block it at enable/start time.
     """
+    command, args = _strip_env_wrapper(command, args)
     if _is_docker_launcher(command):
         return True
     if _launcher_basename(command) not in {"sh", "bash", "dash", "ash", "zsh", "ksh"}:
@@ -130,13 +199,13 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
     for i, tok in enumerate(tokens[:-1]):
         if not isinstance(tok, str):
             continue
-        # POSIX shells take the command string after -c. Options may be combined, e.g. -lc.
-        if tok == "-c" or (tok.startswith("-") and "c" in tok[1:]):
-            try:
-                words = shlex.split(str(tokens[i + 1]))
-            except ValueError:
-                words = str(tokens[i + 1]).split()
-            return any(_is_docker_launcher(word) for word in words)
+        # POSIX shells take the command string after -c. Options may be combined (e.g. -lc), but a
+        # long option that merely contains 'c' (--norc, --noprofile) is NOT -c: only single-dash
+        # option groups carry -c. Keep scanning past a non-matching group so a real -c further along
+        # (``bash --norc -c 'docker …'``) is still inspected.
+        if tok == "-c" or (tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]):
+            if _shell_command_invokes_docker(str(tokens[i + 1])):
+                return True
     return False
 
 

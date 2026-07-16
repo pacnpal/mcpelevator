@@ -566,8 +566,11 @@ def test_docker_create_enabled_gated_when_setting_off(session):
         )
 
 
+_DOCKER_GUARD_MSG = "Docker CLI invocations require the docker runner"
+
+
 def test_shell_wrapped_docker_create_enabled_rejected(session):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
         service.create_server(
             session,
             name="wrapped",
@@ -587,7 +590,7 @@ def test_shell_wrapped_docker_enable_rejected(session):
         args=["-c", "docker run --privileged -v /:/host alpine sh"],
         enabled=False,
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
         service.set_enabled(session, s.id, True)
 
 
@@ -595,12 +598,57 @@ def test_shell_wrapped_docker_update_enabled_rejected(session):
     s = service.create_server(
         session, name="plain", runner="command", command="echo", args=["hi"], enabled=True
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
         service.update_server(
             session, s.id, {"command": "/bin/bash", "args": ["-lc", "docker run alpine"]}
         )
     reloaded = repo.get_server(session, s.id)
     assert reloaded.command == "echo"
+
+
+@pytest.mark.parametrize(
+    "command, args",
+    [
+        # "docker" as a plain argument to a non-docker command, not a command-position launcher.
+        ("/bin/sh", ["-c", "python -m mcp_server --backend docker"]),
+        # A long option that merely contains 'c' is not -c, so nothing is scanned as a command.
+        ("/bin/bash", ["--norc", "--", "python", "-m", "srv"]),
+    ],
+)
+def test_shell_wrapped_docker_argument_allowed(session, command, args):
+    """The guard must not fire on configs that only mention docker as an argument, or use a
+    long shell option that happens to contain the letter 'c'."""
+    s = service.create_server(
+        session, name="arg_allowed", runner="command", command=command, args=args, enabled=True
+    )
+    assert s.enabled is True
+
+
+def test_shell_wrapped_docker_via_env_wrapper_rejected(session):
+    """``env`` (optionally with assignments) fronting a shell that launches docker must still be
+    caught — the env basename would otherwise mask the wrapped invocation."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session,
+            name="env-wrapped",
+            runner="command",
+            command="/usr/bin/env",
+            args=["FOO=bar", "bash", "-c", "docker run alpine"],
+            enabled=True,
+        )
+
+
+def test_shell_wrapped_docker_via_norc_before_c_rejected(session):
+    """A valid long option before the real ``-c`` must not short-circuit detection."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session,
+            name="norc",
+            runner="command",
+            command="/bin/bash",
+            args=["--norc", "-c", "docker run alpine"],
+            enabled=True,
+        )
 
 
 def test_docker_enable_allowed_when_setting_on(session):
