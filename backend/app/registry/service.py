@@ -151,6 +151,59 @@ def _is_docker_launcher(command: str) -> bool:
     return norm[0] in "/.~" or (len(c) >= 2 and c[1] == ":")
 
 
+def _split_top_commas(text: str) -> list[str]:
+    """Split ``text`` on commas that are NOT inside a nested ``{…}`` (for brace-list expansion)."""
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+            continue
+        buf.append(ch)
+    parts.append("".join(buf))
+    return parts
+
+
+def _brace_expand(word: str, _depth: int = 0) -> list[str]:
+    """Best-effort Bash brace-list expansion of a single word, bounded.
+
+    Handles ``{a,b,c}`` comma lists (with one level of nesting) — the form that hides a launcher,
+    e.g. ``{docker,}`` expands to ``docker`` (and ``''``). Sequence braces (``{1..3}``) and
+    ``${VAR}`` (no top-level comma) are left alone. Always includes the original word."""
+    results = [word]
+    if _depth > 8 or "{" not in word:
+        return results
+    start = word.find("{")
+    depth, end = 0, -1
+    for j in range(start, len(word)):
+        if word[j] == "{":
+            depth += 1
+        elif word[j] == "}":
+            depth -= 1
+            if depth == 0:
+                end = j
+                break
+    if end == -1:
+        return results
+    inner = word[start + 1:end]
+    parts = _split_top_commas(inner)
+    if len(parts) < 2:  # no top-level comma (e.g. ${VAR}, {1..3}) — nothing to expand
+        return results
+    prefix, suffix = word[:start], word[end + 1:]
+    for part in parts:
+        for expanded in _brace_expand(prefix + part + suffix, _depth + 1):
+            results.append(expanded)
+            if len(results) >= 64:
+                return results
+    return results
+
+
 # Thin wrappers that stand in FRONT of the real command without being the command themselves:
 # they exec their remaining argv (``sudo docker …`` is a docker launch; ``python --backend docker``
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
@@ -490,7 +543,11 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
             if not isinstance(tok, str):
                 return command, args
             if tok == "--":  # end of the wrapper's options — the next token is the command
-                if i + 1 < len(tokens):
+                if base in _WRAPPERS_WITH_LEADING_OPERAND:
+                    # ``timeout -- DURATION COMMAND``: -- ends options, but the required positional
+                    # (duration) still precedes the command.
+                    peeled = (tokens[i + 2], list(tokens[i + 3:])) if i + 2 < len(tokens) else None
+                elif i + 1 < len(tokens):
                     peeled = (tokens[i + 1], list(tokens[i + 2:]))
                 break
             if tok.startswith("--"):  # long option
@@ -509,6 +566,10 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
                 continue
             if tok.startswith("-") and tok != "-":  # short-option cluster, e.g. -Eu / -vS
                 letters = tok[1:]
+                # ``command -v``/``-V`` only PRINT information about a name — they do not execute it,
+                # so ``command -v docker`` is a lookup, not a launch. Resolve to a non-launcher.
+                if base == "command" and ("v" in letters or "V" in letters):
+                    return "", None
                 short_vals = _WRAPPER_VALUE_SHORT.get(base, frozenset())
                 handled = False
                 for k, c in enumerate(letters):
@@ -603,7 +664,9 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
     Those are out of reach of any parser and out of scope: the real containment for a hostile
     local-exec config is not enabling untrusted ``command`` servers, not this string analysis."""
     command, args = _strip_wrappers(command, args)
-    if _is_docker_launcher(command):
+    # Bash brace expansion can hide the launcher (``{docker,} run`` runs ``docker``): check every
+    # brace-list expansion of the command word, not just the literal.
+    if any(_is_docker_launcher(candidate) for candidate in _brace_expand(command)):
         return True
     if _launcher_basename(command) not in _SHELL_LAUNCHERS:
         return False
@@ -636,7 +699,15 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
 
 def local_exec_invokes_docker(runner: str, command: str, args: Optional[list[str]]) -> bool:
     """True when a local-exec server would invoke the Docker CLI outside the docker runner."""
-    return runner in _LOCAL_EXEC_RUNNERS and _shell_invokes_docker(command, args)
+    if runner not in _LOCAL_EXEC_RUNNERS:
+        return False
+    try:
+        return _shell_invokes_docker(command, args)
+    except RecursionError:
+        # Pathologically nested ``$(…)``/``sh -c`` could exhaust the recursion limit. Fail closed —
+        # reject the (malformed) config rather than letting the exception 500 an API call or abort a
+        # reconcile pass.
+        return True
 
 
 # `docker run` flags that CONSUME the next token as their value (so we skip both). Kept

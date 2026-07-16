@@ -715,7 +715,7 @@ def test_shell_wrapped_docker_update_enabled_rejected(session):
 
 
 @pytest.mark.parametrize(
-    "command, args",
+    ("command", "args"),
     [
         # "docker" as a plain argument to a non-docker command, not a command-position launcher.
         ("/bin/sh", ["-c", "python -m mcp_server --backend docker"]),
@@ -792,7 +792,7 @@ def test_shell_wrapped_docker_via_wrapper_options_rejected(session, inner):
 
 
 @pytest.mark.parametrize(
-    "command, args",
+    ("command", "args"),
     [
         ("sudo", ["docker", "run", "alpine"]),          # a bare thin wrapper as the command
         ("nice", ["-n", "10", "docker", "run"]),        # ...with a value-taking option
@@ -881,7 +881,7 @@ def test_shell_wrapped_docker_quoting_and_continuation_rejected(session, inner):
 
 
 @pytest.mark.parametrize(
-    "command, args",
+    ("command", "args"),
     [
         ("/usr/bin/env", ["-S", "docker\\_run alpine"]),   # GNU env -S '\_' is a separator
         ("/usr/bin/env", ["-vS", "docker\\_run alpine"]),  # ...clustered with a boolean short opt
@@ -898,7 +898,7 @@ def test_env_split_and_deep_nesting_rejected(session, command, args):
 
 
 @pytest.mark.parametrize(
-    "command, args",
+    ("command", "args"),
     [
         # env -S split value re-enters env's grammar: a leading -- or NAME=VALUE still execs docker.
         ("/usr/bin/env", ["-S", "-- docker run alpine"]),
@@ -916,7 +916,7 @@ def test_env_split_string_grammar_rejected(session, command, args):
 
 
 @pytest.mark.parametrize(
-    "command, args",
+    ("command", "args"),
     [
         # `docker` here is a script argument / comment / loop variable / arithmetic operand — never
         # a command the shell executes, so none of these should be rejected.
@@ -936,7 +936,7 @@ def test_shell_docker_non_command_positions_allowed(session, command, args):
 
 
 @pytest.mark.parametrize(
-    "command, args",
+    ("command", "args"),
     [
         ("/bin/bash", ["-o", "nounset", "-c", "docker run alpine"]),   # -o value before -c
         ("/bin/bash", ["-O", "extglob", "-c", "docker run alpine"]),   # -O value before -c
@@ -963,6 +963,51 @@ def test_timeout_non_docker_command_allowed(session):
         args=["30", "python", "app.py"], enabled=True,
     )
     assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("timeout", ["--", "30", "docker", "run", "alpine"]),   # -- ends opts; DURATION still first
+        ("/bin/bash", ["-c", "{docker,} run alpine"]),          # brace expansion hides the launcher
+        ("/bin/bash", ["-c", "{podman,docker} run alpine"]),
+    ],
+)
+def test_timeout_dashdash_and_brace_expansion_rejected(session, command, args):
+    """``timeout --`` (duration after end-of-options) and brace-expanded launchers must be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="dd-brace", runner="command", command=command, args=args, enabled=True
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "command -v docker >/dev/null && exec server",  # `command -v` only LOOKS UP docker
+        "command -V docker",
+        "myapp --opt={a,docker}",                       # brace in an argument, not the command word
+    ],
+)
+def test_command_lookup_and_arg_brace_allowed(session, inner):
+    """`command -v/-V` (a lookup, not a launch) and brace expansion in an argument must not be
+    mistaken for a docker launch."""
+    s = service.create_server(
+        session, name="lookup-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+def test_deeply_nested_shell_command_fails_closed_without_error(session):
+    """Pathologically nested ``$(…)`` must not raise (RecursionError) out of the guard; it fails
+    closed and rejects the malformed config instead of 500-ing the create path."""
+    inner = "$(" * 6000 + "docker run alpine" + ")" * 6000
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="deep-nest", runner="command", command="/bin/sh",
+            args=["-c", inner], enabled=True,
+        )
 
 
 def test_shell_wrapped_docker_second_c_positional_allowed(session):
