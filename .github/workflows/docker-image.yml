@@ -40,16 +40,20 @@ on:
           - beta
 
 concurrency:
-  # Releases and manual builds live in disjoint groups, and manual builds
-  # serialize per channel — keyed on the channel, not the free-typed version,
-  # so `v1.2.3` and `1.2.3` dispatches can't race the same image tag from
-  # different groups. Runs within a group do not cancel an in-flight run:
-  # dispatching dev-1.2.4 must not kill an in-flight dev-1.2.3 (each publishes
-  # a distinct tag). The "Check newest release" step below also re-checks
-  # right before tagging that this version is the highest in each floating
-  # tag's channel — so an out-of-order older release can never roll
-  # latest/beta/X.Y/X back.
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.channel) || 'release' }}
+  # Releases and manual builds live in disjoint groups. Releases are keyed on
+  # their tag ref (one group per release) so distinct release builds never
+  # share a group: GitHub Actions keeps only ONE pending run per group and
+  # replaces any older pending one, so a shared `release` group would let a
+  # newer release evict a still-queued earlier release before its distinct
+  # image tag is published. Manual builds serialize per channel — keyed on the
+  # channel, not the free-typed version, so `v1.2.3` and `1.2.3` dispatches
+  # can't race the same image tag from different groups. `cancel-in-progress:
+  # false` means a run never cancels an in-flight run in its group: dispatching
+  # dev-1.2.4 must not kill an in-flight dev-1.2.3 (each publishes a distinct
+  # tag). The "Check newest release" step below also re-checks right before
+  # tagging that this version is the highest in each floating tag's channel —
+  # so an out-of-order older release can never roll latest/beta/X.Y/X back.
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.channel) || format('release-{0}', github.ref) }}
   cancel-in-progress: false
 
 env:
