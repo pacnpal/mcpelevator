@@ -40,20 +40,26 @@ on:
           - beta
 
 concurrency:
-  # Releases and manual builds live in disjoint groups, and manual builds
-  # serialize per channel — keyed on the channel, not the free-typed version,
-  # so `v1.2.3` and `1.2.3` dispatches can't race the same image tag from
-  # different groups. Runs within a group queue FIFO instead of canceling:
-  # dispatching dev-1.2.4 must not kill an in-flight dev-1.2.3 (each publishes
-  # a distinct tag), and queue: max keeps every queued dispatch, where the
-  # default single-slot queue would silently replace a pending run. Releases
-  # queue too (queue: max forbids cancel-in-progress), and because queue
-  # order is not guaranteed, the "Check newest release" step below re-checks
-  # right before tagging that this version is the highest in each floating
-  # tag's channel — so an out-of-order older release can never roll
-  # latest/beta/X.Y/X back.
+  # Releases and manual builds live in disjoint groups. ALL releases share one
+  # `release` group so release builds SERIALIZE — this is load-bearing for
+  # floating-tag correctness, not just throughput. "Check newest release" gates
+  # latest/beta/X.Y/X on this version being the highest in its channel, but that
+  # check and the eventual slow multi-arch tag push are far apart in the run; if
+  # two releases built concurrently, an older release that gated latest=true
+  # before a newer release was published could finish last and shove latest
+  # backwards. Serializing keeps each release's check-then-push atomic relative
+  # to other releases, so floating tags only ever move forward. (GitHub keeps
+  # just ONE pending run per group, so a burst of 3+ releases inside a single
+  # build window can drop a middle release's queued build — recoverable by
+  # re-running that release, whereas an inverted `latest` would be silent
+  # corruption, so serialization is the safer default.) Manual builds serialize
+  # per channel — keyed on the channel, not the free-typed version, so `v1.2.3`
+  # and `1.2.3` dispatches can't race the same image tag from different groups.
+  # `cancel-in-progress: false` means a run never cancels an in-flight run in
+  # its group: dispatching dev-1.2.4 must not kill an in-flight dev-1.2.3 (each
+  # publishes a distinct tag).
   group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.channel) || 'release' }}
-  queue: max
+  cancel-in-progress: false
 
 env:
   GHCR_IMAGE: ghcr.io/${{ github.repository }}
