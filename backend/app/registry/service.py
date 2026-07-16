@@ -420,6 +420,31 @@ _ANSI_C_SIMPLE = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\
 _HEXDIGITS = set("0123456789abcdefABCDEF")
 
 
+def _find_unquoted(s: str, start: int, needle: str) -> int:
+    """Index of the first ``needle`` in ``s`` at/after ``start`` that is NOT inside single/double
+    quotes, or -1. Used to locate a ``[[ … ]]`` terminator without stopping on a quoted ``]]``."""
+    i, n = start, len(s)
+    quote: Optional[str] = None
+    while i < n:
+        ch = s[i]
+        if quote is not None:
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if s.startswith(needle, i):
+            return i
+        i += 1
+    return -1
+
+
 def _decode_ansi_c(body: str) -> str:
     """Decode bash ANSI-C ``$'…'`` escapes (``\\xHH``, ``\\NNN`` octal, ``\\uHHHH``, ``\\n`` …) to the
     literal characters bash would produce, so ``doc$'\\x6b\\x65\\x72'`` resolves to ``docker``."""
@@ -523,8 +548,9 @@ def _preprocess_shell_string(command_string: str) -> str:
                 and (i + 2 >= n or command_string[i + 2] in " \t")):
             # a ``[[ … ]]`` conditional: its words are operands, not commands — drop the span, but
             # KEEP any command substitutions (they execute before the test, so `[[ $(docker …) ]]`
-            # must still be inspected).
-            close = command_string.find("]]", i + 2)
+            # must still be inspected). Scan for the real UNQUOTED ``]]`` (a quoted ``]]`` is an
+            # operand, not the terminator).
+            close = _find_unquoted(command_string, i + 2, "]]")
             if close != -1:
                 out.append(" " + _preserve_substitutions(command_string[i + 2:close]) + " ")
                 at_boundary = True
@@ -816,6 +842,25 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
     return "docker", list(args or [])
 
 
+def _find_exec_invokes_docker(args: Optional[list[str]]) -> bool:
+    """True when a ``find … -exec/-execdir/-ok/-okdir COMMAND …`` action launches the docker CLI.
+    The command runs from ``-exec`` up to the terminating ``;`` or ``+``."""
+    tokens = list(args or [])
+    k = 0
+    while k < len(tokens):
+        if tokens[k] in ("-exec", "-execdir", "-ok", "-okdir"):
+            k += 1
+            cmd_tokens: list[str] = []
+            while k < len(tokens) and tokens[k] not in (";", "+", "\\;"):
+                cmd_tokens.append(tokens[k])
+                k += 1
+            if cmd_tokens and _shell_invokes_docker(cmd_tokens[0], cmd_tokens[1:]):
+                return True
+            continue
+        k += 1
+    return False
+
+
 def _redirection_span(word: str) -> Optional[str]:
     """Classify ``word`` as a shell redirection: ``"attached"`` (target glued, e.g. ``>/dev/null``,
     ``2>err``), ``"bare"`` (operator only, target is the NEXT token, e.g. ``>``, ``2>``, ``>&``), or
@@ -842,9 +887,20 @@ def _defined_functions(command_string: str) -> set[str]:
             words = shlex.split(seg)
         except ValueError:
             words = seg.split()
-        for k, tok in enumerate(words):
-            if tok == "function" and k + 1 < len(words):
-                names.add(words[k + 1].rstrip("(){}"))
+        idx = 0
+        while idx < len(words):  # reach the command word (skip redirections/assignments)
+            span = _redirection_span(words[idx])
+            if span == "attached":
+                idx += 1
+            elif span == "bare":
+                idx += 2
+            elif _looks_like_assignment(words[idx]):
+                idx += 1
+            else:
+                break
+        # only a `function` keyword in COMMAND position declares a function (not ``echo function x``)
+        if idx + 1 < len(words) and words[idx] == "function":
+            names.add(words[idx + 1].rstrip("(){}"))
     return names
 
 
@@ -895,7 +951,17 @@ def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset()) -
         return False
     if cmd == "eval":  # eval joins its args and executes them as shell input
         return _shell_command_invokes_docker(" ".join(words[idx + 1:]))
-    if cmd in ("builtin", "command") and words[idx + 1:]:  # run the named builtin/command
+    if cmd == "command":  # `command [-pvV] name …` — -v/-V only look up (no launch); skip -p/--
+        rest = words[idx + 1:]
+        j = 0
+        while j < len(rest) and rest[j].startswith("-") and rest[j] != "--":
+            if set(rest[j][1:]) & {"v", "V"}:
+                return False
+            j += 1
+        if j < len(rest) and rest[j] == "--":
+            j += 1
+        return bool(rest[j:]) and _segment_invokes_docker(" ".join(rest[j:]), funcs)
+    if cmd == "builtin" and words[idx + 1:]:  # run the named builtin
         return _segment_invokes_docker(" ".join(words[idx + 1:]), funcs)
     if cmd == "trap":  # `trap [OPTS] ACTION [SIG…]` — the first non-option arg is shell input
         for arg in words[idx + 1:]:
@@ -948,6 +1014,8 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
     # brace-list expansion of the command word, not just the literal.
     if any(_is_docker_launcher(candidate) for candidate in _brace_expand(command)):
         return True
+    if _launcher_basename(command) == "find":  # `find … -exec docker …` launches its child command
+        return _find_exec_invokes_docker(args)
     if _launcher_basename(command) not in _SHELL_LAUNCHERS:
         return False
     tokens = list(args or [])

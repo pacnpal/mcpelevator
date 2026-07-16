@@ -1173,6 +1173,42 @@ def test_shadowing_docker_function_allowed(session):
     assert s.enabled is True
 
 
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        ("find", [".", "-exec", "docker", "run", "alpine", ";"], None),   # find -exec COMMAND
+        (None, None, "find . -execdir docker run \\;"),                    # ...inside a -c string
+        (None, None, "command -p /usr/bin/docker run alpine"),            # `command -p` runs it
+        (None, None, 'echo function docker; docker run alpine'),          # not a real func decl
+        (None, None, '[[ "]]" == x ]] ; docker run alpine'),             # quoted ]] isn't the end
+    ],
+)
+def test_find_exec_command_opts_and_quoted_conditional_rejected(session, command, args, inner):
+    """find's -exec child, `command`'s own options, a `function` token that is only an argument, and
+    a quoted ``]]`` inside a conditional must not let a real docker launch slip through."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="find-x", runner="command", command=command, args=args, enabled=True
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("find", [".", "-exec", "rm", "{}", ";"]),   # find -exec of a non-docker command
+        ("find", [".", "-name", "*.docker"]),         # 'docker' only in a -name pattern
+    ],
+)
+def test_find_non_docker_allowed(session, command, args):
+    """A find whose -exec child isn't docker (or that merely matches a docker-ish name) is allowed."""
+    s = service.create_server(
+        session, name="find-ok", runner="command", command=command, args=args, enabled=True
+    )
+    assert s.enabled is True
+
+
 def test_deeply_nested_shell_command_fails_closed_without_error(session):
     """Pathologically nested ``$(…)`` must not raise (RecursionError) out of the guard; it fails
     closed and rejects the malformed config instead of 500-ing the create path."""
