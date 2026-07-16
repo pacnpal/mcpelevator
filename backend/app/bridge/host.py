@@ -76,6 +76,7 @@ async def _forward_roots(context) -> list[Root]:
 # service layer also rejects these as container env vars). ``is_reserved_docker_env`` is the
 # NARROW set we inherit from the operator's env into the CLI; ``is_forbidden_container_env`` is
 # the broader "a container must not supply this" set (adds Go proxy vars).
+from app.config import is_control_plane_env_var as _is_control_plane_env_var  # noqa: E402
 from app.runners.docker import (  # noqa: E402
     is_forbidden_container_env as _is_forbidden_container_env,
     is_reserved_docker_env as _is_reserved_docker_env,
@@ -85,11 +86,16 @@ from app.runners.docker import (  # noqa: E402
 def _child_env(spec: dict) -> dict[str, str]:
     """Environment for a stdio child.
 
-    Default: merge the bridge's own environment (PATH, HOME, caches) with the
-    server-specific vars so npx/uvx/etc. resolve; server vars win. When the spec sets
-    ``minimal_env`` (the docker runner), pass ONLY the bridge's docker-CLI env (PATH/HOME +
-    the operator's ``DOCKER_*`` config) plus the server's NON-reserved vars — never the full
-    ``os.environ`` — so the elevator's own secrets can't leak into a container via a ``-e KEY``
+    Default (npx/uvx/command): merge the bridge's inherited environment (PATH, HOME, proxy/CA,
+    caches) with the server-specific vars so tools resolve; server vars win. The elevator's OWN
+    ``MCPE_*`` config namespace is stripped first, so a passthrough server — even one that shells
+    out to docker or reads ``BASH_ENV`` — can never inherit the control plane's secrets (admin
+    token, signing keys, DB/data dir). This is the primary containment; the registry's shell-wrapped
+    -docker detection is best-effort defense-in-depth on top of it.
+
+    When the spec sets ``minimal_env`` (the docker runner), pass ONLY the bridge's docker-CLI env
+    (PATH/HOME + the operator's ``DOCKER_*`` config) plus the server's NON-reserved vars — never the
+    full ``os.environ`` — so the elevator's secrets can't leak into a container via a ``-e KEY``
     passthrough.
     """
     server_env = dict(spec.get("env") or {})
@@ -106,7 +112,11 @@ def _child_env(spec: dict) -> dict[str, str]:
         # this is defense in depth for a legacy row.
         safe = {k: v for k, v in server_env.items() if not _is_forbidden_container_env(k)}
         return {**safe, **base}
-    return {**os.environ, **server_env}
+    # Scrub the control plane's own secrets from the inherited env before a passthrough child sees
+    # it; a server may still set an ``MCPE_``-named var explicitly (it wins) — that carries the
+    # operator's chosen value, not the elevator's.
+    base = {k: v for k, v in os.environ.items() if not _is_control_plane_env_var(k)}
+    return {**base, **server_env}
 
 
 def _build_oauth_auth(oauth: dict):

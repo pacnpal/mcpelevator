@@ -186,8 +186,17 @@ model every runner uses (docker just makes each spawn a heavier container); boun
 requiring `bearer` auth on docker servers so only authorized clients can open sessions, and
 by not exposing untrusted images to unauthenticated `/s` traffic. `max_running`, bounded port allocation, process groups, readiness probes, and log
 buffers improve robustness. Remaining risks are expected admin power and supply-chain risk:
-malicious MCP packages inherit the bridge environment and can access container files/network,
-so `MCPE_ADMIN_TOKEN` and upstream secrets should not be left broadly available.
+a malicious MCP package runs arbitrary code with the process user's filesystem/network access.
+It does **not**, however, inherit the control plane's own secrets: the bridge starts every
+local-exec child (`npx`/`uvx`/`command`) and its `setup_script` with the `MCPE_*` namespace
+scrubbed from the environment (`bridge.host._child_env` / `ServerUnit._effective_child_env`), so
+`MCPE_ADMIN_TOKEN`, signing keys, and other elevator config never reach an untrusted package —
+matching the docker runner's minimal-env guarantee. This env boundary, not the registry's
+best-effort shell-wrapped-docker detection, is the primary containment for a config that shells
+out to the docker CLI; that string analysis is bounded defense-in-depth (the shell is
+Turing-complete, so it can never be complete). Secrets a server legitimately needs go in its own
+`env`; ambient non-`MCPE_` deployment vars are still inherited, so avoid placing unrelated
+credentials in the control plane's environment when untrusted local-exec servers are enabled.
 
 **Remote runner and catalog.** Remote server URLs are validated as `http(s)` with a
 hostname and canonical transport, but there is no egress allowlist or metadata-IP block.

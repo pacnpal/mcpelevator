@@ -15,9 +15,22 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.util import host_only
 
+# The env namespace the control plane reads ALL of its own settings from (admin token,
+# session/signing secrets, DB/data dir, …). Kept as an SSOT so the bridge can strip these before
+# handing an environment to a local-exec child — a passthrough server (npx/uvx/command) must never
+# inherit the elevator's own secrets, matching the docker runner's minimal-env guarantee.
+CONTROL_PLANE_ENV_PREFIX = "MCPE_"
+
+
+def is_control_plane_env_var(key: str) -> bool:
+    """True for an env var in the control plane's own ``MCPE_*`` config namespace (case-insensitive)
+    — i.e. one that may hold the elevator's secrets and must not leak into an untrusted child."""
+    return key.upper().startswith(CONTROL_PLANE_ENV_PREFIX)
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="MCPE_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix=CONTROL_PLANE_ENV_PREFIX, env_file=".env", extra="ignore")
 
     @field_validator("*", mode="before")
     @classmethod

@@ -96,6 +96,27 @@ def test_docker_child_env_strips_proxy_and_reserved_vars(monkeypatch):
     assert "MCPE_ADMIN_TOKEN" not in child       # elevator secret never leaks
 
 
+def test_local_exec_child_env_scrubs_control_plane_secrets(monkeypatch):
+    # A passthrough (npx/uvx/command) child inherits ordinary tooling env (PATH, proxy, CA) but
+    # NEVER the control plane's own ``MCPE_*`` secrets — so even a server that shells out to docker
+    # or abuses BASH_ENV can't read the elevator's admin token. Server vars still win.
+    from app.bridge.host import _child_env
+
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")     # tooling env — kept so npx can fetch
+    monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "/etc/ca.pem")   # kept so TLS works
+    monkeypatch.setenv("MCPE_ADMIN_TOKEN", "secret")           # elevator secret — must be scrubbed
+    monkeypatch.setenv("MCPE_SESSION_SECRET", "sign")          # elevator secret — must be scrubbed
+    child = _child_env({"env": {"GITHUB_TOKEN": "x", "MCPE_CUSTOM": "operator"}})
+    assert child["PATH"] == "/usr/bin"
+    assert child["HTTPS_PROXY"] == "http://proxy:3128"
+    assert child["NODE_EXTRA_CA_CERTS"] == "/etc/ca.pem"
+    assert child["GITHUB_TOKEN"] == "x"                        # server var kept
+    assert "MCPE_ADMIN_TOKEN" not in child                    # elevator secret never leaks
+    assert "MCPE_SESSION_SECRET" not in child
+    assert child["MCPE_CUSTOM"] == "operator"                 # a server-set MCPE_ var is the operator's own
+
+
 def test_remote_runner_maps_url_transport_headers():
     s = _server(
         runner="remote",

@@ -16,7 +16,7 @@ from typing import Optional
 
 from fastmcp import Client
 
-from app.config import get_settings
+from app.config import get_settings, is_control_plane_env_var
 from app.db.models import Server, utcnow
 from app.runners import build_spec
 from app.runners.docker import DOCKER_BIN, server_label
@@ -464,9 +464,12 @@ class ServerUnit:
         }
 
     def _effective_child_env(self) -> dict[str, str]:
-        # Setup is local-runner only, so it receives the same bridge environment and
-        # server overrides that the later stdio child starts with.
-        return {**self._bridge_env(self._bridge_payload()), **self.spec.env}
+        # Setup is local-runner only and runs as ``/bin/sh -e -c <script>``, so it gets the SAME
+        # scrubbed environment the later stdio child starts with: the inherited env minus the control
+        # plane's own ``MCPE_*`` secrets, plus the server's declared vars. It must not see the
+        # elevator's admin token / signing keys / the bridge spec even though it's operator code.
+        base = {k: v for k, v in os.environ.items() if not is_control_plane_env_var(k)}
+        return {**base, **self.spec.env}
 
     def _effective_child_cwd(self) -> str:
         settings = get_settings()
