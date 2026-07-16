@@ -935,6 +935,36 @@ def test_shell_docker_non_command_positions_allowed(session, command, args):
     assert s.enabled is True
 
 
+@pytest.mark.parametrize(
+    "command, args",
+    [
+        ("/bin/bash", ["-o", "nounset", "-c", "docker run alpine"]),   # -o value before -c
+        ("/bin/bash", ["-O", "extglob", "-c", "docker run alpine"]),   # -O value before -c
+        ("timeout", ["30", "docker", "run", "alpine"]),                # timeout DURATION COMMAND
+        ("timeout", ["-s", "KILL", "30", "docker", "run"]),            # ...with a value option
+        ("/bin/sh", ["-c", "timeout 5 docker run alpine"]),            # timeout inside a -c string
+        # A command substitution INSIDE arithmetic is still executed by the shell.
+        ("/bin/bash", ["-c", "echo $(( $(docker run alpine) + 1))"]),
+    ],
+)
+def test_option_operands_and_timeout_and_arith_subst_rejected(session, command, args):
+    """Operand-taking shell options, the ``timeout`` wrapper, and command substitution nested in
+    arithmetic must all still be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="opt-timeout", runner="command", command=command, args=args, enabled=True
+        )
+
+
+def test_timeout_non_docker_command_allowed(session):
+    """``timeout`` fronting a non-docker command must not be gated."""
+    s = service.create_server(
+        session, name="timeout-ok", runner="command", command="timeout",
+        args=["30", "python", "app.py"], enabled=True,
+    )
+    assert s.enabled is True
+
+
 def test_shell_wrapped_docker_second_c_positional_allowed(session):
     """Only the FIRST ``-c`` supplies the shell command; a later ``-c`` is ``$0`` and its args never
     run, so a docker string there must not trigger a false rejection."""

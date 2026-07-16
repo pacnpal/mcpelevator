@@ -155,10 +155,15 @@ def _is_docker_launcher(command: str) -> bool:
 # they exec their remaining argv (``sudo docker …`` is a docker launch; ``python --backend docker``
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
-_SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "nice"}
+_SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "nice",
+                       "timeout"}
 
 # Wrappers whose run form accepts leading ``NAME=VALUE`` assignments before the command.
 _WRAPPERS_ACCEPTING_ASSIGNMENTS = {"env", "sudo", "doas"}
+
+# Wrappers whose first bare operand is NOT the command but a positional value the wrapper consumes
+# (``timeout DURATION COMMAND …``): skip that one operand before taking the command.
+_WRAPPERS_WITH_LEADING_OPERAND = {"timeout"}
 
 # Generous bound on wrapper-nesting depth. Real configs nest a couple; hitting this many is
 # pathological (an ``env env … env docker`` stack) and is resolved conservatively (see below).
@@ -187,6 +192,7 @@ _WRAPPER_VALUE_LONG = {
     "env": {"--unset", "--chdir"},
     "nice": {"--adjustment"},
     "exec": set(),
+    "timeout": {"--signal", "--kill-after"},
 }
 _WRAPPER_VALUE_SHORT = {
     "sudo": set("ugpChrtURTD"),
@@ -194,6 +200,7 @@ _WRAPPER_VALUE_SHORT = {
     "env": set("uC"),
     "nice": set("n"),
     "exec": set("a"),
+    "timeout": set("sk"),
 }
 
 # Characters that end a simple command and (re)open a command position when UNQUOTED: control
@@ -303,9 +310,16 @@ def _preprocess_shell_string(command_string: str) -> str:
                 i += 1
             continue
         if ch == "$" and i + 2 < n and command_string[i + 1] == "(" and command_string[i + 2] == "(":
-            _body, i = _read_delimited(command_string, i + 2, ")")  # $((…)) arithmetic — drop it
-            out.append(" ")
-            at_boundary = True
+            body, end = _read_delimited(command_string, i + 2, ")")  # $((…)) arithmetic
+            if "$(" in body or "`" in body:
+                # the shell still runs command substitutions inside arithmetic — keep the span so
+                # ``echo $(( $(docker run) + 1))`` is inspected, not erased.
+                out.append(command_string[i:end])
+                at_boundary = False
+            else:
+                out.append(" ")  # pure arithmetic (just operands/operators) — safe to drop
+                at_boundary = True
+            i = end
             continue
         if ch == "$" and i + 1 < n and command_string[i + 1] in ("'", '"'):
             i += 1  # drop the $, let the quote open on the next iteration
@@ -519,6 +533,11 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
             if base in _WRAPPERS_ACCEPTING_ASSIGNMENTS and _looks_like_assignment(tok):
                 i += 1
                 continue
+            if base in _WRAPPERS_WITH_LEADING_OPERAND:
+                # ``timeout DURATION COMMAND …``: this bare token is the positional the wrapper
+                # consumes (the duration), so the command is the NEXT token.
+                peeled = (tokens[i + 1], list(tokens[i + 2:])) if i + 1 < len(tokens) else None
+                break
             peeled = (tok, list(tokens[i + 1:]))  # first bare token is the wrapped command
             break
         if peeled is None:
@@ -589,9 +608,11 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
     if _launcher_basename(command) not in _SHELL_LAUNCHERS:
         return False
     tokens = list(args or [])
-    for i, tok in enumerate(tokens):
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
         if not isinstance(tok, str):
-            continue
+            return False
         # POSIX shells take the command string after -c. Options may be combined (e.g. -lc), but a
         # long option that merely contains 'c' (--norc, --noprofile) is NOT -c: only single-dash
         # option groups carry -c (sh/bash have no other 'c' short option). The FIRST -c wins — the
@@ -599,12 +620,17 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
         # never executed (so ``sh -c 'echo ok' -c 'docker …'`` isn't false-rejected).
         if tok == "-c" or (tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]):
             return i + 1 < len(tokens) and _shell_command_invokes_docker(str(tokens[i + 1]))
+        # ``-o option`` / ``-O shopt`` (and their long forms) consume the NEXT token as a value, so
+        # skip both — otherwise that value would be mistaken for the script operand below.
+        if tok in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
+            i += 2
+            continue
         # The first non-option operand is the SCRIPT FILE (``bash script.sh …``); everything after
         # it is the script's own argv, not a shell command string — so any later -c is irrelevant.
-        if not tok.startswith("-") and tok != "--":
+        # ``--`` explicitly ends options; the next token is then the script file.
+        if tok == "--" or not tok.startswith("-"):
             return False
-        if tok == "--":  # explicit end of options — next token is the script file
-            return False
+        i += 1
     return False
 
 
