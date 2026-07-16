@@ -1624,9 +1624,9 @@ def test_env_assignment_expanded_command_allowed_when_non_docker(session):
         ("prlimit", ["--nofile=1024", "docker", "run", "alpine"], None),
         # ``npm`` global options may precede the ``exec`` subcommand.
         ("npm", ["--prefix", "/tmp", "exec", "-c", "docker run alpine"], None),
-        # A Bash alias resolves a benign command word to docker.
+        # A Bash alias (with expansion enabled) resolves a benign command word to docker.
         (None, None, "shopt -s expand_aliases\nalias d=docker\nd run alpine"),
-        (None, None, "alias d='docker run'; d alpine"),
+        (None, None, "shopt -s expand_aliases; alias d='docker run'; d alpine"),
         # ``printf`` conversion specs substitute the operands the piped shell then runs.
         (None, None, "printf '%s ' docker run alpine | sh"),
         # Process substitution feeding a shell (static output) or running docker directly.
@@ -1708,6 +1708,57 @@ def test_sourced_procsub_inline_assignment_and_passthrough_non_docker_allowed(se
     s = service.create_server(
         session, name="src-inline-ok", runner="command", command="/bin/bash", args=["-c", inner],
         enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``chrt [policy] PRIORITY COMMAND`` launches a command after its scheduling priority.
+        ("chrt", ["-o", "0", "docker", "run", "alpine"], None),
+        ("chrt", ["-f", "50", "docker", "run"], None),
+        # ``printf %b`` decodes backslash escapes in the operand before the piped shell runs it.
+        (None, None, r"printf '%b' 'dock\145r run\n' | sh"),   # \145 octal → 'e'
+        (None, None, r"printf '%b' 'dock\x65r run\n' | sh"),   # \x65 hex → 'e'
+        # A known-variable parameter transform can still resolve to a docker command word.
+        (None, None, 'D=docker; "${D:0}" run alpine'),        # :offset substring
+        (None, None, "D=dockerXX; ${D:0:6} run"),             # :offset:length
+        (None, None, "D=dockerX; ${D%X} run"),                # suffix removal
+        (None, None, "D=/usr/bin/docker; ${D##*/} run"),      # longest-prefix removal
+    ],
+)
+def test_chrt_printf_b_and_param_transform_rejected(session, command, args, inner):
+    """``chrt``, ``printf %b`` escape decoding, and known-variable parameter transforms
+    (``${D:0}``/``${D%X}``/``${D##*/}``) that resolve to docker must all be gated."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="chrt-printf-xform", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        ("chrt", ["-f", "50", "python", "-m", "srv"], None),  # chrt wrapping a non-docker command
+        (None, None, "${FOO:0} python"),                      # transform on an unknown var → empty
+        (None, None, "D=python; ${D:0} -m srv"),              # transform resolves to non-docker
+        # Aliases are NOT expanded without ``shopt -s expand_aliases`` in a non-interactive shell,
+        # so a benign alias definition must not be treated as a launch.
+        (None, None, "alias d=docker; d run alpine"),
+        (None, None, "alias d='docker run'; d alpine"),
+    ],
+)
+def test_chrt_transform_and_unexpanded_alias_non_docker_allowed(session, command, args, inner):
+    """Non-docker ``chrt``, unresolved/non-docker parameter transforms, and aliases without
+    ``expand_aliases`` enabled must not be rejected."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    s = service.create_server(
+        session, name="chrt-alias-ok", runner="command", command=command, args=args, enabled=True,
     )
     assert s.enabled is True
 

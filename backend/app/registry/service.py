@@ -225,8 +225,8 @@ def _brace_expand(word: str, _depth: int = 0) -> tuple[list[str], bool]:
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "builtin",
-                       "nice", "ionice", "taskset", "unshare", "prlimit", "timeout", "xargs",
-                       "stdbuf", "flock", "chroot", "runuser", "su", "watch"}
+                       "nice", "ionice", "taskset", "chrt", "unshare", "prlimit", "timeout",
+                       "xargs", "stdbuf", "flock", "chroot", "runuser", "su", "watch"}
 
 # Builtins that BOTH persist a ``NAME=VALUE`` assignment to the shell and are a command word
 # (``export D=docker`` / ``declare D=docker``). ``_segment_assignments`` mines their operands so a
@@ -599,6 +599,73 @@ def _param_expansion_default(inner: str) -> str:
     return ""
 
 
+_PARAM_TRANSFORM_OPS = (":", "#", "%", "/", "^", ",")
+
+
+def _split_param_name(inner: str) -> tuple[str, str]:
+    """Split a ``${…}`` body into (parameter NAME, transform SPEC) — ``D:0`` → ``("D", ":0")``,
+    ``D##*/`` → ``("D", "##*/")``. Returns ``("", inner)`` when it does not start with a name."""
+    k = 0
+    while k < len(inner) and (inner[k].isalnum() or inner[k] == "_"):
+        k += 1
+    name = inner[:k]
+    if not name or not (name[0].isalpha() or name[0] == "_"):
+        return "", inner
+    return name, inner[k:]
+
+
+def _is_param_transform(inner: str) -> bool:
+    """True when a ``${…}`` body is ``NAME<transform>`` for a recognized transform operator (substring
+    ``:``, prefix/suffix ``#``/``%``, replace ``/``, case ``^``/``,``) — so preprocessing preserves
+    it for ``_expand_known_vars`` to resolve from a known value."""
+    name, spec = _split_param_name(inner)
+    return bool(name) and bool(spec) and spec[0] in _PARAM_TRANSFORM_OPS
+
+
+def _apply_param_transform(value: str, spec: str) -> str:
+    """Apply a bash parameter transform SPEC (``:offset[:len]`` substring, ``#``/``%`` prefix/suffix
+    removal, ``/`` replacement, ``^``/``,`` case) to a known VALUE. Falls back to the untouched value
+    for forms it can't statically resolve (glob-heavy patterns) — conservative for a launch gate."""
+    if not spec:
+        return value
+    op = spec[0]
+    if op == ":":
+        parts = spec[1:].split(":")
+        try:
+            offset = int(parts[0]) if parts[0] else 0
+        except ValueError:
+            return value
+        if offset < 0:
+            offset = max(0, len(value) + offset)
+        if len(parts) >= 2 and parts[1]:
+            try:
+                length = int(parts[1])
+            except ValueError:
+                return value
+            return value[offset:len(value) + length] if length < 0 else value[offset:offset + length]
+        return value[offset:]
+    if op in ("#", "%"):
+        longest = spec[1:2] == op
+        pat = spec[2:] if longest else spec[1:]
+        if any(c in pat for c in "*?["):  # a glob pattern — leave the value (conservative)
+            return value
+        if op == "#":
+            return value[len(pat):] if value.startswith(pat) else value
+        return value[:-len(pat)] if pat and value.endswith(pat) else value
+    if op == "/":
+        allrep = spec[1:2] == "/"
+        body = spec[2:] if allrep else spec[1:]
+        pat, rep = (body.split("/", 1) + [""])[:2]
+        if any(c in pat for c in "*?["):
+            return value
+        return value.replace(pat, rep) if allrep else value.replace(pat, rep, 1)
+    if op == "^":
+        return value.upper() if spec[1:2] == "^" else (value[:1].upper() + value[1:])
+    if op == ",":
+        return value.lower() if spec[1:2] == "," else (value[:1].lower() + value[1:])
+    return value
+
+
 def _preprocess_shell_string(command_string: str) -> str:
     """Apply shell pre-tokenization rewrites the parser can't see through otherwise, quote-aware:
 
@@ -693,10 +760,11 @@ def _preprocess_shell_string(command_string: str) -> str:
             if default:
                 out.append(default)
                 at_boundary = False
-            elif _is_shell_name(inner) and inner != "IFS":
-                # a plain ``${NAME}`` — keep it intact so the later assignment/env pass
-                # (``_expand_known_vars``) can resolve ``D=docker; ${D} run``. ``${IFS}`` stays a
-                # separator (field split), and complex forms (``${#x}``, ``${1}``) fall through.
+            elif (_is_shell_name(inner) and inner != "IFS") or _is_param_transform(inner):
+                # a plain ``${NAME}`` or a transform ``${NAME:0}``/``${NAME##*/}`` — keep it intact so
+                # the later assignment/env pass (``_expand_known_vars``) can resolve ``D=docker;
+                # ${D:0} run``. ``${IFS}`` stays a separator, and complex forms (``${#x}``, ``${1}``)
+                # fall through.
                 out.append("${" + inner + "}")
                 at_boundary = False
             else:
@@ -995,6 +1063,9 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
         # command); ``-p``/``--pid`` operates on an existing process and launches nothing.
         taskset_cpulist = False
         taskset_pid = False
+        # ``chrt [policy flags] PRIORITY COMMAND`` runs a command after its scheduling priority
+        # operand, unless ``-p``/``--pid`` targets an existing process (then nothing is launched).
+        chrt_pid = False
         i = 0
         while i < len(tokens):
             tok = tokens[i]
@@ -1032,6 +1103,8 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
                     taskset_cpulist = True
                 if base == "taskset" and name == "--pid":
                     taskset_pid = True
+                if base == "chrt" and name == "--pid":
+                    chrt_pid = True
                 if "=" not in tok and name in _WRAPPER_VALUE_LONG.get(base, frozenset()):
                     i += 2  # separate value
                 else:
@@ -1051,6 +1124,8 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
                     taskset_cpulist = True
                 if base == "taskset" and "p" in letters:
                     taskset_pid = True
+                if base == "chrt" and "p" in letters:
+                    chrt_pid = True
                 short_vals = _WRAPPER_VALUE_SHORT.get(base, frozenset())
                 handled = False
                 for k, c in enumerate(letters):
@@ -1091,6 +1166,12 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
                 start = 0 if taskset_cpulist else 1
                 peeled = (operands[start], list(operands[start + 1:])) if len(
                     operands) > start else None
+                break
+            if base == "chrt":
+                if chrt_pid:  # ``chrt -p … PID`` — operates on a process, launches nothing
+                    break
+                operands = tokens[i:]  # first operand is the PRIORITY; the command follows it
+                peeled = (operands[1], list(operands[2:])) if len(operands) > 1 else None
                 break
             if base in _WRAPPERS_WITH_LEADING_OPERAND:
                 # ``timeout DURATION COMMAND …`` / ``flock FILE COMMAND …``: this bare token is the
@@ -1377,6 +1458,18 @@ def _segment_assignments(segment: str) -> dict[str, str]:
     return result
 
 
+def _enables_alias_expansion(segment: str) -> bool:
+    """True when a segment turns on alias expansion (``shopt -s expand_aliases``). Aliases are NOT
+    expanded in a non-interactive ``bash -c`` / ``sh -c`` unless this is set, so alias rewriting must
+    be gated on it to avoid rejecting a benign ``alias d=docker; d run`` that never resolves."""
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        return False
+    return (len(words) >= 3 and words[0] == "shopt" and "-s" in words[1:]
+            and "expand_aliases" in words[1:])
+
+
 def _collect_aliases(segment: str) -> dict[str, str]:
     """The aliases an ``alias NAME=VALUE …`` segment defines, so a later command word that is an
     alias name resolves (``alias d=docker`` → a later ``d run`` launches docker)."""
@@ -1580,8 +1673,13 @@ def _expand_known_vars(segment: str, assignments: dict[str, str],
                         out.append(positionals[p - 1] if 1 <= p <= len(positionals) else "")
                         i = j + 1
                         continue
-                    if _is_shell_name(name) and name != "IFS":  # unknown plain ${NAME} → unset = ""
+                    tname, spec = _split_param_name(name)
+                    if tname in assignments and spec and spec[0] in _PARAM_TRANSFORM_OPS:
+                        out.append(_apply_param_transform(assignments[tname], spec))
                         i = j + 1
+                        continue
+                    if (_is_shell_name(name) and name != "IFS") or _is_param_transform(name):
+                        i = j + 1  # unknown plain/transformed ${NAME} → unset = ""
                         continue
             elif positionals and segment[i + 1].isdigit():  # $1..$9 → a specific positional
                 p = int(segment[i + 1])
@@ -1736,7 +1834,10 @@ def _printf_output(fmt: str, args: list[str]) -> str:
                     if conv == "%":
                         out.append("%")
                     else:
-                        out.append(args[ai] if ai < len(args) else "")
+                        operand = args[ai] if ai < len(args) else ""
+                        # ``%b`` decodes backslash escapes in the operand (``dock\145r`` → ``docker``);
+                        # ``%s`` and the rest emit it verbatim.
+                        out.append(_decode_ansi_c(operand) if conv == "b" else operand)
                         ai += 1
                     i = j + 1
                     continue
@@ -1816,15 +1917,20 @@ def _shell_command_invokes_docker(command_string: str, env: Optional[dict[str, s
     funcs: set[str] = set(seed_funcs)
     bodies: dict[str, str] = {**(func_bodies or {}), **_extract_function_bodies(command_string)}
     aliases: dict[str, str] = {}
+    alias_expansion = False  # bash only expands aliases once ``shopt -s expand_aliases`` is set
     assignments: dict[str, str] = {k: v for k, v in (env or {}).items() if isinstance(v, str)}
     positionals: list[str] = []
     for seg in _split_shell_commands(command_string):
-        expanded = _expand_alias(_expand_known_vars(seg, assignments, positionals), aliases)
+        expanded = _expand_known_vars(seg, assignments, positionals)
+        if alias_expansion:
+            expanded = _expand_alias(expanded, aliases)
         if _segment_invokes_docker(expanded, frozenset(funcs), env, bodies, inspecting):
             return True
         declared = _segment_declares_function(seg)
         if declared:
             funcs.add(declared)
+        if _enables_alias_expansion(seg):
+            alias_expansion = True
         aliases.update(_collect_aliases(seg))
         assignments.update(_segment_assignments(seg))
         set_pos = _set_positionals(seg)
