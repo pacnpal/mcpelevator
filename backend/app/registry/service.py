@@ -242,6 +242,14 @@ _MAX_WRAPPER_PEELS = 64
 # Bash in restricted mode and still honors ``-c``.
 _SHELL_LAUNCHERS = {"sh", "bash", "rbash", "dash", "ash", "zsh", "ksh"}
 
+# Builtins that execute a FILE argument as shell script in the current shell. Pointed at a stdin
+# path (below) they run whatever a heredoc/here-string feeds them.
+_SOURCE_BUILTINS = {"source", "."}
+
+# Paths that resolve to standard input — a heredoc redirected here becomes the sourced/executed
+# script (``source /dev/stdin <<EOF``).
+_STDIN_PATHS = {"/dev/stdin", "-", "/proc/self/fd/0", "/dev/fd/0"}
+
 # Shell reserved words / keywords that can PRECEDE the real command in a simple-command position
 # (``if docker …``, ``! docker …``). Skipping them keeps the scan on the command the shell actually
 # executes. ``time`` and ``coproc`` are handled explicitly (they take options / an optional name);
@@ -311,6 +319,12 @@ def _looks_like_assignment(word: str) -> bool:
         return False
     name = word[:eq]
     return (name[0].isalpha() or name[0] == "_") and all(c.isalnum() or c == "_" for c in name)
+
+
+def _is_shell_name(word: str) -> bool:
+    """True when ``word`` is a valid POSIX identifier (a shell function/variable name)."""
+    return bool(word) and (word[0].isalpha() or word[0] == "_") and all(
+        c.isalnum() or c == "_" for c in word)
 
 
 # GNU ``env -S`` escape sequences that differ from ordinary shell/``shlex`` handling: ``\_`` is a
@@ -413,8 +427,10 @@ def _heredoc_delimiters(line: str) -> list[tuple[str, bool, bool]]:
 
 
 def _line_feeds_shell(line: str) -> bool:
-    """True when the command on a here-document marker line is a shell launcher (``bash <<EOF``),
-    meaning the heredoc body is SCRIPT text the shell executes — not ordinary stdin data."""
+    """True when the command on a here-document marker line will EXECUTE the body as shell script
+    rather than read it as ordinary stdin data. Two shapes qualify: a shell launcher reading the
+    body (``bash <<EOF``), and ``source``/``.`` pointed at a stdin path (``source /dev/stdin <<EOF``
+    executes the heredoc in the current shell)."""
     head = line.split("<<", 1)[0]
     try:
         words = shlex.split(head)
@@ -425,8 +441,13 @@ def _line_feeds_shell(line: str) -> bool:
         idx += 1
     if idx >= len(words):
         return False
-    cmd, _ = _strip_wrappers(words[idx], words[idx + 1:])
-    return _launcher_basename(cmd) in _SHELL_LAUNCHERS
+    cmd, rest = _strip_wrappers(words[idx], words[idx + 1:])
+    base = _launcher_basename(cmd)
+    if base in _SHELL_LAUNCHERS:
+        return True
+    # ``source FILE`` / ``. FILE`` run FILE as script in the current shell; when FILE names stdin
+    # and a heredoc feeds it, the body is the sourced script — inspect it, don't drop it as data.
+    return base in _SOURCE_BUILTINS and any(str(a) in _STDIN_PATHS for a in (rest or []))
 
 
 def _strip_heredocs(command_string: str) -> str:
@@ -836,6 +857,17 @@ def _split_shell_commands(command_string: str) -> list[str]:
             buf.append(command_string[i + 1])
             i += 2
             continue
+        if ch == "(" and _is_shell_name("".join(buf).strip()):
+            # POSIX function definition ``NAME ()`` — keep the ``()`` attached to the name so the
+            # segment stays a recognizable declaration instead of splitting into a bare ``NAME``
+            # command at the paren (which would misread ``docker() { … }`` as a docker launch).
+            j = i + 1
+            while j < n and command_string[j] == " ":
+                j += 1
+            if j < n and command_string[j] == ")":
+                buf.append("()")
+                i = j + 1
+                continue
         if ch in _SHELL_OPERATOR_CHARS:
             segments.append("".join(buf))
             buf = []
@@ -862,6 +894,9 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
             return command, args
         tokens = list(args or [])
         peeled: Optional[tuple[str, Optional[list[str]]]] = None
+        # ``watch`` runs its operand string through ``sh -c`` by default, but ``-x``/``--exec``
+        # passes the argv straight to ``exec`` instead. Track which form applies to this wrapper.
+        watch_exec = False
         i = 0
         while i < len(tokens):
             tok = tokens[i]
@@ -891,6 +926,8 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
                         value = tokens[i + 1] if i + 1 < len(tokens) else ""
                         peeled = _split_string_command(value, tokens[i + 2:])
                     break
+                if base == "watch" and name == "--exec":
+                    watch_exec = True
                 if "=" not in tok and name in _WRAPPER_VALUE_LONG.get(base, frozenset()):
                     i += 2  # separate value
                 else:
@@ -902,6 +939,8 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
                 # so ``command -v docker`` is a lookup, not a launch. Resolve to a non-launcher.
                 if base == "command" and ("v" in letters or "V" in letters):
                     return "", None
+                if base == "watch" and "x" in letters:
+                    watch_exec = True
                 short_vals = _WRAPPER_VALUE_SHORT.get(base, frozenset())
                 handled = False
                 for k, c in enumerate(letters):
@@ -935,6 +974,16 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
                     peeled = ("sh", ["-c"] + list(rest[1:2]))
                 else:
                     peeled = (rest[0], list(rest[1:])) if rest else None
+                break
+            if base == "watch":
+                # ``watch COMMAND …`` joins its operands and runs them through ``sh -c`` — so the
+                # single-string form ``watch 'docker run …'`` still reaches the CLI. With
+                # ``-x``/``--exec`` watch execs the argv directly, so the first operand is the command.
+                operands = tokens[i:]
+                if watch_exec:
+                    peeled = (operands[0], list(operands[1:])) if operands else None
+                else:
+                    peeled = ("sh", ["-c", " ".join(str(t) for t in operands)])
                 break
             peeled = (tok, list(tokens[i + 1:]))  # first bare token is the wrapped command
             break
@@ -1018,9 +1067,33 @@ def _redirection_span(word: str) -> Optional[str]:
     return "attached" if k < len(word) else "bare"
 
 
+def _declared_function_name(words: list[str], idx: int) -> Optional[str]:
+    """The shell function NAME a declaration at command position ``idx`` defines, else ``None``.
+
+    Covers bash's ``function NAME`` keyword form and the POSIX ``NAME () { … }`` form — whose ``()``
+    may be a token glued to the name (``docker()``), split off (``docker`` ``()``), or half-glued
+    (``docker(``) under ``shlex``. A declaration is not a launch, and the NAME then shadows the CLI
+    for later commands."""
+    if idx >= len(words):
+        return None
+    w = words[idx]
+    if w == "function":
+        if idx + 1 < len(words):
+            name = words[idx + 1].rstrip("(){}")
+            return name if _is_shell_name(name) else None
+        return None
+    if "(" in w:  # ``NAME()`` / ``NAME(`` glued to the name
+        name = w[: w.index("(")]
+        return name if _is_shell_name(name) else None
+    if _is_shell_name(w) and idx + 1 < len(words) and words[idx + 1].startswith("("):
+        return w  # ``NAME ()`` — the ``()`` is a separate token
+    return None
+
+
 def _segment_declares_function(segment: str) -> Optional[str]:
-    """The function name declared by ``segment`` via a command-position ``function NAME`` keyword,
-    or ``None``. (``echo function docker`` is an argument, not a declaration.)"""
+    """The function name declared by ``segment`` in command position (bash ``function NAME`` or the
+    POSIX ``NAME () { … }`` form), or ``None``. (``echo function docker`` is an argument, not a
+    declaration.)"""
     try:
         words = shlex.split(segment)
     except ValueError:
@@ -1036,9 +1109,7 @@ def _segment_declares_function(segment: str) -> Optional[str]:
             idx += 1
         else:
             break
-    if idx + 1 < len(words) and words[idx] == "function":
-        return words[idx + 1].rstrip("(){}")
-    return None
+    return _declared_function_name(words, idx)
 
 
 def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset()) -> bool:
@@ -1083,6 +1154,8 @@ def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset()) -
         break
     if idx >= len(words):
         return False
+    if _declared_function_name(words, idx) is not None:
+        return False  # a POSIX ``NAME () { … }`` declaration in command position — not a launch
     cmd = words[idx]
     if cmd in funcs:  # a call to a locally-defined shell function, not the docker CLI
         return False
@@ -1097,7 +1170,9 @@ def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset()) -
             j += 1
         if j < len(rest) and rest[j] == "--":
             j += 1
-        return bool(rest[j:]) and _segment_invokes_docker(" ".join(rest[j:]), funcs)
+        # ``command`` explicitly SUPPRESSES shell-function lookup, so a same-named function does not
+        # shadow the CLI here: ``function docker { :; }; command docker run`` runs the real docker.
+        return bool(rest[j:]) and _segment_invokes_docker(" ".join(rest[j:]), frozenset())
     if cmd == "builtin" and words[idx + 1:]:  # run the named builtin
         return _segment_invokes_docker(" ".join(words[idx + 1:]), funcs)
     if cmd == "trap":  # `trap [OPTS] ACTION [SIG…]` — the first non-option arg is shell input

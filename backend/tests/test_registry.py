@@ -1385,6 +1385,55 @@ def test_param_default_non_docker_allowed(session):
     assert s.enabled is True
 
 
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``command`` suppresses shell-function lookup, so a shadowing definition does NOT protect it.
+        (None, None, "function docker { :; }; command docker run alpine"),
+        (None, None, "docker() { :; }; command docker run alpine"),
+        # ``watch`` runs its single operand string through ``sh -c`` by default.
+        ("watch", ["docker run alpine"], None),
+        # ...and passes the argv straight to exec with -x/--exec (first operand is the command).
+        ("watch", ["-x", "docker", "run", "alpine"], None),
+        ("watch", ["--exec", "docker", "run", "alpine"], None),
+        # ``source``/``.`` pointed at stdin execute the heredoc body as script in the current shell.
+        (None, None, "source /dev/stdin <<'EOF'\ndocker run alpine\nEOF"),
+        (None, None, ". /dev/stdin <<'EOF'\ndocker run alpine\nEOF"),
+        (None, None, "source - <<'EOF'\ndocker run alpine\nEOF"),
+    ],
+)
+def test_command_builtin_watch_string_and_sourced_stdin_rejected(session, command, args, inner):
+    """``command`` bypassing a function shadow, ``watch``'s ``sh -c`` operand string (and its
+    ``-x``/``--exec`` argv form), and a heredoc executed via ``source``/``.`` from stdin must all be
+    gated — each reaches the docker CLI without the docker runner's hardening."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="cmd-watch-src", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "docker() { printf fake; }; docker run alpine",   # POSIX definition shadows the later call
+        "docker () { printf fake; }; docker run alpine",  # ...with a space before the ``()``
+        "source /etc/init.sh <<'EOF'\ndocker run alpine\nEOF",  # source reads a real file, not stdin
+    ],
+)
+def test_posix_function_shadow_and_sourced_file_allowed(session, inner):
+    """A POSIX ``NAME () { … }`` declaration shadows the CLI for later same-named calls (like the
+    ``function`` keyword form), and a heredoc fed to ``source FILE`` where FILE is a real path (not
+    stdin) is inert data — neither is a docker launch, so neither may be rejected."""
+    s = service.create_server(
+        session, name="posix-fn-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
 def test_deeply_nested_shell_command_fails_closed_without_error(session):
     """Pathologically nested ``$(…)`` must not raise (RecursionError) out of the guard; it fails
     closed and rejects the malformed config instead of 500-ing the create path."""
