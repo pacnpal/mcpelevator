@@ -1906,6 +1906,57 @@ def test_setpriv_and_su_session_command_non_docker_allowed(session):
 
 
 @pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # A Bash nameref resolves through its target's value.
+        (None, None, 'declare -n D=E; E=docker; "$D" run alpine'),
+        (None, None, "typeset -n D=E; E=docker; $D run"),
+        # A command substitution whose static output lands in command position.
+        (None, None, "$(printf docker) run alpine"),
+        (None, None, '$(printf "docker run alpine")'),
+        (None, None, "$(echo docker) run"),
+        (None, None, "`printf docker` run"),
+        # ``nsenter [options] PROGRAM`` launches a command.
+        ("nsenter", ["--target", "1", "--mount", "docker", "run", "alpine"], None),
+        ("nsenter", ["-t", "1", "-m", "docker", "run"], None),
+        # A ``for`` loop binding a literal docker value the body then runs.
+        (None, None, 'for x in docker; do "$x" run alpine; done'),
+        (None, None, "for x in a docker b; do $x run; done"),
+    ],
+)
+def test_nameref_static_subst_nsenter_and_for_loop_rejected(session, command, args, inner):
+    """A Bash nameref, a static command-substitution output in command position, ``nsenter``, and a
+    ``for`` loop binding a docker value must all be gated."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="nameref-subst-for", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        (None, None, 'declare -n D=E; E=python; "$D" -m srv'),   # nameref resolves to non-docker
+        (None, None, "echo $(printf docker)"),                   # substitution output is an argument
+        (None, None, '"$(printf \'docker run\')" alpine'),       # quoted multiword isn't a launcher
+        ("nsenter", ["--target", "1", "python", "-m", "srv"], None),  # nsenter wrapping non-docker
+        (None, None, 'for x in python; do "$x" -m srv; done'),   # loop binds a non-docker value
+    ],
+)
+def test_nameref_static_subst_nsenter_and_for_loop_non_docker_allowed(session, command, args, inner):
+    """The nameref/substitution/nsenter/for-loop machinery must not reject the non-docker cases."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    s = service.create_server(
+        session, name="nameref-ok", runner="command", command=command, args=args, enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
     "inner",
     [
         "docker() { printf fake; }; docker run alpine",   # POSIX definition shadows the later call

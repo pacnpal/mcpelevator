@@ -225,8 +225,9 @@ def _brace_expand(word: str, _depth: int = 0) -> tuple[list[str], bool]:
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "builtin",
-                       "nice", "ionice", "taskset", "chrt", "unshare", "prlimit", "setpriv",
-                       "timeout", "xargs", "stdbuf", "flock", "chroot", "runuser", "su", "watch"}
+                       "nice", "ionice", "taskset", "chrt", "unshare", "nsenter", "prlimit",
+                       "setpriv", "timeout", "xargs", "stdbuf", "flock", "chroot", "runuser",
+                       "su", "watch"}
 
 # Builtins that BOTH persist a ``NAME=VALUE`` assignment to the shell and are a command word
 # (``export D=docker`` / ``declare D=docker``). ``_segment_assignments`` mines their operands so a
@@ -285,6 +286,8 @@ _WRAPPER_VALUE_LONG = {
     # space-separated one), so they don't swallow the command; only these take a required value.
     "unshare": {"--map-user", "--map-group", "--map-users", "--map-groups", "--setgroups",
                 "--propagation", "--setuid", "--setgid", "--root", "--wd"},
+    # nsenter's namespace flags take only an OPTIONAL ``=file`` arg; only these consume a value.
+    "nsenter": {"--target", "--setuid", "--setgid"},
     # prlimit's ``--<resource>=<limit>`` options are inline ``=`` forms (no swallowed operand); only
     # ``--pid``/``--output`` take a separate value. ``--pid`` targets an existing process (no child).
     "prlimit": {"--pid", "--output"},
@@ -310,6 +313,7 @@ _WRAPPER_VALUE_SHORT = {
     "ionice": set("cnp"),  # -c class, -n classdata, -p pid
     "taskset": set("cp"),  # -c cpu-list, -p pid
     "unshare": set("SGRw"),  # -S setuid, -G setgid, -R root, -w wd (namespace flags are boolean)
+    "nsenter": set("tSG"),   # -t target, -S setuid, -G setgid (namespace flags are boolean)
     "prlimit": set("po"),    # -p pid, -o output
     "exec": set("a"),
     "timeout": set("sk"),
@@ -1539,6 +1543,91 @@ def _segment_assignments(segment: str) -> dict[str, str]:
     return result
 
 
+def _collect_namerefs(segment: str) -> dict[str, str]:
+    """The Bash namerefs a ``declare -n``/``typeset -n NAME=TARGET`` segment establishes (``NAME``
+    then resolves through ``TARGET``'s value), so ``declare -n D=E; E=docker; "$D"`` reaches the CLI.
+    Leading ``command``/``builtin`` are peeled first."""
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        return {}
+    idx = 0
+    while idx < len(words) and words[idx] in ("command", "builtin"):
+        idx += 1
+    if idx >= len(words) or words[idx] not in ("declare", "typeset", "local"):
+        return {}
+    rest = words[idx + 1:]
+    if not any(w == "-n" or (w.startswith("-") and not w.startswith("--") and "n" in w[1:])
+               for w in rest):
+        return {}
+    result: dict[str, str] = {}
+    for w in rest:
+        if _looks_like_assignment(w):
+            name, target = w.split("=", 1)
+            if _is_shell_name(target):
+                result[name] = target
+    return result
+
+
+def _for_loop_binding(segment: str) -> Optional[tuple[str, list[str]]]:
+    """The ``(VAR, VALUES)`` a ``for VAR in VALUES`` segment binds, so the loop body's ``$VAR`` can be
+    resolved (``for x in docker; do "$x" run; done`` launches docker)."""
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        return None
+    if len(words) < 2 or words[0] != "for" or not _is_shell_name(words[1]):
+        return None
+    if "in" not in words[2:]:
+        return None
+    values = words[words.index("in", 2) + 1:]
+    if "do" in values:
+        values = values[:values.index("do")]
+    return words[1], values
+
+
+def _expand_static_substitutions(segment: str) -> str:
+    """Replace ``$(…)``/backtick command substitutions whose output is statically known (``echo``/
+    ``printf``) with that output, so ``$(printf docker) run`` resolves its command word. Single-quoted
+    spans are literal; a non-static substitution is left intact (its inner is inspected separately)."""
+    out: list[str] = []
+    i, n = 0, len(segment)
+    quote: Optional[str] = None
+    while i < n:
+        ch = segment[i]
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.append(ch)
+            out.append(segment[i + 1])
+            i += 2
+            continue
+        if ch in ("'", '"'):
+            quote = None if ch == quote else (quote or ch)
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "$" and i + 1 < n and segment[i + 1] == "(":
+            inner, end = _read_delimited(segment, i + 2, ")")
+            literal = _static_command_output(inner)
+            out.append(literal if literal is not None else segment[i:end])
+            i = end
+            continue
+        if ch == "`":
+            inner, end = _read_delimited(segment, i + 1, "`")
+            literal = _static_command_output(inner)
+            out.append(literal if literal is not None else segment[i:end])
+            i = end
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _enables_alias_expansion(segment: str) -> bool:
     """True when a segment turns on alias expansion (``shopt -s expand_aliases``). Aliases are NOT
     expanded in a non-interactive ``bash -c`` / ``sh -c`` unless this is set, so alias rewriting must
@@ -1986,6 +2075,9 @@ def _shell_command_invokes_docker(command_string: str, env: Optional[dict[str, s
     if any(_shell_command_invokes_docker(sub, env)
            for sub in _command_substitutions(command_string)):
         return True
+    # Substitute statically-known ``$(printf docker)``/``$(echo …)`` output inline (a non-static
+    # ``$(docker run)`` is left intact — already inspected above), so it reaches command position.
+    command_string = _expand_static_substitutions(command_string)
     if _pipe_into_stdin_shell_invokes_docker(command_string, env):
         return True
     if _process_subst_invokes_docker(command_string, env):
@@ -2003,11 +2095,15 @@ def _shell_command_invokes_docker(command_string: str, env: Optional[dict[str, s
     active_aliases: dict[str, str] = {}
     alias_active = False
     assignments: dict[str, str] = {k: v for k, v in (env or {}).items() if isinstance(v, str)}
+    namerefs: dict[str, str] = {}  # ``declare -n D=E`` — D resolves through E's value
     positionals: list[str] = []
     for line in _split_lines_quote_aware(command_string):
         line_aliases: dict[str, str] = {}
         line_enables_alias = False
         for seg in _split_shell_commands(line):
+            for nref, target in namerefs.items():  # follow namerefs to their target's current value
+                if target in assignments:
+                    assignments[nref] = assignments[target]
             # The env visible to this segment's nested scans (command substitutions, function bodies)
             # is the configured env plus every assignment recorded by EARLIER segments, so ``D=docker;
             # echo "$($D run)"`` and ``D=docker; f() { "$D" run; }; f`` resolve ``$D``.
@@ -2024,6 +2120,16 @@ def _shell_command_invokes_docker(command_string: str, env: Optional[dict[str, s
             if declared:
                 funcs.add(declared)
             assignments.update(_segment_assignments(seg))
+            namerefs.update(_collect_namerefs(seg))
+            loop = _for_loop_binding(seg)
+            if loop is not None:  # ``for VAR in … docker …`` — the body's $VAR can be the CLI
+                var, values = loop
+                for raw in values:
+                    resolved = _expand_static_substitutions(
+                        _expand_known_vars(raw, assignments, positionals)).strip()
+                    if _is_docker_command(resolved):
+                        assignments[var] = "docker"
+                        break
             set_pos = _set_positionals(seg)
             if set_pos is not None:
                 positionals = set_pos
