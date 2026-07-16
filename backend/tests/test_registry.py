@@ -1130,6 +1130,49 @@ def test_quoted_heredoc_and_conditional_operand_allowed(session, inner):
     assert s.enabled is True
 
 
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        ("flock", ["/tmp/lock", "docker", "run", "alpine"], None),   # flock FILE COMMAND
+        ("flock", ["-w", "5", "/tmp/lock", "docker", "run"], None),  # ...with a value option
+        ("flock", ["/tmp/lock", "-c", "docker run alpine"], None),   # flock FILE -c SHELL-COMMAND
+        (None, None, "builtin eval 'docker run alpine'"),            # builtin runs its operand
+        (None, None, "builtin exec docker run alpine"),
+        (None, None, ">/dev/null docker run alpine"),                # a leading redirection
+        (None, None, "2>/dev/null docker run alpine"),
+        (None, None, "echo ok # <<'EOF'\n$(docker run alpine)\nEOF"),  # heredoc marker in a comment
+    ],
+)
+def test_flock_builtin_redirection_and_comment_heredoc_rejected(session, command, args, inner):
+    """flock/builtin wrappers, leading redirections, and a here-doc marker that is only a comment
+    (so the next line still runs) must all be gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="flock-b", runner="command", command=command, args=args, enabled=True
+        )
+
+
+def test_flock_non_docker_command_allowed(session):
+    """flock fronting a non-docker command must not be gated."""
+    s = service.create_server(
+        session, name="flock-ok", runner="command", command="flock",
+        args=["/tmp/lock", "python", "app.py"], enabled=True,
+    )
+    assert s.enabled is True
+
+
+def test_shadowing_docker_function_allowed(session):
+    """A locally-defined ``docker`` shell function means a later ``docker …`` call resolves to that
+    function, not the CLI — it must not be rejected."""
+    s = service.create_server(
+        session, name="func-ok", runner="command", command="/bin/bash",
+        args=["-c", "function docker { printf fake; }; docker run alpine"], enabled=True,
+    )
+    assert s.enabled is True
+
+
 def test_deeply_nested_shell_command_fails_closed_without_error(session):
     """Pathologically nested ``$(…)`` must not raise (RecursionError) out of the guard; it fails
     closed and rejects the malformed config instead of 500-ing the create path."""

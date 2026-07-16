@@ -208,15 +208,15 @@ def _brace_expand(word: str, _depth: int = 0) -> list[str]:
 # they exec their remaining argv (``sudo docker …`` is a docker launch; ``python --backend docker``
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
-_SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "nice",
-                       "timeout", "xargs", "stdbuf"}
+_SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "builtin",
+                       "nice", "timeout", "xargs", "stdbuf", "flock"}
 
 # Wrappers whose run form accepts leading ``NAME=VALUE`` assignments before the command.
 _WRAPPERS_ACCEPTING_ASSIGNMENTS = {"env", "sudo", "doas"}
 
 # Wrappers whose first bare operand is NOT the command but a positional value the wrapper consumes
-# (``timeout DURATION COMMAND …``): skip that one operand before taking the command.
-_WRAPPERS_WITH_LEADING_OPERAND = {"timeout"}
+# (``timeout DURATION COMMAND …`` / ``flock FILE COMMAND …``): skip that one operand.
+_WRAPPERS_WITH_LEADING_OPERAND = {"timeout", "flock"}
 
 # Generous bound on wrapper-nesting depth. Real configs nest a couple; hitting this many is
 # pathological (an ``env env … env docker`` stack) and is resolved conservatively (see below).
@@ -253,6 +253,7 @@ _WRAPPER_VALUE_LONG = {
     "xargs": {"--replace", "--max-args", "--max-procs", "--max-chars", "--delimiter",
               "--arg-file", "--max-lines", "--eof", "--process-slot-var"},
     "stdbuf": {"--input", "--output", "--error"},
+    "flock": {"--timeout", "--wait", "--conflict-exit-code"},
 }
 _WRAPPER_VALUE_SHORT = {
     "sudo": set("ugpChrtURTD"),
@@ -264,6 +265,7 @@ _WRAPPER_VALUE_SHORT = {
     # -I replstr, -n num, -P procs, -s size, -d delim, -a file, -E eof, -L/-l num
     "xargs": set("InPsdaELl"),
     "stdbuf": set("ioe"),  # -i/-o/-e BUFMODE
+    "flock": set("wE"),    # -w timeout, -E exit-code
 }
 
 # Characters that end a simple command and (re)open a command position when UNQUOTED: control
@@ -346,6 +348,8 @@ def _heredoc_delimiters(line: str) -> list[tuple[str, bool, bool]]:
             quote = ch
             i += 1
             continue
+        if ch == "#" and (i == 0 or line[i - 1] in " \t"):
+            break  # a comment starts here — any `<<` after it is not a real heredoc marker
         if ch == "<" and line[i:i + 2] == "<<" and line[i:i + 3] != "<<<":
             j = i + 2
             strip_tabs = False
@@ -559,9 +563,11 @@ def _preprocess_shell_string(command_string: str) -> str:
             i += 1  # locale $"…": drop the $, let the quote open on the next iteration
             continue
         if ch in "<>":
-            # a redirection can be glued to the command word (``docker</dev/null``) or open a
-            # process substitution (``<(docker …)``); split it off so the command word is seen.
-            out.append(" ")
+            # a redirection can be glued to the command word (``docker</dev/null``); split it off so
+            # the command word is seen. Don't split when preceded by a digit (an fd number like
+            # ``2>``) so the redirection token stays intact for the segment scanner.
+            if out and out[-1] not in " \t" and not out[-1].isdigit():
+                out.append(" ")
             out.append(ch)
             at_boundary = True
             i += 1
@@ -792,9 +798,14 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
                 i += 1
                 continue
             if base in _WRAPPERS_WITH_LEADING_OPERAND:
-                # ``timeout DURATION COMMAND …``: this bare token is the positional the wrapper
-                # consumes (the duration), so the command is the NEXT token.
-                peeled = (tokens[i + 1], list(tokens[i + 2:])) if i + 1 < len(tokens) else None
+                # ``timeout DURATION COMMAND …`` / ``flock FILE COMMAND …``: this bare token is the
+                # positional the wrapper consumes, so the command is the NEXT token.
+                rest = tokens[i + 1:]
+                if base == "flock" and rest and rest[0] in ("-c", "--command"):
+                    # ``flock FILE -c COMMAND`` runs COMMAND through the shell — inspect it as such.
+                    peeled = ("sh", ["-c"] + list(rest[1:2]))
+                else:
+                    peeled = (rest[0], list(rest[1:])) if rest else None
                 break
             peeled = (tok, list(tokens[i + 1:]))  # first bare token is the wrapped command
             break
@@ -805,12 +816,45 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
     return "docker", list(args or [])
 
 
-def _segment_invokes_docker(segment: str) -> bool:
+def _redirection_span(word: str) -> Optional[str]:
+    """Classify ``word`` as a shell redirection: ``"attached"`` (target glued, e.g. ``>/dev/null``,
+    ``2>err``), ``"bare"`` (operator only, target is the NEXT token, e.g. ``>``, ``2>``, ``>&``), or
+    ``None`` (not a redirection). Lets ``>/dev/null docker run`` reach ``docker``."""
+    k = 0
+    while k < len(word) and word[k].isdigit():
+        k += 1
+    if k < len(word) and word[k] == "&" and k + 1 < len(word) and word[k + 1] in "<>":
+        k += 1  # &> / &>> form
+    if k >= len(word) or word[k] not in "<>":
+        return None
+    while k < len(word) and word[k] in "<>&":
+        k += 1
+    return "attached" if k < len(word) else "bare"
+
+
+def _defined_functions(command_string: str) -> set[str]:
+    """Names defined via the ``function NAME`` keyword anywhere in the string. A later ``NAME …``
+    call resolves to that shell function, not the CLI, so ``function docker { … }; docker run`` is
+    not a docker launch."""
+    names: set[str] = set()
+    for seg in _split_shell_commands(command_string):
+        try:
+            words = shlex.split(seg)
+        except ValueError:
+            words = seg.split()
+        for k, tok in enumerate(words):
+            if tok == "function" and k + 1 < len(words):
+                names.add(words[k + 1].rstrip("(){}"))
+    return names
+
+
+def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset()) -> bool:
     """True when a single simple-command segment launches the docker CLI as its command word.
 
-    Leading ``NAME=VALUE`` assignments and shell reserved words are skipped to reach the real
-    command; ``eval``/``trap`` re-parse their argument as fresh shell input; ``coproc`` may carry an
-    optional name before the command."""
+    Leading redirections, ``NAME=VALUE`` assignments, and shell reserved words are skipped to reach
+    the real command; ``eval``/``trap`` re-parse their argument as fresh shell input; ``coproc`` may
+    carry an optional name; ``builtin`` re-inspects its operand; a command word that names a defined
+    shell function (``funcs``) is not the CLI."""
     try:
         words = shlex.split(segment)
     except ValueError:
@@ -818,10 +862,20 @@ def _segment_invokes_docker(segment: str) -> bool:
     idx = 0
     while idx < len(words):
         w = words[idx]
+        span = _redirection_span(w)
+        if span == "attached":  # e.g. >/dev/null (target glued) — skip the redirection
+            idx += 1
+            continue
+        if span == "bare":  # e.g. > /dev/null (operator, target is the next token) — skip both
+            idx += 2
+            continue
         if w == "in":
             # after ``in`` (of ``for``/``case``) the rest of this segment is a word-list / case
             # pattern, not a command — ``case docker in docker) …`` / ``for x in docker …``.
             return False
+        if w == "function":  # `function NAME [()] { … }` — NAME is a declaration, not a command
+            idx += 2
+            continue
         if w in _SHELL_DECL_KEYWORDS:  # for/select/case: the NEXT word is a var/subject, not a cmd
             idx += 2
             continue
@@ -837,8 +891,12 @@ def _segment_invokes_docker(segment: str) -> bool:
     if idx >= len(words):
         return False
     cmd = words[idx]
+    if cmd in funcs:  # a call to a locally-defined shell function, not the docker CLI
+        return False
     if cmd == "eval":  # eval joins its args and executes them as shell input
         return _shell_command_invokes_docker(" ".join(words[idx + 1:]))
+    if cmd in ("builtin", "command") and words[idx + 1:]:  # run the named builtin/command
+        return _segment_invokes_docker(" ".join(words[idx + 1:]), funcs)
     if cmd == "trap":  # `trap [OPTS] ACTION [SIG…]` — the first non-option arg is shell input
         for arg in words[idx + 1:]:
             if arg.startswith("-"):
@@ -864,7 +922,8 @@ def _shell_command_invokes_docker(command_string: str) -> bool:
     command_string = _preprocess_shell_string(_strip_heredocs(command_string))
     if any(_shell_command_invokes_docker(sub) for sub in _command_substitutions(command_string)):
         return True
-    return any(_segment_invokes_docker(seg) for seg in _split_shell_commands(command_string))
+    funcs = frozenset(_defined_functions(command_string))
+    return any(_segment_invokes_docker(seg, funcs) for seg in _split_shell_commands(command_string))
 
 
 def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
