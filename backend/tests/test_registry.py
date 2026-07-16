@@ -688,7 +688,9 @@ def test_shell_wrapped_docker_via_wrapper_options_rejected(session, inner):
     [
         ("sudo", ["docker", "run", "alpine"]),          # a bare thin wrapper as the command
         ("nice", ["-n", "10", "docker", "run"]),        # ...with a value-taking option
+        ("sudo", ["FOO=bar", "docker", "run"]),         # sudo's leading VAR=value assignment
         ("/usr/bin/env", ["-S", "docker run alpine"]),  # env -S at the top level
+        ("/usr/bin/env", ["-vS", "docker run alpine"]),  # ...clustered with a boolean short opt
         ("/usr/bin/env", ["bash", "-c", "docker run"]),
     ],
 )
@@ -699,6 +701,54 @@ def test_top_level_wrapper_docker_rejected(session, command, args):
         service.create_server(
             session, name="top-wrap", runner="command", command=command, args=args, enabled=True
         )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "FOO=bar docker run alpine",               # leading shell assignment before the command
+        "if docker run alpine; then true; fi",     # reserved word before the command
+        "time docker run alpine",                  # `time` keyword
+        "! docker run alpine",                     # `!` negation keyword
+        "while docker run x; do :; done",
+        "exec -a ignored docker run alpine",       # exec -a consumes its value
+        "sudo -Eu root docker run alpine",         # clustered short opts with embedded value opt
+        "sudo FOO=bar docker run alpine",          # sudo assignment inside -c
+        'echo "$(docker run alpine)"',             # command substitution inside double quotes
+        "echo `docker run alpine`",                # backtick substitution
+        "eval 'docker run alpine'",                # eval executes its argument string
+    ],
+)
+def test_shell_wrapped_docker_control_syntax_rejected(session, inner):
+    """Assignments, reserved words, exec -a, clustered options, command substitution, and eval must
+    not let a docker launch slip past the guard."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session,
+            name="ctrl-syntax",
+            runner="command",
+            command="/bin/sh",
+            args=["-c", inner],
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "FOO=docker myapp run",              # 'docker' is an assignment VALUE, not the command
+        "echo 'literal $(docker) text'",     # substitution inside single quotes is literal
+        "myapp --label docker.io/img",       # 'docker' only in an argument
+    ],
+)
+def test_shell_wrapped_docker_control_syntax_allowed(session, inner):
+    """Control syntax that only *mentions* docker (assignment value, single-quoted, an argument)
+    must not trigger a false rejection."""
+    s = service.create_server(
+        session, name="ctrl-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
 
 
 def test_shell_wrapped_docker_second_c_positional_allowed(session):
