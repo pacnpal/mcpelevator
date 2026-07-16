@@ -1066,6 +1066,9 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
         # ``chrt [policy flags] PRIORITY COMMAND`` runs a command after its scheduling priority
         # operand, unless ``-p``/``--pid`` targets an existing process (then nothing is launched).
         chrt_pid = False
+        # ``su``/``runuser`` take a USER positional before their ``-c COMMAND`` (``su root -c …``);
+        # skip it (and a leading login ``-``) so the ``-c`` shell command is still reached.
+        shell_c_user_seen = False
         i = 0
         while i < len(tokens):
             tok = tokens[i]
@@ -1193,6 +1196,13 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
                 else:
                     peeled = ("sh", ["-c", " ".join(str(t) for t in operands)])
                 break
+            if base in _WRAPPERS_WITH_SHELL_C and (tok == "-" or not shell_c_user_seen):
+                # ``su [-] USER -c COMMAND`` / ``runuser -l USER -c COMMAND`` — the login dash and the
+                # USER positional precede the ``-c`` shell command, so skip them to reach it.
+                if tok != "-":
+                    shell_c_user_seen = True
+                i += 1
+                continue
             peeled = (tok, list(tokens[i + 1:]))  # first bare token is the wrapped command
             break
         if peeled is None:
@@ -1921,10 +1931,17 @@ def _shell_command_invokes_docker(command_string: str, env: Optional[dict[str, s
     assignments: dict[str, str] = {k: v for k, v in (env or {}).items() if isinstance(v, str)}
     positionals: list[str] = []
     for seg in _split_shell_commands(command_string):
+        # The env visible to this segment's nested scans (command substitutions, function bodies) is
+        # the configured env plus every assignment recorded by EARLIER segments, so ``D=docker;
+        # echo "$($D run)"`` and ``D=docker; f() { "$D" run; }; f`` resolve ``$D``.
+        seg_env = {**(env or {}), **assignments}
         expanded = _expand_known_vars(seg, assignments, positionals)
         if alias_expansion:
             expanded = _expand_alias(expanded, aliases)
-        if _segment_invokes_docker(expanded, frozenset(funcs), env, bodies, inspecting):
+        if any(_shell_command_invokes_docker(sub, seg_env)
+               for sub in _command_substitutions(expanded)):
+            return True
+        if _segment_invokes_docker(expanded, frozenset(funcs), seg_env, bodies, inspecting):
             return True
         declared = _segment_declares_function(seg)
         if declared:

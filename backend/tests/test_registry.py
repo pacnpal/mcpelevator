@@ -1764,6 +1764,53 @@ def test_chrt_transform_and_unexpanded_alias_non_docker_allowed(session, command
 
 
 @pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # A variable assigned earlier resolves inside a command substitution and a function body.
+        (None, None, 'D=docker; echo "$($D run alpine)"'),
+        (None, None, "D=docker; echo $($D run alpine)"),
+        (None, None, 'D=docker; f() { "$D" run alpine; }; f'),
+        # ``su``/``runuser`` take a USER positional before their ``-c`` shell command.
+        ("su", ["root", "-c", "docker run alpine"], None),
+        ("su", ["-l", "root", "-c", "docker run"], None),
+        ("su", ["-", "root", "-c", "docker run"], None),
+        ("runuser", ["-l", "root", "-c", "docker run"], None),
+    ],
+)
+def test_substitution_and_body_assignments_and_su_user_operand_rejected(
+        session, command, args, inner):
+    """A prior assignment resolved inside a command substitution or function body, and ``su``/
+    ``runuser`` with a user positional before ``-c``, must all be gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="subst-body-su", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        (None, None, 'D=python; echo "$($D -m srv)"'),       # substitution resolves to non-docker
+        (None, None, 'D=python; f() { "$D" -m srv; }; f'),   # function body resolves to non-docker
+        ("su", ["root", "-c", "python -m srv"], None),       # su -c a non-docker command
+        ("su", ["root"], None),                              # su with no command (interactive)
+    ],
+)
+def test_substitution_body_assignment_and_su_non_docker_allowed(session, command, args, inner):
+    """The substitution/function-body variable resolution and ``su`` user-operand handling must not
+    reject the non-docker cases."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    s = service.create_server(
+        session, name="subst-su-ok", runner="command", command=command, args=args, enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
     "inner",
     [
         "docker() { printf fake; }; docker run alpine",   # POSIX definition shadows the later call
