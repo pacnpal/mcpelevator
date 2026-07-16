@@ -167,7 +167,7 @@ def _is_docker_command(command: str) -> bool:
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "builtin",
                        "nice", "ionice", "taskset", "chrt", "unshare", "nsenter", "prlimit",
                        "setpriv", "strace", "timeout", "xargs", "stdbuf", "flock", "chroot",
-                       "runuser", "su", "watch", "systemd-run"}
+                       "runuser", "su", "watch", "systemd-run", "script"}
 
 
 # Wrappers whose run form accepts leading ``NAME=VALUE`` assignments before the command.
@@ -270,7 +270,9 @@ _WRAPPER_VALUE_SHORT = {
 }
 
 # Wrappers whose ``-c``/``--command`` option runs its value through a shell (inspect it as script).
-_WRAPPERS_WITH_SHELL_C = {"runuser", "su"}
+# util-linux ``script -c COMMAND typescript`` runs COMMAND via ``sh -c`` (its other operand is the
+# output file, consumed like the su/runuser user positional).
+_WRAPPERS_WITH_SHELL_C = {"runuser", "su", "script"}
 
 # Characters that end a simple command and (re)open a command position when UNQUOTED: control
 # operators (``;`` ``&`` ``|`` newline) and subshell parens. Command substitution (``$(…)`` and
@@ -778,6 +780,12 @@ def _shell_command_invokes_docker(command_string: str) -> bool:
     """True when any simple command in a shell ``-c`` string is (literally) a docker launch — a
     command substitution running docker (``echo "$(docker run)"``), or a segment whose command word
     is the docker CLI (``foo && docker run``). Literal only; no variable/alias/function resolution."""
+    # POSIX shells delete an unquoted backslash-newline (line continuation) before tokenizing, so
+    # ``doc\<newline>ker run`` executes ``docker run``. Fold these out first so a continuation can't
+    # split the docker command word across the boundary. Backslash-newline inside single quotes is
+    # literal, not a continuation, but folding it there only ever alters quoted argument text (never a
+    # command word), so it cannot manufacture a false docker launch.
+    command_string = command_string.replace("\\\n", "")
     if any(_shell_command_invokes_docker(sub) for sub in _command_substitutions(command_string)):
         return True
     return any(_segment_invokes_docker(seg) for seg in _split_shell_commands(command_string))
@@ -813,7 +821,10 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
         if tok in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
             i += 2
             continue
-        # The first non-option operand is the SCRIPT FILE (its argv follows) — not a -c string.
+        # The first non-option operand is the SCRIPT FILE (its argv follows) — not a -c string. Its
+        # contents (and the ``$0``/``$1``/``$@`` positional params passed as later argv) are external,
+        # mutable input we deliberately do NOT read: this is a literal-syntax guard, and the env scrub
+        # is what actually contains a script that reaches docker. See ``local_exec_invokes_docker``.
         if tok == "--" or not tok.startswith("-"):
             return False
         i += 1
@@ -822,7 +833,15 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
 
 def local_exec_invokes_docker(runner: str, command: str, args: Optional[list[str]]) -> bool:
     """True when a local-exec server would invoke the docker CLI outside the docker runner (a
-    best-effort literal check — the env scrub is the real containment; see ``_shell_invokes_docker``)."""
+    best-effort literal check — the env scrub is the real containment; see ``_shell_invokes_docker``).
+
+    ACCEPTED LIMITATIONS (deliberately NOT chased — deciding them is undecidable and the env scrub,
+    not this check, is what contains a docker launch): the contents of an external script file
+    (``sh start.sh``); ``$0``/``$1``/``$@`` positional parameters or any variable/nameref expansion
+    (``sh -c '"$0" run' docker``); Bash brace/ANSI-C expansions that compute a command word
+    (``{docker,run}`` / ``$'docker'``); and cross-segment function/alias shadowing. These are
+    obfuscation vectors, not the shapes a real config uses; the environment the child inherits carries
+    none of the elevator's secrets regardless (see ``bridge.host._child_env`` and docs/security.md)."""
     if runner not in _LOCAL_EXEC_RUNNERS:
         return False
     try:

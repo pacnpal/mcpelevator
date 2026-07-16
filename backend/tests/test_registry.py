@@ -777,6 +777,7 @@ def test_shell_wrapped_docker_via_norc_before_c_rejected(session):
         "env -S 'bash -c \"docker run alpine\"'",
         "systemd-run --scope docker run alpine",   # systemd-run runs COMMAND in a transient unit
         "systemd-run -p MemoryMax=1G docker run",  # -p consumes its property value; docker follows
+        "script -q -c 'docker run alpine' /dev/null",  # util-linux script -c runs COMMAND via sh -c
     ],
 )
 def test_shell_wrapped_docker_via_wrapper_options_rejected(session, inner):
@@ -804,6 +805,7 @@ def test_shell_wrapped_docker_via_wrapper_options_rejected(session, inner):
         ("/usr/bin/env", ["bash", "-c", "docker run"]),
         ("systemd-run", ["--scope", "docker", "run", "alpine"]),  # transient-unit wrapper
         ("systemd-run", ["-M", "container", "docker", "run"]),    # -M consumes its machine value
+        ("script", ["-q", "-c", "docker run alpine", "/dev/null"]),  # script -c COMMAND typescript
     ],
 )
 def test_top_level_wrapper_docker_rejected(session, command, args):
@@ -832,6 +834,8 @@ def test_top_level_wrapper_docker_rejected(session, command, args):
         "eval docker run alpine",                  # ...even unquoted, joined back into one line
         "trap 'docker run alpine' EXIT",           # trap runs its action on the EXIT pseudo-signal
         "trap 'docker run alpine' 0",              # ...POSIX spells the exit trap as signal 0
+        "doc\\\nker run alpine",                    # line continuation folds ``doc\<newline>ker``
+        "docker run \\\nalpine",                    # ...continuation between the command and its args
     ],
 )
 def test_shell_wrapped_docker_control_syntax_rejected(session, inner):
