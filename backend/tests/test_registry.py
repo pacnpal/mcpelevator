@@ -1957,6 +1957,53 @@ def test_nameref_static_subst_nsenter_and_for_loop_non_docker_allowed(session, c
 
 
 @pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # Indirect expansion resolves through the variable named by another.
+        (None, None, 'D=docker; x=D; "${!x}" run alpine'),
+        # ``strace [options] COMMAND`` launches the traced command.
+        ("strace", ["docker", "run", "alpine"], None),
+        ("strace", ["-f", "docker", "run"], None),
+        ("strace", ["-o", "/tmp/t", "docker", "run"], None),
+        # A static literal piped into ``source``/``.`` reading stdin runs as script.
+        (None, None, "printf 'docker run alpine\\n' | source /dev/stdin"),
+        (None, None, "printf 'docker run\\n' | . /dev/stdin"),
+        # ``read VAR <<< WORD`` binds the here-string to VAR.
+        (None, None, 'D=docker; read X <<< "$D"; "$X" run alpine'),
+    ],
+)
+def test_indirect_expansion_strace_sourced_pipe_and_read_rejected(session, command, args, inner):
+    """Indirect ``${!x}`` expansion, ``strace``, a static literal piped into ``source /dev/stdin``,
+    and ``read VAR <<< WORD`` binding must all be gated."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="indirect-strace-read", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        (None, None, 'D=python; x=D; "${!x}" -m srv'),          # indirect resolves to non-docker
+        ("strace", ["python", "-m", "srv"], None),              # strace wrapping a non-docker cmd
+        (None, None, 'D=python; read X <<< "$D"; "$X" -m srv'),  # read binds a non-docker value
+    ],
+)
+def test_indirect_strace_and_read_non_docker_allowed(session, command, args, inner):
+    """The indirect-expansion / strace / read-binding machinery must not reject the non-docker
+    cases."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    s = service.create_server(
+        session, name="indirect-ok", runner="command", command=command, args=args, enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
     "inner",
     [
         "docker() { printf fake; }; docker run alpine",   # POSIX definition shadows the later call

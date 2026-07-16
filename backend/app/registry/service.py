@@ -226,8 +226,8 @@ def _brace_expand(word: str, _depth: int = 0) -> tuple[list[str], bool]:
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "builtin",
                        "nice", "ionice", "taskset", "chrt", "unshare", "nsenter", "prlimit",
-                       "setpriv", "timeout", "xargs", "stdbuf", "flock", "chroot", "runuser",
-                       "su", "watch"}
+                       "setpriv", "strace", "timeout", "xargs", "stdbuf", "flock", "chroot",
+                       "runuser", "su", "watch"}
 
 # Builtins that BOTH persist a ``NAME=VALUE`` assignment to the shell and are a command word
 # (``export D=docker`` / ``declare D=docker``). ``_segment_assignments`` mines their operands so a
@@ -288,6 +288,8 @@ _WRAPPER_VALUE_LONG = {
                 "--propagation", "--setuid", "--setgid", "--root", "--wd"},
     # nsenter's namespace flags take only an OPTIONAL ``=file`` arg; only these consume a value.
     "nsenter": {"--target", "--setuid", "--setgid"},
+    "strace": {"--output", "--attach", "--trace", "--string-limit", "--user", "--env",
+               "--seccomp-bpf", "--columns", "--summary-sort-by", "--interruptible"},
     # prlimit's ``--<resource>=<limit>`` options are inline ``=`` forms (no swallowed operand); only
     # ``--pid``/``--output`` take a separate value. ``--pid`` targets an existing process (no child).
     "prlimit": {"--pid", "--output"},
@@ -314,6 +316,9 @@ _WRAPPER_VALUE_SHORT = {
     "taskset": set("cp"),  # -c cpu-list, -p pid
     "unshare": set("SGRw"),  # -S setuid, -G setgid, -R root, -w wd (namespace flags are boolean)
     "nsenter": set("tSG"),   # -t target, -S setuid, -G setgid (namespace flags are boolean)
+    # strace value options: -o out, -p pid, -e expr, -s strlen, -u user, -E env, -a col, -O ovh,
+    # -S sortby, -b syscall, -I interruptible, -P path.
+    "strace": set("opesuEaOSbIP"),
     "prlimit": set("po"),    # -p pid, -o output
     "exec": set("a"),
     "timeout": set("sk"),
@@ -774,11 +779,12 @@ def _preprocess_shell_string(command_string: str) -> str:
             if default:
                 out.append(default)
                 at_boundary = False
-            elif (_is_shell_name(inner) and inner != "IFS") or _is_param_transform(inner):
-                # a plain ``${NAME}`` or a transform ``${NAME:0}``/``${NAME##*/}`` — keep it intact so
-                # the later assignment/env pass (``_expand_known_vars``) can resolve ``D=docker;
-                # ${D:0} run``. ``${IFS}`` stays a separator, and complex forms (``${#x}``, ``${1}``)
-                # fall through.
+            elif ((_is_shell_name(inner) and inner != "IFS") or _is_param_transform(inner)
+                  or (inner.startswith("!") and _is_shell_name(inner[1:]))):
+                # a plain ``${NAME}``, a transform ``${NAME:0}``/``${NAME##*/}``, or an indirect
+                # ``${!NAME}`` — keep it intact so the later assignment/env pass
+                # (``_expand_known_vars``) can resolve ``D=docker; ${D:0} run`` / ``x=D; ${!x}``.
+                # ``${IFS}`` stays a separator, and complex forms (``${#x}``, ``${1}``) fall through.
                 out.append("${" + inner + "}")
                 at_boundary = False
             else:
@@ -1569,6 +1575,25 @@ def _collect_namerefs(segment: str) -> dict[str, str]:
     return result
 
 
+def _read_herestring_binding(segment: str) -> Optional[tuple[list[str], str]]:
+    """The ``(VARS, WORD)`` a ``read [opts] VAR… <<< WORD`` binds, so ``read X <<< "$D"`` assigns the
+    here-string to ``X``. Leading ``command``/``builtin`` are peeled."""
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        return None
+    idx = 0
+    while idx < len(words) and words[idx] in ("command", "builtin"):
+        idx += 1
+    if idx >= len(words) or words[idx] != "read" or "<<<" not in words[idx:]:
+        return None
+    rest = words[idx + 1:]
+    hi = rest.index("<<<")
+    names = [w for w in rest[:hi] if _is_shell_name(w)]  # skip options; keep bare variable names
+    value = rest[hi + 1] if hi + 1 < len(rest) else ""
+    return (names, value) if names else None
+
+
 def _for_loop_binding(segment: str) -> Optional[tuple[str, list[str]]]:
     """The ``(VAR, VALUES)`` a ``for VAR in VALUES`` segment binds, so the loop body's ``$VAR`` can be
     resolved (``for x in docker; do "$x" run; done`` launches docker)."""
@@ -1838,6 +1863,12 @@ def _expand_known_vars(segment: str, assignments: dict[str, str],
                         out.append(assignments[name])
                         i = j + 1
                         continue
+                    if name.startswith("!") and _is_shell_name(name[1:]):
+                        # indirect ``${!x}`` — the value of the variable NAMED by ``x``
+                        target = assignments.get(name[1:])
+                        out.append(assignments.get(target, "") if target else "")
+                        i = j + 1
+                        continue
                     if positionals and name.isdigit():
                         p = int(name)
                         out.append(positionals[p - 1] if 1 <= p <= len(positionals) else "")
@@ -1928,8 +1959,8 @@ def _split_pipelines(command_string: str) -> list[list[str]]:
 
 def _is_stdin_reading_shell(stage: str) -> bool:
     """True when ``stage`` runs a shell that reads its SCRIPT from stdin — a launcher with no ``-c``
-    and no script-file operand (``… | sh`` / ``… | bash -s``). Such a shell executes whatever the
-    pipe feeds it."""
+    and no script-file operand (``… | sh`` / ``… | bash -s``), or ``source``/``.`` reading a stdin
+    path (``… | source /dev/stdin``). Such a stage executes whatever the pipe feeds it."""
     try:
         words = shlex.split(stage)
     except ValueError:
@@ -1940,6 +1971,8 @@ def _is_stdin_reading_shell(stage: str) -> bool:
     if idx >= len(words):
         return False
     cmd, rest = _strip_wrappers(words[idx], words[idx + 1:])
+    if _launcher_basename(cmd) in _SOURCE_BUILTINS:  # ``source /dev/stdin`` runs the piped script
+        return any(str(a) in _STDIN_PATHS for a in (rest or []))
     if _launcher_basename(cmd) not in _SHELL_LAUNCHERS:
         return False
     j = 0
@@ -2121,6 +2154,17 @@ def _shell_command_invokes_docker(command_string: str, env: Optional[dict[str, s
                 funcs.add(declared)
             assignments.update(_segment_assignments(seg))
             namerefs.update(_collect_namerefs(seg))
+            read_bind = _read_herestring_binding(seg)
+            if read_bind is not None:  # ``read X <<< "$D"`` — X takes the (expanded) here-string
+                names, raw = read_bind
+                value = _expand_static_substitutions(
+                    _expand_known_vars(raw, assignments, positionals)).strip()
+                parts = value.split()
+                for k, name in enumerate(names):
+                    if len(names) == 1:
+                        assignments[name] = value
+                    elif k < len(parts):
+                        assignments[name] = parts[k]
             loop = _for_loop_binding(seg)
             if loop is not None:  # ``for VAR in … docker …`` — the body's $VAR can be the CLI
                 var, values = loop
