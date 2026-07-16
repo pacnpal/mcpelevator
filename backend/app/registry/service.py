@@ -622,10 +622,17 @@ def _is_param_transform(inner: str) -> bool:
     return bool(name) and bool(spec) and spec[0] in _PARAM_TRANSFORM_OPS
 
 
+# Emitted for a parameter transform we can't statically resolve (a glob-pattern ``#``/``%``/``/`` or
+# a non-literal substring offset). A launcher could hide behind it (``${D#?}`` of ``xdocker`` is
+# ``docker``), so ``_segment_invokes_docker`` fails closed when it lands in command position.
+_UNRESOLVED_TRANSFORM = "\x00mcpe-unresolved-transform\x00"
+
+
 def _apply_param_transform(value: str, spec: str) -> str:
     """Apply a bash parameter transform SPEC (``:offset[:len]`` substring, ``#``/``%`` prefix/suffix
-    removal, ``/`` replacement, ``^``/``,`` case) to a known VALUE. Falls back to the untouched value
-    for forms it can't statically resolve (glob-heavy patterns) — conservative for a launch gate."""
+    removal, ``/`` replacement, ``^``/``,`` case) to a known VALUE. Returns ``_UNRESOLVED_TRANSFORM``
+    for forms it can't statically resolve (glob patterns / non-literal offsets) so command-position
+    use fails closed rather than slipping a hidden launcher through as the raw value."""
     if not spec:
         return value
     op = spec[0]
@@ -634,30 +641,30 @@ def _apply_param_transform(value: str, spec: str) -> str:
         try:
             offset = int(parts[0]) if parts[0] else 0
         except ValueError:
-            return value
+            return _UNRESOLVED_TRANSFORM
         if offset < 0:
             offset = max(0, len(value) + offset)
         if len(parts) >= 2 and parts[1]:
             try:
                 length = int(parts[1])
             except ValueError:
-                return value
+                return _UNRESOLVED_TRANSFORM
             return value[offset:len(value) + length] if length < 0 else value[offset:offset + length]
         return value[offset:]
     if op in ("#", "%"):
         longest = spec[1:2] == op
         pat = spec[2:] if longest else spec[1:]
-        if any(c in pat for c in "*?["):  # a glob pattern — leave the value (conservative)
-            return value
+        if any(c in pat for c in "*?["):  # a glob pattern — unresolvable, fail closed
+            return _UNRESOLVED_TRANSFORM
         if op == "#":
             return value[len(pat):] if value.startswith(pat) else value
         return value[:-len(pat)] if pat and value.endswith(pat) else value
     if op == "/":
         allrep = spec[1:2] == "/"
         body = spec[2:] if allrep else spec[1:]
-        pat, rep = (body.split("/", 1) + [""])[:2]
+        pat, rep = [*body.split("/", 1), ""][:2]
         if any(c in pat for c in "*?["):
-            return value
+            return _UNRESOLVED_TRANSFORM
         return value.replace(pat, rep) if allrep else value.replace(pat, rep, 1)
     if op == "^":
         return value.upper() if spec[1:2] == "^" else (value[:1].upper() + value[1:])
@@ -1082,12 +1089,21 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
                 peeled = ("sh", ["-c", value])
                 break
             if tok == "--":  # end of the wrapper's options — the next token is the command
-                if base in _WRAPPERS_WITH_LEADING_OPERAND:
+                rest = tokens[i + 1:]
+                if base == "taskset":  # ``taskset -- MASK COMMAND`` — the mask still precedes it
+                    if not taskset_pid:
+                        start = 0 if taskset_cpulist else 1
+                        peeled = (rest[start], list(rest[start + 1:])) if len(
+                            rest) > start else None
+                elif base == "chrt":  # ``chrt -- PRIORITY COMMAND``
+                    if not chrt_pid:
+                        peeled = (rest[1], list(rest[2:])) if len(rest) > 1 else None
+                elif base in _WRAPPERS_WITH_LEADING_OPERAND:
                     # ``timeout -- DURATION COMMAND``: -- ends options, but the required positional
                     # (duration) still precedes the command.
-                    peeled = (tokens[i + 2], list(tokens[i + 3:])) if i + 2 < len(tokens) else None
-                elif i + 1 < len(tokens):
-                    peeled = (tokens[i + 1], list(tokens[i + 2:]))
+                    peeled = (rest[1], list(rest[2:])) if len(rest) > 1 else None
+                elif rest:
+                    peeled = (rest[0], list(rest[1:]))
                 break
             if tok.startswith("--"):  # long option
                 name = tok.split("=", 1)[0]
@@ -1388,6 +1404,8 @@ def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset(),
     if _declared_function_name(words, idx) is not None:
         return False  # a POSIX ``NAME () { … }`` declaration in command position — not a launch
     cmd = words[idx]
+    if _UNRESOLVED_TRANSFORM in cmd:
+        return True  # a statically-unresolvable parameter transform in command position — fail closed
     if cmd in funcs:  # a call to a locally-defined shell function
         bodies = func_bodies or {}
         if cmd in bodies and cmd not in inspecting:

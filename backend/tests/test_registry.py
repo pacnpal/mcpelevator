@@ -1811,6 +1811,41 @@ def test_substitution_body_assignment_and_su_non_docker_allowed(session, command
 
 
 @pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``taskset -- MASK COMMAND``: ``--`` ends options but the affinity mask still precedes cmd.
+        ("taskset", ["--", "0xff", "docker", "run", "alpine"], None),
+        ("taskset", ["-c", "0-3", "--", "docker", "run"], None),
+        ("chrt", ["--", "50", "docker", "run"], None),
+        # A glob parameter transform is statically unresolvable and can hide a launcher
+        # (``${D#?}`` of ``xdocker`` is ``docker``) — fail closed in command position.
+        (None, None, "D=xdocker; ${D#?} run alpine"),
+        (None, None, "D=aXdocker; ${D##*X} run"),
+    ],
+)
+def test_taskset_dashdash_and_glob_transform_rejected(session, command, args, inner):
+    """``taskset``/``chrt`` after ``--`` must still skip the mask/priority, and an unresolvable glob
+    parameter transform in command position must fail closed."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="dashdash-glob", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+def test_glob_transform_as_argument_allowed(session):
+    """An unresolvable glob transform that is only an ARGUMENT (not the command word) is not a launch
+    and must not be rejected."""
+    s = service.create_server(
+        session, name="glob-arg-ok", runner="command", command="/bin/bash",
+        args=["-c", "echo ${D#?}"], enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
     "inner",
     [
         "docker() { printf fake; }; docker run alpine",   # POSIX definition shadows the later call
