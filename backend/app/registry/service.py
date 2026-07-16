@@ -151,6 +151,15 @@ def _is_docker_launcher(command: str) -> bool:
     return norm[0] in "/.~" or (len(c) >= 2 and c[1] == ":")
 
 
+def _is_docker_command(command: str) -> bool:
+    """Like ``_is_docker_launcher`` but for a SHELL command-word position, where any path whose
+    basename is ``docker`` is unambiguously an executable — including a bare relative path like
+    ``bin/docker`` that the image-field check treats as an OCI reference."""
+    if _is_docker_launcher(command):
+        return True
+    return "/" in command.strip().replace("\\", "/") and _launcher_basename(command) in _DOCKER_LAUNCHERS
+
+
 def _split_top_commas(text: str) -> list[str]:
     """Split ``text`` on commas that are NOT inside a nested ``{…}`` (for brace-list expansion)."""
     parts: list[str] = []
@@ -215,7 +224,7 @@ def _brace_expand(word: str, _depth: int = 0) -> tuple[list[str], bool]:
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "builtin",
-                       "nice", "timeout", "xargs", "stdbuf", "flock", "chroot"}
+                       "nice", "timeout", "xargs", "stdbuf", "flock", "chroot", "runuser", "su"}
 
 # Wrappers whose run form accepts leading ``NAME=VALUE`` assignments before the command.
 _WRAPPERS_ACCEPTING_ASSIGNMENTS = {"env", "sudo", "doas"}
@@ -262,6 +271,8 @@ _WRAPPER_VALUE_LONG = {
     "stdbuf": {"--input", "--output", "--error"},
     "flock": {"--timeout", "--wait", "--conflict-exit-code"},
     "chroot": {"--userspec", "--groups"},
+    "runuser": {"--user", "--group", "--supp-group", "--shell", "--session-command", "--login"},
+    "su": {"--group", "--supp-group", "--shell", "--session-command"},
 }
 _WRAPPER_VALUE_SHORT = {
     "sudo": set("ugpChrtURTD"),
@@ -274,7 +285,12 @@ _WRAPPER_VALUE_SHORT = {
     "xargs": set("InPsdaELl"),
     "stdbuf": set("ioe"),  # -i/-o/-e BUFMODE
     "flock": set("wE"),    # -w timeout, -E exit-code
+    "runuser": set("ugGs"),  # -u user, -g group, -G supp-group, -s shell (-c handled specially)
+    "su": set("gGs"),        # su takes the user as a positional, not -u
 }
+
+# Wrappers whose ``-c``/``--command`` option runs its value through a shell (inspect it as script).
+_WRAPPERS_WITH_SHELL_C = {"runuser", "su"}
 
 # Characters that end a simple command and (re)open a command position when UNQUOTED: control
 # operators (``;`` ``&`` ``|`` newline) and subshell parens. Command substitution (``$(…)`` and
@@ -594,6 +610,13 @@ def _preprocess_shell_string(command_string: str) -> str:
                 at_boundary = True
             i = end
             continue
+        if command_string.startswith("$IFS", i) or command_string.startswith("${IFS}", i):
+            # ``$IFS`` field-splits: ``docker$IFS run`` executes ``docker run``. Substitute a space
+            # (its default) so the command word and args separate.
+            out.append(" ")
+            at_boundary = True
+            i += 6 if command_string.startswith("${IFS}", i) else 4
+            continue
         if ch == "$" and i + 1 < n and command_string[i + 1] == "'":
             # bash ANSI-C quoting: read to the closing ', decode escapes, and re-emit shell-safe
             # single-quoted so the (decoded) fragment stays one word (``doc$'\x6b…'`` → docker).
@@ -804,6 +827,13 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
             tok = tokens[i]
             if not isinstance(tok, str):
                 return command, args
+            if base in _WRAPPERS_WITH_SHELL_C and (
+                tok in ("-c", "--command") or tok.startswith("--command=")):
+                # ``runuser/su -c COMMAND`` runs COMMAND through the target user's shell.
+                value = tok.split("=", 1)[1] if "=" in tok else (
+                    tokens[i + 1] if i + 1 < len(tokens) else "")
+                peeled = ("sh", ["-c", value])
+                break
             if tok == "--":  # end of the wrapper's options — the next token is the command
                 if base in _WRAPPERS_WITH_LEADING_OPERAND:
                     # ``timeout -- DURATION COMMAND``: -- ends options, but the required positional
@@ -877,11 +907,32 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
 
 def _references_positional_params(command_string: str) -> bool:
     """True when a shell command string references positional parameters (``$@``, ``$*``, ``$1``…,
-    ``${@}``, ``${1}``). ``sh -c 'exec "$@"' $0 docker run`` executes those positionals, so they
-    must be inspected as a command when referenced."""
+    ``${@}``, ``${1}``) somewhere they EXPAND — i.e. not inside single quotes and not backslash
+    escaped (double quotes still expand). ``sh -c 'exec "$@"' $0 docker run`` executes those
+    positionals; ``printf '%s' '$@'`` prints a literal and must not trigger inspection."""
     i, n = 0, len(command_string)
+    quote: Optional[str] = None
     while i < n:
-        if command_string[i] == "$" and i + 1 < n:
+        ch = command_string[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:  # escaped: the next char is literal (incl. an escaped $)
+            i += 2
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+                i += 1
+                continue
+            # fall through — $ still expands inside double quotes
+        elif ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch == "$" and i + 1 < n:
             nxt = command_string[i + 1]
             if nxt in "@*" or nxt.isdigit():
                 return True
@@ -1067,9 +1118,10 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
     command, args = _strip_wrappers(command, args)
     # Bash brace expansion can hide the launcher (``{docker,} run`` runs ``docker``): check every
     # brace-list expansion of the command word. Fail closed if expansion was truncated (a later
-    # ``docker`` alternative could have been dropped by the cap).
+    # ``docker`` alternative could have been dropped by the cap). ``_is_docker_command`` also treats
+    # a relative path like ``bin/docker`` as a launcher (this is a command position, not an image).
     candidates, brace_truncated = _brace_expand(command)
-    if brace_truncated or any(_is_docker_launcher(c) for c in candidates):
+    if brace_truncated or any(_is_docker_command(c) for c in candidates):
         return True
     if _launcher_basename(command) == "find":  # `find … -exec docker …` launches its child command
         return _find_exec_invokes_docker(args)

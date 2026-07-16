@@ -1319,6 +1319,42 @@ def test_setup_script_without_docker_allowed(session):
     assert s.enabled is True
 
 
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        (None, None, "docker$IFS run alpine"),          # $IFS field-splitting
+        (None, None, "bin/docker run alpine"),          # relative path executable
+        (None, None, "./docker run alpine"),
+        ("runuser", ["-u", "root", "--", "docker", "run"], None),  # runuser -u user -- COMMAND
+        ("runuser", ["-u", "root", "-c", "docker run alpine"], None),  # runuser -c SHELL-COMMAND
+        ("su", ["-c", "docker run alpine", "root"], None),         # su -c SHELL-COMMAND
+    ],
+)
+def test_ifs_relative_path_and_runuser_rejected(session, command, args, inner):
+    """$IFS field-splitting, a relative docker path, and runuser/su wrappers must be gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="ifs-ru", runner="command", command=command, args=args, enabled=True
+        )
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-c", "printf '%s' '$@'", "ignored", "docker", "run"],   # $@ is single-quoted -> literal
+        ["-c", "bin/python app.py"],                              # relative path, not docker
+    ],
+)
+def test_quoted_positional_and_relative_nondocker_allowed(session, args):
+    """A single-quoted ``$@`` (literal) and a relative non-docker path must not be rejected."""
+    s = service.create_server(
+        session, name="q-pos-ok", runner="command", command="/bin/sh", args=args, enabled=True
+    )
+    assert s.enabled is True
+
+
 def test_deeply_nested_shell_command_fails_closed_without_error(session):
     """Pathologically nested ``$(…)`` must not raise (RecursionError) out of the guard; it fails
     closed and rejects the malformed config instead of 500-ing the create path."""
