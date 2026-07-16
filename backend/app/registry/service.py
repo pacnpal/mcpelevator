@@ -225,8 +225,8 @@ def _brace_expand(word: str, _depth: int = 0) -> tuple[list[str], bool]:
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "builtin",
-                       "nice", "ionice", "taskset", "chrt", "unshare", "prlimit", "timeout",
-                       "xargs", "stdbuf", "flock", "chroot", "runuser", "su", "watch"}
+                       "nice", "ionice", "taskset", "chrt", "unshare", "prlimit", "setpriv",
+                       "timeout", "xargs", "stdbuf", "flock", "chroot", "runuser", "su", "watch"}
 
 # Builtins that BOTH persist a ``NAME=VALUE`` assignment to the shell and are a command word
 # (``export D=docker`` / ``declare D=docker``). ``_segment_assignments`` mines their operands so a
@@ -288,6 +288,9 @@ _WRAPPER_VALUE_LONG = {
     # prlimit's ``--<resource>=<limit>`` options are inline ``=`` forms (no swallowed operand); only
     # ``--pid``/``--output`` take a separate value. ``--pid`` targets an existing process (no child).
     "prlimit": {"--pid", "--output"},
+    "setpriv": {"--reuid", "--regid", "--groups", "--securebits", "--pdeathsig", "--selinux-label",
+                "--apparmor-profile", "--ambient-caps", "--inh-caps", "--bounding-set",
+                "--init-groups", "--landlock-access", "--landlock-rule"},
     "exec": set(),
     "timeout": {"--signal", "--kill-after"},
     "xargs": {"--replace", "--max-args", "--max-procs", "--max-chars", "--delimiter",
@@ -1038,6 +1041,48 @@ def _split_shell_commands(command_string: str) -> list[str]:
     return segments
 
 
+def _split_lines_quote_aware(command_string: str) -> list[str]:
+    """Split into physical lines at unquoted newlines. Bash expands aliases while reading each line,
+    so an alias defined (or ``expand_aliases`` enabled) on one line only affects LATER lines — this
+    lets the walk scope alias state per line. (Line continuations are already removed upstream.)"""
+    lines: list[str] = []
+    buf: list[str] = []
+    quote: Optional[str] = None
+    i, n = 0, len(command_string)
+    while i < n:
+        ch = command_string[i]
+        if quote is not None:
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(ch)
+                buf.append(command_string[i + 1])
+                i += 2
+                continue
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(ch)
+            buf.append(command_string[i + 1])
+            i += 2
+            continue
+        if ch == "\n":
+            lines.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    lines.append("".join(buf))
+    return lines
+
+
 def _strip_wrappers(command: str, args: Optional[list[str]],
                     collected_assignments: Optional[dict[str, str]] = None
                     ) -> tuple[str, Optional[list[str]]]:
@@ -1082,8 +1127,12 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
             if not isinstance(tok, str):
                 return command, args
             if base in _WRAPPERS_WITH_SHELL_C and (
-                tok in ("-c", "--command") or tok.startswith("--command=")):
-                # ``runuser/su -c COMMAND`` runs COMMAND through the target user's shell.
+                    tok in ("-c", "--command", "--session-command")
+                    or tok.startswith(("--command=", "--session-command="))
+                    # a clustered short option that includes ``c`` (``su -lc COMMAND``): its value is
+                    # the next token, exactly like a bare ``-c``.
+                    or (tok.startswith("-") and not tok.startswith("--") and tok.endswith("c"))):
+                # ``runuser/su -c COMMAND`` (also ``--session-command``) runs COMMAND via the shell.
                 value = tok.split("=", 1)[1] if "=" in tok else (
                     tokens[i + 1] if i + 1 < len(tokens) else "")
                 peeled = ("sh", ["-c", value])
@@ -1266,9 +1315,11 @@ def _references_positional_params(command_string: str) -> bool:
     return False
 
 
-def _find_exec_invokes_docker(args: Optional[list[str]]) -> bool:
+def _find_exec_invokes_docker(args: Optional[list[str]],
+                              env: Optional[dict[str, str]] = None) -> bool:
     """True when a ``find … -exec/-execdir/-ok/-okdir COMMAND …`` action launches the docker CLI.
-    The command runs from ``-exec`` up to the terminating ``;`` or ``+``."""
+    The command runs from ``-exec`` up to the terminating ``;`` or ``+``, inheriting the configured
+    ``env`` (so a wrapped ``sh -c '"$D" …'`` child resolves ``$D``)."""
     tokens = list(args or [])
     k = 0
     while k < len(tokens):
@@ -1278,7 +1329,7 @@ def _find_exec_invokes_docker(args: Optional[list[str]]) -> bool:
             while k < len(tokens) and tokens[k] not in (";", "+", "\\;"):
                 cmd_tokens.append(tokens[k])
                 k += 1
-            if cmd_tokens and _shell_invokes_docker(cmd_tokens[0], cmd_tokens[1:]):
+            if cmd_tokens and _shell_invokes_docker(cmd_tokens[0], cmd_tokens[1:], env):
                 return True
             continue
         k += 1
@@ -1468,6 +1519,8 @@ def _segment_assignments(segment: str) -> dict[str, str]:
         words = shlex.split(segment)
     except ValueError:
         return {}
+    while words and words[0] in ("command", "builtin"):  # ``command export …`` still persists
+        words = words[1:]
     if words and words[0] in _ASSIGNMENT_BUILTINS:
         words = words[1:]  # ``export``/``declare`` NAME=VALUE … — mine the assignment operands
         result: dict[str, str] = {}
@@ -1944,33 +1997,41 @@ def _shell_command_invokes_docker(command_string: str, env: Optional[dict[str, s
     # still a launch. Function bodies (present anywhere in the string) let a call be inspected.
     funcs: set[str] = set(seed_funcs)
     bodies: dict[str, str] = {**(func_bodies or {}), **_extract_function_bodies(command_string)}
-    aliases: dict[str, str] = {}
-    alias_expansion = False  # bash only expands aliases once ``shopt -s expand_aliases`` is set
+    # Aliases and ``expand_aliases`` are parse-time and line-scoped: a definition on one physical
+    # line only takes effect on LATER lines, so they are promoted at each line boundary — this is
+    # why ``shopt -s expand_aliases; alias d=docker; d run`` (all one line) does NOT expand ``d``.
+    active_aliases: dict[str, str] = {}
+    alias_active = False
     assignments: dict[str, str] = {k: v for k, v in (env or {}).items() if isinstance(v, str)}
     positionals: list[str] = []
-    for seg in _split_shell_commands(command_string):
-        # The env visible to this segment's nested scans (command substitutions, function bodies) is
-        # the configured env plus every assignment recorded by EARLIER segments, so ``D=docker;
-        # echo "$($D run)"`` and ``D=docker; f() { "$D" run; }; f`` resolve ``$D``.
-        seg_env = {**(env or {}), **assignments}
-        expanded = _expand_known_vars(seg, assignments, positionals)
-        if alias_expansion:
-            expanded = _expand_alias(expanded, aliases)
-        if any(_shell_command_invokes_docker(sub, seg_env)
-               for sub in _command_substitutions(expanded)):
-            return True
-        if _segment_invokes_docker(expanded, frozenset(funcs), seg_env, bodies, inspecting):
-            return True
-        declared = _segment_declares_function(seg)
-        if declared:
-            funcs.add(declared)
-        if _enables_alias_expansion(seg):
-            alias_expansion = True
-        aliases.update(_collect_aliases(seg))
-        assignments.update(_segment_assignments(seg))
-        set_pos = _set_positionals(seg)
-        if set_pos is not None:
-            positionals = set_pos
+    for line in _split_lines_quote_aware(command_string):
+        line_aliases: dict[str, str] = {}
+        line_enables_alias = False
+        for seg in _split_shell_commands(line):
+            # The env visible to this segment's nested scans (command substitutions, function bodies)
+            # is the configured env plus every assignment recorded by EARLIER segments, so ``D=docker;
+            # echo "$($D run)"`` and ``D=docker; f() { "$D" run; }; f`` resolve ``$D``.
+            seg_env = {**(env or {}), **assignments}
+            expanded = _expand_known_vars(seg, assignments, positionals)
+            if alias_active:
+                expanded = _expand_alias(expanded, active_aliases)
+            if any(_shell_command_invokes_docker(sub, seg_env)
+                   for sub in _command_substitutions(expanded)):
+                return True
+            if _segment_invokes_docker(expanded, frozenset(funcs), seg_env, bodies, inspecting):
+                return True
+            declared = _segment_declares_function(seg)
+            if declared:
+                funcs.add(declared)
+            assignments.update(_segment_assignments(seg))
+            set_pos = _set_positionals(seg)
+            if set_pos is not None:
+                positionals = set_pos
+            line_aliases.update(_collect_aliases(seg))  # scoped to LATER lines
+            if _enables_alias_expansion(seg):
+                line_enables_alias = True
+        active_aliases.update(line_aliases)
+        alias_active = alias_active or line_enables_alias
     return False
 
 
@@ -2029,7 +2090,7 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]],
         return True
     base = _launcher_basename(command)
     if base == "find":  # `find … -exec docker …` launches its child command
-        return _find_exec_invokes_docker(args)
+        return _find_exec_invokes_docker(args, env)
     if base in ("npx", "npm"):  # `npx -c '<cmd>'` / `npm exec -c '<cmd>'` run a string via a shell
         return _npm_call_invokes_docker(base, list(args or []), env)
     if base not in _SHELL_LAUNCHERS:

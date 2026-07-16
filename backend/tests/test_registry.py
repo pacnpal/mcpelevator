@@ -1624,9 +1624,9 @@ def test_env_assignment_expanded_command_allowed_when_non_docker(session):
         ("prlimit", ["--nofile=1024", "docker", "run", "alpine"], None),
         # ``npm`` global options may precede the ``exec`` subcommand.
         ("npm", ["--prefix", "/tmp", "exec", "-c", "docker run alpine"], None),
-        # A Bash alias (with expansion enabled) resolves a benign command word to docker.
+        # A Bash alias (expansion enabled, defined on an EARLIER line) resolves to docker.
         (None, None, "shopt -s expand_aliases\nalias d=docker\nd run alpine"),
-        (None, None, "shopt -s expand_aliases; alias d='docker run'; d alpine"),
+        (None, None, "shopt -s expand_aliases\nalias d='docker run'\nd alpine"),
         # ``printf`` conversion specs substitute the operands the piped shell then runs.
         (None, None, "printf '%s ' docker run alpine | sh"),
         # Process substitution feeding a shell (static output) or running docker directly.
@@ -1843,6 +1843,66 @@ def test_glob_transform_as_argument_allowed(session):
         args=["-c", "echo ${D#?}"], enabled=True,
     )
     assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner", "env"),
+    [
+        # ``su``/``runuser`` pass ``--session-command`` and clustered ``-lc`` to the shell like -c.
+        ("su", ["--session-command", "docker run alpine"], None, None),
+        ("su", ["-lc", "docker run alpine"], None, None),
+        ("runuser", ["-lc", "docker run"], None, None),
+        # ``setpriv [options] PROGRAM`` launches a command.
+        ("setpriv", ["--clear-groups", "docker", "run", "alpine"], None, None),
+        ("setpriv", ["--reuid", "1000", "docker", "run"], None, None),
+        # ``find -exec`` children inherit the configured environment.
+        ("find", [".", "-exec", "sh", "-c", '"$D" run alpine', ";"], None, {"D": "docker"}),
+        # ``command``/``builtin export`` persist an assignment a later ``$D`` resolves.
+        (None, None, 'command export D=docker; "$D" run alpine', None),
+        (None, None, 'builtin export D=docker; "$D" run', None),
+    ],
+)
+def test_session_command_setpriv_find_env_and_command_export_rejected(
+        session, command, args, inner, env):
+    """``su --session-command``/``-lc``, ``setpriv``, ``find -exec`` env inheritance, and
+    ``command``/``builtin export`` assignment persistence must all be gated."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="session-setpriv-find", runner="command", command=command, args=args,
+            env=env or {}, enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        # Aliases defined on the SAME physical line as their use are not expanded by bash.
+        "shopt -s expand_aliases; alias d=docker; d run alpine",
+        "shopt -s expand_aliases\nalias d=docker; d run alpine",  # def+use share line 2
+    ],
+)
+def test_same_line_alias_definition_allowed(session, inner):
+    """Bash expands aliases while reading each line, so an alias used on the same line it is defined
+    stays unexpanded — such a config must not be rejected."""
+    s = service.create_server(
+        session, name="same-line-alias", runner="command", command="/bin/bash", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+def test_setpriv_and_su_session_command_non_docker_allowed(session):
+    """``setpriv``/``su --session-command`` wrapping a non-docker command must not be rejected."""
+    for name, cmd, args in [
+        ("sp-ok", "setpriv", ["--clear-groups", "python", "-m", "srv"]),
+        ("su-sc-ok", "su", ["--session-command", "python -m srv"]),
+    ]:
+        s = service.create_server(
+            session, name=name, runner="command", command=cmd, args=args, enabled=True,
+        )
+        assert s.enabled is True
 
 
 @pytest.mark.parametrize(
