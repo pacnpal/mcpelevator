@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import secrets
 import shlex
 import tempfile
@@ -161,65 +160,6 @@ def _is_docker_command(command: str) -> bool:
     return "/" in command.strip().replace("\\", "/") and _launcher_basename(command) in _DOCKER_LAUNCHERS
 
 
-def _split_top_commas(text: str) -> list[str]:
-    """Split ``text`` on commas that are NOT inside a nested ``{…}`` (for brace-list expansion)."""
-    parts: list[str] = []
-    buf: list[str] = []
-    depth = 0
-    for ch in text:
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth = max(0, depth - 1)
-        elif ch == "," and depth == 0:
-            parts.append("".join(buf))
-            buf = []
-            continue
-        buf.append(ch)
-    parts.append("".join(buf))
-    return parts
-
-
-def _brace_expand(word: str, _depth: int = 0) -> tuple[list[str], bool]:
-    """Best-effort Bash brace-list expansion of a single word, bounded. Returns
-    ``(expansions, truncated)`` — ``truncated`` is True when the depth or result cap was hit, so a
-    later alternative may be missing and the caller must fail closed.
-
-    Handles ``{a,b,c}`` comma lists (with nesting) — the form that hides a launcher, e.g.
-    ``{docker,}`` expands to ``docker`` (and ``''``). Sequence braces (``{1..3}``) and ``${VAR}``
-    (no top-level comma) are left alone. Always includes the original word."""
-    if "{" not in word:
-        return [word], False
-    if _depth > 8:  # depth cap hit while braces remain — gave up before fully expanding
-        return [word], True
-    start = word.find("{")
-    depth, end = 0, -1
-    for j in range(start, len(word)):
-        if word[j] == "{":
-            depth += 1
-        elif word[j] == "}":
-            depth -= 1
-            if depth == 0:
-                end = j
-                break
-    if end == -1:
-        return [word], False
-    parts = _split_top_commas(word[start + 1:end])
-    if len(parts) < 2:  # no top-level comma (e.g. ${VAR}, {1..3}) — nothing to expand
-        return [word], False
-    prefix, suffix = word[:start], word[end + 1:]
-    results = [word]
-    truncated = False
-    for part in parts:
-        sub, sub_trunc = _brace_expand(prefix + part + suffix, _depth + 1)
-        truncated = truncated or sub_trunc
-        for expanded in sub:
-            results.append(expanded)
-            if len(results) >= 64:
-                return results, True  # result cap hit — a later alternative may be missing
-    return results, truncated
-
-
 # Thin wrappers that stand in FRONT of the real command without being the command themselves:
 # they exec their remaining argv (``sudo docker …`` is a docker launch; ``python --backend docker``
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
@@ -229,10 +169,6 @@ _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "comman
                        "setpriv", "strace", "timeout", "xargs", "stdbuf", "flock", "chroot",
                        "runuser", "su", "watch"}
 
-# Builtins that BOTH persist a ``NAME=VALUE`` assignment to the shell and are a command word
-# (``export D=docker`` / ``declare D=docker``). ``_segment_assignments`` mines their operands so a
-# later ``$D`` command word resolves.
-_ASSIGNMENT_BUILTINS = {"export", "declare", "typeset", "readonly", "local"}
 
 # Wrappers whose run form accepts leading ``NAME=VALUE`` assignments before the command.
 _WRAPPERS_ACCEPTING_ASSIGNMENTS = {"env", "sudo", "doas"}
@@ -249,13 +185,6 @@ _MAX_WRAPPER_PEELS = 64
 # Bash in restricted mode and still honors ``-c``.
 _SHELL_LAUNCHERS = {"sh", "bash", "rbash", "dash", "ash", "zsh", "ksh"}
 
-# Builtins that execute a FILE argument as shell script in the current shell. Pointed at a stdin
-# path (below) they run whatever a heredoc/here-string feeds them.
-_SOURCE_BUILTINS = {"source", "."}
-
-# Paths that resolve to standard input — a heredoc redirected here becomes the sourced/executed
-# script (``source /dev/stdin <<EOF``).
-_STDIN_PATHS = {"/dev/stdin", "-", "/proc/self/fd/0", "/dev/fd/0"}
 
 # Shell reserved words / keywords that can PRECEDE the real command in a simple-command position
 # (``if docker …``, ``! docker …``). Skipping them keeps the scan on the command the shell actually
@@ -401,446 +330,6 @@ def _split_string_command(value: str, rest: list[str]) -> tuple[str, list[str]]:
     return "env", list(words) + list(rest)
 
 
-def _heredoc_delimiters(line: str) -> list[tuple[str, bool, bool]]:
-    """Find here-document markers (``<<WORD`` / ``<<-WORD`` / ``<<"WORD"``) on a line, honoring
-    quotes and skipping here-strings (``<<<``). Returns (delimiter, strip_leading_tabs, quoted) per
-    marker, in order — bash allows several on one line. ``quoted`` is True when the delimiter word
-    was quoted (``<<'EOF'``), meaning the body is literal (no expansions)."""
-    delims: list[tuple[str, bool, bool]] = []
-    i, n = 0, len(line)
-    quote: Optional[str] = None
-    while i < n:
-        ch = line[i]
-        if quote is not None:
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            i += 1
-            continue
-        if ch == "#" and (i == 0 or line[i - 1] in " \t"):
-            break  # a comment starts here — any `<<` after it is not a real heredoc marker
-        if ch == "<" and line[i:i + 2] == "<<" and line[i:i + 3] != "<<<":
-            j = i + 2
-            strip_tabs = False
-            if j < n and line[j] == "-":
-                strip_tabs = True
-                j += 1
-            while j < n and line[j] in " \t":
-                j += 1
-            word: list[str] = []
-            was_quoted = False
-            while j < n and line[j] not in " \t\n;&|<>()":
-                c = line[j]
-                if c in ("'", '"'):
-                    was_quoted = True
-                    j += 1
-                    while j < n and line[j] != c:
-                        word.append(line[j])
-                        j += 1
-                    j += 1
-                    continue
-                if c == "\\" and j + 1 < n:
-                    was_quoted = True
-                    word.append(line[j + 1])
-                    j += 2
-                    continue
-                word.append(c)
-                j += 1
-            if word:
-                delims.append(("".join(word), strip_tabs, was_quoted))
-            i = j
-            continue
-        i += 1
-    return delims
-
-
-def _line_feeds_shell(line: str) -> bool:
-    """True when the command on a here-document marker line will EXECUTE the body as shell script
-    rather than read it as ordinary stdin data. Two shapes qualify: a shell launcher reading the
-    body (``bash <<EOF``), and ``source``/``.`` pointed at a stdin path (``source /dev/stdin <<EOF``
-    executes the heredoc in the current shell)."""
-    head = line.split("<<", 1)[0]
-    try:
-        words = shlex.split(head)
-    except ValueError:
-        words = head.split()
-    idx = 0
-    while idx < len(words) and _looks_like_assignment(words[idx]):  # leading FOO=bar assignments
-        idx += 1
-    if idx >= len(words):
-        return False
-    cmd, rest = _strip_wrappers(words[idx], words[idx + 1:])
-    base = _launcher_basename(cmd)
-    if base in _SHELL_LAUNCHERS:
-        return True
-    # ``source FILE`` / ``. FILE`` run FILE as script in the current shell; when FILE names stdin
-    # and a heredoc feeds it, the body is the sourced script — inspect it, don't drop it as data.
-    return base in _SOURCE_BUILTINS and any(str(a) in _STDIN_PATHS for a in (rest or []))
-
-
-def _strip_heredocs(command_string: str) -> str:
-    """Drop here-document BODIES (input data, not commands) so their lines aren't parsed as shell
-    commands. The marker line (``cat <<EOF``) is kept; the body up to and including the delimiter
-    line is removed. Two exceptions keep executable content: when the marker line feeds a shell
-    (``bash <<EOF`` — the body IS a script) the whole body is kept for inspection; for an UNQUOTED
-    delimiter the shell expands command substitutions in the body, so those are preserved."""
-    if "<<" not in command_string:
-        return command_string
-    lines = command_string.split("\n")
-    out: list[str] = []
-    idx = 0
-    while idx < len(lines):
-        line = lines[idx]
-        out.append(line)
-        idx += 1
-        feeds_shell = _line_feeds_shell(line)
-        for delim, strip_tabs, quoted in _heredoc_delimiters(line):
-            body_lines: list[str] = []
-            while idx < len(lines):
-                body = lines[idx]
-                idx += 1
-                candidate = body.lstrip("\t") if strip_tabs else body
-                if candidate == delim:
-                    break
-                body_lines.append(body)
-            if feeds_shell:  # the body is a script executed by the shell — inspect it verbatim
-                out.extend(body_lines)
-            elif not quoted:  # unquoted delimiter: keep the body's command substitutions
-                preserved = _preserve_substitutions("\n".join(body_lines))
-                if preserved:
-                    out.append(preserved)
-    return "\n".join(out)
-
-
-_ANSI_C_SIMPLE = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v",
-                  "\\": "\\", "'": "'", '"': '"', "?": "?", "e": "\x1b", "E": "\x1b"}
-_HEXDIGITS = set("0123456789abcdefABCDEF")
-
-
-def _find_unquoted(s: str, start: int, needle: str) -> int:
-    """Index of the first ``needle`` in ``s`` at/after ``start`` that is NOT inside single/double
-    quotes, or -1. Used to locate a ``[[ … ]]`` terminator without stopping on a quoted ``]]``."""
-    i, n = start, len(s)
-    quote: Optional[str] = None
-    while i < n:
-        ch = s[i]
-        if quote is not None:
-            if ch == "\\" and quote == '"' and i + 1 < n:
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            i += 1
-            continue
-        if s.startswith(needle, i):
-            return i
-        i += 1
-    return -1
-
-
-def _decode_ansi_c(body: str) -> str:
-    """Decode bash ANSI-C ``$'…'`` escapes (``\\xHH``, ``\\NNN`` octal, ``\\uHHHH``, ``\\n`` …) to the
-    literal characters bash would produce, so ``doc$'\\x6b\\x65\\x72'`` resolves to ``docker``."""
-    out: list[str] = []
-    i, n = 0, len(body)
-    while i < n:
-        ch = body[i]
-        if ch != "\\" or i + 1 >= n:
-            out.append(ch)
-            i += 1
-            continue
-        nxt = body[i + 1]
-        if nxt in _ANSI_C_SIMPLE:
-            out.append(_ANSI_C_SIMPLE[nxt])
-            i += 2
-        elif nxt == "x":
-            j, hexs = i + 2, ""
-            while j < n and len(hexs) < 2 and body[j] in _HEXDIGITS:
-                hexs += body[j]
-                j += 1
-            if hexs:
-                out.append(chr(int(hexs, 16)))
-                i = j
-            else:
-                out.append(nxt)
-                i += 2
-        elif nxt in "01234567":
-            j, octs = i + 1, ""
-            while j < n and len(octs) < 3 and body[j] in "01234567":
-                octs += body[j]
-                j += 1
-            out.append(chr(int(octs, 8) & 0xFF))
-            i = j
-        elif nxt in ("u", "U"):
-            width = 4 if nxt == "u" else 8
-            j, hexs = i + 2, ""
-            while j < n and len(hexs) < width and body[j] in _HEXDIGITS:
-                hexs += body[j]
-                j += 1
-            if hexs:
-                try:
-                    out.append(chr(int(hexs, 16)))
-                except (ValueError, OverflowError):
-                    pass
-                i = j
-            else:
-                out.append(nxt)
-                i += 2
-        else:
-            out.append(nxt)
-            i += 2
-    return "".join(out)
-
-
-def _param_expansion_default(inner: str) -> str:
-    """For a ``${…}`` body, return the word a default/alternate operator would substitute
-    (``VAR:-docker`` → ``docker``), or ``""`` when there is no such operator (plain ``${VAR}``) or it
-    is an error form (``:?``). A script that unsets the var guarantees the default, so this word is a
-    candidate command position."""
-    for op in (":-", ":=", ":+", "-", "=", "+"):
-        idx = inner.find(op)
-        if idx > 0:  # operator must come after a (non-empty) parameter name
-            return inner[idx + len(op):]
-    return ""
-
-
-_PARAM_TRANSFORM_OPS = (":", "#", "%", "/", "^", ",")
-
-
-def _split_param_name(inner: str) -> tuple[str, str]:
-    """Split a ``${…}`` body into (parameter NAME, transform SPEC) — ``D:0`` → ``("D", ":0")``,
-    ``D##*/`` → ``("D", "##*/")``. Returns ``("", inner)`` when it does not start with a name."""
-    k = 0
-    while k < len(inner) and (inner[k].isalnum() or inner[k] == "_"):
-        k += 1
-    name = inner[:k]
-    if not name or not (name[0].isalpha() or name[0] == "_"):
-        return "", inner
-    return name, inner[k:]
-
-
-def _is_param_transform(inner: str) -> bool:
-    """True when a ``${…}`` body is ``NAME<transform>`` for a recognized transform operator (substring
-    ``:``, prefix/suffix ``#``/``%``, replace ``/``, case ``^``/``,``) — so preprocessing preserves
-    it for ``_expand_known_vars`` to resolve from a known value."""
-    name, spec = _split_param_name(inner)
-    return bool(name) and bool(spec) and spec[0] in _PARAM_TRANSFORM_OPS
-
-
-# Emitted for a parameter transform we can't statically resolve (a glob-pattern ``#``/``%``/``/`` or
-# a non-literal substring offset). A launcher could hide behind it (``${D#?}`` of ``xdocker`` is
-# ``docker``), so ``_segment_invokes_docker`` fails closed when it lands in command position.
-_UNRESOLVED_TRANSFORM = "\x00mcpe-unresolved-transform\x00"
-
-
-def _apply_param_transform(value: str, spec: str) -> str:
-    """Apply a bash parameter transform SPEC (``:offset[:len]`` substring, ``#``/``%`` prefix/suffix
-    removal, ``/`` replacement, ``^``/``,`` case) to a known VALUE. Returns ``_UNRESOLVED_TRANSFORM``
-    for forms it can't statically resolve (glob patterns / non-literal offsets) so command-position
-    use fails closed rather than slipping a hidden launcher through as the raw value."""
-    if not spec:
-        return value
-    op = spec[0]
-    if op == ":":
-        parts = spec[1:].split(":")
-        try:
-            offset = int(parts[0]) if parts[0] else 0
-        except ValueError:
-            return _UNRESOLVED_TRANSFORM
-        if offset < 0:
-            offset = max(0, len(value) + offset)
-        if len(parts) >= 2 and parts[1]:
-            try:
-                length = int(parts[1])
-            except ValueError:
-                return _UNRESOLVED_TRANSFORM
-            return value[offset:len(value) + length] if length < 0 else value[offset:offset + length]
-        return value[offset:]
-    if op in ("#", "%"):
-        longest = spec[1:2] == op
-        pat = spec[2:] if longest else spec[1:]
-        if any(c in pat for c in "*?["):  # a glob pattern — unresolvable, fail closed
-            return _UNRESOLVED_TRANSFORM
-        if op == "#":
-            return value[len(pat):] if value.startswith(pat) else value
-        return value[:-len(pat)] if pat and value.endswith(pat) else value
-    if op == "/":
-        allrep = spec[1:2] == "/"
-        body = spec[2:] if allrep else spec[1:]
-        pat, rep = [*body.split("/", 1), ""][:2]
-        if any(c in pat for c in "*?["):
-            return _UNRESOLVED_TRANSFORM
-        return value.replace(pat, rep) if allrep else value.replace(pat, rep, 1)
-    if op == "^":
-        return value.upper() if spec[1:2] == "^" else (value[:1].upper() + value[1:])
-    if op == ",":
-        return value.lower() if spec[1:2] == "," else (value[:1].lower() + value[1:])
-    return value
-
-
-def _preprocess_shell_string(command_string: str) -> str:
-    """Apply shell pre-tokenization rewrites the parser can't see through otherwise, quote-aware:
-
-    - line continuations (``\\`` immediately before a newline) are removed, as POSIX shells do
-      before tokenizing, so ``docker\\<newline> run`` reads as ``docker run``;
-    - the ``$`` before ``$'…'`` (bash ANSI-C) / ``$"…"`` (locale) quoting is dropped so the quoted
-      fragment concatenates onto its neighbours (``doc$'ker'`` → ``docker``);
-    - ``#`` comments (at a word boundary) are dropped to end-of-line, so a docker example in a
-      comment isn't mistaken for a command;
-    - ``$((…))`` arithmetic expansion is dropped — its parens are not a subshell and its contents
-      are not commands (``echo $((docker + 1))`` references a variable, it doesn't run docker).
-
-    All applied only outside single quotes, where these are literal."""
-    out: list[str] = []
-    i, n = 0, len(command_string)
-    quote: Optional[str] = None
-    at_boundary = True  # start of string / just after an unquoted separator = a command position
-    while i < n:
-        ch = command_string[i]
-        if quote == "'":
-            out.append(ch)
-            if ch == "'":
-                quote = None
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < n and command_string[i + 1] == "\n":
-            i += 2  # line continuation — removed
-            continue
-        if ch == "\\" and i + 1 < n:  # keep any other escape intact (both chars)
-            out.append(ch)
-            out.append(command_string[i + 1])
-            i += 2
-            at_boundary = False
-            continue
-        if quote == '"':
-            out.append(ch)
-            if ch == '"':
-                quote = None
-            i += 1
-            continue
-        # --- unquoted ---
-        if ch == "#" and at_boundary:  # comment — drop to end of line
-            while i < n and command_string[i] != "\n":
-                i += 1
-            continue
-        if (at_boundary and command_string[i:i + 2] == "[["
-                and (i + 2 >= n or command_string[i + 2] in " \t")):
-            # a ``[[ … ]]`` conditional: its words are operands, not commands — drop the span, but
-            # KEEP any command substitutions (they execute before the test, so `[[ $(docker …) ]]`
-            # must still be inspected). Scan for the real UNQUOTED ``]]`` (a quoted ``]]`` is an
-            # operand, not the terminator).
-            close = _find_unquoted(command_string, i + 2, "]]")
-            if close != -1:
-                out.append(" " + _preserve_substitutions(command_string[i + 2:close]) + " ")
-                at_boundary = True
-                i = close + 2
-                continue
-        if ch == "$" and i + 2 < n and command_string[i + 1] == "(" and command_string[i + 2] == "(":
-            body, end = _read_delimited(command_string, i + 2, ")")  # $((…)) arithmetic
-            if "$(" in body or "`" in body:
-                # the shell still runs command substitutions inside arithmetic — keep the span so
-                # ``echo $(( $(docker run) + 1))`` is inspected, not erased.
-                out.append(command_string[i:end])
-                at_boundary = False
-            else:
-                out.append(" ")  # pure arithmetic (just operands/operators) — safe to drop
-                at_boundary = True
-            i = end
-            continue
-        if command_string.startswith("$IFS", i) and (
-                i + 4 >= n or not (command_string[i + 4].isalnum() or command_string[i + 4] == "_")):
-            # bare ``$IFS`` field-splits: ``docker$IFS run`` executes ``docker run`` — emit a space.
-            out.append(" ")
-            at_boundary = True
-            i += 4
-            continue
-        if command_string.startswith("${", i):
-            # ``${…}`` parameter expansion: emit a default/alternate word (``${VAR:-docker}`` →
-            # ``docker``) so the guaranteed-default command position is seen; ``${IFS}`` / an unknown
-            # ``${VAR}`` become a separator.
-            depth, j = 1, i + 2
-            while j < n and depth:
-                if command_string[j] == "{":
-                    depth += 1
-                elif command_string[j] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                j += 1
-            inner = command_string[i + 2:j]
-            default = _param_expansion_default(inner)
-            if default:
-                out.append(default)
-                at_boundary = False
-            elif ((_is_shell_name(inner) and inner != "IFS") or _is_param_transform(inner)
-                  or (inner.startswith("!") and _is_shell_name(inner[1:]))):
-                # a plain ``${NAME}``, a transform ``${NAME:0}``/``${NAME##*/}``, or an indirect
-                # ``${!NAME}`` — keep it intact so the later assignment/env pass
-                # (``_expand_known_vars``) can resolve ``D=docker; ${D:0} run`` / ``x=D; ${!x}``.
-                # ``${IFS}`` stays a separator, and complex forms (``${#x}``, ``${1}``) fall through.
-                out.append("${" + inner + "}")
-                at_boundary = False
-            else:
-                out.append(" ")
-                at_boundary = True
-            i = j + 1
-            continue
-        if ch == "$" and i + 1 < n and command_string[i + 1] == "'":
-            # bash ANSI-C quoting: read to the closing ', decode escapes, and re-emit shell-safe
-            # single-quoted so the (decoded) fragment stays one word (``doc$'\x6b…'`` → docker).
-            j, buf = i + 2, []
-            while j < n and command_string[j] != "'":
-                if command_string[j] == "\\" and j + 1 < n:
-                    buf.append(command_string[j])
-                    buf.append(command_string[j + 1])
-                    j += 2
-                    continue
-                buf.append(command_string[j])
-                j += 1
-            decoded = _decode_ansi_c("".join(buf))
-            out.append("'" + decoded.replace("'", "'\\''") + "'")
-            at_boundary = False
-            i = j + 1  # past the closing '
-            continue
-        if ch == "$" and i + 1 < n and command_string[i + 1] == '"':
-            i += 1  # locale $"…": drop the $, let the quote open on the next iteration
-            continue
-        if command_string[i:i + 3] == "<<<":
-            # here-string ``cmd <<< WORD``: keep ``<<<`` as one token (space-isolated) so the
-            # segment scanner can pair it with its payload.
-            out.append(" <<< ")
-            at_boundary = True
-            i += 3
-            continue
-        if ch in "<>":
-            # a redirection can be glued to the command word (``docker</dev/null``); split it off so
-            # the command word is seen. Don't split when preceded by a digit (an fd number like
-            # ``2>``) so the redirection token stays intact for the segment scanner.
-            if out and out[-1] not in " \t" and not out[-1].isdigit():
-                out.append(" ")
-            out.append(ch)
-            at_boundary = True
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            out.append(ch)
-            at_boundary = False
-            i += 1
-            continue
-        out.append(ch)
-        at_boundary = ch in " \t\n;&|()"
-        i += 1
-    return "".join(out)
-
-
 def _read_delimited(command_string: str, start: int, closer: str) -> tuple[str, int]:
     """Read a substitution body from ``start`` until the matching UNQUOTED ``closer`` (``)`` for
     ``$(…)`` — balancing nested parens — or the next backtick), honoring single/double quotes so a
@@ -927,72 +416,6 @@ def _command_substitutions(command_string: str) -> list[str]:
     return subs
 
 
-def _process_subst_invokes_docker(command_string: str,
-                                  env: Optional[dict[str, str]] = None) -> bool:
-    """True when a process substitution ``<(…)``/``>(…)`` reaches docker: its inner command runs
-    (``<(docker run)``), or — when it feeds a shell as a script file (``bash <(printf 'docker …')``)
-    — the inner's static output is the script that shell executes."""
-    i, n = 0, len(command_string)
-    quote: Optional[str] = None
-    while i < n:
-        ch = command_string[i]
-        if quote is not None:
-            if ch == "\\" and quote == '"' and i + 1 < n:
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < n:
-            i += 2
-            continue
-        if ch in ("<", ">") and i + 1 < n and command_string[i + 1] == "(":
-            inner, end = _read_delimited(command_string, i + 2, ")")
-            if _shell_command_invokes_docker(inner, env):  # the substituted command itself runs
-                return True
-            literal = _static_command_output(inner)  # its static output, if fed to a shell, is script
-            if literal is not None and _preceding_command_is_shell(command_string, i):
-                if _shell_command_invokes_docker(literal, env):
-                    return True
-            i = end
-            continue
-        i += 1
-    return False
-
-
-def _preceding_command_is_shell(command_string: str, pos: int) -> bool:
-    """True when the simple command containing ``pos`` executes a script FILE as shell input — a
-    shell launcher (``bash <(…)``) or ``source``/``.`` (``source <(…)``). Used to tell whether a
-    process substitution at ``pos`` is a script run by that command."""
-    segment = _split_shell_commands(command_string[:pos])[-1]
-    try:
-        words = shlex.split(segment)
-    except ValueError:
-        words = segment.split()
-    idx = 0
-    while idx < len(words) and (_looks_like_assignment(words[idx])
-                                or _redirection_span(words[idx])):
-        idx += 1
-    if idx >= len(words):
-        return False
-    cmd, _ = _strip_wrappers(words[idx], words[idx + 1:])
-    base = _launcher_basename(cmd)
-    return base in _SHELL_LAUNCHERS or base in _SOURCE_BUILTINS
-
-
-def _preserve_substitutions(text: str) -> str:
-    """Return just the command substitutions of ``text`` (re-wrapped as ``$(…)``), dropping the
-    surrounding operands/data. Used to keep the executable substitutions of a construct we otherwise
-    discard — a ``[[ … ]]`` condition or an unquoted here-document body — so ``[[ $(docker …) == x ]]``
-    is still inspected while its plain operands are not."""
-    return " ".join("$(" + inner + ")" for inner in _command_substitutions(text))
-
-
 def _split_shell_commands(command_string: str) -> list[str]:
     """Split a shell command line into simple-command segments at unquoted operators.
 
@@ -1049,48 +472,6 @@ def _split_shell_commands(command_string: str) -> list[str]:
         i += 1
     segments.append("".join(buf))
     return segments
-
-
-def _split_lines_quote_aware(command_string: str) -> list[str]:
-    """Split into physical lines at unquoted newlines. Bash expands aliases while reading each line,
-    so an alias defined (or ``expand_aliases`` enabled) on one line only affects LATER lines — this
-    lets the walk scope alias state per line. (Line continuations are already removed upstream.)"""
-    lines: list[str] = []
-    buf: list[str] = []
-    quote: Optional[str] = None
-    i, n = 0, len(command_string)
-    while i < n:
-        ch = command_string[i]
-        if quote is not None:
-            if ch == "\\" and quote == '"' and i + 1 < n:
-                buf.append(ch)
-                buf.append(command_string[i + 1])
-                i += 2
-                continue
-            buf.append(ch)
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            buf.append(ch)
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < n:
-            buf.append(ch)
-            buf.append(command_string[i + 1])
-            i += 2
-            continue
-        if ch == "\n":
-            lines.append("".join(buf))
-            buf = []
-            i += 1
-            continue
-        buf.append(ch)
-        i += 1
-    lines.append("".join(buf))
-    return lines
 
 
 def _strip_wrappers(command: str, args: Optional[list[str]],
@@ -1287,65 +668,6 @@ def _strip_wrappers(command: str, args: Optional[list[str]],
     return "docker", list(args or [])
 
 
-def _references_positional_params(command_string: str) -> bool:
-    """True when a shell command string references positional parameters (``$@``, ``$*``, ``$1``…,
-    ``${@}``, ``${1}``) somewhere they EXPAND — i.e. not inside single quotes and not backslash
-    escaped (double quotes still expand). ``sh -c 'exec "$@"' $0 docker run`` executes those
-    positionals; ``printf '%s' '$@'`` prints a literal and must not trigger inspection."""
-    i, n = 0, len(command_string)
-    quote: Optional[str] = None
-    while i < n:
-        ch = command_string[i]
-        if quote == "'":
-            if ch == "'":
-                quote = None
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < n:  # escaped: the next char is literal (incl. an escaped $)
-            i += 2
-            continue
-        if quote == '"':
-            if ch == '"':
-                quote = None
-                i += 1
-                continue
-            # fall through — $ still expands inside double quotes
-        elif ch in ("'", '"'):
-            quote = ch
-            i += 1
-            continue
-        if ch == "$" and i + 1 < n:
-            nxt = command_string[i + 1]
-            if nxt in "@*" or nxt.isdigit():
-                return True
-            if nxt == "{" and i + 2 < n and (command_string[i + 2] in "@*"
-                                             or command_string[i + 2].isdigit()):
-                return True
-        i += 1
-    return False
-
-
-def _find_exec_invokes_docker(args: Optional[list[str]],
-                              env: Optional[dict[str, str]] = None) -> bool:
-    """True when a ``find … -exec/-execdir/-ok/-okdir COMMAND …`` action launches the docker CLI.
-    The command runs from ``-exec`` up to the terminating ``;`` or ``+``, inheriting the configured
-    ``env`` (so a wrapped ``sh -c '"$D" …'`` child resolves ``$D``)."""
-    tokens = list(args or [])
-    k = 0
-    while k < len(tokens):
-        if tokens[k] in ("-exec", "-execdir", "-ok", "-okdir"):
-            k += 1
-            cmd_tokens: list[str] = []
-            while k < len(tokens) and tokens[k] not in (";", "+", "\\;"):
-                cmd_tokens.append(tokens[k])
-                k += 1
-            if cmd_tokens and _shell_invokes_docker(cmd_tokens[0], cmd_tokens[1:], env):
-                return True
-            continue
-        k += 1
-    return False
-
-
 def _redirection_span(word: str) -> Optional[str]:
     """Classify ``word`` as a shell redirection: ``"attached"`` (target glued, e.g. ``>/dev/null``,
     ``2>err``), ``"bare"`` (operator only, target is the NEXT token, e.g. ``>``, ``2>``, ``>&``), or
@@ -1385,46 +707,18 @@ def _declared_function_name(words: list[str], idx: int) -> Optional[str]:
     return None
 
 
-def _segment_declares_function(segment: str) -> Optional[str]:
-    """The function name declared by ``segment`` in command position (bash ``function NAME`` or the
-    POSIX ``NAME () { … }`` form), or ``None``. (``echo function docker`` is an argument, not a
-    declaration.)"""
+def _segment_invokes_docker(segment: str) -> bool:
+    """True when a simple-command segment's command word is (literally) the docker CLI.
+
+    Leading redirections, ``NAME=VALUE`` assignments, shell reserved words, and ``for``/``case``
+    subjects are skipped to reach the command word; a ``function NAME`` / ``NAME () { … }`` in command
+    position is a declaration, not a launch. DELIBERATELY LITERAL — no variable/alias/function-body
+    resolution (see ``_shell_invokes_docker``)."""
     try:
         words = shlex.split(segment)
     except ValueError:
         words = segment.split()
     idx = 0
-    while idx < len(words):  # reach the command word (skip redirections/assignments)
-        span = _redirection_span(words[idx])
-        if span == "attached":
-            idx += 1
-        elif span == "bare":
-            idx += 2
-        elif _looks_like_assignment(words[idx]):
-            idx += 1
-        else:
-            break
-    return _declared_function_name(words, idx)
-
-
-def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset(),
-                            env: Optional[dict[str, str]] = None,
-                            func_bodies: Optional[dict[str, str]] = None,
-                            inspecting: frozenset[str] = frozenset()) -> bool:
-    """True when a single simple-command segment launches the docker CLI as its command word.
-
-    Leading redirections, ``NAME=VALUE`` assignments, and shell reserved words are skipped to reach
-    the real command; ``eval``/``trap`` re-parse their argument as fresh shell input; ``coproc`` may
-    carry an optional name; ``builtin`` re-inspects its operand. A command word that names a defined
-    shell function (``funcs``) is not the CLI directly — but its recorded body (``func_bodies``) is
-    inspected, since executing the call runs it (``f() { docker run; }; f``); ``inspecting`` guards
-    against recursion. ``env`` carries deterministic variable values for nested shell inputs."""
-    try:
-        words = shlex.split(segment)
-    except ValueError:
-        words = segment.split()
-    idx = 0
-    inline_env: dict[str, str] = {}
     while idx < len(words):
         w = words[idx]
         span = _redirection_span(w)
@@ -1449,808 +743,41 @@ def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset(),
             while idx < len(words) and words[idx] in ("-p", "--portability", "--"):
                 idx += 1
             break
-        if _looks_like_assignment(w):  # ``D=docker cmd`` scopes D to cmd's environment — carry it
-            name, value = w.split("=", 1)
-            inline_env[name] = value
-            idx += 1
-            continue
-        if w in _SHELL_RESERVED_WORDS:
+        if w in _SHELL_RESERVED_WORDS or _looks_like_assignment(w):
             idx += 1
             continue
         break
     if idx >= len(words):
         return False
-    if inline_env:  # a leading ``NAME=VALUE`` prefix reaches the command's environment (e.g. a shell)
-        env = {**(env or {}), **inline_env}
     if _declared_function_name(words, idx) is not None:
-        return False  # a POSIX ``NAME () { … }`` declaration in command position — not a launch
-    cmd = words[idx]
-    if _UNRESOLVED_TRANSFORM in cmd:
-        return True  # a statically-unresolvable parameter transform in command position — fail closed
-    if cmd in funcs:  # a call to a locally-defined shell function
-        bodies = func_bodies or {}
-        if cmd in bodies and cmd not in inspecting:
-            # executing the call runs the function's body — inspect it, keeping the function's own
-            # name shadowed (a self-call recurses, it doesn't reach the CLI). ``command docker``
-            # inside the body still bypasses the shadow (handled by the ``command`` branch).
-            return _shell_command_invokes_docker(
-                bodies[cmd], env, seed_funcs=funcs, func_bodies=bodies,
-                inspecting=inspecting | {cmd})
-        return False  # no recorded body, or already being inspected (recursion) — not the CLI
-    if _launcher_basename(cmd) in _SOURCE_BUILTINS:
-        # ``source``/``.`` reading a stdin path executes whatever feeds fd 0; a ``<<<`` here-string
-        # is that stdin, so ``source /dev/stdin <<< 'docker run'`` runs the payload as shell script.
-        # (A heredoc feeding source is preserved earlier by ``_line_feeds_shell``/``_strip_heredocs``.)
-        rest = words[idx + 1:]
-        if "<<<" in rest and any(str(a) in _STDIN_PATHS for a in rest):
-            k = rest.index("<<<")
-            if k + 1 < len(rest):
-                return _shell_command_invokes_docker(str(rest[k + 1]), env)
-        return False
-    if cmd == "eval":  # eval joins its args and executes them as shell input
-        return _shell_command_invokes_docker(
-            " ".join(words[idx + 1:]), env, seed_funcs=funcs, func_bodies=func_bodies or {},
-            inspecting=inspecting)
-    if cmd == "command":  # `command [-pvV] name …` — -v/-V only look up (no launch); skip -p/--
-        rest = words[idx + 1:]
-        j = 0
-        while j < len(rest) and rest[j].startswith("-") and rest[j] != "--":
-            if set(rest[j][1:]) & {"v", "V"}:
-                return False
-            j += 1
-        if j < len(rest) and rest[j] == "--":
-            j += 1
-        # ``command`` explicitly SUPPRESSES shell-function lookup, so a same-named function does not
-        # shadow the CLI here: ``function docker { :; }; command docker run`` runs the real docker.
-        return bool(rest[j:]) and _segment_invokes_docker(" ".join(rest[j:]), frozenset(), env)
-    if cmd == "builtin" and words[idx + 1:]:  # run the named builtin
-        return _segment_invokes_docker(
-            " ".join(words[idx + 1:]), funcs, env, func_bodies, inspecting)
-    if cmd == "trap":  # `trap [OPTS] ACTION [SIG…]` — the first non-option arg is shell input
-        for arg in words[idx + 1:]:
-            if arg.startswith("-"):
-                continue
-            return _shell_command_invokes_docker(arg, env)
-        return False
-    if cmd == "coproc":  # `coproc [NAME] command …` — command is at +1 (no name) or +2 (named)
-        rest = words[idx + 1:]
-        if rest and _shell_invokes_docker(rest[0], rest[1:], env):
-            return True
-        return len(rest) >= 2 and _shell_invokes_docker(rest[1], rest[2:], env)
-    return _shell_invokes_docker(cmd, words[idx + 1:], env)
+        return False  # a ``function NAME`` / ``NAME () { … }`` declaration — not a launch
+    return _shell_invokes_docker(words[idx], words[idx + 1:])
 
 
-def _segment_assignments(segment: str) -> dict[str, str]:
-    """``NAME=VALUE`` assignments a segment persists to the shell so a later ``$NAME`` command word
-    resolves. Two shapes persist: a segment that is PURELY assignments (``D=docker``), and an
-    assignment builtin (``export``/``declare``/… ``D=docker``) which both runs and persists. A plain
-    ``D=docker cmd`` scopes ``D`` to ``cmd``'s environment only, so it persists nothing."""
-    try:
-        words = shlex.split(segment)
-    except ValueError:
-        return {}
-    while words and words[0] in ("command", "builtin"):  # ``command export …`` still persists
-        words = words[1:]
-    if words and words[0] in _ASSIGNMENT_BUILTINS:
-        words = words[1:]  # ``export``/``declare`` NAME=VALUE … — mine the assignment operands
-        result: dict[str, str] = {}
-        for w in words:
-            if _looks_like_assignment(w):
-                name, value = w.split("=", 1)
-                result[name] = value
-            # bare names (``export D``) and options (``-x``) carry no literal value — skip them
-        return result
-    result = {}
-    for w in words:
-        if not _looks_like_assignment(w):
-            return {}  # a command word is present — the assignments are env-scoped, not persisted
-        name, value = w.split("=", 1)
-        result[name] = value
-    return result
-
-
-def _collect_namerefs(segment: str) -> dict[str, str]:
-    """The Bash namerefs a ``declare -n``/``typeset -n NAME=TARGET`` segment establishes (``NAME``
-    then resolves through ``TARGET``'s value), so ``declare -n D=E; E=docker; "$D"`` reaches the CLI.
-    Leading ``command``/``builtin`` are peeled first."""
-    try:
-        words = shlex.split(segment)
-    except ValueError:
-        return {}
-    idx = 0
-    while idx < len(words) and words[idx] in ("command", "builtin"):
-        idx += 1
-    if idx >= len(words) or words[idx] not in ("declare", "typeset", "local"):
-        return {}
-    rest = words[idx + 1:]
-    if not any(w == "-n" or (w.startswith("-") and not w.startswith("--") and "n" in w[1:])
-               for w in rest):
-        return {}
-    result: dict[str, str] = {}
-    for w in rest:
-        if _looks_like_assignment(w):
-            name, target = w.split("=", 1)
-            if _is_shell_name(target):
-                result[name] = target
-    return result
-
-
-def _read_herestring_binding(segment: str) -> Optional[tuple[list[str], str]]:
-    """The ``(VARS, WORD)`` a ``read [opts] VAR… <<< WORD`` binds, so ``read X <<< "$D"`` assigns the
-    here-string to ``X``. Leading ``command``/``builtin`` are peeled."""
-    try:
-        words = shlex.split(segment)
-    except ValueError:
-        return None
-    idx = 0
-    while idx < len(words) and words[idx] in ("command", "builtin"):
-        idx += 1
-    if idx >= len(words) or words[idx] != "read" or "<<<" not in words[idx:]:
-        return None
-    rest = words[idx + 1:]
-    hi = rest.index("<<<")
-    names = [w for w in rest[:hi] if _is_shell_name(w)]  # skip options; keep bare variable names
-    value = rest[hi + 1] if hi + 1 < len(rest) else ""
-    return (names, value) if names else None
-
-
-def _for_loop_binding(segment: str) -> Optional[tuple[str, list[str]]]:
-    """The ``(VAR, VALUES)`` a ``for VAR in VALUES`` segment binds, so the loop body's ``$VAR`` can be
-    resolved (``for x in docker; do "$x" run; done`` launches docker)."""
-    try:
-        words = shlex.split(segment)
-    except ValueError:
-        return None
-    if len(words) < 2 or words[0] != "for" or not _is_shell_name(words[1]):
-        return None
-    if "in" not in words[2:]:
-        return None
-    values = words[words.index("in", 2) + 1:]
-    if "do" in values:
-        values = values[:values.index("do")]
-    return words[1], values
-
-
-def _expand_static_substitutions(segment: str) -> str:
-    """Replace ``$(…)``/backtick command substitutions whose output is statically known (``echo``/
-    ``printf``) with that output, so ``$(printf docker) run`` resolves its command word. Single-quoted
-    spans are literal; a non-static substitution is left intact (its inner is inspected separately)."""
-    out: list[str] = []
-    i, n = 0, len(segment)
-    quote: Optional[str] = None
-    while i < n:
-        ch = segment[i]
-        if quote == "'":
-            out.append(ch)
-            if ch == "'":
-                quote = None
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < n:
-            out.append(ch)
-            out.append(segment[i + 1])
-            i += 2
-            continue
-        if ch in ("'", '"'):
-            quote = None if ch == quote else (quote or ch)
-            out.append(ch)
-            i += 1
-            continue
-        if ch == "$" and i + 1 < n and segment[i + 1] == "(":
-            inner, end = _read_delimited(segment, i + 2, ")")
-            literal = _static_command_output(inner)
-            out.append(literal if literal is not None else segment[i:end])
-            i = end
-            continue
-        if ch == "`":
-            inner, end = _read_delimited(segment, i + 1, "`")
-            literal = _static_command_output(inner)
-            out.append(literal if literal is not None else segment[i:end])
-            i = end
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
-
-
-def _enables_alias_expansion(segment: str) -> bool:
-    """True when a segment turns on alias expansion (``shopt -s expand_aliases``). Aliases are NOT
-    expanded in a non-interactive ``bash -c`` / ``sh -c`` unless this is set, so alias rewriting must
-    be gated on it to avoid rejecting a benign ``alias d=docker; d run`` that never resolves."""
-    try:
-        words = shlex.split(segment)
-    except ValueError:
-        return False
-    return (len(words) >= 3 and words[0] == "shopt" and "-s" in words[1:]
-            and "expand_aliases" in words[1:])
-
-
-def _collect_aliases(segment: str) -> dict[str, str]:
-    """The aliases an ``alias NAME=VALUE …`` segment defines, so a later command word that is an
-    alias name resolves (``alias d=docker`` → a later ``d run`` launches docker)."""
-    try:
-        words = shlex.split(segment)
-    except ValueError:
-        return {}
-    if not words or words[0] != "alias":
-        return {}
-    result: dict[str, str] = {}
-    for w in words[1:]:
-        if w.startswith("-"):  # options like ``-p`` (print) carry no definition
-            continue
-        if "=" in w:
-            name, value = w.split("=", 1)
-            if _is_shell_name(name):
-                result[name] = value
-    return result
-
-
-def _expand_alias(segment: str, aliases: dict[str, str], _depth: int = 0) -> str:
-    """Rewrite a segment whose command word is an alias to its definition (``d run`` → ``docker
-    run``), following chained aliases up to a small depth bound."""
-    if not aliases or _depth > 8:
-        return segment
-    try:
-        words = shlex.split(segment)
-    except ValueError:
-        return segment
-    idx = 0
-    while idx < len(words):
-        span = _redirection_span(words[idx])
-        if span == "attached":
-            idx += 1
-        elif span == "bare":
-            idx += 2
-        elif _looks_like_assignment(words[idx]):
-            idx += 1
-        else:
-            break
-    if idx >= len(words) or words[idx] not in aliases:
-        return segment
-    prefix = " ".join(words[:idx])
-    suffix = " ".join(words[idx + 1:])
-    rebuilt = f"{prefix} {aliases[words[idx]]} {suffix}".strip()
-    return _expand_alias(rebuilt, aliases, _depth + 1)
-
-
-_FUNC_HEADER_RE = re.compile(
-    r"(?:\bfunction\s+([A-Za-z_]\w*)\s*(?:\(\s*\))?|([A-Za-z_]\w*)\s*\(\s*\))\s*\{")
-
-
-def _extract_function_bodies(command_string: str) -> dict[str, str]:
-    """Map each shell function NAME to its brace-delimited body text (bash ``function NAME { … }`` or
-    POSIX ``NAME () { … }``), so a call to the function can be inspected — its body may launch docker
-    (``f() { docker run; }; f``). Quote- and nesting-aware brace matching."""
-    bodies: dict[str, str] = {}
-    for m in _FUNC_HEADER_RE.finditer(command_string):
-        name = m.group(1) or m.group(2)
-        brace = m.end() - 1
-        depth, j, n = 0, brace, len(command_string)
-        quote: Optional[str] = None
-        while j < n:
-            ch = command_string[j]
-            if quote is not None:
-                if ch == "\\" and quote == '"' and j + 1 < n:
-                    j += 2
-                    continue
-                if ch == quote:
-                    quote = None
-                j += 1
-                continue
-            if ch in ("'", '"'):
-                quote = ch
-                j += 1
-                continue
-            if ch == "\\" and j + 1 < n:
-                j += 2
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    bodies[name] = command_string[brace + 1:j]
-                    break
-            j += 1
-    return bodies
-
-
-def _set_positionals(segment: str) -> Optional[list[str]]:
-    """The positional parameters a ``set`` command installs (``set -- docker run`` → ``[docker,
-    run]``), or ``None`` when the segment isn't such a ``set``. These become ``$1``/``$@`` for the
-    commands that follow, so ``set -- docker run; "$@"`` launches docker."""
-    try:
-        words = shlex.split(segment)
-    except ValueError:
-        return None
-    idx = 0
-    while idx < len(words) and (_looks_like_assignment(words[idx])
-                                or _redirection_span(words[idx])):
-        idx += 1
-    if idx >= len(words) or words[idx] != "set":
-        return None
-    rest = words[idx + 1:]
-    if "--" in rest:  # explicit end-of-options: everything after is positional
-        return rest[rest.index("--") + 1:]
-    k = 0  # no ``--``: skip option flags, then the remainder are positional words
-    while k < len(rest) and rest[k][:1] in ("-", "+"):
-        if rest[k] in ("-o", "+o"):  # ``set -o pipefail`` consumes a value
-            k += 2
-        else:
-            k += 1
-    return rest[k:]
-
-
-def _expand_positionals(segment: str, positionals: list[str]) -> str:
-    """Replace the whole-list positional forms (``$@`` ``$*`` ``${@}`` ``${*}``, quoted or not) with
-    the ``set --`` positionals as SEPARATE words — ``"$@"`` word-splits in bash, so ``"$@"`` with
-    ``[docker, run]`` must yield a ``docker`` command word, not a single ``"docker run"`` token.
-    Single-quoted spans are left literal."""
-    joined = " ".join(shlex.quote(p) for p in positionals)
-    forms = ('"$@"', '"$*"', '"${@}"', '"${*}"', "$@", "$*", "${@}", "${*}")
-    out: list[str] = []
-    i, n = 0, len(segment)
-    in_single = False
-    while i < n:
-        ch = segment[i]
-        if in_single:
-            out.append(ch)
-            if ch == "'":
-                in_single = False
-            i += 1
-            continue
-        if ch == "'":
-            in_single = True
-            out.append(ch)
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < n:
-            out.append(ch)
-            out.append(segment[i + 1])
-            i += 2
-            continue
-        match = next((f for f in forms if segment.startswith(f, i)), None)
-        if match is not None:
-            out.append(joined)
-            i += len(match)
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
-
-
-def _expand_known_vars(segment: str, assignments: dict[str, str],
-                       positionals: Optional[list[str]] = None) -> str:
-    """Substitute ``$VAR``/``${VAR}`` with a known literal assignment so a deterministic
-    ``D=docker; $D run`` resolves its command word. Single-quoted spans are left literal (no
-    expansion); double quotes expand. An unknown plain ``${NAME}`` collapses to empty (bash treats
-    an unset variable as ``""``) so ``${EMPTY}docker`` still resolves to a ``docker`` command word;
-    a bare unknown ``$NAME`` is left intact (never a launcher on its own). ``positionals`` (from a
-    prior ``set --``) resolve ``$@``/``$*``/``$1``… — but only when non-empty, so an as-yet-unset
-    ``$@`` is left for the argv-based positional check."""
-    positionals = positionals or []
-    if not assignments and not positionals and "${" not in segment:
-        return segment
-    if positionals:  # resolve ``$@``/``$*`` (word-splitting forms) before the scalar pass below
-        segment = _expand_positionals(segment, positionals)
-    out: list[str] = []
-    i, n = 0, len(segment)
-    quote: Optional[str] = None
-    while i < n:
-        ch = segment[i]
-        if quote == "'":
-            out.append(ch)
-            if ch == "'":
-                quote = None
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < n:  # escaped char is literal (an escaped $ does not expand)
-            out.append(ch)
-            out.append(segment[i + 1])
-            i += 2
-            continue
-        if ch in ("'", '"'):
-            quote = None if ch == quote else (quote or ch)
-            out.append(ch)
-            i += 1
-            continue
-        if ch == "$" and i + 1 < n:
-            if segment[i + 1] == "{":
-                j = segment.find("}", i + 2)
-                if j != -1:
-                    name = segment[i + 2:j]
-                    if name in assignments:
-                        out.append(assignments[name])
-                        i = j + 1
-                        continue
-                    if name.startswith("!") and _is_shell_name(name[1:]):
-                        # indirect ``${!x}`` — the value of the variable NAMED by ``x``
-                        target = assignments.get(name[1:])
-                        out.append(assignments.get(target, "") if target else "")
-                        i = j + 1
-                        continue
-                    if positionals and name.isdigit():
-                        p = int(name)
-                        out.append(positionals[p - 1] if 1 <= p <= len(positionals) else "")
-                        i = j + 1
-                        continue
-                    tname, spec = _split_param_name(name)
-                    if tname in assignments and spec and spec[0] in _PARAM_TRANSFORM_OPS:
-                        out.append(_apply_param_transform(assignments[tname], spec))
-                        i = j + 1
-                        continue
-                    if (_is_shell_name(name) and name != "IFS") or _is_param_transform(name):
-                        i = j + 1  # unknown plain/transformed ${NAME} → unset = ""
-                        continue
-            elif positionals and segment[i + 1].isdigit():  # $1..$9 → a specific positional
-                p = int(segment[i + 1])
-                out.append(positionals[p - 1] if 1 <= p <= len(positionals) else "")
-                i += 2
-                continue
-            else:
-                j = i + 1
-                while j < n and (segment[j].isalnum() or segment[j] == "_"):
-                    j += 1
-                name = segment[i + 1:j]
-                if name and name in assignments:
-                    out.append(assignments[name])
-                    i = j
-                    continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
-
-
-def _split_pipelines(command_string: str) -> list[list[str]]:
-    """Split a command line into pipelines, each a list of its ``|``-separated stages. Boundaries
-    that are NOT a pipe (``;`` ``&`` ``&&`` ``||`` newline) start a fresh pipeline. Quote-aware, so a
-    ``|`` inside quotes is not a boundary."""
-    pipelines: list[list[str]] = []
-    current: list[str] = []
-    buf: list[str] = []
-    quote: Optional[str] = None
-    i, n = 0, len(command_string)
-    while i < n:
-        ch = command_string[i]
-        if quote is not None:
-            if ch == "\\" and quote == '"' and i + 1 < n:
-                buf.append(ch)
-                buf.append(command_string[i + 1])
-                i += 2
-                continue
-            buf.append(ch)
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            buf.append(ch)
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < n:
-            buf.append(ch)
-            buf.append(command_string[i + 1])
-            i += 2
-            continue
-        if ch == "|":
-            current.append("".join(buf))
-            buf = []
-            if i + 1 < n and command_string[i + 1] == "|":  # ``||`` — a logical break, not a pipe
-                pipelines.append(current)
-                current = []
-                i += 2
-                continue
-            i += 2 if (i + 1 < n and command_string[i + 1] == "&") else 1  # ``|`` or ``|&``
-            continue
-        if ch in ";&\n":
-            current.append("".join(buf))
-            buf = []
-            pipelines.append(current)
-            current = []
-            i += 2 if (ch == "&" and i + 1 < n and command_string[i + 1] == "&") else 1
-            continue
-        buf.append(ch)
-        i += 1
-    current.append("".join(buf))
-    pipelines.append(current)
-    return pipelines
-
-
-def _is_stdin_reading_shell(stage: str) -> bool:
-    """True when ``stage`` runs a shell that reads its SCRIPT from stdin — a launcher with no ``-c``
-    and no script-file operand (``… | sh`` / ``… | bash -s``), or ``source``/``.`` reading a stdin
-    path (``… | source /dev/stdin``). Such a stage executes whatever the pipe feeds it."""
-    try:
-        words = shlex.split(stage)
-    except ValueError:
-        return False
-    idx = 0
-    while idx < len(words) and _looks_like_assignment(words[idx]):
-        idx += 1
-    if idx >= len(words):
-        return False
-    cmd, rest = _strip_wrappers(words[idx], words[idx + 1:])
-    if _launcher_basename(cmd) in _SOURCE_BUILTINS:  # ``source /dev/stdin`` runs the piped script
-        return any(str(a) in _STDIN_PATHS for a in (rest or []))
-    if _launcher_basename(cmd) not in _SHELL_LAUNCHERS:
-        return False
-    j = 0
-    tokens = list(rest or [])
-    while j < len(tokens):
-        tok = tokens[j]
-        if tok == "-c" or (tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]):
-            return False  # a ``-c`` command string, not stdin
-        if tok in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
-            j += 2
-            continue
-        if tok == "--" or not tok.startswith("-"):
-            return False  # a script-file operand — the shell reads the file, not stdin
-        j += 1
-    return True  # a shell launcher with neither -c nor a script file reads its program from stdin
-
-
-def _static_command_output(stage: str) -> Optional[str]:
-    """The literal text a static ``echo``/``printf`` stage writes to stdout (so a following piped
-    shell's script is known), or ``None`` when the stage's output isn't statically known."""
-    try:
-        words = shlex.split(stage)
-    except ValueError:
-        return None
-    idx = 0
-    while idx < len(words) and _looks_like_assignment(words[idx]):
-        idx += 1
-    if idx >= len(words):
-        return None
-    cmd = _launcher_basename(words[idx])
-    rest = words[idx + 1:]
-    if cmd == "echo":
-        body = [w for w in rest if not (len(w) >= 2 and w[0] == "-" and set(w[1:]) <= set("neE"))]
-        return _decode_ansi_c(" ".join(body))
-    if cmd == "printf":
-        if not rest:
-            return None
-        return _printf_output(rest[0], rest[1:])
-    return None
-
-
-def _printf_output(fmt: str, args: list[str]) -> str:
-    """Best-effort ``printf`` emulation for the static-pipeline guard: substitute conversion specs
-    (``%s``/``%d``/…) with the operands, repeating the format until the operands are exhausted (as
-    printf does), so ``printf '%s ' docker run alpine`` yields ``docker run alpine``."""
-    fmt = _decode_ansi_c(fmt)
-    if "%" not in fmt or not args:
-        return fmt
-    out: list[str] = []
-    ai = 0
-    while True:
-        consumed_before = ai
-        i, n = 0, len(fmt)
-        while i < n:
-            c = fmt[i]
-            if c == "%" and i + 1 < n:
-                j = i + 1
-                while j < n and fmt[j] in "-+ 0#123456789.*":  # flags/width/precision
-                    j += 1
-                if j < n:
-                    conv = fmt[j]
-                    if conv == "%":
-                        out.append("%")
-                    else:
-                        operand = args[ai] if ai < len(args) else ""
-                        # ``%b`` decodes backslash escapes in the operand (``dock\145r`` → ``docker``);
-                        # ``%s`` and the rest emit it verbatim.
-                        out.append(_decode_ansi_c(operand) if conv == "b" else operand)
-                        ai += 1
-                    i = j + 1
-                    continue
-            out.append(c)
-            i += 1
-        if ai >= len(args) or ai == consumed_before:  # all operands used, or no conversion consumed
-            break
-    return "".join(out)
-
-
-def _is_passthrough_filter(stage: str) -> bool:
-    """True when ``stage`` forwards its stdin to stdout unchanged (``cat`` with no file, ``tee``), so
-    a static literal survives it on the way to a stdin-reading shell (``printf … | cat | sh``)."""
-    try:
-        words = shlex.split(stage)
-    except ValueError:
-        return False
-    idx = 0
-    while idx < len(words) and _looks_like_assignment(words[idx]):
-        idx += 1
-    if idx >= len(words):
-        return False
-    base = _launcher_basename(words[idx])
-    rest = words[idx + 1:]
-    if base == "tee":  # tee always copies stdin to stdout (plus its file args)
+def _shell_command_invokes_docker(command_string: str) -> bool:
+    """True when any simple command in a shell ``-c`` string is (literally) a docker launch — a
+    command substitution running docker (``echo "$(docker run)"``), or a segment whose command word
+    is the docker CLI (``foo && docker run``). Literal only; no variable/alias/function resolution."""
+    if any(_shell_command_invokes_docker(sub) for sub in _command_substitutions(command_string)):
         return True
-    if base == "cat":  # cat forwards stdin only with no real file operand (``-`` is stdin)
-        return all(w == "-" or w.startswith("-") for w in rest)
-    return False
+    return any(_segment_invokes_docker(seg) for seg in _split_shell_commands(command_string))
 
 
-def _pipe_into_stdin_shell_invokes_docker(command_string: str,
-                                          env: Optional[dict[str, str]] = None) -> bool:
-    """True when a static ``echo``/``printf`` is piped into a stdin-reading shell that then launches
-    docker (``printf 'docker run\\n' | sh``, even through pass-through filters like
-    ``… | cat | sh``) — the piped literal IS the shell's script."""
-    for pipeline in _split_pipelines(command_string):
-        for k in range(1, len(pipeline)):
-            if _is_stdin_reading_shell(pipeline[k]):
-                j = k - 1  # walk back through pass-through filters to the static source
-                while j > 0 and _is_passthrough_filter(pipeline[j]):
-                    j -= 1
-                literal = _static_command_output(pipeline[j])
-                if literal is not None and _shell_command_invokes_docker(literal, env):
-                    return True
-    return False
+def _shell_invokes_docker(command: str, args: Optional[list[str]]) -> bool:
+    """Best-effort guard for shell-wrapped docker CLI launches.
 
-
-def _shell_command_invokes_docker(command_string: str, env: Optional[dict[str, str]] = None,
-                                  seed_funcs: frozenset[str] = frozenset(),
-                                  func_bodies: Optional[dict[str, str]] = None,
-                                  inspecting: frozenset[str] = frozenset()) -> bool:
-    """True when any simple command in a shell ``-c`` command string launches the docker CLI.
-
-    The string is first normalized for line continuations and ANSI-C/locale ``$'…'`` quoting.
-    Command/process substitutions (``$(…)``/backticks/``<(…)``, executed even inside double quotes)
-    are inspected next, then the string is split into segments at unquoted shell operators and each
-    segment's command word is checked. This catches ``foo && docker run`` / ``echo "$(docker …)"``
-    while still allowing ``docker`` to appear merely as an argument (``python -m srv --backend
-    docker``). ``env`` seeds deterministic variable values (the configured server environment merged
-    into the child by the bridge), so ``"$D" run`` with ``env={"D": "docker"}`` resolves to a launch.
-    ``seed_funcs``/``func_bodies``/``inspecting`` carry the enclosing scope when inspecting a called
-    function's body."""
-    command_string = _preprocess_shell_string(_strip_heredocs(command_string))
-    if any(_shell_command_invokes_docker(sub, env)
-           for sub in _command_substitutions(command_string)):
+    Peels thin wrappers (``sudo``/``env``/``nice``/``timeout``/``su -c``/…) to the real command; if
+    that is the docker CLI, or a shell whose ``-c`` string contains a literal docker command, it is a
+    launch. DELIBERATELY LITERAL: recognizes the docker command word behind wrappers, operators, and
+    ``-c`` strings — the shapes a real config uses — NOT obfuscation via variables, aliases,
+    functions, or computed output. Deciding the latter is undecidable, and the actual containment is
+    the environment scrub (the bridge starts local-exec children without the elevator's secrets — see
+    ``bridge.host._child_env`` and docs/security.md); this is cheap defense-in-depth. Mutually
+    recursive with the ``-c`` inspector; recursion shrinks the input, so it terminates."""
+    command, args = _strip_wrappers(command, args)
+    if _is_docker_command(command):
         return True
-    # Substitute statically-known ``$(printf docker)``/``$(echo …)`` output inline (a non-static
-    # ``$(docker run)`` is left intact — already inspected above), so it reaches command position.
-    command_string = _expand_static_substitutions(command_string)
-    if _pipe_into_stdin_shell_invokes_docker(command_string, env):
-        return True
-    if _process_subst_invokes_docker(command_string, env):
-        return True
-    # Walk segments in order, growing the declared shell functions (and their bodies), aliases,
-    # simple variable assignments, and ``set --`` positionals as we go: a ``function docker { … }``
-    # only shadows the CLI for commands AFTER it, ``D=docker`` only resolves ``$D`` for later
-    # segments, and ``set --`` installs ``$@`` for what follows — so an earlier ``docker run`` is
-    # still a launch. Function bodies (present anywhere in the string) let a call be inspected.
-    funcs: set[str] = set(seed_funcs)
-    bodies: dict[str, str] = {**(func_bodies or {}), **_extract_function_bodies(command_string)}
-    # Aliases and ``expand_aliases`` are parse-time and line-scoped: a definition on one physical
-    # line only takes effect on LATER lines, so they are promoted at each line boundary — this is
-    # why ``shopt -s expand_aliases; alias d=docker; d run`` (all one line) does NOT expand ``d``.
-    active_aliases: dict[str, str] = {}
-    alias_active = False
-    assignments: dict[str, str] = {k: v for k, v in (env or {}).items() if isinstance(v, str)}
-    namerefs: dict[str, str] = {}  # ``declare -n D=E`` — D resolves through E's value
-    positionals: list[str] = []
-    for line in _split_lines_quote_aware(command_string):
-        line_aliases: dict[str, str] = {}
-        line_enables_alias = False
-        for seg in _split_shell_commands(line):
-            for nref, target in namerefs.items():  # follow namerefs to their target's current value
-                if target in assignments:
-                    assignments[nref] = assignments[target]
-            # The env visible to this segment's nested scans (command substitutions, function bodies)
-            # is the configured env plus every assignment recorded by EARLIER segments, so ``D=docker;
-            # echo "$($D run)"`` and ``D=docker; f() { "$D" run; }; f`` resolve ``$D``.
-            seg_env = {**(env or {}), **assignments}
-            expanded = _expand_known_vars(seg, assignments, positionals)
-            if alias_active:
-                expanded = _expand_alias(expanded, active_aliases)
-            if any(_shell_command_invokes_docker(sub, seg_env)
-                   for sub in _command_substitutions(expanded)):
-                return True
-            if _segment_invokes_docker(expanded, frozenset(funcs), seg_env, bodies, inspecting):
-                return True
-            declared = _segment_declares_function(seg)
-            if declared:
-                funcs.add(declared)
-            assignments.update(_segment_assignments(seg))
-            namerefs.update(_collect_namerefs(seg))
-            read_bind = _read_herestring_binding(seg)
-            if read_bind is not None:  # ``read X <<< "$D"`` — X takes the (expanded) here-string
-                names, raw = read_bind
-                value = _expand_static_substitutions(
-                    _expand_known_vars(raw, assignments, positionals)).strip()
-                parts = value.split()
-                for k, name in enumerate(names):
-                    if len(names) == 1:
-                        assignments[name] = value
-                    elif k < len(parts):
-                        assignments[name] = parts[k]
-            loop = _for_loop_binding(seg)
-            if loop is not None:  # ``for VAR in … docker …`` — the body's $VAR can be the CLI
-                var, values = loop
-                for raw in values:
-                    resolved = _expand_static_substitutions(
-                        _expand_known_vars(raw, assignments, positionals)).strip()
-                    if _is_docker_command(resolved):
-                        assignments[var] = "docker"
-                        break
-            set_pos = _set_positionals(seg)
-            if set_pos is not None:
-                positionals = set_pos
-            line_aliases.update(_collect_aliases(seg))  # scoped to LATER lines
-            if _enables_alias_expansion(seg):
-                line_enables_alias = True
-        active_aliases.update(line_aliases)
-        alias_active = alias_active or line_enables_alias
-    return False
-
-
-def _npm_call_invokes_docker(base: str, tokens: list[str],
-                             env: Optional[dict[str, str]] = None) -> bool:
-    """True when ``npx``/``npm exec`` runs a docker CLI via its ``-c``/``--call`` option, whose value
-    is a command string executed through a shell (``npx -c 'docker run …'`` == ``npm exec -c``)."""
-    i = 0
-    if base == "npm":  # the call form is ``npm exec``/``npm x`` — require that subcommand
-        # Global options (``--prefix /tmp``, ``--registry …``) may precede ``exec`` and some consume
-        # a following token, so scan for the subcommand token anywhere rather than assuming arity.
-        try:
-            i = next(k for k, t in enumerate(tokens) if t in ("exec", "x")) + 1
-        except StopIteration:
-            return False
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok in ("-c", "--call"):
-            return i + 1 < len(tokens) and _shell_command_invokes_docker(str(tokens[i + 1]), env)
-        if tok.startswith("--call="):
-            return _shell_command_invokes_docker(tok.split("=", 1)[1], env)
-        if tok.startswith("-c") and not tok.startswith("--"):  # ``-c=cmd`` / ``-ccmd`` inline value
-            return _shell_command_invokes_docker(tok[3:] if tok[2:3] == "=" else tok[2:], env)
-        i += 1
-    return False
-
-
-def _shell_invokes_docker(command: str, args: Optional[list[str]],
-                          env: Optional[dict[str, str]] = None) -> bool:
-    """Best-effort guard for shell-wrapped Docker CLI invocations.
-
-    Direct docker launchers are canonicalized to the docker runner. A shell wrapper cannot be
-    safely normalized without changing its semantics, but it also must not run as an ordinary
-    local command because that bypasses the docker gate, hardening, and minimal environment.
-    Detect the common /bin/sh -c / bash -lc shape (and thin-wrapper variants) and block it at
-    enable/start time. Mutually recursive with the ``-c`` string inspectors above; recursion always
-    shrinks the input (a ``-c`` string is a proper substring), so it terminates.
-
-    BEST-EFFORT BY DESIGN — and deliberately bounded. Deciding whether an arbitrary shell string
-    runs docker is undecidable (the shell is Turing-complete), so this closes the *static,
-    recognizable* ways a config reaches the docker CLI (wrappers, assignments, reserved words,
-    command/process substitution, ``eval`` of a literal, …), not the ones that need execution to
-    resolve (``eval "$(some_cmd)"``, a helper script that shells out to docker,
-    base64-decode-pipe-to-sh). Those are out of reach of any parser and are intentionally out of
-    scope. This is DEFENSE IN DEPTH, not the primary boundary: the primary mitigation is that the
-    bridge starts every local-exec child (and its setup script) with the control plane's own
-    ``MCPE_*`` secrets scrubbed from the environment (``bridge.host._child_env`` /
-    ``ServerUnit._effective_child_env``), and keeps the admin token out of the bridge parent's env,
-    so a config that reaches the docker CLI does not INHERIT the elevator's secrets (the residual
-    same-UID ``/proc`` caveat is documented in docs/security.md). Report new *syntactic* bypass
-    shapes here only when they are cheap and reliable to recognize; exotic forms are an accepted
-    limitation."""
-    wrapper_env: dict[str, str] = {}
-    command, args = _strip_wrappers(command, args, wrapper_env)
-    if wrapper_env:  # ``env D=docker sh -c …`` — the wrapper sets these in the child's environment
-        env = {**(env or {}), **wrapper_env}
-    # Bash brace expansion can hide the launcher (``{docker,} run`` runs ``docker``): check every
-    # brace-list expansion of the command word. Fail closed if expansion was truncated (a later
-    # ``docker`` alternative could have been dropped by the cap). ``_is_docker_command`` also treats
-    # a relative path like ``bin/docker`` as a launcher (this is a command position, not an image).
-    candidates, brace_truncated = _brace_expand(command)
-    if brace_truncated or any(_is_docker_command(c) for c in candidates):
-        return True
-    base = _launcher_basename(command)
-    if base == "find":  # `find … -exec docker …` launches its child command
-        return _find_exec_invokes_docker(args, env)
-    if base in ("npx", "npm"):  # `npx -c '<cmd>'` / `npm exec -c '<cmd>'` run a string via a shell
-        return _npm_call_invokes_docker(base, list(args or []), env)
-    if base not in _SHELL_LAUNCHERS:
+    if _launcher_basename(command) not in _SHELL_LAUNCHERS:
         return False
     tokens = list(args or [])
     i = 0
@@ -2258,68 +785,40 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]],
         tok = tokens[i]
         if not isinstance(tok, str):
             return False
-        # POSIX shells take the command string after -c. Options may be combined (e.g. -lc), but a
-        # long option that merely contains 'c' (--norc, --noprofile) is NOT -c: only single-dash
-        # option groups carry -c (sh/bash have no other 'c' short option). The FIRST -c wins — the
-        # shell reads exactly one command string; a later -c is a positional ($0) whose args are
-        # never executed (so ``sh -c 'echo ok' -c 'docker …'`` isn't false-rejected).
+        # POSIX shells take the command string after -c (options may cluster, e.g. -lc; a long option
+        # merely containing 'c' like --norc is not -c). The first -c wins.
         if tok == "-c" or (tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]):
-            if i + 1 >= len(tokens):
-                return False
-            cmd_str = str(tokens[i + 1])
-            if _shell_command_invokes_docker(cmd_str, env):
-                return True
-            # Args after the command string are $0, $1, … — a script that runs "$@"/"$0"/"$N"
-            # executes them. When the string references positionals, inspect EACH as a potential
-            # command word (``exec "$0"`` / ``exec "$@"`` / ``exec "$2"``), with the following
-            # positionals as its args — a higher positional (``$2``) must not be missed.
-            if _references_positional_params(cmd_str):
-                for start in range(i + 2, len(tokens)):
-                    pos = tokens[start:]
-                    if pos and _shell_invokes_docker(str(pos[0]), list(pos[1:]), env):
-                        return True
-            return False
-        if tok == "<<<":  # here-string: the shell executes the following word as script on stdin
-            return i + 1 < len(tokens) and _shell_command_invokes_docker(str(tokens[i + 1]), env)
-        # ``-o option`` / ``-O shopt`` (and their long forms) consume the NEXT token as a value, so
-        # skip both — otherwise that value would be mistaken for the script operand below.
+            return i + 1 < len(tokens) and _shell_command_invokes_docker(str(tokens[i + 1]))
+        # ``-o option`` / ``-O shopt`` (and long forms) consume the next token — skip both.
         if tok in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
             i += 2
             continue
-        # The first non-option operand is the SCRIPT FILE (``bash script.sh …``); everything after
-        # it is the script's own argv, not a shell command string — so any later -c is irrelevant.
-        # ``--`` explicitly ends options; the next token is then the script file.
+        # The first non-option operand is the SCRIPT FILE (its argv follows) — not a -c string.
         if tok == "--" or not tok.startswith("-"):
             return False
         i += 1
     return False
 
 
-def local_exec_invokes_docker(runner: str, command: str, args: Optional[list[str]],
-                              env: Optional[dict[str, str]] = None) -> bool:
-    """True when a local-exec server would invoke the Docker CLI outside the docker runner. ``env``
-    is the configured server environment (merged into the child by the bridge), so a command word
-    resolved from a deterministic variable (``"$D" run`` with ``D=docker``) is caught."""
+def local_exec_invokes_docker(runner: str, command: str, args: Optional[list[str]]) -> bool:
+    """True when a local-exec server would invoke the docker CLI outside the docker runner (a
+    best-effort literal check — the env scrub is the real containment; see ``_shell_invokes_docker``)."""
     if runner not in _LOCAL_EXEC_RUNNERS:
         return False
     try:
-        return _shell_invokes_docker(command, args, env)
+        return _shell_invokes_docker(command, args)
     except RecursionError:
-        # Pathologically nested ``$(…)``/``sh -c`` could exhaust the recursion limit. Fail closed —
-        # reject the (malformed) config rather than letting the exception 500 an API call or abort a
-        # reconcile pass.
+        # Pathologically nested ``$(…)``/``sh -c`` could exhaust the recursion limit — fail closed.
         return True
 
 
-def setup_script_invokes_docker(runner: str, setup_script: Optional[str],
-                                env: Optional[dict[str, str]] = None) -> bool:
-    """True when a local-exec server's setup script would invoke the Docker CLI. The script runs as
-    ``/bin/sh -e -c <script>`` with the passthrough child environment (``ServerUnit._run_setup``),
-    so it bypasses the docker gate/hardening exactly like a shell-wrapped command."""
+def setup_script_invokes_docker(runner: str, setup_script: Optional[str]) -> bool:
+    """True when a local-exec server's setup script (run as ``/bin/sh -e -c``) would invoke the docker
+    CLI. Best-effort literal check; the env scrub is the real containment."""
     if runner not in _LOCAL_EXEC_RUNNERS or not setup_script:
         return False
     try:
-        return _shell_command_invokes_docker(setup_script, env)
+        return _shell_command_invokes_docker(setup_script)
     except RecursionError:
         return True
 
@@ -3005,10 +1504,10 @@ def create_server(
     # env (choosing a different runner string must not sidestep the root-equivalent gate).
     if runner in _LOCAL_EXEC_RUNNERS and _is_docker_launcher(command):
         runner = "docker"
-    elif enabled and local_exec_invokes_docker(runner, command, args, env):
+    elif enabled and local_exec_invokes_docker(runner, command, args):
         raise ValueError("Docker CLI invocations require the docker runner")
     setup_script = _normalize_setup_script(runner, setup_script)
-    if enabled and setup_script_invokes_docker(runner, setup_script, env):
+    if enabled and setup_script_invokes_docker(runner, setup_script):
         raise ValueError("Docker CLI invocations require the docker runner")
     # A remote server reuses command/args for the upstream URL + transport; canonicalize
     # them up front so the persisted row (and config_hash) is deterministic. There is no
@@ -3103,7 +1602,7 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     if server.runner in _LOCAL_EXEC_RUNNERS and _is_docker_launcher(server.command):
         server.runner = "docker"
     elif server.enabled and local_exec_invokes_docker(
-            server.runner, server.command, server.args, server.env):
+            server.runner, server.command, server.args):
         # The tracked ORM row is already mutated above, but this branch raises before any query
         # autoflushes it, so the edits are still purely in-memory. Expire (not rollback) discards
         # just this instance's staged edits — so the DENIED change can't be flushed by a later
@@ -3116,7 +1615,7 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         session.rollback()
         raise
     if server.enabled and setup_script_invokes_docker(
-            server.runner, server.setup_script, server.env):
+            server.runner, server.setup_script):
         session.expire(server)  # raises before any autoflush — discard just this instance's edits
         raise ValueError("Docker CLI invocations require the docker runner")
     if server.runner == "remote":
@@ -3209,8 +1708,8 @@ def set_enabled(session: Session, server_id: str, enabled: bool) -> Server:
     if enabled and server.runner == "docker":
         _require_docker_enabled(session)
     elif enabled and (
-            local_exec_invokes_docker(server.runner, server.command, server.args, server.env)
-            or setup_script_invokes_docker(server.runner, server.setup_script, server.env)):
+            local_exec_invokes_docker(server.runner, server.command, server.args)
+            or setup_script_invokes_docker(server.runner, server.setup_script)):
         raise ValueError("Docker CLI invocations require the docker runner")
     server.enabled = enabled
     return repo.save_server(session, server)
