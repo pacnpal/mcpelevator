@@ -751,6 +751,10 @@ def _segment_invokes_docker(segment: str) -> bool:
         return False
     if _declared_function_name(words, idx) is not None:
         return False  # a ``function NAME`` / ``NAME () { … }`` declaration — not a launch
+    if words[idx] == "eval":
+        # ``eval`` re-parses its (space-joined) operands as a fresh shell command line, so the
+        # literal ``eval "docker run …"`` launches docker without ever peeling a wrapper or shell.
+        return _shell_command_invokes_docker(" ".join(words[idx + 1:]))
     return _shell_invokes_docker(words[idx], words[idx + 1:])
 
 

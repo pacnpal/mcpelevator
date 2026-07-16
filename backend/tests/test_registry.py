@@ -824,6 +824,8 @@ def test_top_level_wrapper_docker_rejected(session, command, args):
         "sudo FOO=bar docker run alpine",          # sudo assignment inside -c
         'echo "$(docker run alpine)"',             # command substitution inside double quotes
         "echo `docker run alpine`",                # backtick substitution
+        'eval "docker run alpine"',                # eval re-parses its operand as a command line
+        "eval docker run alpine",                  # ...even unquoted, joined back into one line
     ],
 )
 def test_shell_wrapped_docker_control_syntax_rejected(session, inner):
