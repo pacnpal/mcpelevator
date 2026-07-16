@@ -656,14 +656,22 @@ def test_shell_wrapped_docker_via_norc_before_c_rejected(session):
     [
         "sudo docker run alpine",
         "sudo -u root docker run alpine",  # -u consumes its value; docker is still the command
+        "sudo -n docker run alpine",       # sudo -n (--non-interactive) is a boolean, not a value
         "env -u PATH docker run alpine",
-        "nice -n 10 docker run alpine",
+        "nice -n 10 docker run alpine",    # nice -n IS value-taking
         "exec docker run alpine",
-        "foo && docker run alpine",  # docker in a command position after a shell operator
+        "foo && docker run alpine",        # docker in a command position after a shell operator
+        "true&&docker run alpine",         # ...even glued to the operator with no spaces
+        "echo x;docker run alpine",
+        "foo | docker run alpine",
+        "$(docker run alpine)",            # command substitution
+        "env -S 'docker run alpine'",      # env -S split-string bearing the command
+        "env -S 'bash -c \"docker run alpine\"'",
     ],
 )
 def test_shell_wrapped_docker_via_wrapper_options_rejected(session, inner):
-    """Thin wrappers (sudo/env/nice/…) with option flags before ``docker`` must not slip the guard."""
+    """Thin wrappers (sudo/env/nice/…), glued operators, command substitution, and env -S must not
+    slip the guard."""
     with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
         service.create_server(
             session,
@@ -673,6 +681,38 @@ def test_shell_wrapped_docker_via_wrapper_options_rejected(session, inner):
             args=["-c", inner],
             enabled=True,
         )
+
+
+@pytest.mark.parametrize(
+    "command, args",
+    [
+        ("sudo", ["docker", "run", "alpine"]),          # a bare thin wrapper as the command
+        ("nice", ["-n", "10", "docker", "run"]),        # ...with a value-taking option
+        ("/usr/bin/env", ["-S", "docker run alpine"]),  # env -S at the top level
+        ("/usr/bin/env", ["bash", "-c", "docker run"]),
+    ],
+)
+def test_top_level_wrapper_docker_rejected(session, command, args):
+    """A docker CLI fronted by a thin wrapper as the stored command (not inside ``-c``) is still a
+    docker launch and must be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="top-wrap", runner="command", command=command, args=args, enabled=True
+        )
+
+
+def test_shell_wrapped_docker_second_c_positional_allowed(session):
+    """Only the FIRST ``-c`` supplies the shell command; a later ``-c`` is ``$0`` and its args never
+    run, so a docker string there must not trigger a false rejection."""
+    s = service.create_server(
+        session,
+        name="second-c",
+        runner="command",
+        command="/bin/sh",
+        args=["-c", "echo ok", "-c", "docker run alpine"],
+        enabled=True,
+    )
+    assert s.enabled is True
 
 
 def test_docker_enable_allowed_when_setting_on(session):
