@@ -224,7 +224,8 @@ def _brace_expand(word: str, _depth: int = 0) -> tuple[list[str], bool]:
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "builtin",
-                       "nice", "timeout", "xargs", "stdbuf", "flock", "chroot", "runuser", "su"}
+                       "nice", "timeout", "xargs", "stdbuf", "flock", "chroot", "runuser", "su",
+                       "watch"}
 
 # Wrappers whose run form accepts leading ``NAME=VALUE`` assignments before the command.
 _WRAPPERS_ACCEPTING_ASSIGNMENTS = {"env", "sudo", "doas"}
@@ -273,6 +274,7 @@ _WRAPPER_VALUE_LONG = {
     "chroot": {"--userspec", "--groups"},
     "runuser": {"--user", "--group", "--supp-group", "--shell", "--session-command", "--login"},
     "su": {"--group", "--supp-group", "--shell", "--session-command"},
+    "watch": {"--interval"},
 }
 _WRAPPER_VALUE_SHORT = {
     "sudo": set("ugpChrtURTD"),
@@ -287,6 +289,7 @@ _WRAPPER_VALUE_SHORT = {
     "flock": set("wE"),    # -w timeout, -E exit-code
     "runuser": set("ugGs"),  # -u user, -g group, -G supp-group, -s shell (-c handled specially)
     "su": set("gGs"),        # su takes the user as a positional, not -u
+    "watch": set("n"),       # -n interval
 }
 
 # Wrappers whose ``-c``/``--command`` option runs its value through a shell (inspect it as script).
@@ -417,9 +420,12 @@ def _line_feeds_shell(line: str) -> bool:
         words = shlex.split(head)
     except ValueError:
         words = head.split()
-    if not words:
+    idx = 0
+    while idx < len(words) and _looks_like_assignment(words[idx]):  # leading FOO=bar assignments
+        idx += 1
+    if idx >= len(words):
         return False
-    cmd, _ = _strip_wrappers(words[0], words[1:])
+    cmd, _ = _strip_wrappers(words[idx], words[idx + 1:])
     return _launcher_basename(cmd) in _SHELL_LAUNCHERS
 
 
@@ -541,6 +547,18 @@ def _decode_ansi_c(body: str) -> str:
     return "".join(out)
 
 
+def _param_expansion_default(inner: str) -> str:
+    """For a ``${…}`` body, return the word a default/alternate operator would substitute
+    (``VAR:-docker`` → ``docker``), or ``""`` when there is no such operator (plain ``${VAR}``) or it
+    is an error form (``:?``). A script that unsets the var guarantees the default, so this word is a
+    candidate command position."""
+    for op in (":-", ":=", ":+", "-", "=", "+"):
+        idx = inner.find(op)
+        if idx > 0:  # operator must come after a (non-empty) parameter name
+            return inner[idx + len(op):]
+    return ""
+
+
 def _preprocess_shell_string(command_string: str) -> str:
     """Apply shell pre-tokenization rewrites the parser can't see through otherwise, quote-aware:
 
@@ -610,12 +628,34 @@ def _preprocess_shell_string(command_string: str) -> str:
                 at_boundary = True
             i = end
             continue
-        if command_string.startswith("$IFS", i) or command_string.startswith("${IFS}", i):
-            # ``$IFS`` field-splits: ``docker$IFS run`` executes ``docker run``. Substitute a space
-            # (its default) so the command word and args separate.
+        if command_string.startswith("$IFS", i) and (
+                i + 4 >= n or not (command_string[i + 4].isalnum() or command_string[i + 4] == "_")):
+            # bare ``$IFS`` field-splits: ``docker$IFS run`` executes ``docker run`` — emit a space.
             out.append(" ")
             at_boundary = True
-            i += 6 if command_string.startswith("${IFS}", i) else 4
+            i += 4
+            continue
+        if command_string.startswith("${", i):
+            # ``${…}`` parameter expansion: emit a default/alternate word (``${VAR:-docker}`` →
+            # ``docker``) so the guaranteed-default command position is seen; ``${IFS}`` / an unknown
+            # ``${VAR}`` become a separator.
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if command_string[j] == "{":
+                    depth += 1
+                elif command_string[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            default = _param_expansion_default(command_string[i + 2:j])
+            if default:
+                out.append(default)
+                at_boundary = False
+            else:
+                out.append(" ")
+                at_boundary = True
+            i = j + 1
             continue
         if ch == "$" and i + 1 < n and command_string[i + 1] == "'":
             # bash ANSI-C quoting: read to the closing ', decode escapes, and re-emit shell-safe

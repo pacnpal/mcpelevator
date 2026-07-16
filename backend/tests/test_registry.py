@@ -1355,6 +1355,36 @@ def test_quoted_positional_and_relative_nondocker_allowed(session, args):
     assert s.enabled is True
 
 
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        ("watch", ["docker", "run", "alpine"], None),           # watch COMMAND (via sh -c)
+        ("watch", ["-n", "5", "docker", "run"], None),          # ...with a value option
+        (None, None, "FOO=bar sh <<'EOF'\ndocker run alpine\nEOF"),  # heredoc + leading assignment
+        (None, None, "${VAR:-docker} run alpine"),              # parameter-default expansion
+        (None, None, "${VAR-docker} run alpine"),
+    ],
+)
+def test_watch_heredoc_assignment_and_param_default_rejected(session, command, args, inner):
+    """The watch wrapper, a heredoc receiver behind a leading assignment, and a ``${VAR:-docker}``
+    default expansion must all be gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="watch-pd", runner="command", command=command, args=args, enabled=True
+        )
+
+
+def test_param_default_non_docker_allowed(session):
+    """A ``${VAR:-python}`` default that isn't docker must not be rejected."""
+    s = service.create_server(
+        session, name="pd-ok", runner="command", command="/bin/sh",
+        args=["-c", "${VAR:-python} -m srv"], enabled=True,
+    )
+    assert s.enabled is True
+
+
 def test_deeply_nested_shell_command_fails_closed_without_error(session):
     """Pathologically nested ``$(…)`` must not raise (RecursionError) out of the guard; it fails
     closed and rejects the malformed config instead of 500-ing the create path."""
