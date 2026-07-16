@@ -1209,6 +1209,116 @@ def test_find_non_docker_allowed(session, command, args):
     assert s.enabled is True
 
 
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "{" + ("," * 70) + "docker} run alpine",     # brace expansion truncates -> fail closed
+        "docker run alpine; function docker { :; }",  # real launch BEFORE a later shadow decl
+        "bash <<EOF\ndocker run alpine\nEOF",         # heredoc body fed to a shell IS a script
+        "bash <<'EOF'\ndocker run alpine\nEOF",       # ...even with a quoted delimiter
+        "bash <<< \"docker run alpine\"",             # here-string fed to a shell
+    ],
+)
+def test_brace_truncation_function_order_and_shell_stdin_rejected(session, inner):
+    """A brace expansion that truncates (fail closed), a docker launch preceding a later shadowing
+    ``function`` declaration, and heredoc/here-string bodies fed to a shell must all be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="brace-fn-stdin", runner="command", command="/bin/sh",
+            args=["-c", inner], enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "function docker { :; }; docker run alpine",  # later call resolves to the function
+        "cat <<EOF\ndocker run alpine\nEOF",           # heredoc body fed to cat is data
+        "cat <<< docker",                              # here-string fed to cat is data
+    ],
+)
+def test_function_shadow_and_non_shell_stdin_allowed(session, inner):
+    """A call to a previously-defined ``docker`` function, and heredoc/here-string bodies fed to a
+    NON-shell (cat), are not docker launches and must not be rejected."""
+    s = service.create_server(
+        session, name="fn-stdin-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("/usr/bin/rbash", ["-c", "docker run alpine"]),      # restricted bash still honors -c
+        ("chroot", ["/", "docker", "run", "alpine"]),         # chroot NEWROOT COMMAND
+        ("chroot", ["--userspec", "x", "/", "docker", "run"]),
+    ],
+)
+def test_rbash_and_chroot_rejected(session, command, args):
+    """rbash's -c command string and chroot's child command must be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="rbash-chroot", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-c", 'exec "$@"', "ignored", "docker", "run", "alpine"],  # $@ = $1… runs docker
+        ["-c", 'exec "$0"', "docker", "run", "alpine"],             # $0 runs docker
+    ],
+)
+def test_shell_positional_params_rejected(session, args):
+    """Positional args after a `-c` string that references ``$@``/``$0`` are executable, not inert."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="posparam", runner="command", command="/bin/sh", args=args, enabled=True
+        )
+
+
+def test_positionals_without_param_reference_allowed(session):
+    """Positional args that the `-c` script never references are inert and must not be rejected."""
+    s = service.create_server(
+        session, name="pos-ok", runner="command", command="/bin/sh",
+        args=["-c", "echo hi", "x", "docker", "run"], enabled=True,
+    )
+    assert s.enabled is True
+
+
+def test_setup_script_invoking_docker_rejected(session):
+    """A setup script runs as ``/bin/sh -e -c`` with the passthrough env, so a docker invocation in
+    it must be gated on create, update, and enable — not just in command/args."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="ss1", runner="command", command="echo", args=["hi"],
+            setup_script="docker run alpine", enabled=True,
+        )
+    # create disabled, then enable → still gated
+    s = service.create_server(
+        session, name="ss2", runner="command", command="echo", args=["hi"],
+        setup_script="docker run alpine", enabled=False,
+    )
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.set_enabled(session, s.id, True)
+    # update an enabled server's setup_script to a docker invocation → gated
+    s2 = service.create_server(
+        session, name="ss3", runner="command", command="echo", args=["hi"], enabled=True,
+    )
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.update_server(session, s2.id, {"setup_script": "docker run alpine"})
+
+
+def test_setup_script_without_docker_allowed(session):
+    s = service.create_server(
+        session, name="ss-ok", runner="command", command="echo", args=["hi"],
+        setup_script="pip install -r requirements.txt", enabled=True,
+    )
+    assert s.enabled is True
+
+
 def test_deeply_nested_shell_command_fails_closed_without_error(session):
     """Pathologically nested ``$(…)`` must not raise (RecursionError) out of the guard; it fails
     closed and rejects the malformed config instead of 500-ing the create path."""

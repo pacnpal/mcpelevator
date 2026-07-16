@@ -86,9 +86,22 @@ async def test_reconcile_forbids_shell_wrapped_docker_when_runner_disabled():
         )
 
     sup = Supervisor()
+    # Seed a running unit (as if the row had been started before the gate applied) so reconcile
+    # exercises the stop-and-fail path, not just the never-started path.
+    stopped: list[str] = []
+
+    class _StoppableUnit(SimpleNamespace):
+        async def stop(self):
+            stopped.append(sid)
+
+    sup.units[sid] = _StoppableUnit(slug="wrapped-off", config_hash="x", state="running",
+                                    pid=1, port=1, last_error=None, tools=[])
+    sup.request_activation(sid)
     try:
         await sup.reconcile_once()
-        assert sid not in sup.units  # never started
+        assert stopped == [sid]                       # the running unit was stopped
+        assert sid not in sup.units                   # ...and removed
+        assert sup.activation_requested_at(sid) is None  # its activation request was cancelled
         with Session(get_engine()) as session:
             rt = repo.get_runtime(session, sid)
         assert rt is not None
