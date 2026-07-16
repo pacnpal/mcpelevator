@@ -1468,6 +1468,88 @@ def test_ionice_sudo_shell_and_variable_non_docker_allowed(session, command, arg
 
 
 @pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``taskset MASK COMMAND`` (leading affinity mask) and ``taskset -c LIST COMMAND``.
+        ("taskset", ["0xff", "docker", "run", "alpine"], None),
+        ("taskset", ["-c", "0-3", "docker", "run"], None),
+        # ``npx``/``npm exec`` ``-c``/``--call`` run a command string through a shell.
+        ("npx", ["-c", "docker run alpine"], None),
+        ("npx", ["--call", "docker run"], None),
+        ("npm", ["exec", "-c", "docker run"], None),
+        # ``export``/``declare`` persist an assignment that a later ``$D`` command word resolves.
+        (None, None, 'export D=docker; "$D" run alpine'),
+        (None, None, "declare D=docker; $D run alpine"),
+        # A braced ``${D}`` command word resolves from a prior assignment (preprocessing preserves it).
+        (None, None, "D=docker; ${D} run alpine"),
+        # A ``-c`` payload that execs a higher positional (``$2``) whose value is docker.
+        (None, None, None),  # handled specially below (needs positional argv)
+        # ``source``/``.`` executing a ``<<<`` here-string from stdin as script.
+        (None, None, "source /dev/stdin <<< 'docker run alpine'"),
+        (None, None, ". /dev/stdin <<< 'docker run'"),
+    ],
+)
+def test_taskset_npx_call_export_and_stdin_herestring_rejected(session, command, args, inner):
+    """``taskset``/``npx -c``/``npm exec -c`` launchers, ``export``/``declare`` that persist a docker
+    variable, a braced ``${D}`` resolved from an assignment, and a ``<<<`` here-string sourced from
+    stdin must all be gated."""
+    if command is None and args is None and inner is None:
+        command, args = "/bin/sh", ["-c", 'exec "$2" run alpine', "ignored", "python", "docker"]
+    elif inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="taskset-npx-src", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+def test_env_resolved_docker_command_word_rejected(session):
+    """A command word resolved from the configured server environment (merged into the child by the
+    bridge) reaches the docker CLI, so it must be gated — on create, enable, and update."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="envvar1", runner="command", command="/bin/sh",
+            args=["-c", '"$D" run alpine'], env={"D": "docker"}, enabled=True,
+        )
+    # create disabled, then enable → still gated (env carries the deterministic value)
+    s = service.create_server(
+        session, name="envvar2", runner="command", command="/bin/sh",
+        args=["-c", '"$D" run alpine'], env={"D": "docker"}, enabled=False,
+    )
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.set_enabled(session, s.id, True)
+    # update an enabled server's env to introduce the docker value → gated
+    s2 = service.create_server(
+        session, name="envvar3", runner="command", command="/bin/sh",
+        args=["-c", '"$D" run alpine'], env={"D": "python"}, enabled=True,
+    )
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.update_server(session, s2.id, {"env": {"D": "docker"}})
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner", "env"),
+    [
+        ("taskset", ["0x1", "python", "-m", "srv"], None, None),   # taskset wrapping non-docker
+        ("npx", ["-y", "@scope/pkg"], None, None),                 # ordinary npx (no -c)
+        ("npx", ["-c", "echo hi"], None, None),                    # npx -c non-docker
+        (None, None, "export D=python; $D -m srv", None),          # export non-docker
+        (None, None, "${D} -m srv", {"D": "python"}),              # env-resolved non-docker
+    ],
+)
+def test_taskset_npx_export_and_env_non_docker_allowed(session, command, args, inner, env):
+    """The new launchers/resolvers wrapping a NON-docker command must not be rejected."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    s = service.create_server(
+        session, name="new-launchers-ok", runner="command", command=command, args=args,
+        env=env or {}, enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
     "inner",
     [
         "docker() { printf fake; }; docker run alpine",   # POSIX definition shadows the later call

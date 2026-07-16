@@ -144,6 +144,38 @@ async def test_reconcile_forbids_shell_wrapped_docker_even_when_runner_enabled()
             repo.delete_server(session, sid)
 
 
+async def test_reconcile_forbids_setup_script_docker_when_runner_enabled():
+    """A benign command with a ``setup_script`` that invokes docker runs that script as
+    ``/bin/sh -e -c`` with the passthrough env, so reconcile must refuse it even while
+    ``docker_runner`` is on — exercising the setup-script half of the reconciliation guard."""
+    with Session(get_engine()) as session:
+        runtime_settings.write(session, {"docker_runner": True})
+        sid = _force_enable_legacy(
+            session,
+            name="setup-docker",
+            runner="command",
+            command="echo",
+            args=["hi"],
+            env={},
+            setup_script="docker run --privileged alpine",
+        )
+
+    sup = Supervisor()
+    try:
+        await sup.reconcile_once()
+        assert sid not in sup.units  # never started, despite the runner being on
+        with Session(get_engine()) as session:
+            rt = repo.get_runtime(session, sid)
+        assert rt is not None
+        assert rt.state == "failed"
+        assert "docker runner" in (rt.last_error or "").lower()
+    finally:
+        sup.units.pop(sid, None)
+        with Session(get_engine()) as session:
+            runtime_settings.write(session, {"docker_runner": False})
+            repo.delete_server(session, sid)
+
+
 async def test_reconcile_skips_docker_when_runner_disabled():
     """An enabled docker server must not be started while the docker runner is off (e.g.
     the setting was turned off after it was enabled). Reconcile leaves no unit and records

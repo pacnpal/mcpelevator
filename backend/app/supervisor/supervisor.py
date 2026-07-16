@@ -216,8 +216,10 @@ class Supervisor:
             # starting it would spawn an ungated, unhardened container with the control plane's full
             # environment. Forbid it regardless of the docker_runner setting — even a legacy row that
             # predates this guard, and even while the runner is on.
-            if registry_service.local_exec_invokes_docker(sv.runner, sv.command, sv.args) or (
-                registry_service.setup_script_invokes_docker(sv.runner, sv.setup_script)
+            if registry_service.local_exec_invokes_docker(
+                sv.runner, sv.command, sv.args, sv.env
+            ) or registry_service.setup_script_invokes_docker(
+                sv.runner, sv.setup_script, sv.env
             ):
                 forbidden_docker.append(
                     (sv, "Docker CLI invocations require the docker runner")
