@@ -28,6 +28,18 @@ def is_control_plane_env_var(key: str) -> bool:
     return key.upper().startswith(CONTROL_PLANE_ENV_PREFIX)
 
 
+# The subset of the control plane's own config that is actually secret-bearing. Stripped from the
+# (trusted) bridge process's inherited environment too, so an untrusted child can't recover it by
+# reading its immediate parent's ``/proc/<ppid>/environ`` on a same-UID host. Non-secret ``MCPE_*``
+# config (data dir, base URL, host allowlist) is left for the bridge's own ``get_settings()``.
+CONTROL_PLANE_SECRET_ENV = frozenset({"MCPE_ADMIN_TOKEN"})
+
+
+def is_control_plane_secret_env_var(key: str) -> bool:
+    """True for a control-plane env var that carries a secret (the break-glass admin token)."""
+    return key.upper() in CONTROL_PLANE_SECRET_ENV
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix=CONTROL_PLANE_ENV_PREFIX, env_file=".env", extra="ignore")

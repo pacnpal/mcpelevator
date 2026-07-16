@@ -187,16 +187,26 @@ requiring `bearer` auth on docker servers so only authorized clients can open se
 by not exposing untrusted images to unauthenticated `/s` traffic. `max_running`, bounded port allocation, process groups, readiness probes, and log
 buffers improve robustness. Remaining risks are expected admin power and supply-chain risk:
 a malicious MCP package runs arbitrary code with the process user's filesystem/network access.
-It does **not**, however, inherit the control plane's own secrets: the bridge starts every
+It does **not**, however, *inherit* the control plane's own secrets: the bridge starts every
 local-exec child (`npx`/`uvx`/`command`) and its `setup_script` with the `MCPE_*` namespace
-scrubbed from the environment (`bridge.host._child_env` / `ServerUnit._effective_child_env`), so
-`MCPE_ADMIN_TOKEN`, signing keys, and other elevator config never reach an untrusted package —
-matching the docker runner's minimal-env guarantee. This env boundary, not the registry's
-best-effort shell-wrapped-docker detection, is the primary containment for a config that shells
-out to the docker CLI; that string analysis is bounded defense-in-depth (the shell is
-Turing-complete, so it can never be complete). Secrets a server legitimately needs go in its own
-`env`; ambient non-`MCPE_` deployment vars are still inherited, so avoid placing unrelated
-credentials in the control plane's environment when untrusted local-exec servers are enabled.
+scrubbed from the environment (`bridge.host._child_env` / `ServerUnit._effective_child_env`), and
+keeps the admin token out of the bridge parent's own env (`ServerUnit._bridge_env`), so
+`MCPE_ADMIN_TOKEN` and other elevator config are not passed to an untrusted package nor recoverable
+from its immediate parent's `/proc/<ppid>/environ` — matching the docker runner's minimal-env
+guarantee. This env boundary, not the registry's best-effort shell-wrapped-docker detection, is the
+primary in-process mitigation for a config that shells out to the docker CLI; that string analysis
+is bounded defense-in-depth (the shell is Turing-complete, so it can never be complete).
+
+**Residual (same-UID `/proc`).** Env scrubbing is not a hard boundary on a same-UID host: the
+control-plane process was `exec`'d by the operator *with* any `MCPE_ADMIN_TOKEN` in its
+environment, so that value stays in the process's own `/proc/<pid>/environ` (deleting it from
+`os.environ` does not clear the kernel's exec-time region), which a same-UID child can read by
+walking `PPid`. A hard guarantee requires OS-level isolation — the **docker runner**, running
+children under a **separate UID / PID namespace**, or mounting `/proc` with **`hidepid=2`** — or
+supplying the admin token through a non-environment channel. Secrets a server legitimately needs
+go in its own `env`; ambient non-`MCPE_` deployment vars are still inherited, so avoid placing
+unrelated credentials in the control plane's environment when untrusted local-exec servers are
+enabled.
 
 **Remote runner and catalog.** Remote server URLs are validated as `http(s)` with a
 hostname and canonical transport, but there is no egress allowlist or metadata-IP block.

@@ -88,10 +88,15 @@ def _child_env(spec: dict) -> dict[str, str]:
 
     Default (npx/uvx/command): merge the bridge's inherited environment (PATH, HOME, proxy/CA,
     caches) with the server-specific vars so tools resolve; server vars win. The elevator's OWN
-    ``MCPE_*`` config namespace is stripped first, so a passthrough server — even one that shells
-    out to docker or reads ``BASH_ENV`` — can never inherit the control plane's secrets (admin
-    token, signing keys, DB/data dir). This is the primary containment; the registry's shell-wrapped
-    -docker detection is best-effort defense-in-depth on top of it.
+    ``MCPE_*`` config namespace is stripped first, so a passthrough server — even one that shells out
+    to docker or reads ``BASH_ENV`` — does not INHERIT the control plane's secrets (admin token,
+    signing keys, DB/data dir), and the secret subset is also kept out of the bridge parent's env
+    (``ServerUnit._bridge_env``) so it isn't recoverable from ``/proc/<ppid>/environ``. NOTE: on a
+    same-UID host without process isolation a child can still read an operator-supplied admin token
+    from the control-plane process's own ``/proc/<pid>/environ``; a hard guarantee needs the docker
+    runner, a separate UID / PID namespace / ``hidepid``, or supplying the token off-env. This env
+    boundary is the primary in-process mitigation; the registry's shell-wrapped-docker detection is
+    best-effort defense-in-depth on top of it. See docs/security.md.
 
     When the spec sets ``minimal_env`` (the docker runner), pass ONLY the bridge's docker-CLI env
     (PATH/HOME + the operator's ``DOCKER_*`` config) plus the server's NON-reserved vars — never the

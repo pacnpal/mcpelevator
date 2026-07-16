@@ -16,7 +16,11 @@ from typing import Optional
 
 from fastmcp import Client
 
-from app.config import get_settings, is_control_plane_env_var
+from app.config import (
+    get_settings,
+    is_control_plane_env_var,
+    is_control_plane_secret_env_var,
+)
 from app.db.models import Server, utcnow
 from app.runners import build_spec
 from app.runners.docker import DOCKER_BIN, server_label
@@ -454,8 +458,14 @@ class ServerUnit:
     def _bridge_env(self, payload: dict) -> dict[str, str]:
         settings = get_settings()
         assert self.port is not None
+        # The bridge is trusted mcpelevator code and never needs the break-glass admin token, so
+        # keep it OUT of the bridge's environment: an untrusted local child would otherwise recover
+        # it from the immediate parent's ``/proc/<ppid>/environ`` on a same-UID host despite the
+        # child's own env being scrubbed. (The control-plane process's own /proc still exposes an
+        # operator-supplied admin token — a same-UID limitation; see docs/security.md.)
+        inherited = {k: v for k, v in os.environ.items() if not is_control_plane_secret_env_var(k)}
         return {
-            **os.environ,
+            **inherited,
             "MCPE_BRIDGE_SPEC": json.dumps(payload),
             "MCPE_BRIDGE_HOST": self.host,
             "MCPE_BRIDGE_PORT": str(self.port),

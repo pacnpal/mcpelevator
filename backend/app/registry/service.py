@@ -2226,12 +2226,14 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]],
     command/process substitution, ``eval`` of a literal, …), not the ones that need execution to
     resolve (``eval "$(some_cmd)"``, a helper script that shells out to docker,
     base64-decode-pipe-to-sh). Those are out of reach of any parser and are intentionally out of
-    scope. This is DEFENSE IN DEPTH, not the primary boundary: the real containment is that the
+    scope. This is DEFENSE IN DEPTH, not the primary boundary: the primary mitigation is that the
     bridge starts every local-exec child (and its setup script) with the control plane's own
     ``MCPE_*`` secrets scrubbed from the environment (``bridge.host._child_env`` /
-    ``ServerUnit._effective_child_env``), so even a config that does reach the docker CLI cannot read
-    the elevator's admin token or signing keys. Report new *syntactic* bypass shapes here only when
-    they are cheap and reliable to recognize; exotic forms are an accepted limitation."""
+    ``ServerUnit._effective_child_env``), and keeps the admin token out of the bridge parent's env,
+    so a config that reaches the docker CLI does not INHERIT the elevator's secrets (the residual
+    same-UID ``/proc`` caveat is documented in docs/security.md). Report new *syntactic* bypass
+    shapes here only when they are cheap and reliable to recognize; exotic forms are an accepted
+    limitation."""
     wrapper_env: dict[str, str] = {}
     command, args = _strip_wrappers(command, args, wrapper_env)
     if wrapper_env:  # ``env D=docker sh -c …`` — the wrapper sets these in the child's environment
