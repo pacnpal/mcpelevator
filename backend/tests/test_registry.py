@@ -1416,6 +1416,58 @@ def test_command_builtin_watch_string_and_sourced_stdin_rejected(session, comman
 
 
 @pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``ionice`` runs a supplied command like ``nice`` — its value options must not swallow it.
+        ("ionice", ["-c", "3", "docker", "run", "alpine"], None),
+        ("ionice", ["--class", "3", "docker", "run"], None),
+        ("ionice", ["-c3", "docker", "run"], None),          # value glued into the short cluster
+        ("ionice", ["-t", "docker", "run"], None),           # -t is boolean (no value)
+        # ``sudo -s``/``-i`` pass the trailing operands to a shell via ``-c`` — a command LINE.
+        ("sudo", ["-s", "true; docker run alpine"], None),
+        ("sudo", ["-i", "true; docker run alpine"], None),
+        ("sudo", ["--shell", "docker run"], None),
+        # A literal ``NAME=VALUE`` assignment makes a later ``$VAR`` command word deterministic.
+        (None, None, 'D=docker; "$D" run alpine'),
+        (None, None, "D=/usr/bin/docker; $D run alpine"),
+    ],
+)
+def test_ionice_sudo_shell_and_variable_command_word_rejected(session, command, args, inner):
+    """``ionice`` as a command launcher, ``sudo -s``/``-i`` shell command lines, and a command word
+    resolved from a prior literal assignment (``D=docker; "$D" run``) must all be gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="ionice-sudo-var", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        ("ionice", ["-c", "3", "python", "-m", "srv"], None),   # ionice wrapping a non-docker cmd
+        ("sudo", ["-s", "python -m srv"], None),                # sudo -s with a non-docker command
+        (None, None, "D=python; $D -m srv"),                    # assignment resolves to non-docker
+        (None, None, "D=docker; '$D' run"),                     # single-quoted $D never expands
+        (None, None, "D=docker echo hi; $D run"),               # env-scoped assign, not persisted
+    ],
+)
+def test_ionice_sudo_shell_and_variable_non_docker_allowed(session, command, args, inner):
+    """``ionice``/``sudo -s`` wrapping a non-docker command, and variable command words that do NOT
+    resolve to docker (non-docker value, single-quoted, or env-scoped assignment), must not be
+    rejected."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    s = service.create_server(
+        session, name="ionice-sudo-var-ok", runner="command", command=command, args=args,
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
     "inner",
     [
         "docker() { printf fake; }; docker run alpine",   # POSIX definition shadows the later call

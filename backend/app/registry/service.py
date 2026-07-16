@@ -224,8 +224,8 @@ def _brace_expand(word: str, _depth: int = 0) -> tuple[list[str], bool]:
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "builtin",
-                       "nice", "timeout", "xargs", "stdbuf", "flock", "chroot", "runuser", "su",
-                       "watch"}
+                       "nice", "ionice", "timeout", "xargs", "stdbuf", "flock", "chroot",
+                       "runuser", "su", "watch"}
 
 # Wrappers whose run form accepts leading ``NAME=VALUE`` assignments before the command.
 _WRAPPERS_ACCEPTING_ASSIGNMENTS = {"env", "sudo", "doas"}
@@ -273,6 +273,7 @@ _WRAPPER_VALUE_LONG = {
     "doas": {"--user"},
     "env": {"--unset", "--chdir"},
     "nice": {"--adjustment"},
+    "ionice": {"--class", "--classdata", "--pid"},
     "exec": set(),
     "timeout": {"--signal", "--kill-after"},
     "xargs": {"--replace", "--max-args", "--max-procs", "--max-chars", "--delimiter",
@@ -289,6 +290,7 @@ _WRAPPER_VALUE_SHORT = {
     "doas": set("uC"),
     "env": set("uC"),
     "nice": set("n"),
+    "ionice": set("cnp"),  # -c class, -n classdata, -p pid
     "exec": set("a"),
     "timeout": set("sk"),
     # -I replstr, -n num, -P procs, -s size, -d delim, -a file, -E eof, -L/-l num
@@ -897,6 +899,9 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
         # ``watch`` runs its operand string through ``sh -c`` by default, but ``-x``/``--exec``
         # passes the argv straight to ``exec`` instead. Track which form applies to this wrapper.
         watch_exec = False
+        # ``sudo -s``/``-i`` (``--shell``/``--login``) pass any trailing command to the target
+        # user's shell via ``-c`` (joining the operands), so it is a shell command line, not argv.
+        sudo_shell = False
         i = 0
         while i < len(tokens):
             tok = tokens[i]
@@ -928,6 +933,8 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
                     break
                 if base == "watch" and name == "--exec":
                     watch_exec = True
+                if base == "sudo" and name in ("--shell", "--login"):
+                    sudo_shell = True
                 if "=" not in tok and name in _WRAPPER_VALUE_LONG.get(base, frozenset()):
                     i += 2  # separate value
                 else:
@@ -941,6 +948,8 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
                     return "", None
                 if base == "watch" and "x" in letters:
                     watch_exec = True
+                if base == "sudo" and ("s" in letters or "i" in letters):
+                    sudo_shell = True
                 short_vals = _WRAPPER_VALUE_SHORT.get(base, frozenset())
                 handled = False
                 for k, c in enumerate(letters):
@@ -965,6 +974,10 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
             if base in _WRAPPERS_ACCEPTING_ASSIGNMENTS and _looks_like_assignment(tok):
                 i += 1
                 continue
+            if sudo_shell:  # ``sudo -s COMMAND …`` — the operands are a shell command line
+                operands = tokens[i:]
+                peeled = ("sh", ["-c", " ".join(str(t) for t in operands)])
+                break
             if base in _WRAPPERS_WITH_LEADING_OPERAND:
                 # ``timeout DURATION COMMAND …`` / ``flock FILE COMMAND …``: this bare token is the
                 # positional the wrapper consumes, so the command is the NEXT token.
@@ -1189,6 +1202,72 @@ def _segment_invokes_docker(segment: str, funcs: frozenset[str] = frozenset()) -
     return _shell_invokes_docker(cmd, words[idx + 1:])
 
 
+def _segment_assignments(segment: str) -> dict[str, str]:
+    """Simple ``NAME=VALUE`` assignments a segment persists to the shell — i.e. only when the segment
+    is PURELY assignments (``D=docker``). ``D=docker cmd`` scopes ``D`` to ``cmd``'s environment
+    (not the shell), so it persists nothing and returns empty."""
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        return {}
+    result: dict[str, str] = {}
+    for w in words:
+        if not _looks_like_assignment(w):
+            return {}  # a command word is present — the assignments are env-scoped, not persisted
+        name, value = w.split("=", 1)
+        result[name] = value
+    return result
+
+
+def _expand_known_vars(segment: str, assignments: dict[str, str]) -> str:
+    """Substitute ``$VAR``/``${VAR}`` with a known literal assignment so a deterministic
+    ``D=docker; $D run`` resolves its command word. Single-quoted spans are left literal (no
+    expansion); double quotes expand. Only names in ``assignments`` are touched, so unrelated
+    ``${VAR:-default}`` forms (already resolved in preprocessing) are untouched."""
+    if not assignments:
+        return segment
+    out: list[str] = []
+    i, n = 0, len(segment)
+    quote: Optional[str] = None
+    while i < n:
+        ch = segment[i]
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:  # escaped char is literal (an escaped $ does not expand)
+            out.append(ch)
+            out.append(segment[i + 1])
+            i += 2
+            continue
+        if ch in ("'", '"'):
+            quote = None if ch == quote else (quote or ch)
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "$" and i + 1 < n:
+            if segment[i + 1] == "{":
+                j = segment.find("}", i + 2)
+                if j != -1 and segment[i + 2:j] in assignments:
+                    out.append(assignments[segment[i + 2:j]])
+                    i = j + 1
+                    continue
+            else:
+                j = i + 1
+                while j < n and (segment[j].isalnum() or segment[j] == "_"):
+                    j += 1
+                name = segment[i + 1:j]
+                if name and name in assignments:
+                    out.append(assignments[name])
+                    i = j
+                    continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _shell_command_invokes_docker(command_string: str) -> bool:
     """True when any simple command in a shell ``-c`` command string launches the docker CLI.
 
@@ -1200,16 +1279,19 @@ def _shell_command_invokes_docker(command_string: str) -> bool:
     command_string = _preprocess_shell_string(_strip_heredocs(command_string))
     if any(_shell_command_invokes_docker(sub) for sub in _command_substitutions(command_string)):
         return True
-    # Walk segments in order, growing the set of declared shell functions as we go: a
-    # ``function docker { … }`` only shadows the CLI for commands that come AFTER it, so an earlier
-    # ``docker run`` is still a launch.
+    # Walk segments in order, growing the set of declared shell functions and simple variable
+    # assignments as we go: a ``function docker { … }`` only shadows the CLI for commands that come
+    # AFTER it, and ``D=docker`` only resolves ``$D`` for later segments — so an earlier ``docker
+    # run`` is still a launch.
     funcs: set[str] = set()
+    assignments: dict[str, str] = {}
     for seg in _split_shell_commands(command_string):
-        if _segment_invokes_docker(seg, frozenset(funcs)):
+        if _segment_invokes_docker(_expand_known_vars(seg, assignments), frozenset(funcs)):
             return True
         declared = _segment_declares_function(seg)
         if declared:
             funcs.add(declared)
+        assignments.update(_segment_assignments(seg))
     return False
 
 
