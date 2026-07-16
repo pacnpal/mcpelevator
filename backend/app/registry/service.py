@@ -123,6 +123,10 @@ _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "comman
 # Wrappers whose run form accepts leading ``NAME=VALUE`` assignments before the command.
 _WRAPPERS_ACCEPTING_ASSIGNMENTS = {"env", "sudo", "doas"}
 
+# Generous bound on wrapper-nesting depth. Real configs nest a couple; hitting this many is
+# pathological (an ``env env … env docker`` stack) and is resolved conservatively (see below).
+_MAX_WRAPPER_PEELS = 64
+
 # Shells whose ``-c STRING`` argument is itself a command line we must look inside.
 _SHELL_LAUNCHERS = {"sh", "bash", "dash", "ash", "zsh", "ksh"}
 
@@ -173,64 +177,171 @@ def _looks_like_assignment(word: str) -> bool:
     return (name[0].isalpha() or name[0] == "_") and all(c.isalnum() or c == "_" for c in name)
 
 
+# GNU ``env -S`` escape sequences that differ from ordinary shell/``shlex`` handling: ``\_`` is a
+# SEPARATOR (a space that env splits on), the whitespace escapes act as separators too, and ``\c``
+# ends processing. Normalizing them before splitting means ``env -S 'docker\_run'`` is seen as the
+# two words env would exec, not the single token ``docker_run``.
+_ENV_S_ESCAPES = {"_": " ", "t": " ", "n": " ", "r": " ", "f": " ", "v": " ",
+                  "\\": "\\", "#": "#", "$": "$"}
+
+
+def _normalize_env_split(value: str) -> str:
+    """Apply GNU ``env -S`` escape handling (``\\_`` → separator, ``\\c`` → stop, …) so the value can
+    be tokenized the way env itself would split it."""
+    out: list[str] = []
+    i, n = 0, len(value)
+    while i < n:
+        ch = value[i]
+        if ch == "\\" and i + 1 < n:
+            nxt = value[i + 1]
+            if nxt == "c":  # \c ends processing — drop the rest
+                break
+            out.append(_ENV_S_ESCAPES.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _split_string_command(value: str, rest: list[str]) -> tuple[str, list[str]]:
     """Parse env ``-S``'s split-string value (a whole command line env splits and execs) into
     (command, args), appending any tokens that followed the ``-S`` option."""
+    normalized = _normalize_env_split(value)
     try:
-        words = shlex.split(value)
+        words = shlex.split(normalized)
     except ValueError:
-        words = value.split()
+        words = normalized.split()
     if not words:
         return "env", []  # nothing wrapped — resolves to neither a docker nor a shell launcher
     return words[0], list(words[1:]) + list(rest)
 
 
-def _command_substitutions(command_string: str) -> list[str]:
-    """Return the inner text of every ``$(…)`` and backtick command substitution the shell would
-    execute — i.e. NOT inside single quotes (double quotes still run substitutions). Nested parens
-    are balanced. Lets the guard see ``echo "$(docker run …)"`` where the substitution runs docker
-    before the visible command does."""
-    subs: list[str] = []
+def _preprocess_shell_string(command_string: str) -> str:
+    """Apply shell pre-tokenization rewrites the parser can't see through otherwise, quote-aware:
+
+    - line continuations (``\\`` immediately before a newline) are removed, as POSIX shells do
+      before tokenizing, so ``docker\\<newline> run`` reads as ``docker run``;
+    - the ``$`` before ``$'…'`` (bash ANSI-C) / ``$"…"`` (locale) quoting is dropped so the quoted
+      fragment concatenates onto its neighbours (``doc$'ker'`` → ``docker``).
+
+    Only applied outside single quotes, where these are literal."""
+    out: list[str] = []
     i, n = 0, len(command_string)
-    in_single = False
+    quote: Optional[str] = None
     while i < n:
         ch = command_string[i]
-        if in_single:
+        if quote == "'":
+            out.append(ch)
             if ch == "'":
-                in_single = False
+                quote = None
             i += 1
             continue
-        if ch == "'":
-            in_single = True
-            i += 1
+        if ch == "\\" and i + 1 < n and command_string[i + 1] == "\n":
+            i += 2  # line continuation — removed
             continue
-        if ch == "\\" and i + 1 < n:  # escaped: never opens a substitution
+        if ch == "\\" and i + 1 < n:  # keep any other escape intact (both chars)
+            out.append(ch)
+            out.append(command_string[i + 1])
             i += 2
             continue
+        if quote == '"':
+            out.append(ch)
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch == "$" and i + 1 < n and command_string[i + 1] in ("'", '"'):
+            i += 1  # drop the $, let the quote open on the next iteration
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _read_delimited(command_string: str, start: int, closer: str) -> tuple[str, int]:
+    """Read a substitution body from ``start`` until the matching UNQUOTED ``closer`` (``)`` for
+    ``$(…)`` — balancing nested parens — or the next backtick), honoring single/double quotes so a
+    quoted delimiter inside the body (``$(printf ')' ; docker …)``) does not end it early. Returns
+    (inner_text, index_past_closer)."""
+    depth = 1
+    j, n = start, len(command_string)
+    quote: Optional[str] = None
+    while j < n:
+        ch = command_string[j]
+        if quote is not None:
+            if ch == "\\" and quote == '"' and j + 1 < n:
+                j += 2
+                continue
+            if ch == quote:
+                quote = None
+            j += 1
+            continue
+        if ch == "\\" and j + 1 < n:
+            j += 2
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            j += 1
+            continue
+        if closer == ")":
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return command_string[start:j], j + 1
+        elif ch == closer:  # backtick
+            return command_string[start:j], j + 1
+        j += 1
+    return command_string[start:j], j
+
+
+def _command_substitutions(command_string: str) -> list[str]:
+    """Return the inner text of every ``$(…)`` and backtick command substitution the shell would
+    execute — i.e. NOT inside single quotes (double quotes still run substitutions). Quotes inside a
+    substitution body are honored while balancing. Lets the guard see ``echo "$(docker run …)"``
+    where the substitution runs docker before the visible command does."""
+    subs: list[str] = []
+    i, n = 0, len(command_string)
+    quote: Optional[str] = None
+    while i < n:
+        ch = command_string[i]
+        if quote == "'":  # single quotes suppress substitution entirely
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+                i += 1
+                continue
+            # inside double quotes: fall through — $(…)/backticks still execute
+        else:
+            if ch == "\\" and i + 1 < n:  # escaped: never opens a substitution
+                i += 2
+                continue
+            if ch == "'":
+                quote = "'"
+                i += 1
+                continue
+            if ch == '"':
+                quote = '"'
+                i += 1
+                continue
         if ch == "$" and i + 1 < n and command_string[i + 1] == "(":
-            depth, j = 1, i + 2
-            start = j
-            while j < n and depth:
-                if command_string[j] == "(":
-                    depth += 1
-                elif command_string[j] == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                j += 1
-            subs.append(command_string[start:j])
-            i = j + 1
+            body, i = _read_delimited(command_string, i + 2, ")")
+            subs.append(body)
             continue
         if ch == "`":
-            j = i + 1
-            start = j
-            while j < n and command_string[j] != "`":
-                if command_string[j] == "\\" and j + 1 < n:
-                    j += 2
-                    continue
-                j += 1
-            subs.append(command_string[start:j])
-            i = j + 1
+            body, i = _read_delimited(command_string, i + 1, "`")
+            subs.append(body)
             continue
         i += 1
     return subs
@@ -289,8 +400,10 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
     doas), per-wrapper value options — including clustered short options (``sudo -Eu root``) and env
     ``-S``/``-vS`` split strings — and ``--`` end-of-options, so ``sudo -u root docker`` /
     ``nice -n 10 docker`` / ``exec -a x docker`` aren't misread. Loops so nested wrappers
-    (``sudo env docker``) fully peel."""
-    for _ in range(16):  # bound the loop; real configs nest at most a couple of wrappers
+    (``sudo env docker``) fully peel; if the (generous) nesting bound is hit while still on a
+    wrapper — pathological ``env env … env docker`` stacking — it resolves conservatively to a
+    docker launcher rather than giving up and reporting the outer wrapper as safe."""
+    for _ in range(_MAX_WRAPPER_PEELS):
         base = _launcher_basename(command)
         if base not in _SHELL_CMD_PREFIXES:
             return command, args
@@ -350,7 +463,8 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
         if peeled is None:
             return command, args
         command, args = peeled
-    return command, args
+    # Bound exhausted while still peeling wrappers — treat the chain as reaching docker.
+    return "docker", list(args or [])
 
 
 def _segment_invokes_docker(segment: str) -> bool:
@@ -376,10 +490,12 @@ def _segment_invokes_docker(segment: str) -> bool:
 def _shell_command_invokes_docker(command_string: str) -> bool:
     """True when any simple command in a shell ``-c`` command string launches the docker CLI.
 
+    The string is first normalized for line continuations and ANSI-C/locale ``$'…'`` quoting.
     Command substitutions (``$(…)``/backticks, executed even inside double quotes) are inspected
-    first, then the string is split into segments at unquoted shell operators and each segment's
+    next, then the string is split into segments at unquoted shell operators and each segment's
     command word is checked. This catches ``foo && docker run`` / ``echo "$(docker …)"`` while still
     allowing ``docker`` to appear merely as an argument (``python -m srv --backend docker``)."""
+    command_string = _preprocess_shell_string(command_string)
     if any(_shell_command_invokes_docker(sub) for sub in _command_substitutions(command_string)):
         return True
     return any(_segment_invokes_docker(seg) for seg in _split_shell_commands(command_string))

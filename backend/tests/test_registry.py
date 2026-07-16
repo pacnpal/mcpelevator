@@ -739,6 +739,7 @@ def test_shell_wrapped_docker_control_syntax_rejected(session, inner):
         "FOO=docker myapp run",              # 'docker' is an assignment VALUE, not the command
         "echo 'literal $(docker) text'",     # substitution inside single quotes is literal
         "myapp --label docker.io/img",       # 'docker' only in an argument
+        "env MYVAR=1 python app.py",         # env assignment fronting a non-docker command
     ],
 )
 def test_shell_wrapped_docker_control_syntax_allowed(session, inner):
@@ -749,6 +750,43 @@ def test_shell_wrapped_docker_control_syntax_allowed(session, inner):
         enabled=True,
     )
     assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        # A quoted ')' inside the $(...) body must not end the substitution early.
+        "echo \"$(printf ')' ; docker run alpine)\"",
+        "docker\\\n run alpine",               # a line continuation the shell removes
+        "doc$'ker' run alpine",                # bash ANSI-C $'...' quoting concatenates to `docker`
+        "eval \"docker run\"",                 # eval of a double-quoted string
+    ],
+)
+def test_shell_wrapped_docker_quoting_and_continuation_rejected(session, inner):
+    """Quote-aware substitution balancing, line continuations, and ANSI-C quoting must not let a
+    docker launch slip past the guard."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="quote-cont", runner="command", command="/bin/sh",
+            args=["-c", inner], enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "command, args",
+    [
+        ("/usr/bin/env", ["-S", "docker\\_run alpine"]),   # GNU env -S '\_' is a separator
+        ("/usr/bin/env", ["-vS", "docker\\_run alpine"]),  # ...clustered with a boolean short opt
+        # Pathological wrapper nesting beyond the peel bound resolves conservatively to docker.
+        ("/bin/sh", ["-c", "env " * 70 + "docker run alpine"]),
+    ],
+)
+def test_env_split_and_deep_nesting_rejected(session, command, args):
+    """env -S split-string escapes and pathological wrapper nesting must still be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="env-s-deep", runner="command", command=command, args=args, enabled=True
+        )
 
 
 def test_shell_wrapped_docker_second_c_positional_allowed(session):
