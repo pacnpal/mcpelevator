@@ -1042,6 +1042,45 @@ def test_case_subject_and_loop_list_allowed(session, inner):
     assert s.enabled is True
 
 
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "printf x | xargs docker run alpine",       # xargs runs its COMMAND
+        "printf x | xargs -n1 -P4 docker run",       # ...with value options
+        "printf x | xargs -I{} docker run {}",
+        "cat <<EOF && docker run alpine\nhi\nEOF",   # docker on the heredoc MARKER line runs
+        "[[ -n $X ]] && docker run alpine",          # docker after ]] is a real command
+    ],
+)
+def test_xargs_heredoc_marker_and_conditional_rejected(session, inner):
+    """xargs child commands, a docker command on a heredoc marker line, and a real command after a
+    ``[[ … ]]`` test must all be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="xargs-hd", runner="command", command="/bin/sh", args=["-c", inner],
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "cat <<EOF\ndocker run alpine\nEOF",          # docker is inside the heredoc BODY (data)
+        "cat <<-EOF\n\tdocker run alpine\n\tEOF",
+        "[[ docker == docker ]] && exec server",      # docker is a `[[ … ]]` operand
+        "printf x | xargs echo docker",               # docker is an xargs INITIAL-ARG, not the cmd
+    ],
+)
+def test_heredoc_body_and_conditional_operand_allowed(session, inner):
+    """A docker string in a heredoc body, a `[[ … ]]` operand, or an xargs argument is data, not a
+    launched command, and must not be rejected."""
+    s = service.create_server(
+        session, name="hd-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
 def test_deeply_nested_shell_command_fails_closed_without_error(session):
     """Pathologically nested ``$(…)`` must not raise (RecursionError) out of the guard; it fails
     closed and rejects the malformed config instead of 500-ing the create path."""

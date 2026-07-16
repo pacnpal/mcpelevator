@@ -209,7 +209,7 @@ def _brace_expand(word: str, _depth: int = 0) -> list[str]:
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "nice",
-                       "timeout"}
+                       "timeout", "xargs"}
 
 # Wrappers whose run form accepts leading ``NAME=VALUE`` assignments before the command.
 _WRAPPERS_ACCEPTING_ASSIGNMENTS = {"env", "sudo", "doas"}
@@ -250,6 +250,8 @@ _WRAPPER_VALUE_LONG = {
     "nice": {"--adjustment"},
     "exec": set(),
     "timeout": {"--signal", "--kill-after"},
+    "xargs": {"--replace", "--max-args", "--max-procs", "--max-chars", "--delimiter",
+              "--arg-file", "--max-lines", "--eof", "--process-slot-var"},
 }
 _WRAPPER_VALUE_SHORT = {
     "sudo": set("ugpChrtURTD"),
@@ -258,6 +260,7 @@ _WRAPPER_VALUE_SHORT = {
     "nice": set("n"),
     "exec": set("a"),
     "timeout": set("sk"),
+    "xargs": set("InPsdaLl"),  # -I replstr, -n num, -P procs, -s size, -d delim, -a file, -L/-l num
 }
 
 # Characters that end a simple command and (re)open a command position when UNQUOTED: control
@@ -319,6 +322,79 @@ def _split_string_command(value: str, rest: list[str]) -> tuple[str, list[str]]:
     except ValueError:
         words = normalized.split()
     return "env", list(words) + list(rest)
+
+
+def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
+    """Find here-document markers (``<<WORD`` / ``<<-WORD`` / ``<<"WORD"``) on a line, honoring
+    quotes and skipping here-strings (``<<<``). Returns (delimiter, strip_leading_tabs) per marker,
+    in order — bash allows several on one line."""
+    delims: list[tuple[str, bool]] = []
+    i, n = 0, len(line)
+    quote: Optional[str] = None
+    while i < n:
+        ch = line[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch == "<" and line[i:i + 2] == "<<" and line[i:i + 3] != "<<<":
+            j = i + 2
+            strip_tabs = False
+            if j < n and line[j] == "-":
+                strip_tabs = True
+                j += 1
+            while j < n and line[j] in " \t":
+                j += 1
+            word: list[str] = []
+            while j < n and line[j] not in " \t\n;&|<>()":
+                c = line[j]
+                if c in ("'", '"'):
+                    j += 1
+                    while j < n and line[j] != c:
+                        word.append(line[j])
+                        j += 1
+                    j += 1
+                    continue
+                if c == "\\" and j + 1 < n:
+                    word.append(line[j + 1])
+                    j += 2
+                    continue
+                word.append(c)
+                j += 1
+            if word:
+                delims.append(("".join(word), strip_tabs))
+            i = j
+            continue
+        i += 1
+    return delims
+
+
+def _strip_heredocs(command_string: str) -> str:
+    """Drop here-document BODIES (input data, not commands) so their lines aren't parsed as shell
+    commands. The marker line (``cat <<EOF``) is kept; the body up to and including the delimiter
+    line is removed."""
+    if "<<" not in command_string:
+        return command_string
+    lines = command_string.split("\n")
+    out: list[str] = []
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        out.append(line)
+        idx += 1
+        for delim, strip_tabs in _heredoc_delimiters(line):
+            while idx < len(lines):
+                body = lines[idx]
+                idx += 1
+                candidate = body.lstrip("\t") if strip_tabs else body
+                if candidate == delim:
+                    break
+    return "\n".join(out)
 
 
 _ANSI_C_SIMPLE = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v",
@@ -425,6 +501,15 @@ def _preprocess_shell_string(command_string: str) -> str:
             while i < n and command_string[i] != "\n":
                 i += 1
             continue
+        if (at_boundary and command_string[i:i + 2] == "[["
+                and (i + 2 >= n or command_string[i + 2] in " \t")):
+            # a ``[[ … ]]`` conditional: its words are operands, not commands — drop the whole span
+            close = command_string.find("]]", i + 2)
+            if close != -1:
+                out.append(" ")
+                at_boundary = True
+                i = close + 2
+                continue
         if ch == "$" and i + 2 < n and command_string[i + 1] == "(" and command_string[i + 2] == "(":
             body, end = _read_delimited(command_string, i + 2, ")")  # $((…)) arithmetic
             if "$(" in body or "`" in body:
@@ -752,7 +837,7 @@ def _shell_command_invokes_docker(command_string: str) -> bool:
     next, then the string is split into segments at unquoted shell operators and each segment's
     command word is checked. This catches ``foo && docker run`` / ``echo "$(docker …)"`` while still
     allowing ``docker`` to appear merely as an argument (``python -m srv --backend docker``)."""
-    command_string = _preprocess_shell_string(command_string)
+    command_string = _preprocess_shell_string(_strip_heredocs(command_string))
     if any(_shell_command_invokes_docker(sub) for sub in _command_substitutions(command_string)):
         return True
     return any(_segment_invokes_docker(seg) for seg in _split_shell_commands(command_string))
