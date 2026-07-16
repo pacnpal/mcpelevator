@@ -167,7 +167,7 @@ def _is_docker_command(command: str) -> bool:
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "builtin",
                        "nice", "ionice", "taskset", "chrt", "unshare", "nsenter", "prlimit",
                        "setpriv", "strace", "timeout", "xargs", "stdbuf", "flock", "chroot",
-                       "runuser", "su", "watch"}
+                       "runuser", "su", "watch", "systemd-run"}
 
 
 # Wrappers whose run form accepts leading ``NAME=VALUE`` assignments before the command.
@@ -235,6 +235,14 @@ _WRAPPER_VALUE_LONG = {
     "runuser": {"--user", "--group", "--supp-group", "--shell", "--session-command", "--login"},
     "su": {"--group", "--supp-group", "--shell", "--session-command"},
     "watch": {"--interval"},
+    # ``systemd-run [OPTIONS] COMMAND`` runs COMMAND in a transient unit; boolean flags like
+    # ``--scope``/``--pty`` are absent here so the command word is still reached, while these
+    # separate-token value options are consumed so a property/env value isn't misread as the command.
+    "systemd-run": {"--property", "--setenv", "--machine", "--host", "--unit", "--slice",
+                    "--description", "--uid", "--gid", "--nice", "--working-directory",
+                    "--service-type", "--on-active", "--on-boot", "--on-startup",
+                    "--on-unit-active", "--on-unit-inactive", "--on-calendar", "--timer-property",
+                    "--path-property", "--socket-property"},
 }
 _WRAPPER_VALUE_SHORT = {
     "sudo": set("ugpChrtURTD"),
@@ -258,6 +266,7 @@ _WRAPPER_VALUE_SHORT = {
     "runuser": set("ugGs"),  # -u user, -g group, -G supp-group, -s shell (-c handled specially)
     "su": set("gGs"),        # su takes the user as a positional, not -u
     "watch": set("n"),       # -n interval
+    "systemd-run": set("pEMH"),  # -p property, -E setenv, -M machine, -H host (others are boolean)
 }
 
 # Wrappers whose ``-c``/``--command`` option runs its value through a shell (inspect it as script).
@@ -755,6 +764,13 @@ def _segment_invokes_docker(segment: str) -> bool:
         # ``eval`` re-parses its (space-joined) operands as a fresh shell command line, so the
         # literal ``eval "docker run …"`` launches docker without ever peeling a wrapper or shell.
         return _shell_command_invokes_docker(" ".join(words[idx + 1:]))
+    if words[idx] == "trap":
+        # ``trap ACTION [signal…]`` runs ACTION as a shell command line when the trap fires, so the
+        # literal ``trap 'docker run alpine' EXIT`` (or POSIX ``… 0``) launches docker. ACTION is the
+        # first operand; the reset form (``trap - EXIT``) and options (``trap -p``/``-l``) start with
+        # ``-`` and carry no runnable command.
+        action = next((w for w in words[idx + 1:] if not w.startswith("-")), None)
+        return _shell_command_invokes_docker(action) if action is not None else False
     return _shell_invokes_docker(words[idx], words[idx + 1:])
 
 
