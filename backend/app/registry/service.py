@@ -209,7 +209,7 @@ def _brace_expand(word: str, _depth: int = 0) -> list[str]:
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "nice",
-                       "timeout", "xargs"}
+                       "timeout", "xargs", "stdbuf"}
 
 # Wrappers whose run form accepts leading ``NAME=VALUE`` assignments before the command.
 _WRAPPERS_ACCEPTING_ASSIGNMENTS = {"env", "sudo", "doas"}
@@ -252,6 +252,7 @@ _WRAPPER_VALUE_LONG = {
     "timeout": {"--signal", "--kill-after"},
     "xargs": {"--replace", "--max-args", "--max-procs", "--max-chars", "--delimiter",
               "--arg-file", "--max-lines", "--eof", "--process-slot-var"},
+    "stdbuf": {"--input", "--output", "--error"},
 }
 _WRAPPER_VALUE_SHORT = {
     "sudo": set("ugpChrtURTD"),
@@ -260,7 +261,9 @@ _WRAPPER_VALUE_SHORT = {
     "nice": set("n"),
     "exec": set("a"),
     "timeout": set("sk"),
-    "xargs": set("InPsdaLl"),  # -I replstr, -n num, -P procs, -s size, -d delim, -a file, -L/-l num
+    # -I replstr, -n num, -P procs, -s size, -d delim, -a file, -E eof, -L/-l num
+    "xargs": set("InPsdaELl"),
+    "stdbuf": set("ioe"),  # -i/-o/-e BUFMODE
 }
 
 # Characters that end a simple command and (re)open a command position when UNQUOTED: control
@@ -324,11 +327,12 @@ def _split_string_command(value: str, rest: list[str]) -> tuple[str, list[str]]:
     return "env", list(words) + list(rest)
 
 
-def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
+def _heredoc_delimiters(line: str) -> list[tuple[str, bool, bool]]:
     """Find here-document markers (``<<WORD`` / ``<<-WORD`` / ``<<"WORD"``) on a line, honoring
-    quotes and skipping here-strings (``<<<``). Returns (delimiter, strip_leading_tabs) per marker,
-    in order — bash allows several on one line."""
-    delims: list[tuple[str, bool]] = []
+    quotes and skipping here-strings (``<<<``). Returns (delimiter, strip_leading_tabs, quoted) per
+    marker, in order — bash allows several on one line. ``quoted`` is True when the delimiter word
+    was quoted (``<<'EOF'``), meaning the body is literal (no expansions)."""
+    delims: list[tuple[str, bool, bool]] = []
     i, n = 0, len(line)
     quote: Optional[str] = None
     while i < n:
@@ -351,9 +355,11 @@ def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
             while j < n and line[j] in " \t":
                 j += 1
             word: list[str] = []
+            was_quoted = False
             while j < n and line[j] not in " \t\n;&|<>()":
                 c = line[j]
                 if c in ("'", '"'):
+                    was_quoted = True
                     j += 1
                     while j < n and line[j] != c:
                         word.append(line[j])
@@ -361,13 +367,14 @@ def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
                     j += 1
                     continue
                 if c == "\\" and j + 1 < n:
+                    was_quoted = True
                     word.append(line[j + 1])
                     j += 2
                     continue
                 word.append(c)
                 j += 1
             if word:
-                delims.append(("".join(word), strip_tabs))
+                delims.append(("".join(word), strip_tabs, was_quoted))
             i = j
             continue
         i += 1
@@ -377,7 +384,8 @@ def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
 def _strip_heredocs(command_string: str) -> str:
     """Drop here-document BODIES (input data, not commands) so their lines aren't parsed as shell
     commands. The marker line (``cat <<EOF``) is kept; the body up to and including the delimiter
-    line is removed."""
+    line is removed. For an UNQUOTED delimiter the shell still expands command substitutions in the
+    body before feeding it as stdin, so those substitutions are preserved for inspection."""
     if "<<" not in command_string:
         return command_string
     lines = command_string.split("\n")
@@ -387,13 +395,19 @@ def _strip_heredocs(command_string: str) -> str:
         line = lines[idx]
         out.append(line)
         idx += 1
-        for delim, strip_tabs in _heredoc_delimiters(line):
+        for delim, strip_tabs, quoted in _heredoc_delimiters(line):
+            body_lines: list[str] = []
             while idx < len(lines):
                 body = lines[idx]
                 idx += 1
                 candidate = body.lstrip("\t") if strip_tabs else body
                 if candidate == delim:
                     break
+                body_lines.append(body)
+            if not quoted:  # unquoted delimiter: keep the body's command substitutions
+                preserved = _preserve_substitutions("\n".join(body_lines))
+                if preserved:
+                    out.append(preserved)
     return "\n".join(out)
 
 
@@ -503,10 +517,12 @@ def _preprocess_shell_string(command_string: str) -> str:
             continue
         if (at_boundary and command_string[i:i + 2] == "[["
                 and (i + 2 >= n or command_string[i + 2] in " \t")):
-            # a ``[[ … ]]`` conditional: its words are operands, not commands — drop the whole span
+            # a ``[[ … ]]`` conditional: its words are operands, not commands — drop the span, but
+            # KEEP any command substitutions (they execute before the test, so `[[ $(docker …) ]]`
+            # must still be inspected).
             close = command_string.find("]]", i + 2)
             if close != -1:
-                out.append(" ")
+                out.append(" " + _preserve_substitutions(command_string[i + 2:close]) + " ")
                 at_boundary = True
                 i = close + 2
                 continue
@@ -646,6 +662,14 @@ def _command_substitutions(command_string: str) -> list[str]:
             continue
         i += 1
     return subs
+
+
+def _preserve_substitutions(text: str) -> str:
+    """Return just the command substitutions of ``text`` (re-wrapped as ``$(…)``), dropping the
+    surrounding operands/data. Used to keep the executable substitutions of a construct we otherwise
+    discard — a ``[[ … ]]`` condition or an unquoted here-document body — so ``[[ $(docker …) == x ]]``
+    is still inspected while its plain operands are not."""
+    return " ".join("$(" + inner + ")" for inner in _command_substitutions(text))
 
 
 def _split_shell_commands(command_string: str) -> list[str]:

@@ -1081,6 +1081,55 @@ def test_heredoc_body_and_conditional_operand_allowed(session, inner):
     assert s.enabled is True
 
 
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("stdbuf", ["-oL", "docker", "run", "alpine"]),        # stdbuf launches its COMMAND
+        ("xargs", ["-E", "STOP", "docker", "run", "alpine"]),  # xargs -E EOF takes a value
+    ],
+)
+def test_stdbuf_and_xargs_eof_rejected(session, command, args):
+    """stdbuf (a command-launching wrapper) and xargs' value-taking ``-E`` must be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="stdbuf-x", runner="command", command=command, args=args, enabled=True
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "[[ $(docker run alpine) == x ]]",   # substitution inside a [[ … ]] condition executes
+        "cat <<EOF\n$(docker run alpine)\nEOF",  # unquoted heredoc expands its body's substitution
+    ],
+)
+def test_substitutions_in_conditional_and_heredoc_rejected(session, inner):
+    """A command substitution inside a ``[[ … ]]`` condition or an unquoted here-document body still
+    runs, so it must be inspected even though the surrounding operands/data are dropped."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="sub-cond", runner="command", command="/bin/sh", args=["-c", inner],
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "cat <<'EOF'\n$(docker run)\nEOF",           # QUOTED delimiter → body is literal data
+        "[[ docker == $(hostname) ]] && exec srv",   # docker is an operand; the sub isn't docker
+    ],
+)
+def test_quoted_heredoc_and_conditional_operand_allowed(session, inner):
+    """A quoted here-document body (literal) and a plain ``docker`` operand in a condition (whose
+    only substitution is unrelated) must not be rejected."""
+    s = service.create_server(
+        session, name="quoted-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
 def test_deeply_nested_shell_command_fails_closed_without_error(session):
     """Pathologically nested ``$(…)`` must not raise (RecursionError) out of the guard; it fails
     closed and rejects the malformed config instead of 500-ing the create path."""
