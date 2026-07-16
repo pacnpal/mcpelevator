@@ -1550,6 +1550,69 @@ def test_taskset_npx_export_and_env_non_docker_allowed(session, command, args, i
 
 
 @pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``unshare`` runs a supplied command after its namespace flags.
+        ("unshare", ["docker", "run", "alpine"], None),
+        ("unshare", ["-r", "docker", "run"], None),
+        ("unshare", ["-m", "-p", "docker", "run"], None),
+        ("unshare", ["-R", "/root", "docker", "run"], None),      # -R consumes a value
+        # A static ``printf``/``echo`` piped into a stdin-reading shell — the literal is the script.
+        (None, None, "printf 'docker run alpine\\n' | sh"),
+        (None, None, "echo docker run | bash"),
+        (None, None, "printf '%s\\n' 'docker run' | sh -s"),
+        # ``env NAME=VALUE`` applies the assignment to the child shell that expands it.
+        ("env", ["D=docker", "sh", "-c", '"$D" run alpine'], None),
+        ("env", ["D=docker", "bash", "-c", "${D} run"], None),
+        # ``set --`` installs positionals a later ``"$@"``/``$1`` executes.
+        (None, None, 'set -- docker run alpine; "$@"'),
+        (None, None, "set -- docker run; $1 alpine"),
+        (None, None, 'set docker run; "$@"'),                     # ``set`` without ``--``
+    ],
+)
+def test_unshare_pipe_shell_env_assignment_and_set_positionals_rejected(
+        session, command, args, inner):
+    """``unshare`` launchers, a static literal piped into a stdin-reading shell, an ``env NAME=VALUE``
+    the child shell expands, and ``set --`` positionals executed via ``"$@"`` must all be gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="unshare-pipe-set", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "echo hello | sh",                     # piped literal isn't docker
+        "printf 'docker run' | grep x",        # piped into a NON-shell (grep) — just data
+        'set -- python -m srv; "$@"',          # positionals resolve to a non-docker command
+        "set -e; echo hi",                     # ``set`` options install no positionals
+    ],
+)
+def test_unshare_pipe_and_set_non_docker_allowed(session, inner):
+    """Static-literal pipes into a non-shell or a non-docker program, and ``set`` forms that don't
+    install a docker positional, must not be rejected."""
+    s = service.create_server(
+        session, name="pipe-set-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+def test_env_assignment_expanded_command_allowed_when_non_docker(session):
+    """An ``env NAME=VALUE`` whose child shell expands it to a NON-docker command must not be
+    rejected."""
+    s = service.create_server(
+        session, name="env-assign-ok", runner="command", command="env",
+        args=["D=python", "sh", "-c", '"$D" -m srv'], enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
     "inner",
     [
         "docker() { printf fake; }; docker run alpine",   # POSIX definition shadows the later call

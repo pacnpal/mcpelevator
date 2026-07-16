@@ -224,8 +224,8 @@ def _brace_expand(word: str, _depth: int = 0) -> tuple[list[str], bool]:
 # is not). Several also accept leading ``NAME=VALUE`` assignments. Peeling these keeps detection
 # focused on the actual command word. ``eval`` is handled separately (its args ARE shell input).
 _SHELL_CMD_PREFIXES = {"exec", "sudo", "doas", "env", "nohup", "setsid", "command", "builtin",
-                       "nice", "ionice", "taskset", "timeout", "xargs", "stdbuf", "flock",
-                       "chroot", "runuser", "su", "watch"}
+                       "nice", "ionice", "taskset", "unshare", "timeout", "xargs", "stdbuf",
+                       "flock", "chroot", "runuser", "su", "watch"}
 
 # Builtins that BOTH persist a ``NAME=VALUE`` assignment to the shell and are a command word
 # (``export D=docker`` / ``declare D=docker``). ``_segment_assignments`` mines their operands so a
@@ -280,6 +280,10 @@ _WRAPPER_VALUE_LONG = {
     "nice": {"--adjustment"},
     "ionice": {"--class", "--classdata", "--pid"},
     "taskset": {"--cpu-list"},
+    # unshare's namespace flags (``-m``/``-p``/…) take only an OPTIONAL ``=file`` arg (never a
+    # space-separated one), so they don't swallow the command; only these take a required value.
+    "unshare": {"--map-user", "--map-group", "--map-users", "--map-groups", "--setgroups",
+                "--propagation", "--setuid", "--setgid", "--root", "--wd"},
     "exec": set(),
     "timeout": {"--signal", "--kill-after"},
     "xargs": {"--replace", "--max-args", "--max-procs", "--max-chars", "--delimiter",
@@ -298,6 +302,7 @@ _WRAPPER_VALUE_SHORT = {
     "nice": set("n"),
     "ionice": set("cnp"),  # -c class, -n classdata, -p pid
     "taskset": set("cp"),  # -c cpu-list, -p pid
+    "unshare": set("SGRw"),  # -S setuid, -G setgid, -R root, -w wd (namespace flags are boolean)
     "exec": set("a"),
     "timeout": set("sk"),
     # -I replstr, -n num, -P procs, -s size, -d delim, -a file, -E eof, -L/-l num
@@ -895,7 +900,9 @@ def _split_shell_commands(command_string: str) -> list[str]:
     return segments
 
 
-def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optional[list[str]]]:
+def _strip_wrappers(command: str, args: Optional[list[str]],
+                    collected_assignments: Optional[dict[str, str]] = None
+                    ) -> tuple[str, Optional[list[str]]]:
     """Peel thin wrappers (``env``/``sudo``/``doas``/``nice``/``exec``/…) off the front so the real
     command underneath is what gets inspected. Honors leading ``NAME=VALUE`` assignments (env/sudo/
     doas), per-wrapper value options — including clustered short options (``sudo -Eu root``) and env
@@ -903,7 +910,11 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
     ``nice -n 10 docker`` / ``exec -a x docker`` aren't misread. Loops so nested wrappers
     (``sudo env docker``) fully peel; if the (generous) nesting bound is hit while still on a
     wrapper — pathological ``env env … env docker`` stacking — it resolves conservatively to a
-    docker launcher rather than giving up and reporting the outer wrapper as safe."""
+    docker launcher rather than giving up and reporting the outer wrapper as safe.
+
+    When ``collected_assignments`` is supplied, ``NAME=VALUE`` prefixes the wrapper applies to the
+    child (``env D=docker sh -c '"$D" …'``) are recorded into it, so the child shell's expansion of
+    ``$D`` can be resolved by the caller."""
     for _ in range(_MAX_WRAPPER_PEELS):
         base = _launcher_basename(command)
         if base not in _SHELL_CMD_PREFIXES:
@@ -999,6 +1010,9 @@ def _strip_wrappers(command: str, args: Optional[list[str]]) -> tuple[str, Optio
                     i += 1  # boolean-only cluster
                 continue
             if base in _WRAPPERS_ACCEPTING_ASSIGNMENTS and _looks_like_assignment(tok):
+                if collected_assignments is not None:  # env/sudo apply this to the child's env
+                    name, value = tok.split("=", 1)
+                    collected_assignments[name] = value
                 i += 1
                 continue
             if sudo_shell:  # ``sudo -s COMMAND …`` — the operands are a shell command line
@@ -1278,14 +1292,84 @@ def _segment_assignments(segment: str) -> dict[str, str]:
     return result
 
 
-def _expand_known_vars(segment: str, assignments: dict[str, str]) -> str:
+def _set_positionals(segment: str) -> Optional[list[str]]:
+    """The positional parameters a ``set`` command installs (``set -- docker run`` → ``[docker,
+    run]``), or ``None`` when the segment isn't such a ``set``. These become ``$1``/``$@`` for the
+    commands that follow, so ``set -- docker run; "$@"`` launches docker."""
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        return None
+    idx = 0
+    while idx < len(words) and (_looks_like_assignment(words[idx])
+                                or _redirection_span(words[idx])):
+        idx += 1
+    if idx >= len(words) or words[idx] != "set":
+        return None
+    rest = words[idx + 1:]
+    if "--" in rest:  # explicit end-of-options: everything after is positional
+        return rest[rest.index("--") + 1:]
+    k = 0  # no ``--``: skip option flags, then the remainder are positional words
+    while k < len(rest) and rest[k][:1] in ("-", "+"):
+        if rest[k] in ("-o", "+o"):  # ``set -o pipefail`` consumes a value
+            k += 2
+        else:
+            k += 1
+    return rest[k:]
+
+
+def _expand_positionals(segment: str, positionals: list[str]) -> str:
+    """Replace the whole-list positional forms (``$@`` ``$*`` ``${@}`` ``${*}``, quoted or not) with
+    the ``set --`` positionals as SEPARATE words — ``"$@"`` word-splits in bash, so ``"$@"`` with
+    ``[docker, run]`` must yield a ``docker`` command word, not a single ``"docker run"`` token.
+    Single-quoted spans are left literal."""
+    joined = " ".join(shlex.quote(p) for p in positionals)
+    forms = ('"$@"', '"$*"', '"${@}"', '"${*}"', "$@", "$*", "${@}", "${*}")
+    out: list[str] = []
+    i, n = 0, len(segment)
+    in_single = False
+    while i < n:
+        ch = segment[i]
+        if in_single:
+            out.append(ch)
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+        if ch == "'":
+            in_single = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.append(ch)
+            out.append(segment[i + 1])
+            i += 2
+            continue
+        match = next((f for f in forms if segment.startswith(f, i)), None)
+        if match is not None:
+            out.append(joined)
+            i += len(match)
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _expand_known_vars(segment: str, assignments: dict[str, str],
+                       positionals: Optional[list[str]] = None) -> str:
     """Substitute ``$VAR``/``${VAR}`` with a known literal assignment so a deterministic
     ``D=docker; $D run`` resolves its command word. Single-quoted spans are left literal (no
     expansion); double quotes expand. An unknown plain ``${NAME}`` collapses to empty (bash treats
     an unset variable as ``""``) so ``${EMPTY}docker`` still resolves to a ``docker`` command word;
-    a bare unknown ``$NAME`` is left intact (never a launcher on its own)."""
-    if not assignments and "${" not in segment:
+    a bare unknown ``$NAME`` is left intact (never a launcher on its own). ``positionals`` (from a
+    prior ``set --``) resolve ``$@``/``$*``/``$1``… — but only when non-empty, so an as-yet-unset
+    ``$@`` is left for the argv-based positional check."""
+    positionals = positionals or []
+    if not assignments and not positionals and "${" not in segment:
         return segment
+    if positionals:  # resolve ``$@``/``$*`` (word-splitting forms) before the scalar pass below
+        segment = _expand_positionals(segment, positionals)
     out: list[str] = []
     i, n = 0, len(segment)
     quote: Optional[str] = None
@@ -1316,9 +1400,19 @@ def _expand_known_vars(segment: str, assignments: dict[str, str]) -> str:
                         out.append(assignments[name])
                         i = j + 1
                         continue
+                    if positionals and name.isdigit():
+                        p = int(name)
+                        out.append(positionals[p - 1] if 1 <= p <= len(positionals) else "")
+                        i = j + 1
+                        continue
                     if _is_shell_name(name) and name != "IFS":  # unknown plain ${NAME} → unset = ""
                         i = j + 1
                         continue
+            elif positionals and segment[i + 1].isdigit():  # $1..$9 → a specific positional
+                p = int(segment[i + 1])
+                out.append(positionals[p - 1] if 1 <= p <= len(positionals) else "")
+                i += 2
+                continue
             else:
                 j = i + 1
                 while j < n and (segment[j].isalnum() or segment[j] == "_"):
@@ -1331,6 +1425,133 @@ def _expand_known_vars(segment: str, assignments: dict[str, str]) -> str:
         out.append(ch)
         i += 1
     return "".join(out)
+
+
+def _split_pipelines(command_string: str) -> list[list[str]]:
+    """Split a command line into pipelines, each a list of its ``|``-separated stages. Boundaries
+    that are NOT a pipe (``;`` ``&`` ``&&`` ``||`` newline) start a fresh pipeline. Quote-aware, so a
+    ``|`` inside quotes is not a boundary."""
+    pipelines: list[list[str]] = []
+    current: list[str] = []
+    buf: list[str] = []
+    quote: Optional[str] = None
+    i, n = 0, len(command_string)
+    while i < n:
+        ch = command_string[i]
+        if quote is not None:
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(ch)
+                buf.append(command_string[i + 1])
+                i += 2
+                continue
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(ch)
+            buf.append(command_string[i + 1])
+            i += 2
+            continue
+        if ch == "|":
+            current.append("".join(buf))
+            buf = []
+            if i + 1 < n and command_string[i + 1] == "|":  # ``||`` — a logical break, not a pipe
+                pipelines.append(current)
+                current = []
+                i += 2
+                continue
+            i += 2 if (i + 1 < n and command_string[i + 1] == "&") else 1  # ``|`` or ``|&``
+            continue
+        if ch in ";&\n":
+            current.append("".join(buf))
+            buf = []
+            pipelines.append(current)
+            current = []
+            i += 2 if (ch == "&" and i + 1 < n and command_string[i + 1] == "&") else 1
+            continue
+        buf.append(ch)
+        i += 1
+    current.append("".join(buf))
+    pipelines.append(current)
+    return pipelines
+
+
+def _is_stdin_reading_shell(stage: str) -> bool:
+    """True when ``stage`` runs a shell that reads its SCRIPT from stdin — a launcher with no ``-c``
+    and no script-file operand (``… | sh`` / ``… | bash -s``). Such a shell executes whatever the
+    pipe feeds it."""
+    try:
+        words = shlex.split(stage)
+    except ValueError:
+        return False
+    idx = 0
+    while idx < len(words) and _looks_like_assignment(words[idx]):
+        idx += 1
+    if idx >= len(words):
+        return False
+    cmd, rest = _strip_wrappers(words[idx], words[idx + 1:])
+    if _launcher_basename(cmd) not in _SHELL_LAUNCHERS:
+        return False
+    j = 0
+    tokens = list(rest or [])
+    while j < len(tokens):
+        tok = tokens[j]
+        if tok == "-c" or (tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]):
+            return False  # a ``-c`` command string, not stdin
+        if tok in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
+            j += 2
+            continue
+        if tok == "--" or not tok.startswith("-"):
+            return False  # a script-file operand — the shell reads the file, not stdin
+        j += 1
+    return True  # a shell launcher with neither -c nor a script file reads its program from stdin
+
+
+def _static_command_output(stage: str) -> Optional[str]:
+    """The literal text a static ``echo``/``printf`` stage writes to stdout (so a following piped
+    shell's script is known), or ``None`` when the stage's output isn't statically known."""
+    try:
+        words = shlex.split(stage)
+    except ValueError:
+        return None
+    idx = 0
+    while idx < len(words) and _looks_like_assignment(words[idx]):
+        idx += 1
+    if idx >= len(words):
+        return None
+    cmd = _launcher_basename(words[idx])
+    rest = words[idx + 1:]
+    if cmd == "echo":
+        body = [w for w in rest if not (len(w) >= 2 and w[0] == "-" and set(w[1:]) <= set("neE"))]
+        return _decode_ansi_c(" ".join(body))
+    if cmd == "printf":
+        if not rest:
+            return None
+        text = _decode_ansi_c(rest[0])  # the format string
+        if "%" in rest[0] and len(rest) > 1:  # rough %-substitution: append the operands
+            text += " " + " ".join(rest[1:])
+        return text
+    return None
+
+
+def _pipe_into_stdin_shell_invokes_docker(command_string: str,
+                                          env: Optional[dict[str, str]] = None) -> bool:
+    """True when a static ``echo``/``printf`` is piped into a stdin-reading shell that then launches
+    docker (``printf 'docker run\\n' | sh``) — the piped literal IS the shell's script."""
+    for pipeline in _split_pipelines(command_string):
+        for k in range(1, len(pipeline)):
+            if _is_stdin_reading_shell(pipeline[k]):
+                literal = _static_command_output(pipeline[k - 1])
+                if literal is not None and _shell_command_invokes_docker(literal, env):
+                    return True
+    return False
 
 
 def _shell_command_invokes_docker(command_string: str,
@@ -1348,20 +1569,27 @@ def _shell_command_invokes_docker(command_string: str,
     if any(_shell_command_invokes_docker(sub, env)
            for sub in _command_substitutions(command_string)):
         return True
-    # Walk segments in order, growing the set of declared shell functions and simple variable
-    # assignments as we go: a ``function docker { … }`` only shadows the CLI for commands that come
-    # AFTER it, and ``D=docker`` only resolves ``$D`` for later segments — so an earlier ``docker
-    # run`` is still a launch. Configured-env values are the deterministic baseline (present from
-    # the first segment); a same-named in-script assignment overrides them from its point on.
+    if _pipe_into_stdin_shell_invokes_docker(command_string, env):
+        return True
+    # Walk segments in order, growing the set of declared shell functions, simple variable
+    # assignments, and ``set --`` positionals as we go: a ``function docker { … }`` only shadows the
+    # CLI for commands AFTER it, ``D=docker`` only resolves ``$D`` for later segments, and ``set --``
+    # installs ``$@`` for what follows — so an earlier ``docker run`` is still a launch. Configured-
+    # env values are the deterministic baseline; a same-named in-script assignment overrides them.
     funcs: set[str] = set()
     assignments: dict[str, str] = {k: v for k, v in (env or {}).items() if isinstance(v, str)}
+    positionals: list[str] = []
     for seg in _split_shell_commands(command_string):
-        if _segment_invokes_docker(_expand_known_vars(seg, assignments), frozenset(funcs), env):
+        if _segment_invokes_docker(
+                _expand_known_vars(seg, assignments, positionals), frozenset(funcs), env):
             return True
         declared = _segment_declares_function(seg)
         if declared:
             funcs.add(declared)
         assignments.update(_segment_assignments(seg))
+        set_pos = _set_positionals(seg)
+        if set_pos is not None:
+            positionals = set_pos
     return False
 
 
@@ -1406,7 +1634,10 @@ def _shell_invokes_docker(command: str, args: Optional[list[str]],
     (``eval "$(some_cmd)"``, a helper script that shells out to docker, base64-decode-pipe-to-sh).
     Those are out of reach of any parser and out of scope: the real containment for a hostile
     local-exec config is not enabling untrusted ``command`` servers, not this string analysis."""
-    command, args = _strip_wrappers(command, args)
+    wrapper_env: dict[str, str] = {}
+    command, args = _strip_wrappers(command, args, wrapper_env)
+    if wrapper_env:  # ``env D=docker sh -c …`` — the wrapper sets these in the child's environment
+        env = {**(env or {}), **wrapper_env}
     # Bash brace expansion can hide the launcher (``{docker,} run`` runs ``docker``): check every
     # brace-list expansion of the command word. Fail closed if expansion was truncated (a later
     # ``docker`` alternative could have been dropped by the cap). ``_is_docker_command`` also treats
