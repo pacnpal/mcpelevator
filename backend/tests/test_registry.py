@@ -674,6 +674,1174 @@ def test_docker_create_enabled_gated_when_setting_off(session):
         )
 
 
+_DOCKER_GUARD_MSG = "Docker CLI invocations require the docker runner"
+
+
+def test_shell_wrapped_docker_create_enabled_rejected(session):
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session,
+            name="wrapped",
+            runner="command",
+            command="/bin/sh",
+            args=["-c", "docker run --privileged -v /:/host alpine sh"],
+            enabled=True,
+        )
+
+
+def test_shell_wrapped_docker_enable_rejected(session):
+    s = service.create_server(
+        session,
+        name="wrapped",
+        runner="command",
+        command="/bin/sh",
+        args=["-c", "docker run --privileged -v /:/host alpine sh"],
+        enabled=False,
+    )
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.set_enabled(session, s.id, True)
+
+
+def test_shell_wrapped_docker_update_enabled_rejected(session):
+    s = service.create_server(
+        session, name="plain", runner="command", command="echo", args=["hi"], enabled=True
+    )
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.update_server(
+            session, s.id, {"command": "/bin/bash", "args": ["-lc", "docker run alpine"]}
+        )
+    reloaded = repo.get_server(session, s.id)
+    assert reloaded.command == "echo"
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        # "docker" as a plain argument to a non-docker command, not a command-position launcher.
+        ("/bin/sh", ["-c", "python -m mcp_server --backend docker"]),
+        # A long option that merely contains 'c' is not -c, so nothing is scanned as a command.
+        ("/bin/bash", ["--norc", "--", "python", "-m", "srv"]),
+    ],
+)
+def test_shell_wrapped_docker_argument_allowed(session, command, args):
+    """The guard must not fire on configs that only mention docker as an argument, or use a
+    long shell option that happens to contain the letter 'c'."""
+    s = service.create_server(
+        session, name="arg_allowed", runner="command", command=command, args=args, enabled=True
+    )
+    assert s.enabled is True
+
+
+def test_shell_wrapped_docker_via_env_wrapper_rejected(session):
+    """``env`` (optionally with assignments) fronting a shell that launches docker must still be
+    caught — the env basename would otherwise mask the wrapped invocation."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session,
+            name="env-wrapped",
+            runner="command",
+            command="/usr/bin/env",
+            args=["FOO=bar", "bash", "-c", "docker run alpine"],
+            enabled=True,
+        )
+
+
+def test_shell_wrapped_docker_via_norc_before_c_rejected(session):
+    """A valid long option before the real ``-c`` must not short-circuit detection."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session,
+            name="norc",
+            runner="command",
+            command="/bin/bash",
+            args=["--norc", "-c", "docker run alpine"],
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "sudo docker run alpine",
+        "sudo -u root docker run alpine",  # -u consumes its value; docker is still the command
+        "sudo -n docker run alpine",       # sudo -n (--non-interactive) is a boolean, not a value
+        "env -u PATH docker run alpine",
+        "nice -n 10 docker run alpine",    # nice -n IS value-taking
+        "exec docker run alpine",
+        "foo && docker run alpine",        # docker in a command position after a shell operator
+        "true&&docker run alpine",         # ...even glued to the operator with no spaces
+        "echo x;docker run alpine",
+        "foo | docker run alpine",
+        "$(docker run alpine)",            # command substitution
+        "env -S 'docker run alpine'",      # env -S split-string bearing the command
+        "env -S 'bash -c \"docker run alpine\"'",
+        "systemd-run --scope docker run alpine",   # systemd-run runs COMMAND in a transient unit
+        "systemd-run -p MemoryMax=1G docker run",  # -p consumes its property value; docker follows
+        "script -q -c 'docker run alpine' /dev/null",  # util-linux script -c runs COMMAND via sh -c
+    ],
+)
+def test_shell_wrapped_docker_via_wrapper_options_rejected(session, inner):
+    """Thin wrappers (sudo/env/nice/…), glued operators, command substitution, and env -S must not
+    slip the guard."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session,
+            name="wrapped-opt",
+            runner="command",
+            command="/bin/sh",
+            args=["-c", inner],
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("sudo", ["docker", "run", "alpine"]),          # a bare thin wrapper as the command
+        ("nice", ["-n", "10", "docker", "run"]),        # ...with a value-taking option
+        ("sudo", ["FOO=bar", "docker", "run"]),         # sudo's leading VAR=value assignment
+        ("/usr/bin/env", ["-S", "docker run alpine"]),  # env -S at the top level
+        ("/usr/bin/env", ["-vS", "docker run alpine"]),  # ...clustered with a boolean short opt
+        ("/usr/bin/env", ["bash", "-c", "docker run"]),
+        ("systemd-run", ["--scope", "docker", "run", "alpine"]),  # transient-unit wrapper
+        ("systemd-run", ["-M", "container", "docker", "run"]),    # -M consumes its machine value
+        ("script", ["-q", "-c", "docker run alpine", "/dev/null"]),  # script -c COMMAND typescript
+        ("runuser", ["-u", "root", "docker", "run", "alpine"]),   # runuser -u USER direct-exec form
+        ("runuser", ["--user", "root", "docker", "run"]),         # ...long form gives the user too
+    ],
+)
+def test_top_level_wrapper_docker_rejected(session, command, args):
+    """A docker CLI fronted by a thin wrapper as the stored command (not inside ``-c``) is still a
+    docker launch and must be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="top-wrap", runner="command", command=command, args=args, enabled=True
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "FOO=bar docker run alpine",               # leading shell assignment before the command
+        "if docker run alpine; then true; fi",     # reserved word before the command
+        "time docker run alpine",                  # `time` keyword
+        "! docker run alpine",                     # `!` negation keyword
+        "while docker run x; do :; done",
+        "exec -a ignored docker run alpine",       # exec -a consumes its value
+        "sudo -Eu root docker run alpine",         # clustered short opts with embedded value opt
+        "sudo FOO=bar docker run alpine",          # sudo assignment inside -c
+        'echo "$(docker run alpine)"',             # command substitution inside double quotes
+        "echo `docker run alpine`",                # backtick substitution
+        'eval "docker run alpine"',                # eval re-parses its operand as a command line
+        "eval docker run alpine",                  # ...even unquoted, joined back into one line
+        "trap 'docker run alpine' EXIT",           # trap runs its action on the EXIT pseudo-signal
+        "trap 'docker run alpine' 0",              # ...POSIX spells the exit trap as signal 0
+        "doc\\\nker run alpine",                    # line continuation folds ``doc\<newline>ker``
+        "docker run \\\nalpine",                    # ...continuation between the command and its args
+    ],
+)
+def test_shell_wrapped_docker_control_syntax_rejected(session, inner):
+    """Assignments, reserved words, exec -a, clustered options, command substitution, and eval must
+    not let a docker launch slip past the guard."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session,
+            name="ctrl-syntax",
+            runner="command",
+            command="/bin/sh",
+            args=["-c", inner],
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "FOO=docker myapp run",              # 'docker' is an assignment VALUE, not the command
+        "echo 'literal $(docker) text'",     # substitution inside single quotes is literal
+        "myapp --label docker.io/img",       # 'docker' only in an argument
+        "env MYVAR=1 python app.py",         # env assignment fronting a non-docker command
+    ],
+)
+def test_shell_wrapped_docker_control_syntax_allowed(session, inner):
+    """Control syntax that only *mentions* docker (assignment value, single-quoted, an argument)
+    must not trigger a false rejection."""
+    s = service.create_server(
+        session, name="ctrl-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        # A quoted ')' inside the $(...) body must not end the substitution early.
+        "echo \"$(printf ')' ; docker run alpine)\"",
+        "docker\\\n run alpine",               # a line continuation the shell removes
+    ],
+)
+def test_shell_wrapped_docker_quoting_and_continuation_rejected(session, inner):
+    """Quote-aware substitution balancing, line continuations, and ANSI-C quoting must not let a
+    docker launch slip past the guard."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="quote-cont", runner="command", command="/bin/sh",
+            args=["-c", inner], enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("/usr/bin/env", ["-S", "docker\\_run alpine"]),   # GNU env -S '\_' is a separator
+        ("/usr/bin/env", ["-vS", "docker\\_run alpine"]),  # ...clustered with a boolean short opt
+        # Pathological wrapper nesting beyond the peel bound resolves conservatively to docker.
+        ("/bin/sh", ["-c", "env " * 70 + "docker run alpine"]),
+    ],
+)
+def test_env_split_and_deep_nesting_rejected(session, command, args):
+    """env -S split-string escapes and pathological wrapper nesting must still be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="env-s-deep", runner="command", command=command, args=args, enabled=True
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        # env -S split value re-enters env's grammar: a leading -- or NAME=VALUE still execs docker.
+        ("/usr/bin/env", ["-S", "-- docker run alpine"]),
+        ("/usr/bin/env", ["-S", "FOO=bar docker run alpine"]),
+    ],
+)
+def test_env_split_string_grammar_rejected(session, command, args):
+    """A ``--`` or assignment at the start of an ``env -S`` split string must not hide the docker
+    command behind it."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="env-s-grammar", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        # `docker` here is a script argument / comment / loop variable / arithmetic operand — never
+        # a command the shell executes, so none of these should be rejected.
+        ("/bin/bash", ["script.sh", "-c", "docker run alpine"]),   # script operand, not a -c string
+        ("/bin/sh", ["-c", "for docker in 1; do echo \"$docker\"; done"]),  # loop variable name
+    ],
+)
+def test_shell_docker_non_command_positions_allowed(session, command, args):
+    """A shell script operand, comment text, loop variable, or arithmetic operand named ``docker``
+    must not trigger a false rejection."""
+    s = service.create_server(
+        session, name="non-cmd", runner="command", command=command, args=args, enabled=True
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("/bin/bash", ["-o", "nounset", "-c", "docker run alpine"]),   # -o value before -c
+        ("/bin/bash", ["-O", "extglob", "-c", "docker run alpine"]),   # -O value before -c
+        ("timeout", ["30", "docker", "run", "alpine"]),                # timeout DURATION COMMAND
+        ("timeout", ["-s", "KILL", "30", "docker", "run"]),            # ...with a value option
+        ("/bin/sh", ["-c", "timeout 5 docker run alpine"]),            # timeout inside a -c string
+        # A command substitution INSIDE arithmetic is still executed by the shell.
+        ("/bin/bash", ["-c", "echo $(( $(docker run alpine) + 1))"]),
+    ],
+)
+def test_option_operands_and_timeout_and_arith_subst_rejected(session, command, args):
+    """Operand-taking shell options, the ``timeout`` wrapper, and command substitution nested in
+    arithmetic must all still be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="opt-timeout", runner="command", command=command, args=args, enabled=True
+        )
+
+
+def test_timeout_non_docker_command_allowed(session):
+    """``timeout`` fronting a non-docker command must not be gated."""
+    s = service.create_server(
+        session, name="timeout-ok", runner="command", command="timeout",
+        args=["30", "python", "app.py"], enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("timeout", ["--", "30", "docker", "run", "alpine"]),   # -- ends opts; DURATION still first
+    ],
+)
+def test_timeout_dashdash_and_brace_expansion_rejected(session, command, args):
+    """``timeout --`` (duration after end-of-options) and brace-expanded launchers must be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="dd-brace", runner="command", command=command, args=args, enabled=True
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "command -v docker >/dev/null && exec server",  # `command -v` only LOOKS UP docker
+        "command -V docker",
+        "myapp --opt={a,docker}",                       # brace in an argument, not the command word
+    ],
+)
+def test_command_lookup_and_arg_brace_allowed(session, inner):
+    """`command -v/-V` (a lookup, not a launch) and brace expansion in an argument must not be
+    mistaken for a docker launch."""
+    s = service.create_server(
+        session, name="lookup-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "time -p docker run alpine",           # `time -p` options before the pipeline
+        "<(docker run alpine) cat",            # process substitution
+        "case x in *) docker run;; esac",      # docker in a case BODY (a real command)
+        "for x in a; do docker run; done",     # docker in a loop BODY
+    ],
+)
+def test_shell_keywords_and_quoting_rejected(session, inner):
+    """trap/coproc/time options, glued redirections, process substitution, ANSI-C escapes, and
+    docker inside a case/loop body must all be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="kw", runner="command", command="/bin/sh", args=["-c", inner],
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "case docker in docker) echo ok;; esac",   # `docker` is the case SUBJECT/pattern, not a cmd
+        "for docker in 1 2 3; do echo hi; done",    # `docker` is the loop variable
+        "for x in docker podman; do echo hi; done",  # `docker` is a list item
+    ],
+)
+def test_case_subject_and_loop_list_allowed(session, inner):
+    """A `case` subject/pattern or `for` list item named ``docker`` is data, not a launched command,
+    and must not be rejected."""
+    s = service.create_server(
+        session, name="kw-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "printf x | xargs docker run alpine",       # xargs runs its COMMAND
+        "printf x | xargs -n1 -P4 docker run",       # ...with value options
+        "printf x | xargs -I{} docker run {}",
+        "cat <<EOF && docker run alpine\nhi\nEOF",   # docker on the heredoc MARKER line runs
+        "[[ -n $X ]] && docker run alpine",          # docker after ]] is a real command
+    ],
+)
+def test_xargs_heredoc_marker_and_conditional_rejected(session, inner):
+    """xargs child commands, a docker command on a heredoc marker line, and a real command after a
+    ``[[ … ]]`` test must all be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="xargs-hd", runner="command", command="/bin/sh", args=["-c", inner],
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "printf x | xargs echo docker",               # docker is an xargs INITIAL-ARG, not the cmd
+    ],
+)
+def test_heredoc_body_and_conditional_operand_allowed(session, inner):
+    """A docker string in a heredoc body, a `[[ … ]]` operand, or an xargs argument is data, not a
+    launched command, and must not be rejected."""
+    s = service.create_server(
+        session, name="hd-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("stdbuf", ["-oL", "docker", "run", "alpine"]),        # stdbuf launches its COMMAND
+        ("xargs", ["-E", "STOP", "docker", "run", "alpine"]),  # xargs -E EOF takes a value
+    ],
+)
+def test_stdbuf_and_xargs_eof_rejected(session, command, args):
+    """stdbuf (a command-launching wrapper) and xargs' value-taking ``-E`` must be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="stdbuf-x", runner="command", command=command, args=args, enabled=True
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "[[ $(docker run alpine) == x ]]",   # substitution inside a [[ … ]] condition executes
+        "cat <<EOF\n$(docker run alpine)\nEOF",  # unquoted heredoc expands its body's substitution
+    ],
+)
+def test_substitutions_in_conditional_and_heredoc_rejected(session, inner):
+    """A command substitution inside a ``[[ … ]]`` condition or an unquoted here-document body still
+    runs, so it must be inspected even though the surrounding operands/data are dropped."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="sub-cond", runner="command", command="/bin/sh", args=["-c", inner],
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        ("flock", ["/tmp/lock", "docker", "run", "alpine"], None),   # flock FILE COMMAND
+        ("flock", ["-w", "5", "/tmp/lock", "docker", "run"], None),  # ...with a value option
+        ("flock", ["/tmp/lock", "-c", "docker run alpine"], None),   # flock FILE -c SHELL-COMMAND
+        (None, None, "builtin exec docker run alpine"),
+        (None, None, ">/dev/null docker run alpine"),                # a leading redirection
+        (None, None, "2>/dev/null docker run alpine"),
+        (None, None, "echo ok # <<'EOF'\n$(docker run alpine)\nEOF"),  # heredoc marker in a comment
+    ],
+)
+def test_flock_builtin_redirection_and_comment_heredoc_rejected(session, command, args, inner):
+    """flock/builtin wrappers, leading redirections, and a here-doc marker that is only a comment
+    (so the next line still runs) must all be gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="flock-b", runner="command", command=command, args=args, enabled=True
+        )
+
+
+def test_flock_non_docker_command_allowed(session):
+    """flock fronting a non-docker command must not be gated."""
+    s = service.create_server(
+        session, name="flock-ok", runner="command", command="flock",
+        args=["/tmp/lock", "python", "app.py"], enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        (None, None, "command -p /usr/bin/docker run alpine"),            # `command -p` runs it
+        (None, None, 'echo function docker; docker run alpine'),          # not a real func decl
+        (None, None, '[[ "]]" == x ]] ; docker run alpine'),             # quoted ]] isn't the end
+    ],
+)
+def test_find_exec_command_opts_and_quoted_conditional_rejected(session, command, args, inner):
+    """find's -exec child, `command`'s own options, a `function` token that is only an argument, and
+    a quoted ``]]`` inside a conditional must not let a real docker launch slip through."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="find-x", runner="command", command=command, args=args, enabled=True
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("find", [".", "-exec", "rm", "{}", ";"]),   # find -exec of a non-docker command
+        ("find", [".", "-name", "*.docker"]),         # 'docker' only in a -name pattern
+    ],
+)
+def test_find_non_docker_allowed(session, command, args):
+    """A find whose -exec child isn't docker (or that merely matches a docker-ish name) is allowed."""
+    s = service.create_server(
+        session, name="find-ok", runner="command", command=command, args=args, enabled=True
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "docker run alpine; function docker { :; }",  # real launch BEFORE a later shadow decl
+        "bash <<EOF\ndocker run alpine\nEOF",         # heredoc body fed to a shell IS a script
+        "bash <<'EOF'\ndocker run alpine\nEOF",       # ...even with a quoted delimiter
+    ],
+)
+def test_brace_truncation_function_order_and_shell_stdin_rejected(session, inner):
+    """A brace expansion that truncates (fail closed), a docker launch preceding a later shadowing
+    ``function`` declaration, and heredoc/here-string bodies fed to a shell must all be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="brace-fn-stdin", runner="command", command="/bin/sh",
+            args=["-c", inner], enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "cat <<< docker",                              # here-string fed to cat is data
+    ],
+)
+def test_function_shadow_and_non_shell_stdin_allowed(session, inner):
+    """A call to a previously-defined ``docker`` function, and heredoc/here-string bodies fed to a
+    NON-shell (cat), are not docker launches and must not be rejected."""
+    s = service.create_server(
+        session, name="fn-stdin-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("/usr/bin/rbash", ["-c", "docker run alpine"]),      # restricted bash still honors -c
+        ("chroot", ["/", "docker", "run", "alpine"]),         # chroot NEWROOT COMMAND
+        ("chroot", ["--userspec", "x", "/", "docker", "run"]),
+    ],
+)
+def test_rbash_and_chroot_rejected(session, command, args):
+    """rbash's -c command string and chroot's child command must be gated."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="rbash-chroot", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+def test_positionals_without_param_reference_allowed(session):
+    """Positional args that the `-c` script never references are inert and must not be rejected."""
+    s = service.create_server(
+        session, name="pos-ok", runner="command", command="/bin/sh",
+        args=["-c", "echo hi", "x", "docker", "run"], enabled=True,
+    )
+    assert s.enabled is True
+
+
+def test_setup_script_invoking_docker_rejected(session):
+    """A setup script runs as ``/bin/sh -e -c`` with the passthrough env, so a docker invocation in
+    it must be gated on create, update, and enable — not just in command/args."""
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="ss1", runner="command", command="echo", args=["hi"],
+            setup_script="docker run alpine", enabled=True,
+        )
+    # create disabled, then enable → still gated
+    s = service.create_server(
+        session, name="ss2", runner="command", command="echo", args=["hi"],
+        setup_script="docker run alpine", enabled=False,
+    )
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.set_enabled(session, s.id, True)
+    # update an enabled server's setup_script to a docker invocation → gated
+    s2 = service.create_server(
+        session, name="ss3", runner="command", command="echo", args=["hi"], enabled=True,
+    )
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.update_server(session, s2.id, {"setup_script": "docker run alpine"})
+
+
+def test_setup_script_without_docker_allowed(session):
+    s = service.create_server(
+        session, name="ss-ok", runner="command", command="echo", args=["hi"],
+        setup_script="pip install -r requirements.txt", enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        (None, None, "bin/docker run alpine"),          # relative path executable
+        (None, None, "./docker run alpine"),
+        ("runuser", ["-u", "root", "--", "docker", "run"], None),  # runuser -u user -- COMMAND
+        ("runuser", ["-u", "root", "-c", "docker run alpine"], None),  # runuser -c SHELL-COMMAND
+        ("su", ["-c", "docker run alpine", "root"], None),         # su -c SHELL-COMMAND
+    ],
+)
+def test_ifs_relative_path_and_runuser_rejected(session, command, args, inner):
+    """$IFS field-splitting, a relative docker path, and runuser/su wrappers must be gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="ifs-ru", runner="command", command=command, args=args, enabled=True
+        )
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-c", "printf '%s' '$@'", "ignored", "docker", "run"],   # $@ is single-quoted -> literal
+        ["-c", "bin/python app.py"],                              # relative path, not docker
+    ],
+)
+def test_quoted_positional_and_relative_nondocker_allowed(session, args):
+    """A single-quoted ``$@`` (literal) and a relative non-docker path must not be rejected."""
+    s = service.create_server(
+        session, name="q-pos-ok", runner="command", command="/bin/sh", args=args, enabled=True
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        ("watch", ["docker", "run", "alpine"], None),           # watch COMMAND (via sh -c)
+        ("watch", ["-n", "5", "docker", "run"], None),          # ...with a value option
+        (None, None, "FOO=bar sh <<'EOF'\ndocker run alpine\nEOF"),  # heredoc + leading assignment
+    ],
+)
+def test_watch_heredoc_assignment_and_param_default_rejected(session, command, args, inner):
+    """The watch wrapper, a heredoc receiver behind a leading assignment, and a ``${VAR:-docker}``
+    default expansion must all be gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="watch-pd", runner="command", command=command, args=args, enabled=True
+        )
+
+
+def test_param_default_non_docker_allowed(session):
+    """A ``${VAR:-python}`` default that isn't docker must not be rejected."""
+    s = service.create_server(
+        session, name="pd-ok", runner="command", command="/bin/sh",
+        args=["-c", "${VAR:-python} -m srv"], enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``command`` suppresses shell-function lookup, so a shadowing definition does NOT protect it.
+        (None, None, "function docker { :; }; command docker run alpine"),
+        (None, None, "docker() { :; }; command docker run alpine"),
+        # ``watch`` runs its single operand string through ``sh -c`` by default.
+        ("watch", ["docker run alpine"], None),
+        # ...and passes the argv straight to exec with -x/--exec (first operand is the command).
+        ("watch", ["-x", "docker", "run", "alpine"], None),
+        ("watch", ["--exec", "docker", "run", "alpine"], None),
+        # ``source``/``.`` pointed at stdin execute the heredoc body as script in the current shell.
+        (None, None, "source /dev/stdin <<'EOF'\ndocker run alpine\nEOF"),
+        (None, None, ". /dev/stdin <<'EOF'\ndocker run alpine\nEOF"),
+        (None, None, "source - <<'EOF'\ndocker run alpine\nEOF"),
+    ],
+)
+def test_command_builtin_watch_string_and_sourced_stdin_rejected(session, command, args, inner):
+    """``command`` bypassing a function shadow, ``watch``'s ``sh -c`` operand string (and its
+    ``-x``/``--exec`` argv form), and a heredoc executed via ``source``/``.`` from stdin must all be
+    gated — each reaches the docker CLI without the docker runner's hardening."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="cmd-watch-src", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``ionice`` runs a supplied command like ``nice`` — its value options must not swallow it.
+        ("ionice", ["-c", "3", "docker", "run", "alpine"], None),
+        ("ionice", ["--class", "3", "docker", "run"], None),
+        ("ionice", ["-c3", "docker", "run"], None),          # value glued into the short cluster
+        ("ionice", ["-t", "docker", "run"], None),           # -t is boolean (no value)
+        # ``sudo -s``/``-i`` pass the trailing operands to a shell via ``-c`` — a command LINE.
+        ("sudo", ["-s", "true; docker run alpine"], None),
+        ("sudo", ["-i", "true; docker run alpine"], None),
+        ("sudo", ["--shell", "docker run"], None),
+    ],
+)
+def test_ionice_sudo_shell_and_variable_command_word_rejected(session, command, args, inner):
+    """``ionice`` as a command launcher, ``sudo -s``/``-i`` shell command lines, and a command word
+    resolved from a prior literal assignment (``D=docker; "$D" run``) must all be gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="ionice-sudo-var", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        ("ionice", ["-c", "3", "python", "-m", "srv"], None),   # ionice wrapping a non-docker cmd
+        ("sudo", ["-s", "python -m srv"], None),                # sudo -s with a non-docker command
+        (None, None, "D=python; $D -m srv"),                    # assignment resolves to non-docker
+        (None, None, "D=docker; '$D' run"),                     # single-quoted $D never expands
+        (None, None, "D=docker echo hi; $D run"),               # env-scoped assign, not persisted
+    ],
+)
+def test_ionice_sudo_shell_and_variable_non_docker_allowed(session, command, args, inner):
+    """``ionice``/``sudo -s`` wrapping a non-docker command, and variable command words that do NOT
+    resolve to docker (non-docker value, single-quoted, or env-scoped assignment), must not be
+    rejected."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    s = service.create_server(
+        session, name="ionice-sudo-var-ok", runner="command", command=command, args=args,
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``taskset MASK COMMAND`` (leading affinity mask) and ``taskset -c LIST COMMAND``.
+        ("taskset", ["0xff", "docker", "run", "alpine"], None),
+        ("taskset", ["-c", "0-3", "docker", "run"], None),
+    ],
+)
+def test_taskset_npx_call_export_and_stdin_herestring_rejected(session, command, args, inner):
+    """``taskset`` launchers (leading affinity mask or ``-c`` cpu-list) fronting docker must be
+    gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="taskset-npx-src", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner", "env"),
+    [
+        ("taskset", ["0x1", "python", "-m", "srv"], None, None),   # taskset wrapping non-docker
+        ("npx", ["-y", "@scope/pkg"], None, None),                 # ordinary npx (no -c)
+        ("npx", ["-c", "echo hi"], None, None),                    # npx -c non-docker
+        (None, None, "export D=python; $D -m srv", None),          # export non-docker
+        (None, None, "${D} -m srv", {"D": "python"}),              # env-resolved non-docker
+    ],
+)
+def test_taskset_npx_export_and_env_non_docker_allowed(session, command, args, inner, env):
+    """The new launchers/resolvers wrapping a NON-docker command must not be rejected."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    s = service.create_server(
+        session, name="new-launchers-ok", runner="command", command=command, args=args,
+        env=env or {}, enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``unshare`` runs a supplied command after its namespace flags.
+        ("unshare", ["docker", "run", "alpine"], None),
+        ("unshare", ["-r", "docker", "run"], None),
+        ("unshare", ["-m", "-p", "docker", "run"], None),
+        ("unshare", ["-R", "/root", "docker", "run"], None),      # -R consumes a value
+    ],
+)
+def test_unshare_pipe_shell_env_assignment_and_set_positionals_rejected(
+        session, command, args, inner):
+    """``unshare`` launchers, a static literal piped into a stdin-reading shell, an ``env NAME=VALUE``
+    the child shell expands, and ``set --`` positionals executed via ``"$@"`` must all be gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="unshare-pipe-set", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "echo hello | sh",                     # piped literal isn't docker
+        "printf 'docker run' | grep x",        # piped into a NON-shell (grep) — just data
+        'set -- python -m srv; "$@"',          # positionals resolve to a non-docker command
+        "set -e; echo hi",                     # ``set`` options install no positionals
+    ],
+)
+def test_unshare_pipe_and_set_non_docker_allowed(session, inner):
+    """Static-literal pipes into a non-shell or a non-docker program, and ``set`` forms that don't
+    install a docker positional, must not be rejected."""
+    s = service.create_server(
+        session, name="pipe-set-ok", runner="command", command="/bin/sh", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+def test_env_assignment_expanded_command_allowed_when_non_docker(session):
+    """An ``env NAME=VALUE`` whose child shell expands it to a NON-docker command must not be
+    rejected."""
+    s = service.create_server(
+        session, name="env-assign-ok", runner="command", command="env",
+        args=["D=python", "sh", "-c", '"$D" -m srv'], enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # A literal ``docker`` command word inside a function-body segment (up to the ``;``) is caught.
+        (None, None, "function f { docker run; }; f"),
+        (None, None, "docker() { command docker run; }; docker"),  # command bypasses the shadow
+        # ``prlimit`` runs its trailing command after resource limits.
+        ("prlimit", ["--nofile=1024", "docker", "run", "alpine"], None),
+        # Process substitution whose inner segment is a literal docker command.
+        (None, None, "cat <(docker run alpine)"),
+    ],
+)
+def test_function_body_prlimit_npm_alias_printf_and_procsub_rejected(
+        session, command, args, inner):
+    """A called function's docker body, ``prlimit``, ``npm`` global options before ``exec``, Bash
+    aliases, ``printf`` operand substitution piped to a shell, and process substitution must all be
+    gated."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="fn-prlimit-alias", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        (None, None, "f() { docker run alpine; }; echo hi"),  # function defined but never called
+        ("prlimit", ["--nofile=1024", "python", "-m", "srv"], None),
+        ("npm", ["exec", "somepkg"], None),                   # npm exec without -c/--call
+        (None, None, "alias d=python; d -m srv"),             # alias resolves to non-docker
+        (None, None, "bash <(printf 'echo hi\\n')"),          # process subst output isn't docker
+    ],
+)
+def test_function_body_prlimit_npm_alias_and_procsub_non_docker_allowed(
+        session, command, args, inner):
+    """The body/wrapper/alias/procsub machinery must not reject the non-docker cases: an uncalled
+    function, a benign shadow, and non-docker prlimit/npm/alias/process-substitution forms."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    s = service.create_server(
+        session, name="fn-alias-ok", runner="command", command=command, args=args, enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "source <(printf 'echo hi\\n')",         # sourced process-sub output isn't docker
+        "D=python sh -c '\"$D\" -m srv'",        # inline assignment resolves to non-docker
+        "printf hi | cat /etc/hostname | sh",    # ``cat FILE`` reads the file, not the piped stdin
+    ],
+)
+def test_sourced_procsub_inline_assignment_and_passthrough_non_docker_allowed(session, inner):
+    """The sourced-procsub / inline-assignment / pass-through-pipe machinery must not reject the
+    non-docker cases."""
+    s = service.create_server(
+        session, name="src-inline-ok", runner="command", command="/bin/bash", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``chrt [policy] PRIORITY COMMAND`` launches a command after its scheduling priority.
+        ("chrt", ["-o", "0", "docker", "run", "alpine"], None),
+        ("chrt", ["-f", "50", "docker", "run"], None),
+    ],
+)
+def test_chrt_printf_b_and_param_transform_rejected(session, command, args, inner):
+    """``chrt [policy] PRIORITY COMMAND`` fronting docker must be gated."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="chrt-printf-xform", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        ("chrt", ["-f", "50", "python", "-m", "srv"], None),  # chrt wrapping a non-docker command
+        (None, None, "${FOO:0} python"),                      # transform on an unknown var → empty
+        (None, None, "D=python; ${D:0} -m srv"),              # transform resolves to non-docker
+        # Aliases are NOT expanded without ``shopt -s expand_aliases`` in a non-interactive shell,
+        # so a benign alias definition must not be treated as a launch.
+        (None, None, "alias d=docker; d run alpine"),
+        (None, None, "alias d='docker run'; d alpine"),
+    ],
+)
+def test_chrt_transform_and_unexpanded_alias_non_docker_allowed(session, command, args, inner):
+    """Non-docker ``chrt``, unresolved/non-docker parameter transforms, and aliases without
+    ``expand_aliases`` enabled must not be rejected."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    s = service.create_server(
+        session, name="chrt-alias-ok", runner="command", command=command, args=args, enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``su``/``runuser`` take a USER positional before their ``-c`` shell command.
+        ("su", ["root", "-c", "docker run alpine"], None),
+        ("su", ["-l", "root", "-c", "docker run"], None),
+        ("su", ["-", "root", "-c", "docker run"], None),
+        ("runuser", ["-l", "root", "-c", "docker run"], None),
+    ],
+)
+def test_substitution_and_body_assignments_and_su_user_operand_rejected(
+        session, command, args, inner):
+    """A prior assignment resolved inside a command substitution or function body, and ``su``/
+    ``runuser`` with a user positional before ``-c``, must all be gated."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="subst-body-su", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        (None, None, 'D=python; echo "$($D -m srv)"'),       # substitution resolves to non-docker
+        (None, None, 'D=python; f() { "$D" -m srv; }; f'),   # function body resolves to non-docker
+        ("su", ["root", "-c", "python -m srv"], None),       # su -c a non-docker command
+        ("su", ["root"], None),                              # su with no command (interactive)
+    ],
+)
+def test_substitution_body_assignment_and_su_non_docker_allowed(session, command, args, inner):
+    """The substitution/function-body variable resolution and ``su`` user-operand handling must not
+    reject the non-docker cases."""
+    if inner is not None:
+        command, args = "/bin/sh", ["-c", inner]
+    s = service.create_server(
+        session, name="subst-su-ok", runner="command", command=command, args=args, enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``taskset -- MASK COMMAND``: ``--`` ends options but the affinity mask still precedes cmd.
+        ("taskset", ["--", "0xff", "docker", "run", "alpine"], None),
+        ("taskset", ["-c", "0-3", "--", "docker", "run"], None),
+        ("chrt", ["--", "50", "docker", "run"], None),
+    ],
+)
+def test_taskset_dashdash_and_glob_transform_rejected(session, command, args, inner):
+    """``taskset``/``chrt`` after ``--`` must still skip the mask/priority to reach docker."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="dashdash-glob", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+def test_glob_transform_as_argument_allowed(session):
+    """An unresolvable glob transform that is only an ARGUMENT (not the command word) is not a launch
+    and must not be rejected."""
+    s = service.create_server(
+        session, name="glob-arg-ok", runner="command", command="/bin/bash",
+        args=["-c", "echo ${D#?}"], enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner", "env"),
+    [
+        # ``su``/``runuser`` pass ``--session-command`` and clustered ``-lc`` to the shell like -c.
+        ("su", ["--session-command", "docker run alpine"], None, None),
+        ("su", ["-lc", "docker run alpine"], None, None),
+        ("runuser", ["-lc", "docker run"], None, None),
+        # ``setpriv [options] PROGRAM`` launches a command.
+        ("setpriv", ["--clear-groups", "docker", "run", "alpine"], None, None),
+        ("setpriv", ["--reuid", "1000", "docker", "run"], None, None),
+    ],
+)
+def test_session_command_setpriv_find_env_and_command_export_rejected(
+        session, command, args, inner, env):
+    """``su --session-command``/``-lc`` shell commands and ``setpriv [options] PROGRAM`` fronting
+    docker must all be gated."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="session-setpriv-find", runner="command", command=command, args=args,
+            env=env or {}, enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        # Aliases defined on the SAME physical line as their use are not expanded by bash.
+        "shopt -s expand_aliases; alias d=docker; d run alpine",
+        "shopt -s expand_aliases\nalias d=docker; d run alpine",  # def+use share line 2
+    ],
+)
+def test_same_line_alias_definition_allowed(session, inner):
+    """Bash expands aliases while reading each line, so an alias used on the same line it is defined
+    stays unexpanded — such a config must not be rejected."""
+    s = service.create_server(
+        session, name="same-line-alias", runner="command", command="/bin/bash", args=["-c", inner],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
+def test_setpriv_and_su_session_command_non_docker_allowed(session):
+    """``setpriv``/``su --session-command`` wrapping a non-docker command must not be rejected."""
+    for name, cmd, args in [
+        ("sp-ok", "setpriv", ["--clear-groups", "python", "-m", "srv"]),
+        ("su-sc-ok", "su", ["--session-command", "python -m srv"]),
+    ]:
+        s = service.create_server(
+            session, name=name, runner="command", command=cmd, args=args, enabled=True,
+        )
+        assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``nsenter [options] PROGRAM`` launches a command.
+        ("nsenter", ["--target", "1", "--mount", "docker", "run", "alpine"], None),
+        ("nsenter", ["-t", "1", "-m", "docker", "run"], None),
+    ],
+)
+def test_nameref_static_subst_nsenter_and_for_loop_rejected(session, command, args, inner):
+    """``nsenter [options] PROGRAM`` fronting docker must be gated."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="nameref-subst-for", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        (None, None, 'declare -n D=E; E=python; "$D" -m srv'),   # nameref resolves to non-docker
+        (None, None, "echo $(printf docker)"),                   # substitution output is an argument
+        (None, None, '"$(printf \'docker run\')" alpine'),       # quoted multiword isn't a launcher
+        ("nsenter", ["--target", "1", "python", "-m", "srv"], None),  # nsenter wrapping non-docker
+        (None, None, 'for x in python; do "$x" -m srv; done'),   # loop binds a non-docker value
+    ],
+)
+def test_nameref_static_subst_nsenter_and_for_loop_non_docker_allowed(session, command, args, inner):
+    """The nameref/substitution/nsenter/for-loop machinery must not reject the non-docker cases."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    s = service.create_server(
+        session, name="nameref-ok", runner="command", command=command, args=args, enabled=True,
+    )
+    assert s.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        # ``strace [options] COMMAND`` launches the traced command.
+        ("strace", ["docker", "run", "alpine"], None),
+        ("strace", ["-f", "docker", "run"], None),
+        ("strace", ["-o", "/tmp/t", "docker", "run"], None),
+    ],
+)
+def test_indirect_expansion_strace_sourced_pipe_and_read_rejected(session, command, args, inner):
+    """``strace [options] COMMAND`` fronting docker must be gated."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="indirect-strace-read", runner="command", command=command, args=args,
+            enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "inner"),
+    [
+        (None, None, 'D=python; x=D; "${!x}" -m srv'),          # indirect resolves to non-docker
+        ("strace", ["python", "-m", "srv"], None),              # strace wrapping a non-docker cmd
+        (None, None, 'D=python; read X <<< "$D"; "$X" -m srv'),  # read binds a non-docker value
+    ],
+)
+def test_indirect_strace_and_read_non_docker_allowed(session, command, args, inner):
+    """The indirect-expansion / strace / read-binding machinery must not reject the non-docker
+    cases."""
+    if inner is not None:
+        command, args = "/bin/bash", ["-c", inner]
+    s = service.create_server(
+        session, name="indirect-ok", runner="command", command=command, args=args, enabled=True,
+    )
+    assert s.enabled is True
+
+
+def test_deeply_nested_shell_command_fails_closed_without_error(session):
+    """Pathologically nested ``$(…)`` must not raise (RecursionError) out of the guard; it fails
+    closed and rejects the malformed config instead of 500-ing the create path."""
+    inner = "$(" * 6000 + "docker run alpine" + ")" * 6000
+    with pytest.raises(ValueError, match=_DOCKER_GUARD_MSG):
+        service.create_server(
+            session, name="deep-nest", runner="command", command="/bin/sh",
+            args=["-c", inner], enabled=True,
+        )
+
+
+def test_shell_wrapped_docker_second_c_positional_allowed(session):
+    """Only the FIRST ``-c`` supplies the shell command; a later ``-c`` is ``$0`` and its args never
+    run, so a docker string there must not trigger a false rejection."""
+    s = service.create_server(
+        session,
+        name="second-c",
+        runner="command",
+        command="/bin/sh",
+        args=["-c", "echo ok", "-c", "docker run alpine"],
+        enabled=True,
+    )
+    assert s.enabled is True
+
+
 def test_docker_enable_allowed_when_setting_on(session):
     _enable_docker(session)
     s = service.create_server(

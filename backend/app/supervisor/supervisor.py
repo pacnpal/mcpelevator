@@ -23,6 +23,7 @@ from sqlmodel import Session
 from app.config import get_settings
 from app.db import get_engine, repo
 from app.db.models import Server, utcnow
+from app.registry import service as registry_service
 from app.registry import settings as runtime_settings
 from app.runners.docker import DOCKER_BIN, LABEL_KEY
 from app.supervisor.ports import PortAllocator
@@ -196,7 +197,7 @@ class Supervisor:
 
         desired: dict[str, Server] = {}
         disabled: list[Server] = []
-        disabled_docker: list[Server] = []
+        forbidden_docker: list[tuple[Server, str]] = []
         for sv in servers:
             if not sv.enabled:
                 disabled.append(sv)
@@ -205,20 +206,36 @@ class Supervisor:
             # The docker runner is root-equivalent and opt-in: if it's off, an enabled docker
             # server must not run — collect it for a stop pass below (this also catches the
             # setting being turned off while a docker server is running, within one interval).
-            if sv.runner == "docker" and not docker_on:
-                disabled_docker.append(sv)
+            if not docker_on and sv.runner == "docker":
+                forbidden_docker.append(
+                    (sv, "Docker runner is disabled (enable it in Settings)")
+                )
+                continue
+            # A shell-wrapped docker CLI invocation on a passthrough runner can NEVER be routed
+            # through the hardened docker runner (only real ``docker`` launchers canonicalize), so
+            # starting it would spawn an ungated, unhardened container with the control plane's full
+            # environment. Forbid it regardless of the docker_runner setting — even a legacy row that
+            # predates this guard, and even while the runner is on.
+            if registry_service.local_exec_invokes_docker(
+                sv.runner, sv.command, sv.args
+            ) or registry_service.setup_script_invokes_docker(
+                sv.runner, sv.setup_script
+            ):
+                forbidden_docker.append(
+                    (sv, "Docker CLI invocations require the docker runner")
+                )
                 continue
             desired[sv.id] = sv
 
-        # gate: stop any docker unit the runner-off setting now forbids, and surface why
-        for sv in disabled_docker:
+        # gate: stop any docker unit now forbidden (runner off, or an unhardenable shell wrapper),
+        # and surface why
+        for sv, reason in forbidden_docker:
             self.cancel_activation_request(sv.id)
             if sv.id in self.units:
                 await self._stop(sv.id)
             self._write_runtime(
                 sv.id, state="failed", pid=None, port=None,
-                last_error="Docker runner is disabled (enable it in Settings)",
-                restart_count=0, last_health=None, tools=[],
+                last_error=reason, restart_count=0, last_health=None, tools=[],
             )
 
         # stop anything running that is no longer desired

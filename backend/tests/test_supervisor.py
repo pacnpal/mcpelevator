@@ -17,6 +17,7 @@ from mcp.types import Tool
 
 from app.db import get_engine, init_db, repo
 from app.registry import service
+from app.registry import settings as runtime_settings
 from app.supervisor.supervisor import Supervisor
 from app.supervisor.unit import tool_summary
 
@@ -62,12 +63,123 @@ def _fake_unit(server) -> SimpleNamespace:
     )
 
 
+def _force_enable_legacy(session, **kwargs) -> str:
+    """Persist an enabled row that bypasses service validation, standing in for a legacy row
+    (or a hand-edited DB) that predates the shell-wrapped-docker guard."""
+    server = service.create_server(session, enabled=False, **kwargs)
+    row = repo.get_server(session, server.id)
+    row.enabled = True
+    repo.save_server(session, row)
+    return server.id
+
+
+async def test_reconcile_forbids_shell_wrapped_docker_when_runner_disabled():
+    with Session(get_engine()) as session:
+        runtime_settings.write(session, {"docker_runner": False})
+        sid = _force_enable_legacy(
+            session,
+            name="wrapped-off",
+            runner="command",
+            command="/bin/sh",
+            args=["-c", "docker run --privileged alpine"],
+            env={},
+        )
+
+    sup = Supervisor()
+    # Seed a running unit (as if the row had been started before the gate applied) so reconcile
+    # exercises the stop-and-fail path, not just the never-started path.
+    stopped: list[str] = []
+
+    class _StoppableUnit(SimpleNamespace):
+        async def stop(self):
+            stopped.append(sid)
+
+    sup.units[sid] = _StoppableUnit(slug="wrapped-off", config_hash="x", state="running",
+                                    pid=1, port=1, last_error=None, tools=[])
+    sup.request_activation(sid)
+    try:
+        await sup.reconcile_once()
+        assert stopped == [sid]                       # the running unit was stopped
+        assert sid not in sup.units                   # ...and removed
+        assert sup.activation_requested_at(sid) is None  # its activation request was cancelled
+        with Session(get_engine()) as session:
+            rt = repo.get_runtime(session, sid)
+        assert rt is not None
+        assert rt.state == "failed"
+        assert "docker runner" in (rt.last_error or "").lower()
+    finally:
+        sup.units.pop(sid, None)
+        with Session(get_engine()) as session:
+            repo.delete_server(session, sid)
+
+
+async def test_reconcile_forbids_shell_wrapped_docker_even_when_runner_enabled():
+    """A shell-wrapped ``docker`` CLI on a passthrough runner can't be hardened, so it must be
+    refused even while ``docker_runner`` is on — otherwise reconcile would start it through the
+    passthrough command runner with the full control-plane environment."""
+    with Session(get_engine()) as session:
+        runtime_settings.write(session, {"docker_runner": True})
+        sid = _force_enable_legacy(
+            session,
+            name="wrapped-on",
+            runner="command",
+            command="/bin/sh",
+            args=["-c", "docker run --privileged alpine"],
+            env={},
+        )
+
+    sup = Supervisor()
+    try:
+        await sup.reconcile_once()
+        assert sid not in sup.units  # never started, despite the runner being on
+        with Session(get_engine()) as session:
+            rt = repo.get_runtime(session, sid)
+        assert rt is not None
+        assert rt.state == "failed"
+        assert "docker runner" in (rt.last_error or "").lower()
+    finally:
+        sup.units.pop(sid, None)
+        with Session(get_engine()) as session:
+            runtime_settings.write(session, {"docker_runner": False})
+            repo.delete_server(session, sid)
+
+
+async def test_reconcile_forbids_setup_script_docker_when_runner_enabled():
+    """A benign command with a ``setup_script`` that invokes docker runs that script as
+    ``/bin/sh -e -c`` with the passthrough env, so reconcile must refuse it even while
+    ``docker_runner`` is on — exercising the setup-script half of the reconciliation guard."""
+    with Session(get_engine()) as session:
+        runtime_settings.write(session, {"docker_runner": True})
+        sid = _force_enable_legacy(
+            session,
+            name="setup-docker",
+            runner="command",
+            command="echo",
+            args=["hi"],
+            env={},
+            setup_script="docker run --privileged alpine",
+        )
+
+    sup = Supervisor()
+    try:
+        await sup.reconcile_once()
+        assert sid not in sup.units  # never started, despite the runner being on
+        with Session(get_engine()) as session:
+            rt = repo.get_runtime(session, sid)
+        assert rt is not None
+        assert rt.state == "failed"
+        assert "docker runner" in (rt.last_error or "").lower()
+    finally:
+        sup.units.pop(sid, None)
+        with Session(get_engine()) as session:
+            runtime_settings.write(session, {"docker_runner": False})
+            repo.delete_server(session, sid)
+
+
 async def test_reconcile_skips_docker_when_runner_disabled():
     """An enabled docker server must not be started while the docker runner is off (e.g.
     the setting was turned off after it was enabled). Reconcile leaves no unit and records
     a clear failed state — never a silent spawn of a root-equivalent container."""
-    from app.registry import settings as runtime_settings
-
     sup = Supervisor()
     with Session(get_engine()) as session:
         runtime_settings.write(session, {"docker_runner": True})

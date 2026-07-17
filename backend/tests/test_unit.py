@@ -57,6 +57,32 @@ def _server(tmp_path: Path, *, setup_script: str) -> Server:
     )
 
 
+def test_env_scrub_keeps_control_plane_secrets_from_children(tmp_path, monkeypatch):
+    # The break-glass admin token must not reach an untrusted local-exec child — not in its own
+    # env, and not recoverable from the (trusted) bridge parent's env via /proc/<ppid>/environ.
+    from app.supervisor import unit as unit_module
+
+    monkeypatch.setattr(unit_module, "get_settings", lambda: _settings(tmp_path))
+    monkeypatch.setenv("MCPE_ADMIN_TOKEN", "secret")
+    monkeypatch.setenv("MCPE_PUBLIC_BASE_URL", "http://x")  # non-secret MCPE_ config
+    monkeypatch.setenv("PATH", "/usr/bin")
+    unit = ServerUnit(_server(tmp_path, setup_script="true"))
+    unit.port = 12345
+
+    bridge_env = unit._bridge_env(unit._bridge_payload())
+    assert "MCPE_ADMIN_TOKEN" not in bridge_env               # secret kept out of the bridge parent
+    assert bridge_env["MCPE_PUBLIC_BASE_URL"] == "http://x"   # non-secret config still available
+    assert bridge_env["PATH"] == "/usr/bin"
+
+    # The setup script gets the full child scrub: ALL of the elevator's MCPE_ namespace removed,
+    # while the server's own vars and ordinary tooling env survive.
+    setup_env = unit._effective_child_env()
+    assert "MCPE_ADMIN_TOKEN" not in setup_env
+    assert "MCPE_PUBLIC_BASE_URL" not in setup_env            # a child needs no elevator config
+    assert setup_env["EXPECTED_CWD"] == str(tmp_path / "work")  # server var kept
+    assert setup_env["PATH"] == "/usr/bin"
+
+
 async def test_setup_runs_before_bridge_with_child_environment_and_cwd(tmp_path, monkeypatch):
     from app.supervisor import unit as unit_module
 
