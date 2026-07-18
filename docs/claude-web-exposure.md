@@ -237,6 +237,19 @@ Managed OAuth ([secure MCP servers with Access](https://developers.cloudflare.co
    otherwise rejects. If your local clients use Path B (bearer) instead, leave these
    off. Then **Save**.
 
+> **Keep the connector from lapsing (refresh tokens).** With Path A, **Cloudflare
+> Access is the authorization server** — it, not mcpelevator, decides how long a
+> Claude session lasts and whether it can renew silently. Access's Managed OAuth
+> issues a **refresh token** when the client requests the `offline_access` scope
+> (Claude's connector does), so the connector renews in the background instead of
+> forcing a re-login when the access token expires. Two knobs govern how long that
+> lasts: the application's **Session Duration** (Access **Advanced settings**) and
+> the identity provider's own session/refresh lifetime. Set a Session Duration that
+> matches how long you want connectors to stay live without re-auth (a very short one
+> makes Claude re-run the login frequently even with a refresh token). This is a
+> Cloudflare-side setting; mcpelevator is on `none` behind the gate and issues no
+> tokens itself.
+
 Verify the gate is live — and verify it's **Access**, not mcpelevator, answering.
 This matters because mcpelevator's own `bearer` provider *also* returns
 `401 WWW-Authenticate: Bearer` (with **no** `resource_metadata`), so a bare 401 is
@@ -391,6 +404,17 @@ Caveats:
   `/.well-known/oauth-protected-resource/g/<name>/mcp`. A protected member is bundled
   only when it uses the same provider as the group, so bearer and OAuth credentials
   cannot bypass one another.
+- **Refresh tokens are your AS's job, not mcpelevator's.** In this path mcpelevator is
+  a *resource server* — it validates the JWTs your AS mints and never issues tokens.
+  Whether a Claude connector renews silently (instead of forcing a re-login when the
+  access token expires) depends on your AS issuing a **refresh token**, which it does
+  when the client requests `offline_access`. Per [SEP-2207](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2207),
+  `offline_access` belongs in your **authorization server's** advertised
+  `scopes_supported`, **not** in mcpelevator's `oauth_scopes` (Protected Resource
+  Metadata) — a refresh token isn't a resource requirement, and SEP-2207 clients read
+  it from the AS metadata. Keep `oauth_scopes` to the identity/resource scopes your
+  tokens actually need (e.g. `openid profile email`), and enable offline/refresh access
+  at the AS.
 - Need OAuth humans AND token-carrying automation on the same endpoints? Set
   `oauth_accept_bearer: true` — local `mcpe_...` tokens then get the bearer
   provider's verdict (including its per-server scoping) on oauth-protected

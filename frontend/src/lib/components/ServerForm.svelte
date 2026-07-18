@@ -635,6 +635,14 @@
 						<label for="srv-oauth-scopes" class="text-xs font-medium text-[var(--color-ink-muted)]">
 							Scopes <span class="text-[var(--color-ink-dim)]">(optional, space-separated)</span>
 						</label>
+						<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+							Usually leave this blank: at sign-in mcpelevator discovers the provider's
+							scopes automatically and requests
+							<span class="font-mono text-[var(--color-ink-muted)]">offline_access</span>
+							so it issues a refresh token (renewed in the background). Add a scope here
+							only if the provider needs one it doesn't advertise — e.g. its own scope for
+							offline/refresh access, or a resource it won't grant unless asked.
+						</p>
 						<input
 							id="srv-oauth-scopes"
 							type="text"
@@ -644,9 +652,6 @@
 							placeholder="read write"
 							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 						/>
-						<p class="text-xs text-[var(--color-ink-dim)]">
-							Leave blank to request whatever scopes the provider advertises.
-						</p>
 					</div>
 
 					<!-- Static client credentials: optional. Blank = Dynamic Client Registration. -->

@@ -393,6 +393,102 @@ def test_merge_scopes_unions_and_dedupes():
     assert oauth_flow._merge_scopes(None) is None
 
 
+def test_offline_access_default_gating():
+    from types import SimpleNamespace
+
+    # No metadata discovered yet -> best-effort ask (common for lenient providers).
+    assert oauth_flow._offline_access_default(SimpleNamespace()) is True
+    # Metadata present but no scopes_supported list -> ask.
+    assert (
+        oauth_flow._offline_access_default(
+            SimpleNamespace(oauth_metadata=SimpleNamespace(scopes_supported=None))
+        )
+        is True
+    )
+    # AS advertises offline_access -> ask.
+    assert (
+        oauth_flow._offline_access_default(
+            SimpleNamespace(
+                oauth_metadata=SimpleNamespace(scopes_supported=["read", "offline_access"])
+            )
+        )
+        is True
+    )
+    # AS publishes a scope list that OMITS it -> don't (a strict AS would reject the
+    # whole authorization with invalid_scope on an unadvertised scope).
+    assert (
+        oauth_flow._offline_access_default(
+            SimpleNamespace(oauth_metadata=SimpleNamespace(scopes_supported=["read", "write"]))
+        )
+        is False
+    )
+
+
+def _make_scoped_provider(operator_scopes):
+    from mcp.shared.auth import OAuthClientMetadata
+    from pydantic import AnyHttpUrl
+
+    async def _redirect(_url):
+        return None
+
+    async def _callback():
+        return ("code", None)
+
+    return oauth_flow._ScopedOAuthClientProvider(
+        server_url="https://up.example/mcp",
+        client_metadata=OAuthClientMetadata(
+            client_name="mcpelevator",
+            redirect_uris=[AnyHttpUrl("http://localhost/cb")],
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+        ),
+        storage=oauth_flow._MemoryTokenStorage(),
+        redirect_handler=_redirect,
+        callback_handler=_callback,
+        timeout=600.0,
+        operator_scopes=operator_scopes,
+    )
+
+
+async def test_grant_requests_offline_access_by_default(monkeypatch):
+    from types import SimpleNamespace
+
+    provider = _make_scoped_provider(operator_scopes="read")
+    provider.context.client_metadata.scope = "read"  # what the SDK's strategy selected
+    provider.context.oauth_metadata = SimpleNamespace(scopes_supported=None)
+    captured: dict[str, str] = {}
+
+    async def fake_grant(self):
+        captured["scope"] = self.context.client_metadata.scope
+        return ("code", "verifier")
+
+    monkeypatch.setattr(
+        oauth_flow.OAuthClientProvider, "_perform_authorization_code_grant", fake_grant
+    )
+    await provider._perform_authorization_code_grant()
+    # offline_access (refresh token) AND the operator's scope are both requested.
+    assert set(captured["scope"].split()) == {"read", "offline_access"}
+
+
+async def test_grant_omits_offline_access_when_as_lists_without_it(monkeypatch):
+    from types import SimpleNamespace
+
+    provider = _make_scoped_provider(operator_scopes=None)
+    provider.context.client_metadata.scope = "read write"
+    provider.context.oauth_metadata = SimpleNamespace(scopes_supported=["read", "write"])
+    captured: dict[str, str] = {}
+
+    async def fake_grant(self):
+        captured["scope"] = self.context.client_metadata.scope
+        return ("code", "verifier")
+
+    monkeypatch.setattr(
+        oauth_flow.OAuthClientProvider, "_perform_authorization_code_grant", fake_grant
+    )
+    await provider._perform_authorization_code_grant()
+    assert "offline_access" not in (captured["scope"] or "").split()
+
+
 def test_repair_authorization_url_rejoins_double_question_mark():
     # The SDK appends "?<params>" to the discovered authorization_endpoint; when that
     # endpoint already has a query (e.g. Railway's ?resource=...), the second "?" hides
