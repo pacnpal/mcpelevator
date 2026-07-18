@@ -46,6 +46,11 @@ class Server(SQLModel, table=True):
     # JSON object; always set by service. For runner="remote" this is the upstream
     # HTTP headers (e.g. {"Authorization": "Bearer …"}), not process env.
     env: dict = Field(sa_column=Column(JSON))
+    # JSON array; runner="docker" only — extra `docker run` options placed before the
+    # image (e.g. --name, --shm-size=1g), validated at the service boundary
+    # (runners.docker.run_args_error) and forced [] for every other runner. Nullable:
+    # rows predating the column hold NULL, read as [].
+    run_args: Optional[list] = Field(default=None, sa_column=Column(JSON))
     cwd: Optional[str] = None
     setup_script: str = ""
 

@@ -125,3 +125,56 @@ describe('ServerForm setup script', () => {
 		expect(submit?.disabled).toBe(true);
 	});
 });
+
+describe('ServerForm docker run options', () => {
+	it('seeds run options, previews them before the image, and submits run_args', () => {
+		const onsubmit = vi.fn();
+		const target = render({
+			mode: 'edit',
+			initial: {
+				name: 'gh',
+				runner: 'docker',
+				command: 'img:1',
+				args: ['serve'],
+				run_args: ['--name', 'my-mcp'],
+				env: { TOKEN: 'x' }
+			},
+			onsubmit
+		});
+
+		const runArgs = target.querySelector<HTMLTextAreaElement>('#srv-docker-run-args');
+		expect(runArgs?.value).toBe('--name\nmy-mcp');
+		// the live preview mirrors the real argv order: -e NAME, run options, --, image, args
+		expect(target.textContent).toContain(
+			'docker run -i --rm --init […] -e TOKEN --name my-mcp -- img:1 serve'
+		);
+
+		// editing the options updates the preview live
+		if (!runArgs) throw new Error('Run options textarea not found');
+		runArgs.value = '--shm-size=1g';
+		runArgs.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		expect(target.textContent).toContain(
+			'docker run -i --rm --init […] -e TOKEN --shm-size=1g -- img:1 serve'
+		);
+
+		target.querySelector('form')?.dispatchEvent(
+			new SubmitEvent('submit', { bubbles: true, cancelable: true })
+		);
+		expect(onsubmit).toHaveBeenCalledWith(
+			expect.objectContaining({ runner: 'docker', run_args: ['--shm-size=1g'] })
+		);
+	});
+
+	it('sends empty run_args for non-docker runners', () => {
+		const onsubmit = vi.fn();
+		const target = render({
+			initial: { name: 'local', runner: 'command', command: '/usr/bin/server', args: [] },
+			onsubmit
+		});
+		target.querySelector('form')?.dispatchEvent(
+			new SubmitEvent('submit', { bubbles: true, cancelable: true })
+		);
+		expect(onsubmit).toHaveBeenCalledWith(expect.objectContaining({ run_args: [] }));
+	});
+});

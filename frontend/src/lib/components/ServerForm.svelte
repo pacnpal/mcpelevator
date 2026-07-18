@@ -112,6 +112,7 @@
 			runner: runner0,
 			command: init.command ?? '',
 			argsText: args0.join('\n'),
+			runArgsText: (init.run_args ?? []).join('\n'),
 			pkg: pkg0,
 			extraArgsText: extra0,
 			transport: transport0,
@@ -141,6 +142,11 @@
 	// directly. `command` (for runner=command) is edited there too.
 	let command = $state(seed.command);
 	let argsText = $state(seed.argsText);
+
+	// Docker runner only: extra `docker run` options placed before the image
+	// (--name, --shm-size=1g, …). The backend validates them and rejects the
+	// few that would break the runner (-d, -e/--env/--env-file, '--').
+	let runArgsText = $state(seed.runArgsText);
 
 	// Friendly inputs (npx/uvx): the package/tool name, plus any extra args.
 	let pkg = $state(seed.pkg);
@@ -251,13 +257,23 @@
 	const nameValid = $derived(name.trim().length > 0);
 	const commandValid = $derived(command.trim().length > 0);
 
-	// The hardened `docker run …` the backend will synthesize from the image + args (an
-	// honest preview; the exact hardening flags are elided as […]).
+	// The hardened `docker run …` the backend will synthesize, live as the operator types
+	// (an honest preview; the exact hardening flags are elided as […]). Mirrors the real
+	// argv order: hardening defaults, `-e NAME` per env var (names only — values never
+	// enter the command), the operator's run options (last, so a repeated flag overrides
+	// the defaults), then `--` and the image + container args.
+	const resolvedRunArgs = $derived(splitLines(runArgsText));
+	const dockerEnvNames = $derived(
+		envRows.map((r) => r.key.trim()).filter((k) => k.length > 0)
+	);
 	const dockerPreview = $derived(
 		[
 			// static prefix (kept verbatim — it isn't user input), then the user-provided
-			// image + args, each quoted only if it contains whitespace.
+			// pieces, each quoted only if it contains whitespace.
 			'docker run -i --rm --init […]',
+			...dockerEnvNames.flatMap((k) => ['-e', k]).map(quoteIfNeeded),
+			...resolvedRunArgs.map(quoteIfNeeded),
+			'--',
 			...[command.trim() || '<image>', ...resolvedArgs].filter((p) => p.length > 0).map(quoteIfNeeded)
 		].join(' ')
 	);
@@ -346,6 +362,9 @@
 			// remote stores [transport] in args; there's no local process, so no cwd.
 			// docker stores command=image + args=container args, and cwd is meaningless.
 			args: isRemote ? [transport] : resolvedArgs,
+			// docker only: extra `docker run` options before the image (empty elsewhere,
+			// matching the backend's normalization).
+			run_args: isDocker ? resolvedRunArgs : [],
 			// Preserve executable text byte-for-byte; canonicalize whitespace-only input to blank.
 			setup_script: setupScript.trim() ? setupScript : '',
 			env: buildEnv(),
@@ -741,8 +760,30 @@
 				placeholder="ghcr.io/github/github-mcp-server"
 				class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 			/>
+			<label for="srv-docker-run-args" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
+				Docker run options <span class="text-[var(--color-ink-dim)]">(optional, one per line — before the image)</span>
+			</label>
+			<textarea
+				id="srv-docker-run-args"
+				bind:value={runArgsText}
+				rows="2"
+				spellcheck="false"
+				placeholder="--name&#10;my-mcp&#10;--shm-size=1g"
+				class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+			></textarea>
+			<p class="text-xs text-[var(--color-ink-dim)]">
+				Extra <code class="font-mono text-[var(--color-ink-muted)]">docker run</code> flags
+				placed before the image (e.g.
+				<code class="font-mono text-[var(--color-ink-muted)]">--name</code>,
+				<code class="font-mono text-[var(--color-ink-muted)]">--shm-size=1g</code>). They come
+				after mcpelevator's defaults, so repeating a flag (e.g.
+				<code class="font-mono text-[var(--color-ink-muted)]">--memory 2g</code>) overrides it.
+				<code class="font-mono text-[var(--color-ink-muted)]">-e</code>/<code class="font-mono text-[var(--color-ink-muted)]">--env-file</code>
+				and <code class="font-mono text-[var(--color-ink-muted)]">-d</code> aren't allowed here —
+				use <span class="font-medium">Environment</span> below for variables.
+			</p>
 			<label for="srv-docker-args" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
-				Container arguments <span class="text-[var(--color-ink-dim)]">(optional, one per line)</span>
+				Container arguments <span class="text-[var(--color-ink-dim)]">(optional, one per line — after the image)</span>
 			</label>
 			<textarea
 				id="srv-docker-args"
@@ -753,8 +794,9 @@
 				class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 			></textarea>
 			<p class="text-xs text-[var(--color-ink-dim)]">
-				mcpelevator adds the hardening, cleanup and secret-passing flags. Put env/API keys
-				under <span class="font-medium">Environment</span> below — they're passed to the
+				Arguments for the MCP server inside the container. mcpelevator adds the hardening,
+				cleanup and secret-passing flags. Put env/API keys under
+				<span class="font-medium">Environment</span> below — they're passed to the
 				container by name (never embedded in the command).
 			</p>
 		</div>

@@ -76,6 +76,41 @@ def test_docker_runner_appends_container_args_after_image():
     assert a[-3:] == ["img:1", "--transport", "stdio"]
 
 
+def test_docker_runner_places_run_args_after_defaults_before_image():
+    s = _server(
+        runner="docker", command="img:1", args=["serve"],
+        run_args=["--name", "my-mcp", "--shm-size=1g", "--memory", "2g"],
+    )
+    a = build_spec(s).args
+    # operator options land after the hardening defaults (so duplicates win, docker is
+    # last-wins) and before the `--` + image + container args
+    i = a.index("--name")
+    assert a[i:i + 5] == ["--name", "my-mcp", "--shm-size=1g", "--memory", "2g"]
+    assert i > a.index("--pids-limit")
+    assert a[-3:] == ["--", "img:1", "serve"]
+    # the default --memory still precedes the operator override
+    assert a.index("--memory") < i
+
+
+def test_docker_runner_sanitizes_forbidden_run_args_on_legacy_rows():
+    # The service rejects these at the boundary; a hand-edited row must still never
+    # leak a value into argv, detach, spoof the reap label, or shift the image.
+    s = _server(
+        runner="docker", command="img:1", args=[],
+        run_args=[
+            "-e", "SECRET=x", "--detach", "--", "--label", "mcpelevator.server=spoof",
+            "--name", "kept",
+        ],
+    )
+    a = build_spec(s).args
+    assert "SECRET=x" not in a and "--detach" not in a
+    assert "mcpelevator.server=spoof" not in a
+    assert a.count("--") == 1  # only the builder's own end-of-options marker
+    i = a.index("--name")
+    assert a[i:i + 2] == ["--name", "kept"]
+    assert a[-2:] == ["--", "img:1"]
+
+
 def test_docker_child_env_strips_proxy_and_reserved_vars(monkeypatch):
     # The docker CLI child gets: operator DOCKER_* + PATH/HOME from the bridge env, plus the
     # server's NON-reserved vars — but NOT a server-declared proxy var (it would reroute the
