@@ -387,6 +387,43 @@ async def test_drive_cancels_done_future_on_pre_url_failure(monkeypatch):
         real.clear()
 
 
+async def test_drive_cancels_done_future_when_callback_never_arrives(monkeypatch):
+    # Regression: the authorization URL was produced, but the operator never finished in the
+    # browser, so the provider's callback wait times out and _drive fails POST-URL with
+    # callback_event still unset. complete_authorization never ran, so done_future is awaited by
+    # no one — it must be cancelled, not exception-loaded (which would warn on collection).
+    class _Boom(_FakeAsyncClient):
+        def stream(self, _method, _url, **_kwargs):
+            class _Ctx:
+                async def __aenter__(_self):
+                    raise RuntimeError("timed out waiting for the operator to finish signing in")
+
+                async def __aexit__(_self, *exc):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _Boom)
+
+    class _Srv:
+        id = "srv-drive-nocb"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+
+    pending = oauth_flow._Pending(_Srv.id)
+    pending.url_future.set_result("https://auth.example/authorize?state=s")  # URL already handed back
+    # callback_event intentionally left unset — the browser never returned.
+    mem = oauth_flow._MemoryTokenStorage()
+    real = ServerTokenStorage(_Srv.id)
+    real.clear()
+    try:
+        await oauth_flow._drive(_Srv, object(), mem, real, pending)
+        assert pending.done_future.cancelled()  # silent — no "Future exception was never retrieved"
+    finally:
+        real.clear()
+
+
 def test_registration_status_parses_status_code():
     from mcp.client.auth import OAuthRegistrationError
 

@@ -369,15 +369,16 @@ async def _drive(
         # url_future and will surface this to the operator.
         pending.url_future.set_exception(error)
     if not pending.done_future.done():
-        if url_pending:
-            # done_future is only ever awaited by complete_authorization, which is reachable
-            # only after a URL was returned and the browser came back. Having failed before
-            # that, no one will ever retrieve done_future's exception — setting one would log a
-            # spurious "Future exception was never retrieved" when it's garbage-collected. A
+        if url_pending or not pending.callback_event.is_set():
+            # done_future is only ever awaited by complete_authorization, which runs only after
+            # a URL was returned AND the browser came back (callback_event set). Having failed
+            # before the URL, or after it but with the browser never returning (the callback
+            # wait timed out), no one will ever retrieve done_future's exception — setting one
+            # would log a spurious "Future exception was never retrieved" when it's collected. A
             # cancelled, never-awaited future is silent, so cancel it instead.
             pending.done_future.cancel()
         else:
-            # A URL was already handed back; the operator's callback is (or will be) awaiting
+            # A URL was handed back and the callback arrived; complete_authorization is awaiting
             # done_future, so surface the failure there.
             pending.done_future.set_exception(error)
 
