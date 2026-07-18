@@ -33,7 +33,7 @@ import logging
 import re
 import time
 from typing import Optional
-from urllib.parse import parse_qs, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
 import httpx
 from mcp.client.auth import OAuthClientProvider, OAuthRegistrationError, TokenStorage
@@ -320,7 +320,9 @@ def _ensure_consent_prompt(url: str) -> str:
     scope = " ".join(query.get("scope", [])).split()
     if OFFLINE_ACCESS not in scope or query.get("prompt"):
         return url
-    new_query = parts.query + ("&" if parts.query else "") + urlencode({"prompt": "consent"})
+    # Reached only with offline_access in the scope param, so the query is non-empty;
+    # "prompt=consent" needs no escaping, so append it directly.
+    new_query = f"{parts.query}&prompt=consent"
     return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
 
 
