@@ -68,6 +68,9 @@ class OAuthStatus(BaseModel):
 class ServerDetail(ServerSummary):
     command: str
     args: list[str] = []
+    # docker runner only: extra `docker run` options placed before the image
+    # (e.g. --name, --shm-size=1g). Always [] for other runners.
+    run_args: list[str] = []
     env: dict[str, str] = {}
     cwd: Optional[str] = None
     setup_script: str = ""
@@ -89,6 +92,10 @@ class ServerCreate(BaseModel):
     runner: str = "npx"
     command: str
     args: list[str] = []
+    # docker runner only: extra `docker run` options placed before the image. A
+    # forbidden option (-d, -e/--env/--env-file, the reserved reaping label, '--')
+    # is a 400; the value is forced [] for non-docker runners server-side.
+    run_args: list[str] = []
     env: dict[str, str] = {}
     cwd: Optional[str] = None
     setup_script: str = ""
@@ -115,6 +122,7 @@ class ServerUpdate(BaseModel):
     runner: Optional[str] = None
     command: Optional[str] = None
     args: Optional[list[str]] = None
+    run_args: Optional[list[str]] = None
     env: Optional[dict[str, str]] = None
     cwd: Optional[str] = None
     setup_script: Optional[str] = None

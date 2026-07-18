@@ -363,13 +363,26 @@
 	const effectiveAuth = $derived(server?.auth ?? null);
 
 	// Render the stored command + args as a single shell-ish line, quoting any
-	// token that contains whitespace so the spacing reads correctly.
-	const commandLine = $derived(
-		[server?.command ?? '', ...(server?.args ?? [])]
+	// token that contains whitespace so the spacing reads correctly. For a docker
+	// server the stored shape is (image, container args, run options) and the backend
+	// synthesizes the real `docker run …` — mirror it honestly (hardening flags elided
+	// as […], env passed by NAME only, run options before `--` + image).
+	const commandLine = $derived.by(() => {
+		const quote = (p: string) => (/\s/.test(p) ? `"${p}"` : p);
+		if (server?.runner === 'docker') {
+			return [
+				'docker run -i --rm --init […]',
+				...Object.keys(server.env ?? {}).flatMap((k) => ['-e', k]).map(quote),
+				...(server.run_args ?? []).map(quote),
+				'--',
+				...[server.command, ...(server.args ?? [])].filter((p) => p.length > 0).map(quote)
+			].join(' ');
+		}
+		return [server?.command ?? '', ...(server?.args ?? [])]
 			.filter((p) => p.length > 0)
-			.map((p) => (/\s/.test(p) ? `"${p}"` : p))
-			.join(' ')
-	);
+			.map(quote)
+			.join(' ');
+	});
 
 	// Browser tab title: reflect the server being viewed (the layout otherwise leaves it a
 	// constant "mcpelevator" on every server page). Surface an OAuth server that still needs

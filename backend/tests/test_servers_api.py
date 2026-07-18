@@ -189,6 +189,47 @@ def test_disable_returns_stopping_instead_of_stale_running_runtime(monkeypatch):
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
+def test_docker_run_args_api_round_trip_and_validation():
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "gh",
+                "runner": "docker",
+                "command": "img:1",
+                "args": ["serve"],
+                "run_args": ["--name", "my-mcp", "--shm-size=1g"],
+            },
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.status_code == 200
+            assert detail.json()["run_args"] == ["--name", "my-mcp", "--shm-size=1g"]
+
+            patched = c.patch(
+                f"/api/servers/{server_id}",
+                json={"run_args": ["--shm-size=2g"]},
+                headers=LOOPBACK,
+            )
+            assert patched.status_code == 200, patched.text
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["run_args"] == ["--shm-size=2g"]
+
+            # A forbidden run option is a clean 400 with the reason, not a 500.
+            rejected = c.patch(
+                f"/api/servers/{server_id}",
+                json={"run_args": ["-e", "SECRET=x"]},
+                headers=LOOPBACK,
+            )
+            assert rejected.status_code == 400
+            assert "Environment" in rejected.json()["detail"]
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
 def test_enable_docker_server_gated_returns_400():
     with TestClient(app) as c:
         # Ensure the runner is off (default), then import a docker server (created disabled).

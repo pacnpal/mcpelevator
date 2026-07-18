@@ -25,7 +25,12 @@ from app.db import repo
 from app.db.models import RUNNERS, Server
 from app.registry import settings as runtime_settings
 from app.runners import remote as remote_runner
-from app.runners.docker import is_forbidden_container_env, is_reserved_docker_env
+from app.runners.docker import (
+    DOCKER_RUN_VALUE_FLAGS,
+    is_forbidden_container_env,
+    is_reserved_docker_env,
+    run_args_error,
+)
 from app.runners.remote import canonical_transport
 from app.util import config_hash, config_hash_tag, new_id, slugify
 
@@ -872,34 +877,11 @@ def setup_script_invokes_docker(runner: str, setup_script: Optional[str]) -> boo
         return True
 
 
-# `docker run` flags that CONSUME the next token as their value (so we skip both). Kept
-# reasonably complete for real MCP configs; an unknown value-taking flag is the accepted
-# edge (it'd be read as a boolean and its value mistaken for the image — rare in practice).
-_DOCKER_VALUE_FLAGS = frozenset({
-    "-e", "--env", "--env-file",
-    "-a", "--attach",
-    "-v", "--volume", "--mount", "--tmpfs",
-    "-p", "--publish", "--expose",
-    "-w", "--workdir",
-    "--name", "--hostname", "-h",
-    "--network", "--net", "--network-alias", "--ip", "--ip6", "--link", "--link-local-ip",
-    "--add-host", "--dns", "--dns-search", "--dns-option", "--mac-address", "--domainname",
-    "--label", "-l", "--label-file",
-    "-m", "--memory", "--memory-swap", "--memory-reservation", "--memory-swappiness",
-    "--kernel-memory", "--cpus", "--cpuset-cpus", "--cpuset-mems", "--cpu-shares", "-c",
-    "--cpu-period", "--cpu-quota", "--cpu-rt-period", "--cpu-rt-runtime", "--blkio-weight",
-    "-u", "--user", "--userns", "--group-add", "--cgroup-parent", "--cgroupns",
-    "--entrypoint",
-    "--platform", "--pull", "--isolation", "--pid", "--ipc", "--uts", "--cidfile",
-    "--stop-timeout", "--stop-signal", "--restart", "--detach-keys",
-    "--device", "--device-cgroup-rule", "--device-read-bps", "--device-write-bps",
-    "--device-read-iops", "--device-write-iops", "--volumes-from", "--volume-driver",
-    "--ulimit", "--shm-size", "--pids-limit", "--sysctl", "--storage-opt", "--annotation",
-    "--security-opt", "--cap-add", "--cap-drop", "--oom-score-adj",
-    "--health-cmd", "--health-interval", "--health-timeout", "--health-retries",
-    "--health-start-period", "--health-start-interval",
-    "--log-driver", "--log-opt", "--gpus", "--runtime",
-})
+# `docker run` flags that CONSUME the next token as their value (so we skip both). The
+# table itself lives with the docker runner (SSOT, shared with the run_args option-arity
+# walkers); an unknown value-taking flag is the accepted edge (it'd be read as a boolean
+# and its value mistaken for the image — rare in practice).
+_DOCKER_VALUE_FLAGS = DOCKER_RUN_VALUE_FLAGS
 
 
 _ENV_FILE_WARNING = (
@@ -1240,7 +1222,31 @@ def _normalize_validate_docker(
     _validate_docker_env(env)
     for w in warnings:  # the hardened parser altered the invocation — surface it, don't do it silently
         logger.warning("docker server %r: %s", name, w)
+    if warnings:
+        # Not a warning itself — the remedy. A dropped option the operator really wants
+        # (--network none, a pinned --user, …) can be restored deliberately via run_args.
+        warnings.append(
+            "To keep a dropped option intentionally, re-add it under the server's "
+            "Docker run options."
+        )
     return command, args, env, warnings
+
+
+def normalize_run_args(runner: str, run_args: Optional[list]) -> list[str]:
+    """Canonicalize a server's extra ``docker run`` options.
+
+    They only mean anything to the docker runner, so they're forced empty for every
+    other runner (keeping ``config_hash`` stable and a stray value from riding along on
+    a conversion — same policy as OAuth on non-remote runners). For docker, the small
+    forbidden set (detach, env flags, the reserved reaping label, a bare ``--``) is
+    rejected so it never persists; see ``runners.docker.run_args_error``.
+    """
+    if runner != "docker":
+        return []
+    err = run_args_error(run_args)
+    if err is not None:
+        raise ValueError(err)
+    return list(run_args or [])
 
 
 def _require_docker_enabled(session: Session) -> None:
@@ -1287,6 +1293,9 @@ def _hash_payload(server: Server) -> dict[str, Any]:
         "runner": server.runner,
         "command": server.command,
         "args": server.args,
+        # Normalized so a pre-field row (NULL) hashes identically to an empty list —
+        # the boot backfill must not see a value change where there is none.
+        "run_args": list(server.run_args or []),
         "env": server.env,
         "cwd": server.cwd,
         "setup_script": server.setup_script or "",
@@ -1529,6 +1538,7 @@ def create_server(
     runner: str,
     command: str,
     args: Optional[list[str]] = None,
+    run_args: Optional[list[str]] = None,
     env: Optional[dict[str, str]] = None,
     cwd: Optional[str] = None,
     setup_script: str = "",
@@ -1578,6 +1588,8 @@ def create_server(
             warnings_sink.extend(warnings)
         if enabled:
             _require_docker_enabled(session)
+    # Extra `docker run` options: validated for docker, forced empty elsewhere.
+    run_args = normalize_run_args(runner, run_args)
 
     server = Server(
         id=new_id(),
@@ -1586,6 +1598,7 @@ def create_server(
         runner=runner,
         command=command.strip(),
         args=list(args or []),
+        run_args=run_args,
         env=dict(env or {}),
         cwd=cwd,
         setup_script=setup_script,
@@ -1608,6 +1621,7 @@ _MUTABLE_FIELDS = {
     "runner",
     "command",
     "args",
+    "run_args",
     "env",
     "cwd",
     "setup_script",
@@ -1707,6 +1721,16 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
                 # gate above, which raises before any flush).
                 session.rollback()
                 raise
+    # Extra `docker run` options: validated for docker (a forbidden option is a 400),
+    # forced empty for every other runner so a conversion can't carry them along. The
+    # tracked row is already mutated (and possibly autoflushed by the gate query above),
+    # so only a rollback keeps a rejected PATCH from being persisted by a caller that
+    # commits this session later.
+    try:
+        server.run_args = normalize_run_args(server.runner, server.run_args)
+    except ValueError:
+        session.rollback()
+        raise
     server.config_hash = compute_hash(server)  # recompute -> drives idempotent reconcile
     return repo.save_server(session, server)
 
@@ -1732,6 +1756,7 @@ def clone_server(session: Session, server_id: str, *, name: Optional[str] = None
         # Tolerate a NULL JSON column from a legacy/hand-edited row (the model
         # types these non-optional, but the DB can still hold null).
         args=list(src.args or []),
+        run_args=list(src.run_args or []),
         env=dict(src.env or {}),
         cwd=src.cwd,
         setup_script=src.setup_script or "",

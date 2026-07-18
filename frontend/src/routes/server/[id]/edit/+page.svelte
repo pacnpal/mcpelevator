@@ -36,6 +36,7 @@
 					runner: server.runner,
 					command: server.command,
 					args: server.args,
+					run_args: server.run_args,
 					setup_script: server.setup_script,
 					env: server.env,
 					cwd: server.cwd,

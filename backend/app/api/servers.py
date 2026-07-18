@@ -152,6 +152,7 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         **summary.model_dump(),
         command=server.command,
         args=server.args,
+        run_args=server.run_args or [],
         env=server.env,
         cwd=server.cwd,
         setup_script=server.setup_script or "",

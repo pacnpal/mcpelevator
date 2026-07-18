@@ -81,6 +81,9 @@ export interface OAuthStatus {
 export interface ServerDetail extends ServerSummary {
 	command: string;
 	args: string[];
+	/** Docker runner only: extra `docker run` options placed before the image
+	 * (e.g. --name, --shm-size=1g). Always [] for other runners. */
+	run_args: string[];
 	setup_script: string;
 	env: Record<string, string>;
 	cwd: string | null;
@@ -105,6 +108,10 @@ export interface ServerCreate {
 	runner: Runner;
 	command: string;
 	args: string[];
+	/** Docker runner only: extra `docker run` options placed before the image.
+	 * Forbidden options (-d, -e/--env/--env-file, the reserved reaping label, '--')
+	 * are rejected with a 400; forced [] for non-docker runners server-side. */
+	run_args?: string[];
 	setup_script?: string;
 	env: Record<string, string>;
 	cwd?: string | null;
