@@ -345,6 +345,10 @@ async def start_oauth(server_id: str, request: Request, session: Session = Depen
         raise HTTPException(status_code=400, detail="this server does not use OAuth")
     try:
         url = await oauth_flow.begin_authorization(server, callback_url=_oauth_callback_url(request))
+    except oauth_flow.OAuthBeginError as exc:
+        # Already an operator-facing message with the right status (e.g. a 429 when the
+        # upstream rate-limits client registration) — surface it verbatim.
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:  # discovery/registration failure or timeout
         raise HTTPException(status_code=502, detail=f"could not start OAuth: {exc}") from exc
     return {"authorize_url": url}

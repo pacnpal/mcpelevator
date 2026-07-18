@@ -30,12 +30,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 import httpx
-from mcp.client.auth import OAuthClientProvider, TokenStorage
+from mcp.client.auth import OAuthClientProvider, OAuthRegistrationError, TokenStorage
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 from pydantic import AnyHttpUrl
 
@@ -68,6 +69,44 @@ _INIT_HEADERS = {
     "Content-Type": "application/json",
     "MCP-Protocol-Version": "2025-06-18",
 }
+
+
+class OAuthBeginError(RuntimeError):
+    """A failure to START the interactive OAuth flow, carrying an operator-facing message
+    and the HTTP status the API should answer with. Lets ``begin_authorization`` translate
+    a raw SDK/provider error into something actionable before it reaches the route handler,
+    instead of the route dumping the provider's raw JSON body as an opaque 502."""
+
+    def __init__(self, message: str, *, status_code: int = 502):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _registration_status(exc: OAuthRegistrationError) -> Optional[int]:
+    """Pull the HTTP status out of an ``OAuthRegistrationError``. The SDK bakes it into the
+    message as ``"Registration failed: <status> <body>"`` (mcp.client.auth.utils) with no
+    structured field, so the message is the only place to read it back from."""
+    match = re.match(r"Registration failed: (\d{3})\b", str(exc))
+    return int(match.group(1)) if match else None
+
+
+def _classify_begin_error(exc: BaseException) -> OAuthBeginError:
+    """Translate a raw begin-flow failure into an operator-facing :class:`OAuthBeginError`.
+
+    The common actionable case is the upstream rate-limiting Dynamic Client Registration
+    (HTTP 429): surface that as a clean 429 with next steps, rather than a 502 carrying the
+    provider's raw error JSON. Everything else keeps the previous generic message + 502."""
+    if isinstance(exc, OAuthBeginError):
+        return exc
+    status = _registration_status(exc) if isinstance(exc, OAuthRegistrationError) else None
+    if status == 429:
+        return OAuthBeginError(
+            "the OAuth provider is rate-limiting Dynamic Client Registration (HTTP 429). "
+            "Wait a minute and try connecting again; if it keeps happening, register a client "
+            "with the provider and set an explicit Client ID to skip registration.",
+            status_code=429,
+        )
+    return OAuthBeginError(f"could not start OAuth: {exc}", status_code=502)
 
 
 def _merge_scopes(*scope_strings: Optional[str]) -> Optional[str]:
@@ -323,10 +362,24 @@ async def _drive(
 
     error = inner_error or RuntimeError("OAuth flow finished without returning tokens")
     logger.info("OAuth authorization for %s failed: %s", server.id, error)
-    if not pending.url_future.done():
+    url_pending = not pending.url_future.done()
+    if url_pending:
+        # Failed during discovery/registration, before an authorization URL was produced
+        # (e.g. the upstream rate-limited DCR with a 429): begin_authorization is awaiting
+        # url_future and will surface this to the operator.
         pending.url_future.set_exception(error)
     if not pending.done_future.done():
-        pending.done_future.set_exception(error)
+        if url_pending:
+            # done_future is only ever awaited by complete_authorization, which is reachable
+            # only after a URL was returned and the browser came back. Having failed before
+            # that, no one will ever retrieve done_future's exception — setting one would log a
+            # spurious "Future exception was never retrieved" when it's garbage-collected. A
+            # cancelled, never-awaited future is silent, so cancel it instead.
+            pending.done_future.cancel()
+        else:
+            # A URL was already handed back; the operator's callback is (or will be) awaiting
+            # done_future, so surface the failure there.
+            pending.done_future.set_exception(error)
 
 
 async def begin_authorization(server, *, callback_url: str) -> str:
@@ -425,12 +478,12 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         return await asyncio.wait_for(asyncio.shield(pending.url_future), timeout=_URL_TIMEOUT)
     except asyncio.TimeoutError as exc:
         _forget(pending)
-        raise RuntimeError(
+        raise OAuthBeginError(
             "timed out contacting the OAuth provider (metadata discovery / registration)"
         ) from exc
-    except Exception:
+    except Exception as exc:
         _forget(pending)
-        raise
+        raise _classify_begin_error(exc) from exc
 
 
 async def complete_authorization(state: str, code: str) -> str:
