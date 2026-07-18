@@ -303,6 +303,155 @@ async def test_flow_rejects_grant_the_endpoint_still_refuses(monkeypatch):
         store.clear()
 
 
+async def test_registration_rate_limit_surfaces_clean_429(monkeypatch):
+    # A 429 from Dynamic Client Registration (before any authorization URL is produced) must
+    # surface as a clean OAuthBeginError carrying status 429 — not the provider's raw JSON as a
+    # 502 — and must leave no pending flow behind.
+    from mcp.client.auth import OAuthRegistrationError
+
+    class _RateLimited(_FakeAsyncClient):
+        def stream(self, _method, _url, **_kwargs):
+            class _Ctx:
+                async def __aenter__(_self):
+                    raise OAuthRegistrationError(
+                        'Registration failed: 429 {"error":"too_many_requests"}'
+                    )
+
+                async def __aexit__(_self, *exc):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _RateLimited)
+
+    class _Srv:
+        id = "srv-ratelimit-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        with pytest.raises(oauth_flow.OAuthBeginError) as excinfo:
+            await oauth_flow.begin_authorization(
+                _Srv, callback_url="http://127.0.0.1/api/oauth/callback"
+            )
+        assert excinfo.value.status_code == 429
+        assert "rate-limiting" in str(excinfo.value)
+        # The failed flow was forgotten — no dangling pending/state for this server.
+        assert all(p.server_id != _Srv.id for p in oauth_flow._PENDING.values())
+    finally:
+        store.clear()
+
+
+async def test_drive_cancels_done_future_on_pre_url_failure(monkeypatch):
+    # Regression: when the flow fails BEFORE handing back an authorization URL, done_future is
+    # never awaited by anyone (complete_authorization only runs after the browser returns). It
+    # must be cancelled, not loaded with an exception — an unretrieved future-exception logs a
+    # spurious "Future exception was never retrieved" when the pending object is collected.
+    class _Boom(_FakeAsyncClient):
+        def stream(self, _method, _url, **_kwargs):
+            class _Ctx:
+                async def __aenter__(_self):
+                    raise RuntimeError("failed before url")
+
+                async def __aexit__(_self, *exc):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _Boom)
+
+    class _Srv:
+        id = "srv-drive-preurl"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+
+    pending = oauth_flow._Pending(_Srv.id)
+    mem = oauth_flow._MemoryTokenStorage()
+    real = ServerTokenStorage(_Srv.id)
+    real.clear()
+    try:
+        # provider is unused on this path (the fake client ignores auth); pass a placeholder.
+        await oauth_flow._drive(_Srv, object(), mem, real, pending)
+        # url_future carries the error for begin_authorization to retrieve and classify...
+        assert isinstance(pending.url_future.exception(), RuntimeError)
+        # ...while done_future is cancelled (silent), never exception-loaded.
+        assert pending.done_future.cancelled()
+    finally:
+        real.clear()
+
+
+async def test_drive_cancels_done_future_when_callback_never_arrives(monkeypatch):
+    # Regression: the authorization URL was produced, but the operator never finished in the
+    # browser, so the provider's callback wait times out and _drive fails POST-URL with
+    # callback_event still unset. complete_authorization never ran, so done_future is awaited by
+    # no one — it must be cancelled, not exception-loaded (which would warn on collection).
+    class _Boom(_FakeAsyncClient):
+        def stream(self, _method, _url, **_kwargs):
+            class _Ctx:
+                async def __aenter__(_self):
+                    raise RuntimeError("timed out waiting for the operator to finish signing in")
+
+                async def __aexit__(_self, *exc):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _Boom)
+
+    class _Srv:
+        id = "srv-drive-nocb"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+
+    pending = oauth_flow._Pending(_Srv.id)
+    pending.url_future.set_result("https://auth.example/authorize?state=s")  # URL already handed back
+    # callback_event intentionally left unset — the browser never returned.
+    mem = oauth_flow._MemoryTokenStorage()
+    real = ServerTokenStorage(_Srv.id)
+    real.clear()
+    try:
+        await oauth_flow._drive(_Srv, object(), mem, real, pending)
+        assert pending.done_future.cancelled()  # silent — no "Future exception was never retrieved"
+    finally:
+        real.clear()
+
+
+def test_registration_status_parses_status_code():
+    from mcp.client.auth import OAuthRegistrationError
+
+    assert (
+        oauth_flow._registration_status(
+            OAuthRegistrationError('Registration failed: 429 {"error":"too_many_requests"}')
+        )
+        == 429
+    )
+    # A non-status registration error (e.g. an invalid body) has no code to read.
+    assert oauth_flow._registration_status(OAuthRegistrationError("Invalid registration response: x")) is None
+
+
+def test_classify_begin_error_maps_429_and_falls_back():
+    from mcp.client.auth import OAuthRegistrationError
+
+    rate_limited = oauth_flow._classify_begin_error(
+        OAuthRegistrationError('Registration failed: 429 {"error":"too_many_requests"}')
+    )
+    assert rate_limited.status_code == 429 and "rate-limiting" in str(rate_limited)
+    # Any other registration failure keeps the generic message + 502.
+    other = oauth_flow._classify_begin_error(OAuthRegistrationError("Registration failed: 400 bad"))
+    assert other.status_code == 502 and "could not start OAuth" in str(other)
+    # An already-classified error passes through unchanged (no double-wrapping).
+    pre = oauth_flow.OAuthBeginError("already friendly", status_code=429)
+    assert oauth_flow._classify_begin_error(pre) is pre
+
+
 async def test_set_tokens_preserves_refresh_token_when_absent():
     # A refresh response that omits refresh_token (provider not rotating) must not wipe the
     # stored one, or the next refresh has no credential.
@@ -580,6 +729,25 @@ def test_authorize_returns_url(monkeypatch):
             r = c.post(f"/api/servers/{sid}/oauth/authorize", headers=LOOPBACK)
             assert r.status_code == 200, r.text
             assert r.json()["authorize_url"] == "https://auth.example/authorize?state=abc"
+        finally:
+            c.delete(f"/api/servers/{sid}", headers=LOOPBACK)
+
+
+def test_authorize_rate_limited_returns_429(monkeypatch):
+    async def _fake_begin(server, *, callback_url):
+        raise oauth_flow.OAuthBeginError(
+            "the OAuth provider is rate-limiting Dynamic Client Registration (HTTP 429). "
+            "Wait a minute and try connecting again.",
+            status_code=429,
+        )
+
+    monkeypatch.setattr(oauth_flow, "begin_authorization", _fake_begin)
+    with TestClient(app) as c:
+        sid = _create_oauth_server(c)
+        try:
+            r = c.post(f"/api/servers/{sid}/oauth/authorize", headers=LOOPBACK)
+            assert r.status_code == 429, r.text
+            assert "rate-limiting" in r.json()["detail"]
         finally:
             c.delete(f"/api/servers/{sid}", headers=LOOPBACK)
 
