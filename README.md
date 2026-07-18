@@ -155,6 +155,16 @@ A `remote` server authenticates **to the upstream** one of two ways:
   supplies the `Authorization` header). Optional `oauth_scopes` and static
   `oauth_client_id`/`oauth_client_secret` (blank = auto-register).
 
+  Scopes are **discovered automatically** at sign-in (RFC 9728 / RFC 8414 / OIDC
+  well-known metadata), so `oauth_scopes` is usually unnecessary — leave it blank.
+  mcpelevator also requests the **`offline_access`** scope by default ([SEP-2207](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2207)),
+  so the provider issues a **refresh token** and the session doesn't lapse on the
+  short access-token clock — unless the provider advertises a scope list that omits
+  it, in which case the request is left as-is (a strict provider would otherwise
+  reject the whole authorization). Set `oauth_scopes` only when the provider needs a
+  scope it doesn't advertise — e.g. a provider-specific scope for offline/refresh
+  access; operator scopes are always requested.
+
 > **Most remote MCP servers accept both**, but some support only one — **check the
 > server's docs** to be sure. Prefer a static token/API key when the server issues
 > one: it's more permanent. Choose OAuth when the provider requires it or doesn't

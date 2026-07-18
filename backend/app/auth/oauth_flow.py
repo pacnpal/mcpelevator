@@ -47,6 +47,12 @@ from app.util import new_id
 logger = logging.getLogger(__name__)
 
 CLIENT_NAME = "mcpelevator"
+# SEP-2207 (accepted 2026): an OAuth client that wants a refresh token keeps
+# ``refresh_token`` in its grant_types (we do) AND requests the ``offline_access``
+# scope. Most authorization servers only mint a refresh token when the client asks
+# for offline access, so without this every remote-OAuth session lapses on the short
+# access-token clock and the operator has to re-authenticate by hand.
+OFFLINE_ACCESS = "offline_access"
 # Seconds to obtain the authorization URL (metadata discovery + client registration).
 _URL_TIMEOUT = 30.0
 # Seconds the operator has to complete the browser sign-in before we give up.
@@ -120,26 +126,50 @@ def _merge_scopes(*scope_strings: Optional[str]) -> Optional[str]:
     return " ".join(seen) if seen else None
 
 
+def _offline_access_default(context) -> bool:
+    """Whether to add ``offline_access`` (→ refresh token) to the requested scope.
+
+    SEP-2207: request it by default, UNLESS the authorization server publishes a
+    ``scopes_supported`` list that omits it. That exception respects an AS which
+    validates scopes strictly — an unadvertised ``offline_access`` would otherwise get
+    the whole authorization rejected with ``invalid_scope``. When the AS advertises it,
+    or publishes no scope list at all, we ask, so the common case (short-lived access
+    token + long-lived refresh token) works with no operator action. An operator whose
+    provider honours ``offline_access`` without advertising it can still type it into
+    the scopes field — operator scopes are always requested, gate or no gate.
+    """
+    metadata = getattr(context, "oauth_metadata", None)
+    supported = getattr(metadata, "scopes_supported", None) if metadata else None
+    if supported is None:
+        return True
+    return OFFLINE_ACCESS in supported
+
+
 class _ScopedOAuthClientProvider(OAuthClientProvider):
-    """``OAuthClientProvider`` that keeps the operator's requested scopes in the grant.
+    """``OAuthClientProvider`` that requests a refresh token and keeps the operator's scopes.
 
     The SDK runs its own "scope selection strategy" during the 401-driven handshake and
     OVERWRITES ``context.client_metadata.scope`` from the WWW-Authenticate header / the
     discovered resource+auth-server metadata (``oauth2.get_client_metadata_scopes``),
     discarding whatever the operator typed. That's wrong when the operator deliberately
     asked for a specific set (e.g. an upstream that doesn't advertise scopes, or one
-    that needs a scope it omits from the challenge). We union the operator's scopes back
-    in immediately before the authorization URL is built so they're always requested,
-    while still honouring any the server volunteered."""
+    that needs a scope it omits from the challenge). Immediately before the authorization
+    URL is built we union back in, so they're always requested while still honouring any
+    the server volunteered: (1) ``offline_access`` by default (SEP-2207 — see
+    ``_offline_access_default``), so the provider issues a refresh token and the session
+    doesn't lapse on the access-token clock, and (2) the operator's explicit scopes."""
 
     def __init__(self, *args, operator_scopes: Optional[str] = None, **kwargs):
         super().__init__(*args, **kwargs)
         self._operator_scopes = operator_scopes or None
 
     async def _perform_authorization_code_grant(self) -> tuple[str, str]:
-        if self._operator_scopes:
+        extra = self._operator_scopes
+        if _offline_access_default(self.context):
+            extra = _merge_scopes(extra, OFFLINE_ACCESS)
+        if extra:
             self.context.client_metadata.scope = _merge_scopes(
-                self.context.client_metadata.scope, self._operator_scopes
+                self.context.client_metadata.scope, extra
             )
         return await super()._perform_authorization_code_grant()
 
