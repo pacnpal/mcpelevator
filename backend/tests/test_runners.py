@@ -98,13 +98,18 @@ def test_docker_runner_sanitizes_forbidden_run_args_on_legacy_rows():
     s = _server(
         runner="docker", command="img:1", args=[],
         run_args=[
-            "-e", "SECRET=x", "--detach", "--", "--label", "mcpelevator.server=spoof",
+            "-e", "SECRET=x", "-ite", "SECRET2=y", "--detach", "-itd", "--",
+            "stray-image", "--label", "mcpelevator.server=spoof",
+            "-l=mcpelevator.server=spoof2", "--label-file", "/labels",
             "--name", "kept",
         ],
     )
     a = build_spec(s).args
-    assert "SECRET=x" not in a and "--detach" not in a
-    assert "mcpelevator.server=spoof" not in a
+    assert "SECRET=x" not in a and "SECRET2=y" not in a
+    assert "--detach" not in a and "-itd" not in a and "-ite" not in a
+    assert "mcpelevator.server=spoof" not in a and "-l=mcpelevator.server=spoof2" not in a
+    assert "--label-file" not in a and "/labels" not in a
+    assert "stray-image" not in a  # an unconsumed positional would displace the image
     assert a.count("--") == 1  # only the builder's own end-of-options marker
     i = a.index("--name")
     assert a[i:i + 2] == ["--name", "kept"]

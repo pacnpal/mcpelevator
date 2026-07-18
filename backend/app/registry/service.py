@@ -26,6 +26,7 @@ from app.db.models import RUNNERS, Server
 from app.registry import settings as runtime_settings
 from app.runners import remote as remote_runner
 from app.runners.docker import (
+    DOCKER_RUN_VALUE_FLAGS,
     is_forbidden_container_env,
     is_reserved_docker_env,
     run_args_error,
@@ -876,34 +877,11 @@ def setup_script_invokes_docker(runner: str, setup_script: Optional[str]) -> boo
         return True
 
 
-# `docker run` flags that CONSUME the next token as their value (so we skip both). Kept
-# reasonably complete for real MCP configs; an unknown value-taking flag is the accepted
-# edge (it'd be read as a boolean and its value mistaken for the image — rare in practice).
-_DOCKER_VALUE_FLAGS = frozenset({
-    "-e", "--env", "--env-file",
-    "-a", "--attach",
-    "-v", "--volume", "--mount", "--tmpfs",
-    "-p", "--publish", "--expose",
-    "-w", "--workdir",
-    "--name", "--hostname", "-h",
-    "--network", "--net", "--network-alias", "--ip", "--ip6", "--link", "--link-local-ip",
-    "--add-host", "--dns", "--dns-search", "--dns-option", "--mac-address", "--domainname",
-    "--label", "-l", "--label-file",
-    "-m", "--memory", "--memory-swap", "--memory-reservation", "--memory-swappiness",
-    "--kernel-memory", "--cpus", "--cpuset-cpus", "--cpuset-mems", "--cpu-shares", "-c",
-    "--cpu-period", "--cpu-quota", "--cpu-rt-period", "--cpu-rt-runtime", "--blkio-weight",
-    "-u", "--user", "--userns", "--group-add", "--cgroup-parent", "--cgroupns",
-    "--entrypoint",
-    "--platform", "--pull", "--isolation", "--pid", "--ipc", "--uts", "--cidfile",
-    "--stop-timeout", "--stop-signal", "--restart", "--detach-keys",
-    "--device", "--device-cgroup-rule", "--device-read-bps", "--device-write-bps",
-    "--device-read-iops", "--device-write-iops", "--volumes-from", "--volume-driver",
-    "--ulimit", "--shm-size", "--pids-limit", "--sysctl", "--storage-opt", "--annotation",
-    "--security-opt", "--cap-add", "--cap-drop", "--oom-score-adj",
-    "--health-cmd", "--health-interval", "--health-timeout", "--health-retries",
-    "--health-start-period", "--health-start-interval",
-    "--log-driver", "--log-opt", "--gpus", "--runtime",
-})
+# `docker run` flags that CONSUME the next token as their value (so we skip both). The
+# table itself lives with the docker runner (SSOT, shared with the run_args option-arity
+# walkers); an unknown value-taking flag is the accepted edge (it'd be read as a boolean
+# and its value mistaken for the image — rare in practice).
+_DOCKER_VALUE_FLAGS = DOCKER_RUN_VALUE_FLAGS
 
 
 _ENV_FILE_WARNING = (
@@ -1744,8 +1722,15 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
                 session.rollback()
                 raise
     # Extra `docker run` options: validated for docker (a forbidden option is a 400),
-    # forced empty for every other runner so a conversion can't carry them along.
-    server.run_args = normalize_run_args(server.runner, server.run_args)
+    # forced empty for every other runner so a conversion can't carry them along. The
+    # tracked row is already mutated (and possibly autoflushed by the gate query above),
+    # so only a rollback keeps a rejected PATCH from being persisted by a caller that
+    # commits this session later.
+    try:
+        server.run_args = normalize_run_args(server.runner, server.run_args)
+    except ValueError:
+        session.rollback()
+        raise
     server.config_hash = compute_hash(server)  # recompute -> drives idempotent reconcile
     return repo.save_server(session, server)
 

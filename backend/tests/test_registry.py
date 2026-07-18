@@ -663,22 +663,37 @@ def test_docker_run_args_change_rolls_config_hash(session):
         ["-e", "SECRET=x"],          # values in argv would leak into ps
         ["--env=SECRET=x"],
         ["-eSECRET=x"],              # attached short form
+        ["-ite", "SECRET=x"],        # hidden in a short cluster (docker reads -i -t -e)
+        ["-iteSECRET=x"],
         ["--env-file", "/a.env"],
         ["-d"],                      # detach breaks stdio
         ["--detach"],
+        ["-itd"],                    # detach hidden in a cluster
+        ["-d=true"],                 # pflag's boolean =value spelling
         ["--"],                      # would shift the image into container argv
         ["--label", "mcpelevator.server=spoof"],  # reserved reaping label
         ["--label=mcpelevator.server=spoof"],
-        [""],                        # empty token
+        ["-itl", "mcpelevator.server=spoof"],     # reserved label via a cluster
+        ["-l=mcpelevator.server=spoof"],          # pflag's short =value glue
+        ["--label-file", "/labels"],  # a label file could override the reap label
+        ["--label-file=/labels"],
+        ["busybox"],                  # a positional would displace the image
+        ["--shm-size=1g", "other-image"],
+        ["--name"],                   # trailing value-flag would swallow the `--` guard
+        [""],                         # empty token
     ],
 )
 def test_docker_run_args_forbidden_rejected(session, bad):
     with pytest.raises(ValueError):
         service.create_server(session, name="d", runner="docker", command="img:1", run_args=bad)
-    # the same boundary bites on update
+    # the same boundary bites on update — and the rejected PATCH must not linger in the
+    # session (a later commit on it must not persist the forbidden options)
     s = service.create_server(session, name="ok", runner="docker", command="img:1")
     with pytest.raises(ValueError):
         service.update_server(session, s.id, {"run_args": bad})
+    session.commit()
+    session.expire_all()
+    assert repo.get_server(session, s.id).run_args == []
 
 
 def test_docker_run_args_allow_ordinary_labels(session):
@@ -688,6 +703,16 @@ def test_docker_run_args_allow_ordinary_labels(session):
         run_args=["--label", "team=infra", "--label=env=prod"],
     )
     assert s.run_args == ["--label", "team=infra", "--label=env=prod"]
+
+
+def test_docker_run_args_allow_separated_values_and_clusters(session):
+    # a value-taking flag's separated value is consumed by arity — not misread as a
+    # positional image — and boolean clusters / attached short values pass through
+    args = ["--name", "my-mcp", "--shm-size", "1g", "-it", "-p", "8080:80", "-hnode1"]
+    s = service.create_server(
+        session, name="d", runner="docker", command="img:1", run_args=args
+    )
+    assert s.run_args == args
 
 
 def test_run_args_forced_empty_for_non_docker_runners(session):

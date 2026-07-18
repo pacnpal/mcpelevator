@@ -780,7 +780,9 @@
 				<code class="font-mono text-[var(--color-ink-muted)]">--memory 2g</code>) overrides it.
 				<code class="font-mono text-[var(--color-ink-muted)]">-e</code>/<code class="font-mono text-[var(--color-ink-muted)]">--env-file</code>
 				and <code class="font-mono text-[var(--color-ink-muted)]">-d</code> aren't allowed here —
-				use <span class="font-medium">Environment</span> below for variables.
+				use <span class="font-medium">Environment</span> below for variables. Note a fixed
+				<code class="font-mono text-[var(--color-ink-muted)]">--name</code> can collide if two
+				sessions of this server overlap (docker rejects duplicate container names).
 			</p>
 			<label for="srv-docker-args" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
 				Container arguments <span class="text-[var(--color-ink-dim)]">(optional, one per line — after the image)</span>
