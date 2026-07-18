@@ -635,7 +635,7 @@
 						<label for="srv-oauth-scopes" class="text-xs font-medium text-[var(--color-ink-muted)]">
 							Scopes <span class="text-[var(--color-ink-dim)]">(optional, space-separated)</span>
 						</label>
-						<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+						<p id="srv-oauth-scopes-help" class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
 							Usually leave this blank: at sign-in mcpelevator discovers the provider's
 							scopes automatically and requests
 							<span class="font-mono text-[var(--color-ink-muted)]">offline_access</span>
@@ -645,6 +645,7 @@
 						</p>
 						<input
 							id="srv-oauth-scopes"
+							aria-describedby="srv-oauth-scopes-help"
 							type="text"
 							bind:value={oauthScopes}
 							autocomplete="off"

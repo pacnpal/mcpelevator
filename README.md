@@ -161,9 +161,11 @@ A `remote` server authenticates **to the upstream** one of two ways:
   so the provider issues a **refresh token** and the session doesn't lapse on the
   short access-token clock — unless the provider advertises a scope list that omits
   it, in which case the request is left as-is (a strict provider would otherwise
-  reject the whole authorization). Set `oauth_scopes` only when the provider needs a
-  scope it doesn't advertise — e.g. a provider-specific scope for offline/refresh
-  access; operator scopes are always requested.
+  reject the whole authorization). When `offline_access` is requested, the sign-in
+  also sends `prompt=consent`, which OIDC providers require to actually mint the
+  refresh token (a non-OIDC provider ignores it). Set `oauth_scopes` only when the
+  provider needs a scope it doesn't advertise — e.g. a provider-specific scope for
+  offline/refresh access; operator scopes are always requested.
 
 > **Most remote MCP servers accept both**, but some support only one — **check the
 > server's docs** to be sure. Prefer a static token/API key when the server issues
