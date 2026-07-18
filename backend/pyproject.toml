@@ -20,6 +20,10 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    # starlette.testclient prefers httpx2 (Pydantic's maintained httpx fork) and warns when it
+    # falls back to httpx. The app's runtime HTTP client stays on `httpx` above; only the test
+    # client needs httpx2, so it lives here.
+    "httpx2>=2.7",
 ]
 
 [tool.uv]
