@@ -33,7 +33,7 @@ import logging
 import re
 import time
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
 import httpx
 from mcp.client.auth import OAuthClientProvider, OAuthRegistrationError, TokenStorage
@@ -138,8 +138,8 @@ def _offline_access_default(context) -> bool:
     provider honours ``offline_access`` without advertising it can still type it into
     the scopes field — operator scopes are always requested, gate or no gate.
     """
-    metadata = getattr(context, "oauth_metadata", None)
-    supported = getattr(metadata, "scopes_supported", None) if metadata else None
+    metadata = context.oauth_metadata
+    supported = metadata.scopes_supported if metadata else None
     if supported is None:
         return True
     return OFFLINE_ACCESS in supported
@@ -295,6 +295,35 @@ def _repair_authorization_url(url: str) -> str:
     if not sep or "?" not in base:
         return url  # zero or one '?' — already well-formed
     return f"{base}&{params}"
+
+
+def _ensure_consent_prompt(url: str) -> str:
+    """Add ``prompt=consent`` to an authorization URL that requests ``offline_access``.
+
+    OIDC providers only (re)issue a refresh token for offline access when the user actively
+    consents, which the spec ties to ``prompt=consent``. Without it a returning, already-
+    consented user gets an authorization code but NO refresh token — the very lapse
+    requesting ``offline_access`` is meant to avoid (SEP-2207). The SDK's URL builder
+    serializes only the standard params plus ``scope``, so we append it here.
+
+    Skipped when the URL already carries a ``prompt`` (don't clobber a provider-specific
+    value) or doesn't request offline access. A non-OIDC OAuth2 server simply ignores the
+    unknown parameter (RFC 6749 §3.1), so sending it for offline-access requests is safe.
+    The existing query is preserved byte-for-byte (see ``_repair_authorization_url``) — only
+    the new parameter is appended — and any parse hiccup on an exotic URL just leaves it
+    unchanged rather than risking corruption."""
+    parts = urlsplit(url)
+    try:
+        query = parse_qs(parts.query, keep_blank_values=True)
+    except ValueError:
+        return url
+    scope = " ".join(query.get("scope", [])).split()
+    if OFFLINE_ACCESS not in scope or query.get("prompt"):
+        return url
+    # Reached only with offline_access in the scope param, so the query is non-empty;
+    # "prompt=consent" needs no escaping, so append it directly.
+    new_query = f"{parts.query}&prompt=consent"
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
 
 
 def _extract_state(url: str) -> Optional[str]:
@@ -476,6 +505,7 @@ async def begin_authorization(server, *, callback_url: str) -> str:
 
     async def redirect_handler(authorization_url: str) -> None:
         authorization_url = _repair_authorization_url(authorization_url)
+        authorization_url = _ensure_consent_prompt(authorization_url)
         state = _extract_state(authorization_url)
         pending.state = state
         if state is not None:

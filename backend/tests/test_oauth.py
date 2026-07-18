@@ -545,8 +545,8 @@ def test_merge_scopes_unions_and_dedupes():
 def test_offline_access_default_gating():
     from types import SimpleNamespace
 
-    # No metadata discovered yet -> best-effort ask (common for lenient providers).
-    assert oauth_flow._offline_access_default(SimpleNamespace()) is True
+    # No metadata discovered yet (oauth_metadata is None) -> best-effort ask.
+    assert oauth_flow._offline_access_default(SimpleNamespace(oauth_metadata=None)) is True
     # Metadata present but no scopes_supported list -> ask.
     assert (
         oauth_flow._offline_access_default(
@@ -678,6 +678,41 @@ def test_repair_authorization_url_leaves_wellformed_urls_alone():
     # percent-encoded "?" inside a value is a literal, not a separator — untouched
     encoded = "https://auth.example.com/authorize?resource=https%3A%2F%2Fx%3Fy&state=s2"
     assert oauth_flow._repair_authorization_url(encoded) == encoded
+
+
+def test_ensure_consent_prompt_added_when_offline_access_requested():
+    # offline_access in scope + no prompt -> append prompt=consent so an OIDC AS re-consents
+    # and mints a refresh token; the existing query is left byte-for-byte intact.
+    url = "https://auth.example.com/authorize?scope=read+offline_access&state=s"
+    out = oauth_flow._ensure_consent_prompt(url)
+    assert out == "https://auth.example.com/authorize?scope=read+offline_access&state=s&prompt=consent"
+    assert oauth_flow._extract_state(out) == "s"  # state still parses
+
+
+def test_ensure_consent_prompt_skips_without_offline_access():
+    url = "https://auth.example.com/authorize?scope=read+write&state=s"
+    assert oauth_flow._ensure_consent_prompt(url) == url
+    # no scope param at all -> unchanged
+    bare = "https://auth.example.com/authorize?response_type=code&state=s"
+    assert oauth_flow._ensure_consent_prompt(bare) == bare
+
+
+def test_ensure_consent_prompt_preserves_existing_prompt():
+    # A provider-specific prompt value must not be clobbered.
+    url = "https://auth.example.com/authorize?scope=offline_access&prompt=login&state=s"
+    assert oauth_flow._ensure_consent_prompt(url) == url
+
+
+def test_ensure_consent_prompt_preserves_railway_style_query():
+    # The repaired Railway URL carries a percent-encoded resource param before the SDK's own
+    # params; appending prompt=consent must not disturb that value.
+    url = (
+        "https://backboard.railway.com/oauth/auth?resource=https%3A%2F%2Fbackboard.railway.com"
+        "&response_type=code&scope=offline_access&state=xyz"
+    )
+    out = oauth_flow._ensure_consent_prompt(url)
+    assert out == url + "&prompt=consent"
+    assert "resource=https%3A%2F%2Fbackboard.railway.com" in out
 
 
 # --------------------------------------------------------------------------- #
