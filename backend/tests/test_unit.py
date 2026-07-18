@@ -86,7 +86,11 @@ def test_env_scrub_keeps_control_plane_secrets_from_children(tmp_path, monkeypat
 async def test_setup_runs_before_bridge_with_child_environment_and_cwd(tmp_path, monkeypatch):
     from app.supervisor import unit as unit_module
 
-    monkeypatch.setattr(unit_module, "get_settings", lambda: _settings(tmp_path))
+    monkeypatch.setattr(
+        unit_module,
+        "get_settings",
+        lambda: _settings(tmp_path, start_timeout_s=60),
+    )
     server = _server(
         tmp_path,
         setup_script=(
@@ -275,7 +279,9 @@ async def test_exit_after_stable_run_waits_before_fresh_activation(tmp_path, mon
     monkeypatch.setattr(
         unit_module,
         "get_settings",
-        lambda: _settings(tmp_path, restart_budget=1, restart_stable_s=0.05),
+        lambda: _settings(
+            tmp_path, start_timeout_s=60, restart_budget=1, restart_stable_s=0.05
+        ),
     )
     server = _server(tmp_path, setup_script="touch setup-complete")
     unit = ServerUnit(server)
