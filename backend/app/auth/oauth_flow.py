@@ -104,14 +104,16 @@ def _classify_begin_error(exc: BaseException) -> OAuthBeginError:
     replace with its own 502 page, hiding the message entirely):
 
     * the provider has no Dynamic Client Registration endpoint at all (HTTP 404/405/501 —
-      e.g. GitHub, whose MCP server requires a pre-registered OAuth App), and
+      e.g. GitHub, whose MCP server requires a pre-registered OAuth App) or refuses
+      anonymous registration by policy (HTTP 401/403, e.g. an endpoint requiring an
+      initial access token we don't hold — the remedy is the same), and
     * the provider rate-limiting registration (HTTP 429).
 
     Everything else keeps the previous generic message + 502."""
     if isinstance(exc, OAuthBeginError):
         return exc
     status = _registration_status(exc) if isinstance(exc, OAuthRegistrationError) else None
-    if status in (404, 405, 501):
+    if status in (401, 403, 404, 405, 501):
         return OAuthBeginError(
             "the OAuth provider does not support Dynamic Client Registration "
             f"(HTTP {status} from its registration endpoint), so it requires a pre-registered "

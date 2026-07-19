@@ -446,9 +446,10 @@ def test_classify_begin_error_maps_429_and_falls_back():
     )
     assert rate_limited.status_code == 429 and "rate-limiting" in str(rate_limited)
     # A provider with no DCR endpoint at all (GitHub answers its fallback /register path with
-    # a Go-style "404 page not found") maps to a 400 telling the operator to pre-register a
-    # client and set an explicit Client ID + secret.
-    for status in (404, 405, 501):
+    # a Go-style "404 page not found"), or one refusing anonymous registration by policy
+    # (401/403), maps to a 400 telling the operator to pre-register a client and set an
+    # explicit Client ID + secret.
+    for status in (401, 403, 404, 405, 501):
         no_dcr = oauth_flow._classify_begin_error(
             OAuthRegistrationError(f"Registration failed: {status} 404 page not found\n")
         )
