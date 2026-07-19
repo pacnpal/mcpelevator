@@ -47,12 +47,16 @@ def _effective_local_runners(user) -> bool:
 class Principal:
     """The resolved control-plane caller. ``user_id`` is None for the synthetic
     admins (enforcement off, the env break-glass token, or a legacy user-less
-    control token) — they own nothing and see everything."""
+    control token) — they own nothing and see everything. ``token_id`` records
+    WHICH stored credential authenticated the request (None when none did: the
+    env token or the enforcement-off local operator), so re-authorization can
+    fail closed if that credential is revoked while the request is queued."""
 
     user_id: Optional[str]
     name: str
     role: str
     local_runners: bool
+    token_id: Optional[str] = None
 
     @property
     def is_admin(self) -> bool:
@@ -109,26 +113,37 @@ def _resolve_uncached(request: Request, session: Session) -> Optional[Principal]
         row = repo.get_token_by_hash(session, hash_token(token))
         if row is not None and row.scope == "control":
             if row.user_id is None:
-                return LEGACY_ADMIN
+                # Legacy/boot mint: admin, but bound to THIS token row so a
+                # revocation mid-request fails re-authorization (see refresh).
+                return Principal(
+                    user_id=None, name=LEGACY_ADMIN.name, role=ROLE_ADMIN,
+                    local_runners=True, token_id=row.id,
+                )
             user = repo.get_user(session, row.user_id)
             if user is not None:
                 return Principal(
                     user_id=user.id, name=user.name, role=user.role,
                     local_runners=_effective_local_runners(user),
+                    token_id=row.id,
                 )
             # else: dangling credential — fail closed (enforcement is on here).
     return None
 
 
 def refresh(session: Session, principal: Principal) -> Optional[Principal]:
-    """Re-read a user-bound principal's role/flags from the DB — the check-time
-    truth for authorization decisions made INSIDE a serialized write. A request
-    resolves its principal once at entry; an admin may demote the user or revoke
-    their local-runner permission (both committed under the config write lock)
-    while the request is queued, so every policy check performed under that lock
-    must use this refreshed view, not the entry-time snapshot. Synthetic
-    principals (user_id None) are immutable and returned unchanged. Returns None
-    when the user row is gone — the caller should fail closed (401)."""
+    """Re-read a principal's authority from the DB — the check-time truth for
+    authorization decisions made INSIDE a serialized write. A request resolves its
+    principal once at entry; while it is queued an admin may demote the user,
+    revoke their local-runner permission, or REVOKE THE VERY TOKEN the request
+    authenticated with (all committed under the config write lock) — so both the
+    credential and the user are re-validated here, not just the role. Returns None
+    when either is gone — the caller should fail closed (401). Credential-less
+    synthetic principals (env token, enforcement-off local operator) are immutable
+    and returned unchanged."""
+    from app.db.models import Token  # local import: models must not import auth
+
+    if principal.token_id is not None and session.get(Token, principal.token_id) is None:
+        return None  # the presented credential was revoked while we were queued
     if principal.user_id is None:
         return principal
     user = repo.get_user(session, principal.user_id)
@@ -137,6 +152,7 @@ def refresh(session: Session, principal: Principal) -> Optional[Principal]:
     return Principal(
         user_id=user.id, name=user.name, role=user.role,
         local_runners=_effective_local_runners(user),
+        token_id=principal.token_id,
     )
 
 

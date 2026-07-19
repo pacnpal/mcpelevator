@@ -622,6 +622,12 @@ async def disconnect_oauth(
     if not await run_in_threadpool(_clear_if_still_visible):
         sup.nudge()  # bring the stopped bridge back — its credentials are untouched
         raise HTTPException(status_code=404, detail="server not found")
+    # Rebuild the response from a row re-read AND re-authorized after the awaited
+    # work: the detail body carries command/env/OAuth config, and a transfer
+    # committing after the lock released must not have that leak to the former
+    # owner via the pre-fetched object.
+    session.expire_all()
+    server = _visible(principal, session, server_id)
     # The server stays enabled, so the reconciler restarts it; with no tokens it can't
     # authenticate upstream and surfaces as needing re-auth — the intended "disconnected"
     # state (matches the connect path, which also restarts to pick up fresh tokens).
