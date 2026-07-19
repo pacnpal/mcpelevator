@@ -34,10 +34,10 @@ function shellQuote(value: string): string {
 // backend-mirroring classifier in `host.ts` with ranges that only matter for
 // reachability: 0.0.0.0/8 and CGNAT (100.64.0.0/10, e.g. Tailscale).
 function isPrivateHost(host: string): boolean {
-	const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+	const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
 	if (v4) {
-		const a = Number(v4[1]);
-		const b = Number(v4[2]);
+		const [a, b, c, d] = v4.slice(1).map(Number);
+		if ([a, b, c, d].some((n) => n > 255)) return false;
 		if (a === 0 || (a === 100 && b >= 64 && b <= 127)) return true;
 	}
 	return isPrivateIpHost(host);
