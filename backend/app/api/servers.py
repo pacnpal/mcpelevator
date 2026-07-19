@@ -42,7 +42,7 @@ from app.auth import principal as principal_mod
 from app.auth.principal import Principal, current_principal
 from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
-from app.db import get_session, repo
+from app.db import get_engine, get_session, repo
 from app.db.models import Server
 from app.groups import registry as group_registry
 from app.registry import service
@@ -586,7 +586,24 @@ async def disconnect_oauth(
     # Unconditional — sup.stop is idempotent, and gating on ``enabled`` would miss a bridge
     # still winding down from a just-toggled row.
     await sup.stop(server_id)
-    ServerTokenStorage(server_id).clear()
+
+    def _clear_if_still_visible() -> bool:
+        """Re-validate ownership AFTER the awaited stop, under the config write lock:
+        transfer intentionally preserves the stored upstream credential, so an owner
+        reassignment landing in the stop gap must make the former owner's disconnect
+        404 instead of wiping the new owner's token file."""
+        with service.config_write_lock():
+            session.expire_all()
+            fresh = principal_mod.refresh(session, principal)
+            current = repo.get_server(session, server_id)
+            if fresh is None or current is None or not policy.can_view_server(fresh, current):
+                return False
+            ServerTokenStorage(server_id).clear()
+            return True
+
+    if not await run_in_threadpool(_clear_if_still_visible):
+        sup.nudge()  # bring the stopped bridge back — its credentials are untouched
+        raise HTTPException(status_code=404, detail="server not found")
     # The server stays enabled, so the reconciler restarts it; with no tokens it can't
     # authenticate upstream and surfaces as needing re-auth — the intended "disconnected"
     # state (matches the connect path, which also restarts to pick up fresh tokens).
@@ -829,6 +846,13 @@ async def stream_logs(
         "X-Accel-Buffering": "no",  # don't let any intermediary buffer the stream
     }
 
+    def _still_visible() -> bool:
+        # Fresh session per check: the committed truth, no identity-map staleness.
+        with Session(get_engine()) as check:
+            row = repo.get_server(check, server_id)
+            fresh = principal_mod.refresh(check, principal)
+            return row is not None and fresh is not None and policy.can_view_server(fresh, row)
+
     async def events():
         unit = sup.unit(server_id)
         if unit is None:
@@ -838,12 +862,22 @@ async def stream_logs(
         # this same event loop, so no line can slip in to be missed or duplicated.
         queue = unit.logs.subscribe()
         backlog = unit.logs.snapshot()
+        # Ownership can change under a long-lived stream (a transfer doesn't bounce
+        # the unit), so visibility is re-validated at most every _RECHECK_S seconds
+        # — a former owner's open stream goes quiet and closes shortly after the
+        # server changes hands, instead of tailing the new owner's logs forever.
+        _RECHECK_S = 5.0
+        last_check = time.monotonic()
         try:
             for line in backlog:
                 yield _sse({"line": line})
             while True:
                 if await request.is_disconnected() or sup.unit(server_id) is not unit:
                     break
+                if time.monotonic() - last_check > _RECHECK_S:
+                    if not _still_visible():
+                        break
+                    last_check = time.monotonic()
                 try:
                     line = await asyncio.wait_for(queue.get(), timeout=15)
                     yield _sse({"line": line})

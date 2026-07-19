@@ -223,11 +223,15 @@ class _Pending:
     still awaiting upstream discovery, BEFORE the flow registers in ``_PENDING``,
     where there is nothing to cancel yet."""
 
-    def __init__(self, server_id: str, owner_id: Optional[str] = None):
+    def __init__(self, server_id: str, owner_id: Optional[str] = None, row_existed: bool = False):
         loop = asyncio.get_running_loop()
         self.id = new_id()
         self.server_id = server_id
         self.owner_id = owner_id
+        # Did the server ROW exist in the DB when the flow began? Promotion treats
+        # a now-missing row as "deleted mid-flow" (blocked) only when it did — a
+        # flow driven against an unpersisted server object (tests) is exempt.
+        self.row_existed = row_existed
         self.state: Optional[str] = None  # OAuth ``state``, learned from the auth URL
         self.code: Optional[str] = None  # filled in by the callback
         self.url_future: asyncio.Future[str] = loop.create_future()
@@ -351,21 +355,36 @@ def _probe_headers(server) -> dict[str, str]:
     return headers
 
 
-def _owner_changed(server_id: str, snapshot_owner: Optional[str]) -> bool:
-    """Does the server's CURRENT owner differ from the flow's begin-time snapshot?
-    A fresh session against the engine (not any request session) so the read is the
-    committed truth. A missing row reports False — deletion has its own explicit
-    cancel-and-clear path, and flows driven against unpersisted servers (tests)
-    must not be judged on a row that never existed."""
+def _server_row_state(server_id: str) -> tuple[bool, Optional[str]]:
+    """(exists, owner_id) for the server's COMMITTED row, read on a fresh session
+    against the engine (never a request session) so no identity map interferes."""
     from sqlmodel import Session
 
     from app.db import get_engine, repo
 
     with Session(get_engine()) as session:
         row = repo.get_server(session, server_id)
-        if row is None:
-            return False
-        return row.owner_id != snapshot_owner
+        return (row is not None, row.owner_id if row is not None else None)
+
+
+def _promotion_blocked(pending: _Pending) -> Optional[str]:
+    """Why this flow's grant must NOT be promoted (None = go ahead), judged against
+    the committed row at promotion time. A row that vanished since the flow began
+    means the server was DELETED mid-flow — its delete path cancels registered
+    flows and clears the credential store, but a flow still in its pre-registration
+    awaits escapes both, and promoting would recreate an orphaned credential file
+    for a server that no longer exists. An owner that changed means the grant
+    belongs to the FORMER owner's upstream account. A row that never existed
+    (``row_existed`` False — unpersisted test servers) is exempt from the deletion
+    check."""
+    exists, owner = _server_row_state(pending.server_id)
+    if not exists:
+        if pending.row_existed:
+            return "server was deleted during authorization"
+        return None
+    if owner != pending.owner_id:
+        return "server ownership changed during authorization — sign in again"
+    return None
 
 
 async def _drive(
@@ -418,18 +437,15 @@ async def _drive(
             "granted scopes or resource may not match what this server requires"
         )
         tokens = None
-    # Ownership is validated at PROMOTION time, against the snapshot taken when the
-    # flow began: if an admin reassigned the server while the sign-in was in flight,
-    # this grant belongs to the FORMER owner's upstream account and must not become
-    # the transferred server's credential. (Reassignment also cancels registered
+    # Ownership AND existence are validated at PROMOTION time, against snapshots
+    # taken when the flow began: reassignment and deletion both cancel registered
     # pending flows, but a flow still in its pre-registration awaits has nothing to
-    # cancel — this check is the backstop that closes that window.) A row that no
-    # longer exists is left to the delete path, which cancels + clears explicitly.
-    if tokens is not None and _owner_changed(server.id, pending.owner_id):
-        inner_error = inner_error or RuntimeError(
-            "server ownership changed during authorization — sign in again"
-        )
-        tokens = None
+    # cancel — this check is the backstop that closes that window for both.
+    if tokens is not None:
+        blocked = _promotion_blocked(pending)
+        if blocked is not None:
+            inner_error = inner_error or RuntimeError(blocked)
+            tokens = None
     if tokens is not None:
         # Promote the freshly-obtained credentials to the shared store the bridge reads, in
         # ONE atomic write that fully replaces any prior state. Building it in memory first
@@ -534,7 +550,10 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         scope=server.oauth_scopes or None,
     )
 
-    pending = _Pending(server.id, owner_id=getattr(server, "owner_id", None))
+    row_existed, _ = _server_row_state(server.id)
+    pending = _Pending(
+        server.id, owner_id=getattr(server, "owner_id", None), row_existed=row_existed
+    )
 
     async def redirect_handler(authorization_url: str) -> None:
         authorization_url = _repair_authorization_url(authorization_url)

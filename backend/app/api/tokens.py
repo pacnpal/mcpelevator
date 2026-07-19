@@ -123,19 +123,37 @@ async def delete_token(
     session: Session = Depends(get_session),
     principal: Principal = Depends(current_principal),
 ):
-    # A member deletes only their own tokens; a non-visible id 404s exactly like a
-    # nonexistent one (same no-leak semantics as the server routes).
-    existing = session.get(Token, token_id)
-    if existing is not None and not policy.can_view_token(principal, existing):
-        raise HTTPException(status_code=404, detail="token not found")
-    # Refuse to remove the last control token if it would leave /api enforced with no
-    # credential. The predicate is re-evaluated inside the delete transaction (after the
-    # write lock is taken) so a concurrent settings change that just enabled enforcement
-    # is seen, closing the delete/enable race. MCPE_ADMIN_TOKEN, if set, lifts the guard.
+    # Refuse to remove the last ADMIN credential while /api stays enforced with no
+    # env token; MCPE_ADMIN_TOKEN, if set, lifts the guard.
     def protect(s: Session) -> bool:
         return enforcement_enabled(s) and not get_settings().admin_token
 
-    result = repo.delete_token(session, token_id, protect_last_control=protect)
+    def _delete():
+        """Ownership check + delete under the config write lock — the SAME lock the
+        user-demotion and user-delete paths hold for their admin-credential guards,
+        so a control-token revocation can't slip between one of those guards
+        counting this token and its mutation committing (two such requests could
+        otherwise remove every admin login between them). The last-control guard
+        inside repo.delete_token is likewise now race-free against those paths."""
+        with service.config_write_lock():
+            session.expire_all()  # re-reads must see state committed while we waited
+            fresh = principal_mod.refresh(session, principal)
+            if fresh is None:
+                return "unauthorized"
+            # A member deletes only their own tokens; a non-visible id 404s exactly
+            # like a nonexistent one (same no-leak semantics as the server routes).
+            existing = session.get(Token, token_id)
+            if existing is not None and not policy.can_view_token(fresh, existing):
+                return "not_found"
+            return repo.delete_token(session, token_id, protect_last_control=protect)
+
+    result = await run_in_threadpool(_delete)
+    if result == "unauthorized":
+        raise HTTPException(
+            status_code=401,
+            detail="control-plane auth required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     if result == "not_found":
         raise HTTPException(status_code=404, detail="token not found")
     if result == "last_control":
