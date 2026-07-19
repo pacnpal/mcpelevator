@@ -124,6 +124,7 @@ async def update_user(
         demotions/deletions can't both pass the guard on each other's still-present
         credential and remove every admin login between them."""
         with service.config_write_lock():
+            session.expire_all()  # re-reads must see state committed while we waited
             user = repo.get_user(session, user_id)
             if user is None:
                 return "not_found"
@@ -177,6 +178,7 @@ async def delete_user(user_id: str, session: Session = Depends(get_session)):
         pointing at a deleted user). Returns 'not_found' | 'last_admin' | an owned
         count | 'ok'."""
         with service.config_write_lock():
+            session.expire_all()  # re-reads must see state committed while we waited
             user = repo.get_user(session, user_id)
             if user is None:
                 return "not_found"

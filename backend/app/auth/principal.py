@@ -84,6 +84,15 @@ def _resolve_uncached(request: Request, session: Session) -> Optional[Principal]
         is_env_admin_token,
     )
 
+    # Enforcement OFF decides FIRST: the local operator is trusted in full
+    # regardless of any bearer header — exactly the pre-multi-user behavior, where
+    # /api never read the header at all. This must also outrank a stored MEMBER
+    # login token: after an admin turns enforcement off, a browser still sending
+    # its member credential must get the documented zero-config local-admin
+    # surface, not a member view it can only escape by clearing the token.
+    if not enforcement_enabled(session):
+        return LOCAL_ADMIN
+
     token = _bearer(request)
     if is_env_admin_token(token):
         return ENV_ADMIN
@@ -102,14 +111,28 @@ def _resolve_uncached(request: Request, session: Session) -> Optional[Principal]
                     # whose row happens to hold false gets a crippled form.
                     local_runners=bool(user.local_runners) or user.role == ROLE_ADMIN,
                 )
-            # else: dangling credential — fall through to the enforcement check
-            # (fails closed when enforcement is on).
-    # No usable credential on the request. With enforcement OFF the local operator
-    # is trusted in full REGARDLESS of any stray/data-plane bearer header — exactly
-    # the pre-multi-user behavior, where /api never read the header at all.
-    if not enforcement_enabled(session):
-        return LOCAL_ADMIN
+            # else: dangling credential — fail closed (enforcement is on here).
     return None
+
+
+def refresh(session: Session, principal: Principal) -> Optional[Principal]:
+    """Re-read a user-bound principal's role/flags from the DB — the check-time
+    truth for authorization decisions made INSIDE a serialized write. A request
+    resolves its principal once at entry; an admin may demote the user or revoke
+    their local-runner permission (both committed under the config write lock)
+    while the request is queued, so every policy check performed under that lock
+    must use this refreshed view, not the entry-time snapshot. Synthetic
+    principals (user_id None) are immutable and returned unchanged. Returns None
+    when the user row is gone — the caller should fail closed (401)."""
+    if principal.user_id is None:
+        return principal
+    user = repo.get_user(session, principal.user_id)
+    if user is None:
+        return None
+    return Principal(
+        user_id=user.id, name=user.name, role=user.role,
+        local_runners=bool(user.local_runners) or user.role == ROLE_ADMIN,
+    )
 
 
 def current_principal(request: Request, session: Session = Depends(get_session)) -> Principal:

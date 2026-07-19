@@ -138,6 +138,30 @@ def test_local_runner_permission():
             _reset()
 
 
+def test_enforcement_off_outranks_stored_member_token():
+    """Turning enforcement OFF restores the zero-config local-admin surface even
+    for a browser still sending its member login token — the header must not
+    demote the local operator below what an anonymous request gets."""
+    with TestClient(app) as client:
+        try:
+            admin, member, _ = _setup(client)
+            theirs = _mk(client, admin, "admins server")
+            # Enforcement on: the member view is scoped.
+            assert [s["id"] for s in client.get("/api/servers", headers=member).json()] == []
+            with Session(get_engine()) as s:
+                runtime_settings.write(s, {"control_plane_auth": "auto", "bind_mode": "local"})
+            # Enforcement off: the same request (member token attached) is the
+            # synthetic local admin — full visibility, admin surfaces reachable.
+            status = client.get("/api/auth/status", headers=member).json()
+            assert status["user"]["role"] == "admin" and status["user"]["id"] is None
+            assert theirs["id"] in [
+                s["id"] for s in client.get("/api/servers", headers=member).json()
+            ]
+            assert client.get("/api/users", headers=member).status_code == 200
+        finally:
+            _reset()
+
+
 def test_admin_local_runner_permission_is_effective():
     """policy always permits every runner for admins; the principal's
     local_runners field must agree (an admin row storing false is irrelevant),

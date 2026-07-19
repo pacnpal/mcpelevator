@@ -9,6 +9,7 @@ from starlette.responses import Response
 
 from app.api.schemas import TokenCreate, TokenCreated, TokenInfo
 from app.auth import policy
+from app.auth import principal as principal_mod
 from app.auth.control_plane import enforcement_enabled
 from app.auth.principal import Principal, current_principal
 from app.config import get_settings
@@ -55,21 +56,6 @@ async def create_token(
             status_code=400,
             detail="scope must be 'all', 'control', 'group:<name>', or a server id",
         )
-    # A server-id scope is validated here (a fast read, no lock). A group scope is
-    # validated at INSERT time under the config write lock instead (see _persist below),
-    # so it can't race a concurrent group delete.
-    scoped_server = None
-    if not scope.startswith("group:") and scope not in ("all", "control"):
-        scoped_server = repo.get_server(session, scope)
-        if scoped_server is None:
-            raise HTTPException(status_code=400, detail=f"unknown server scope {scope!r}")
-    # Multi-user: a member mints tokens only for servers they own (never "all",
-    # "control", or a group). One policy call decides; 400 with the same shape as a
-    # dangling id for an invisible server, 403 for the named scopes.
-    denial = policy.token_scope_error(principal, scope, scoped_server)
-    if denial is not None:
-        status = 400 if denial.startswith("unknown server scope") else 403
-        raise HTTPException(status_code=status, detail=denial)
     raw = new_token()
     token = Token(
         id=new_id(),
@@ -82,24 +68,48 @@ async def create_token(
         user_id=principal.user_id,
     )
 
-    def _persist() -> bool:
-        """Insert the token. For a group scope, re-check the group exists and insert under
-        the config write lock — the SAME lock DELETE /api/groups/{name} holds while it
-        revokes the group's tokens and removes it — so a token can't be minted for a group
-        being deleted and survive the revocation (which would re-authorize a same-named
-        group recreated later). The lock also keeps the wait off the event loop. Returns
-        False when the group no longer exists (-> 400)."""
-        if scope.startswith("group:"):
-            with service.config_write_lock():
-                if not group_registry.exists(session, scope[len("group:"):]):
-                    return False
-                repo.create_token(session, token)
-                return True
-        repo.create_token(session, token)
-        return True
+    def _persist() -> tuple[int, str] | None:
+        """Validate-and-insert as ONE serialized step. EVERY check runs inside the
+        config write lock, against a REFRESHED principal, so a mint can't race the
+        privilege transitions that commit under this same lock: a demotion (which
+        revokes the user's admin-grade tokens) can't miss a privileged token whose
+        insert was still in flight, an owner reassignment (which revokes the former
+        owner's tokens for the server) can't miss a mint for the just-transferred
+        server, and a group token can't be minted for a group being deleted and
+        survive its revocation. Returns (status, detail) to reject, None on success."""
+        with service.config_write_lock():
+            # Drop pre-lock snapshots: the identity map would otherwise satisfy the
+            # re-reads below from cached instances (e.g. the principal's user row
+            # loaded by resolve()), hiding a demotion committed while we waited.
+            session.expire_all()
+            fresh = principal_mod.refresh(session, principal)
+            if fresh is None:
+                return (401, "control-plane auth required")
+            # Policy FIRST for the named scopes: a member gets a deterministic 403
+            # for "all"/"control"/any group, without learning which groups exist.
+            scoped_server = None
+            if not scope.startswith("group:") and scope not in ("all", "control"):
+                scoped_server = repo.get_server(session, scope)
+                if scoped_server is None:
+                    return (400, f"unknown server scope {scope!r}")
+            # A member mints tokens only for servers they own (never "all",
+            # "control", or a group). 400 with the same shape as a dangling id for
+            # an invisible server, 403 for the named scopes.
+            denial = policy.token_scope_error(fresh, scope, scoped_server)
+            if denial is not None:
+                return (400 if denial.startswith("unknown server scope") else 403, denial)
+            if scope.startswith("group:") and not group_registry.exists(
+                session, scope[len("group:"):]
+            ):
+                return (400, f"unknown group scope {scope!r}")
+            repo.create_token(session, token)
+            return None
 
-    if not await run_in_threadpool(_persist):
-        raise HTTPException(status_code=400, detail=f"unknown group scope {scope!r}")
+    # Threadpool: the lock is shared with imports deriving scrypt hashes — never
+    # wait for it on the event loop.
+    rejected = await run_in_threadpool(_persist)
+    if rejected is not None:
+        raise HTTPException(status_code=rejected[0], detail=rejected[1])
     return TokenCreated(
         id=token.id, name=token.name, prefix=token.prefix,
         scope=token.scope, user_id=token.user_id, user_name=principal.name if token.user_id else None,

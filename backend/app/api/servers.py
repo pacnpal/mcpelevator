@@ -38,6 +38,7 @@ from app.api.schemas import (
 )
 from app.api.util import base_url, resync_groups
 from app.auth import oauth_flow, policy
+from app.auth import principal as principal_mod
 from app.auth.principal import Principal, current_principal
 from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
@@ -108,6 +109,35 @@ def _visible(
     """Resolve + authorize a /servers/{id}-shaped route in one step: a server the
     principal can't see 404s exactly like one that doesn't exist (policy module)."""
     return policy.require_visible_server(principal, repo.get_server(session, server_id))
+
+
+_LAUNCH_FIELDS = {"runner", "command", "args", "run_args", "env", "cwd", "setup_script"}
+
+
+def _launch_touched(row: Server, changes: dict) -> bool:
+    """Would ``changes`` alter WHAT this server executes? Compares VALUES, not key
+    presence: the SPA's edit form resends the whole config, so a name-only save
+    carries unchanged launch fields and must not count. run_args is nullable in
+    storage (legacy rows hold NULL, read as []) while the form always sends a
+    list — normalized so NULL vs [] isn't a "change"."""
+    return any(
+        changes[k] != ((getattr(row, k) or []) if k == "run_args" else getattr(row, k))
+        for k in changes.keys() & _LAUNCH_FIELDS
+    )
+
+
+def _fresh(session: Session, principal: Principal) -> Principal:
+    """The principal's check-time view for authorization INSIDE a serialized write
+    (see principal.refresh). Fails closed with the standard 401 when the caller's
+    user row was deleted while the request was in flight."""
+    fresh = principal_mod.refresh(session, principal)
+    if fresh is None:
+        raise HTTPException(
+            status_code=401,
+            detail="control-plane auth required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return fresh
 
 
 def _summary(server: Server, sup, session: Session, base: str, live=None) -> ServerSummary:
@@ -235,14 +265,26 @@ async def create_server(
         fields["source"] = raw_source[:200]
     else:
         fields["source"] = "manual"
-    # Multi-user: runner permission is checked BEFORE anything persists, and the
-    # creator becomes the owner (synthetic admins have no user_id -> admin-owned).
+    # Multi-user: runner permission is checked BEFORE anything persists (fast, for
+    # a clean error), and RE-CHECKED against the refreshed principal inside the
+    # config write lock — a permission revocation commits under that same lock, so
+    # a create that raced it must observe the revoked flag, not its entry-time
+    # snapshot. The creator becomes the owner (synthetic admins -> admin-owned).
     policy.require_runner_allowed(principal, fields.get("runner") or "npx")
     fields["owner_id"] = principal.user_id
+
+    def _create():
+        with service.config_write_lock():
+            session.expire_all()  # re-reads must see state committed while we waited
+            policy.require_runner_allowed(
+                _fresh(session, principal), fields.get("runner") or "npx"
+            )
+            return service.create_server(session, **fields)
+
     try:
         # Threadpool: the config write derives config_hash with scrypt (memory-hard by
         # design) — keep that off the event loop so /s proxy traffic isn't stalled.
-        server = await run_in_threadpool(service.create_server, session, **fields)
+        server = await run_in_threadpool(_create)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
@@ -284,22 +326,13 @@ async def update_server(
         if new_owner is not None and repo.get_user(session, new_owner) is None:
             raise HTTPException(status_code=400, detail=f"unknown user {new_owner!r}")
 
-    # Runner policy on edit: a member without local-runner permission may still
-    # start/stop a local server an admin provisioned for them, but must not shape
-    # WHAT it executes — changing anything launch-affecting on (or converting a
-    # server into) a local runner requires the permission. Compare VALUES, not key
-    # presence: the SPA's edit form resends the whole config, so a name-only save
-    # carries unchanged launch fields and must still succeed.
-    target_runner = changes.get("runner", existing_row.runner)
-    launch_fields = {"runner", "command", "args", "run_args", "env", "cwd", "setup_script"}
-    launch_touched = any(
-        # run_args is nullable in storage (legacy rows hold NULL, read as []) while
-        # the form always sends a list — normalize so NULL vs [] isn't a "change".
-        changes[k] != ((getattr(existing_row, k) or []) if k == "run_args" else getattr(existing_row, k))
-        for k in changes.keys() & launch_fields
-    )
-    if launch_touched:
-        policy.require_runner_allowed(principal, target_runner)
+    # Runner policy on edit (fast pre-check; re-run inside the serialized write): a
+    # member without local-runner permission may still start/stop a local server an
+    # admin provisioned for them, but must not shape WHAT it executes — changing
+    # anything launch-affecting on (or converting a server into) a local runner
+    # requires the permission.
+    if _launch_touched(existing_row, changes):
+        policy.require_runner_allowed(principal, changes.get("runner", existing_row.runner))
     # The generic None-drop implements partial PATCH, but it also swallows an *explicit*
     # null on the nullable OAuth client fields — so clearing a static client id/secret to
     # fall back to Dynamic Client Registration would be silently ignored. Preserve those
@@ -325,23 +358,38 @@ async def update_server(
         oauth_flow.cancel_pending(server_id)
 
     def _write():
-        """The whole PATCH as ONE serialized write. Without an owner change this is
-        just the config update. With one, everything runs under a single hold of the
-        config write lock (reentrant — update_server re-enters it): the target user
-        is re-validated BEFORE the config commit, so a user deleted since the fast
-        pre-check above rejects the PATCH with nothing applied (no partial commit),
-        and a concurrent user deletion — which takes the same lock for its
-        owns-servers check — can never interleave and leave a dangling owner_id.
-        Revoke-then-set for the former owner's tokens: an interruption leaves the
-        old owner minus some tokens (they can re-mint), never a transferred server
-        whose former owner still holds live tokens."""
-        if not owner_change_requested:
-            return service.update_server(session, server_id, changes)
+        """The whole PATCH as ONE serialized write under a single hold of the config
+        write lock (reentrant — update_server re-enters it). ALL authorization is
+        re-validated inside against check-time state, because the transitions that
+        could invalidate the fast pre-checks above (owner reassignment, user
+        deletion, a demotion or permission revocation) each commit under this same
+        lock: visibility (a just-reassigned-away server 404s instead of being
+        edited by its former owner), the local-runner permission (against the
+        REFRESHED principal), and — for an owner change — the target user's
+        existence BEFORE the config commit, so a user deleted since the pre-check
+        rejects the PATCH with nothing applied. Revoke-then-set for the former
+        owner's tokens: an interruption leaves the old owner minus some tokens
+        (they can re-mint), never a transferred server whose former owner still
+        holds live tokens."""
         with service.config_write_lock():
+            # Drop every pre-lock snapshot: the session's identity map would
+            # otherwise satisfy the re-reads below from cached instances, and the
+            # whole point is to observe state committed while we waited.
+            session.expire_all()
+            fresh = _fresh(session, principal)
+            current = policy.require_visible_server(
+                fresh, repo.get_server(session, server_id)
+            )
+            if _launch_touched(current, changes):
+                policy.require_runner_allowed(
+                    fresh, changes.get("runner", current.runner)
+                )
+            if not owner_change_requested:
+                return service.update_server(session, server_id, changes)
             if new_owner is not None and repo.get_user(session, new_owner) is None:
                 raise ValueError(f"unknown user {new_owner!r}")
             updated = service.update_server(session, server_id, changes)
-            old_owner = existing_row.owner_id
+            old_owner = current.owner_id
             if old_owner is not None and old_owner != new_owner:
                 # The former owner's data-plane tokens for this server: they can no
                 # longer see or manage it, so a token they minted must not keep
@@ -398,12 +446,18 @@ async def update_server(
     return _summary(server, sup, session, base_url(request))
 
 
-def _prune_then_delete(session: Session, server_id: str) -> bool:
+def _prune_then_delete(session: Session, server_id: str, principal: Principal) -> bool:
     """Prune the server from every group's explicit member list, then delete the row —
     both under a SINGLE hold of the config write lock. Run in the threadpool by the
     caller, never on the event loop: prune_server and service.delete_server each take
     that lock, and a bulk import holding it while deriving scrypt hashes would otherwise
     stall the loop (and all proxy/API traffic) here.
+
+    Visibility is RE-CHECKED here, inside the lock, against the refreshed principal:
+    the handler's entry check precedes an await (the process stop), and an owner
+    reassignment committing in that gap — under this same lock — must make the former
+    owner's delete 404, not destroy the new owner's server. (The already-issued stop is
+    a benign blip: desired state is untouched, so the reconciler restarts the bridge.)
 
     Prune FIRST so an interruption between the two commits leaves a benign state — the
     row lingers but no group references a missing id (which validate_at_startup would
@@ -411,8 +465,15 @@ def _prune_then_delete(session: Session, server_id: str) -> bool:
     also closes the window where a concurrent group write could re-add this server after
     the prune but before the delete. The lock is reentrant, so the inner acquisitions in
     prune_server / delete_server are cheap no-ops. A no-op prune for a nonexistent id.
-    Returns False when the server didn't exist (-> 404)."""
+    Returns False when the server doesn't exist or isn't visible (-> 404 either way)."""
     with service.config_write_lock():
+        session.expire_all()  # re-reads must see state committed while we waited
+        current = repo.get_server(session, server_id)
+        if current is None:
+            return False
+        fresh = principal_mod.refresh(session, principal)
+        if fresh is None or not policy.can_view_server(fresh, current):
+            return False
         group_registry.prune_server(session, server_id)
         return service.delete_server(session, server_id)
 
@@ -430,7 +491,7 @@ async def delete_server(
     await sup.stop(server_id)  # tear down the process before removing desired state
     # Prune + delete in the worker thread (see _prune_then_delete): both take the config
     # write lock, so the wait must not sit on the event loop.
-    if not await run_in_threadpool(_prune_then_delete, session, server_id):
+    if not await run_in_threadpool(_prune_then_delete, session, server_id, principal):
         raise HTTPException(status_code=404, detail="server not found")
     # Cancel any in-flight authorization and drop stored upstream OAuth credentials for this
     # (now-deleted) server — otherwise a late callback could re-promote tokens and leave an
@@ -529,14 +590,26 @@ async def clone_server(
     """Duplicate a server's config into a new, disabled server (a fresh id + unique
     slug). The operator reviews/edits the copy, then enables it."""
     src = _visible(principal, session, server_id)
-    # Cloning IS creating: the same runner policy applies, and the cloner owns the copy.
+    # Cloning IS creating: the same runner policy applies (fast pre-check here,
+    # re-run against check-time state inside the serialized write below), and the
+    # cloner owns the copy.
     policy.require_runner_allowed(principal, src.runner)
+
+    def _clone():
+        with service.config_write_lock():
+            session.expire_all()  # re-reads must see state committed while we waited
+            fresh = _fresh(session, principal)
+            current = policy.require_visible_server(
+                fresh, repo.get_server(session, server_id)
+            )
+            policy.require_runner_allowed(fresh, current.runner)
+            return service.clone_server(
+                session, server_id, name=payload.name, owner_id=principal.user_id
+            )
+
     try:
         # Threadpool: see create_server — the clone's config_hash is a scrypt derivation.
-        server = await run_in_threadpool(
-            service.clone_server, session, server_id,
-            name=payload.name, owner_id=principal.user_id,
-        )
+        server = await run_in_threadpool(_clone)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
@@ -620,17 +693,24 @@ async def import_servers(
     disabled by default — the user reviews, then enables. The importer owns every
     created row; local-runner entries a restricted member may not create land in
     ``skipped`` (per entry), so their remote entries still import."""
-    try:
-        # Threadpool: a bulk import derives one scrypt config_hash per server — N stacked
-        # derivations must not sit on the event loop.
-        created, skipped, warnings = await run_in_threadpool(
-            lambda: service.import_mcp_servers(
+    def _import():
+        # allow_local is derived from the REFRESHED principal inside the lock (the
+        # lock import_mcp_servers re-enters), so a permission revocation committed
+        # while this request queued is observed, not the entry-time snapshot.
+        with service.config_write_lock():
+            session.expire_all()
+            fresh = _fresh(session, principal)
+            return service.import_mcp_servers(
                 session,
                 payload,
                 owner_id=principal.user_id,
-                allow_local=policy.can_use_runner(principal, "npx"),
+                allow_local=policy.can_use_runner(fresh, "npx"),
             )
-        )
+
+    try:
+        # Threadpool: a bulk import derives one scrypt config_hash per server — N stacked
+        # derivations must not sit on the event loop.
+        created, skipped, warnings = await run_in_threadpool(_import)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
