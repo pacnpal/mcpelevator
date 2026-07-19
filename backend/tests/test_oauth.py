@@ -445,6 +445,17 @@ def test_classify_begin_error_maps_429_and_falls_back():
         OAuthRegistrationError('Registration failed: 429 {"error":"too_many_requests"}')
     )
     assert rate_limited.status_code == 429 and "rate-limiting" in str(rate_limited)
+    # A provider with no DCR endpoint at all (GitHub answers its fallback /register path with
+    # a Go-style "404 page not found"), or one refusing anonymous registration by policy
+    # (401/403), maps to a 400 telling the operator to pre-register a client and set an
+    # explicit Client ID + secret.
+    for status in (401, 403, 404, 405, 501):
+        no_dcr = oauth_flow._classify_begin_error(
+            OAuthRegistrationError(f"Registration failed: {status} 404 page not found\n")
+        )
+        assert no_dcr.status_code == 400
+        assert "does not support Dynamic Client Registration" in str(no_dcr)
+        assert "Client ID" in str(no_dcr)
     # Any other registration failure keeps the generic message + 502.
     other = oauth_flow._classify_begin_error(OAuthRegistrationError("Registration failed: 400 bad"))
     assert other.status_code == 502 and "could not start OAuth" in str(other)

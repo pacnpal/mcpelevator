@@ -99,12 +99,29 @@ def _registration_status(exc: OAuthRegistrationError) -> Optional[int]:
 def _classify_begin_error(exc: BaseException) -> OAuthBeginError:
     """Translate a raw begin-flow failure into an operator-facing :class:`OAuthBeginError`.
 
-    The common actionable case is the upstream rate-limiting Dynamic Client Registration
-    (HTTP 429): surface that as a clean 429 with next steps, rather than a 502 carrying the
-    provider's raw error JSON. Everything else keeps the previous generic message + 502."""
+    Two actionable cases get a clean 4xx with next steps rather than a 502 carrying the
+    provider's raw error body (which a fronting CDN like Cloudflare may even swallow and
+    replace with its own 502 page, hiding the message entirely):
+
+    * the provider has no Dynamic Client Registration endpoint at all (HTTP 404/405/501 —
+      e.g. GitHub, whose MCP server requires a pre-registered OAuth App) or refuses
+      anonymous registration by policy (HTTP 401/403, e.g. an endpoint requiring an
+      initial access token we don't hold — the remedy is the same), and
+    * the provider rate-limiting registration (HTTP 429).
+
+    Everything else keeps the previous generic message + 502."""
     if isinstance(exc, OAuthBeginError):
         return exc
     status = _registration_status(exc) if isinstance(exc, OAuthRegistrationError) else None
+    if status in (401, 403, 404, 405, 501):
+        return OAuthBeginError(
+            "the OAuth provider does not support Dynamic Client Registration "
+            f"(HTTP {status} from its registration endpoint), so it requires a pre-registered "
+            "client. Register an app with the provider (for GitHub: an OAuth App whose "
+            "authorization callback URL is this mcpelevator's /api/oauth/callback), then set "
+            "its Client ID and Client Secret on this server and connect again.",
+            status_code=400,
+        )
     if status == 429:
         return OAuthBeginError(
             "the OAuth provider is rate-limiting Dynamic Client Registration (HTTP 429). "
