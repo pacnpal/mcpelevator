@@ -19,6 +19,7 @@ from starlette.responses import RedirectResponse
 from sqlmodel import Session
 
 from app.api.schemas import AuthStatus, AuthUser
+from app.api.util import oauth_public_base
 from app.auth import oauth_flow, principal as principal_mod
 from app.auth.control_plane import control_auth, enforcement_enabled
 from app.db import get_session, repo
@@ -44,6 +45,31 @@ async def auth_status(request: Request, session: Session = Depends(get_session))
         authenticated=control_auth(request, session) == "ok",
         user=user,
     )
+
+
+@router.get("/oauth/client-metadata.json")
+async def oauth_client_metadata(request: Request) -> dict:
+    """This instance's OAuth Client ID Metadata Document (CIMD).
+
+    Providers that support URL-based client ids (the MCP 2025-11-25 authorization
+    spec's successor to Dynamic Client Registration) fetch this document server-side
+    and use its URL as the client_id — no registration step at all. It must be PUBLIC
+    (the provider holds no credential for us) and is harmless to expose: every value
+    is already derivable from the instance's own base URL. CIMD clients are public
+    clients — PKCE secures the exchange, so ``token_endpoint_auth_method`` is ``none``
+    and no secret exists. The flow only offers this URL to a provider when the base is
+    https (``oauth_flow._client_metadata_url``); a LAN-only http instance serves the
+    document but can never be fetched by a provider, which is inert."""
+    base = oauth_public_base(request)
+    return {
+        "client_id": f"{base}/api/oauth/client-metadata.json",
+        "client_name": "mcpelevator",
+        "client_uri": base,
+        "redirect_uris": [f"{base}/api/oauth/callback"],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    }
 
 
 # Fixed, literal redirect targets. The callback deliberately puts NO request-derived

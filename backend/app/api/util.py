@@ -43,3 +43,20 @@ def base_url(request: Request) -> str:
     if host:
         return f"{request.url.scheme or 'http'}://{host}"
     return settings.base_url
+
+
+def oauth_public_base(request: Request) -> str:
+    """The base URL upstream-OAuth artifacts are anchored on: the redirect callback
+    the provider sends the browser back to, and the client metadata document (CIMD)
+    the provider fetches. Same derivation as ``base_url``, with one extra step: behind
+    an HTTPS-terminating reverse proxy without ``MCPE_PUBLIC_BASE_URL``, the ASGI
+    request scheme is the plain ``http`` of the proxy→app hop; honor
+    ``X-Forwarded-Proto`` so the advertised URLs are ``https`` (OAuth providers reject
+    non-loopback http redirect URIs, and CIMD client ids must be https). The
+    operator-declared public URL still wins when set."""
+    base = base_url(request)
+    if not get_settings().public_base_url and base.startswith("http://"):
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        if forwarded == "https":
+            base = "https://" + base[len("http://"):]
+    return base
