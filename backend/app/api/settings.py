@@ -9,7 +9,11 @@ from starlette.requests import Request
 from app.api.schemas import SettingsInfo, SettingsUpdate
 from app.api.util import resync_groups
 from app.auth import principal as principal_mod
-from app.auth.control_plane import would_lock_out
+from app.auth.control_plane import (
+    admin_credential_presented,
+    enforcement_enabled,
+    would_lock_out,
+)
 from app.auth.principal import Principal, require_admin
 from app.db import get_session
 from app.registry import settings as runtime_settings
@@ -41,13 +45,9 @@ async def update_settings(
 
     def guard(s: Session) -> None:
         # Both checks run inside the settings write transaction (under the write
-        # lock), so nothing can change between check and commit:
-        # 1) Re-authorize the CALLER — an auth-transition or lock wait may have
-        #    outlived their admin role (a demotion commits under the config lock),
-        #    and a former admin must not alter global settings.
-        if not principal_mod.admin_now(s, principal):
-            raise HTTPException(status_code=403, detail="admin role required")
-        # 2) Refuse to switch enforcement on unless THIS request presents an
+        # lock, AFTER the staged changes flushed), so nothing can change between
+        # check and commit:
+        # 1) Refuse to switch enforcement on unless THIS request presents an
         #    ADMIN-resolving credential (would_lock_out) — a token delete racing
         #    this enable can't remove the last admin credential between the check
         #    and the commit, and a member login can't flip enforcement on and
@@ -57,6 +57,21 @@ async def update_settings(
                 status_code=400,
                 detail="authenticate with an admin token before enabling control-plane auth",
             )
+        # 2) Re-authorize the CALLER. Token-bound principals re-check their
+        #    credential and role (a demotion/revocation commits under the config
+        #    lock and must fail this queued write). The enforcement-off synthetic
+        #    needs its own rule because enforcement_enabled here reads the STAGED
+        #    values: when this very request is the one flipping enforcement on,
+        #    the local operator is still the legitimate caller — provided they
+        #    presented an admin credential (which check 1 already demanded). A
+        #    CONCURRENT flip (committed by another request while this one queued)
+        #    is caught the same way: enforcement now reads on, no admin credential
+        #    on this request -> rejected.
+        if principal is principal_mod.LOCAL_ADMIN:
+            if enforcement_enabled(s) and not admin_credential_presented(request, s):
+                raise HTTPException(status_code=403, detail="admin role required")
+        elif not principal_mod.admin_now(s, principal):
+            raise HTTPException(status_code=403, detail="admin role required")
 
     auth_changed = "default_auth_provider" in changes
     try:

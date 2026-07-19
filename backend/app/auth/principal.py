@@ -140,7 +140,16 @@ def refresh(session: Session, principal: Principal) -> Optional[Principal]:
     when either is gone — the caller should fail closed (401). Credential-less
     synthetic principals (env token, enforcement-off local operator) are immutable
     and returned unchanged."""
+    from app.auth.control_plane import enforcement_enabled  # circular-import guard
     from app.db.models import Token  # local import: models must not import auth
+
+    if principal is LOCAL_ADMIN:
+        # The enforcement-off synthetic is only valid WHILE enforcement stays off:
+        # an anonymous request resolved before a concurrent enforcement enable must
+        # not carry local-admin power into a serialized write that commits after
+        # it (e.g. minting a durable control token past the flip). The env admin
+        # below is different — that credential can't be revoked at runtime.
+        return principal if not enforcement_enabled(session) else None
 
     if principal.token_id is not None and session.get(Token, principal.token_id) is None:
         return None  # the presented credential was revoked while we were queued

@@ -347,6 +347,10 @@ async def update_server(
     # (owner is identity, not launch config): pop it here, apply after the PATCH.
     owner_change_requested = "owner_id" in payload.model_fields_set
     new_owner = changes.pop("owner_id", None)
+    # Captured NOW: _write's expire_all invalidates existing_row, so a later
+    # attribute read would lazily reload the POST-transfer owner and the
+    # cancellation guard below would never see a change.
+    owner_at_entry = existing_row.owner_id
     if owner_change_requested:
         if not principal.is_admin:
             raise HTTPException(status_code=403, detail="only admins may reassign owners")
@@ -375,14 +379,6 @@ async def update_server(
     before_hash = existing.config_hash if existing is not None else None
     auth_changed = "auth_provider" in changes
     sup = request.app.state.supervisor
-
-    if owner_change_requested and existing_row.owner_id != new_owner:
-        # A pending upstream-OAuth authorization belongs to the FORMER owner's
-        # browser session: cancel it so its public callback can't later promote
-        # their upstream grant onto the just-transferred server. Stored tokens are
-        # left in place — transferring a working server, credentials included, is
-        # the admin's deliberate choice (disconnect first to hand it over cold).
-        oauth_flow.cancel_pending(server_id)
 
     def _write():
         """The whole PATCH as ONE serialized write under a single hold of the config
@@ -450,6 +446,20 @@ async def update_server(
         )
         async with transition:
             server = await run_in_threadpool(_write)
+            if owner_change_requested and owner_at_entry != new_owner:
+                # A pending upstream-OAuth authorization belongs to the FORMER
+                # owner's browser session: cancel it so its public callback can't
+                # later promote their grant onto the just-transferred server.
+                # Cancelled only AFTER the locked reauthorization committed the
+                # transfer — a PATCH that _write rejects (demoted caller, vanished
+                # target user) must not abort the current owner's sign-in as a
+                # side effect — and on the event loop, where the flow's asyncio
+                # task lives. The flow that ran during the write window is already
+                # blocked from promoting by its owner-snapshot binding. Stored
+                # tokens are left in place — transferring a working server,
+                # credentials included, is the admin's deliberate choice
+                # (disconnect first to hand it over cold).
+                oauth_flow.cancel_pending(server_id)
             # Remove the old endpoint before an auth transition can publish group
             # routes under the new policy. _stop pops the endpoint before waiting for
             # process teardown, so no request can enter with stale credentials.
