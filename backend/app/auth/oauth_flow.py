@@ -214,12 +214,20 @@ class _MemoryTokenStorage(TokenStorage):
 
 
 class _Pending:
-    """One in-flight authorization the operator has started but not yet completed."""
+    """One in-flight authorization the operator has started but not yet completed.
 
-    def __init__(self, server_id: str):
+    ``owner_id`` snapshots the server's owner at the moment the flow began: the
+    grant belongs to whoever started the sign-in, so promotion re-checks that the
+    server still has that owner (see ``_drive``). Cancellation on reassignment
+    alone can't cover this — a transfer can land while ``begin_authorization`` is
+    still awaiting upstream discovery, BEFORE the flow registers in ``_PENDING``,
+    where there is nothing to cancel yet."""
+
+    def __init__(self, server_id: str, owner_id: Optional[str] = None):
         loop = asyncio.get_running_loop()
         self.id = new_id()
         self.server_id = server_id
+        self.owner_id = owner_id
         self.state: Optional[str] = None  # OAuth ``state``, learned from the auth URL
         self.code: Optional[str] = None  # filled in by the callback
         self.url_future: asyncio.Future[str] = loop.create_future()
@@ -343,6 +351,23 @@ def _probe_headers(server) -> dict[str, str]:
     return headers
 
 
+def _owner_changed(server_id: str, snapshot_owner: Optional[str]) -> bool:
+    """Does the server's CURRENT owner differ from the flow's begin-time snapshot?
+    A fresh session against the engine (not any request session) so the read is the
+    committed truth. A missing row reports False — deletion has its own explicit
+    cancel-and-clear path, and flows driven against unpersisted servers (tests)
+    must not be judged on a row that never existed."""
+    from sqlmodel import Session
+
+    from app.db import get_engine, repo
+
+    with Session(get_engine()) as session:
+        row = repo.get_server(session, server_id)
+        if row is None:
+            return False
+        return row.owner_id != snapshot_owner
+
+
 async def _drive(
     server,
     provider: OAuthClientProvider,
@@ -391,6 +416,18 @@ async def _drive(
         inner_error = inner_error or RuntimeError(
             f"the upstream still rejected the new OAuth token (HTTP {final_status}) — the "
             "granted scopes or resource may not match what this server requires"
+        )
+        tokens = None
+    # Ownership is validated at PROMOTION time, against the snapshot taken when the
+    # flow began: if an admin reassigned the server while the sign-in was in flight,
+    # this grant belongs to the FORMER owner's upstream account and must not become
+    # the transferred server's credential. (Reassignment also cancels registered
+    # pending flows, but a flow still in its pre-registration awaits has nothing to
+    # cancel — this check is the backstop that closes that window.) A row that no
+    # longer exists is left to the delete path, which cancels + clears explicitly.
+    if tokens is not None and _owner_changed(server.id, pending.owner_id):
+        inner_error = inner_error or RuntimeError(
+            "server ownership changed during authorization — sign in again"
         )
         tokens = None
     if tokens is not None:
@@ -497,7 +534,7 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         scope=server.oauth_scopes or None,
     )
 
-    pending = _Pending(server.id)
+    pending = _Pending(server.id, owner_id=getattr(server, "owner_id", None))
 
     async def redirect_handler(authorization_url: str) -> None:
         authorization_url = _repair_authorization_url(authorization_url)

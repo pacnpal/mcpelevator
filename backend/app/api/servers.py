@@ -140,6 +140,22 @@ def _fresh(session: Session, principal: Principal) -> Principal:
     return fresh
 
 
+def _set_enabled_visible(
+    session: Session, server_id: str, principal: Principal, enabled: bool
+) -> Server:
+    """Toggle desired state with visibility RE-CHECKED under the config write lock:
+    the handler's entry check precedes the lock wait, and an owner reassignment
+    committing in that gap — under this same lock — must make the former owner's
+    toggle 404, not flip the new owner's server. Runs in a worker thread (the lock
+    is reentrant, so set_enabled's own acquisition is a no-op)."""
+    with service.config_write_lock():
+        session.expire_all()  # re-reads must see state committed while we waited
+        policy.require_visible_server(
+            _fresh(session, principal), repo.get_server(session, server_id)
+        )
+        return service.set_enabled(session, server_id, enabled)
+
+
 def _summary(server: Server, sup, session: Session, base: str, live=None) -> ServerSummary:
     state, last_error, pid, port, tools, startup_status = live or _live_state(
         server, sup, session
@@ -630,7 +646,7 @@ async def enable_server(
     try:
         # Threadpool: set_enabled takes the registry write lock, and an import in a worker
         # can hold that lock across many derivations — don't wait for it on the event loop.
-        server = await run_in_threadpool(service.set_enabled, session, server_id, True)
+        server = await run_in_threadpool(_set_enabled_visible, session, server_id, principal, True)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
@@ -654,7 +670,7 @@ async def disable_server(
     _visible(principal, session, server_id)
     try:
         # Threadpool: see enable_server — the lock wait must not block the loop.
-        server = await run_in_threadpool(service.set_enabled, session, server_id, False)
+        server = await run_in_threadpool(_set_enabled_visible, session, server_id, principal, False)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     sup = request.app.state.supervisor
