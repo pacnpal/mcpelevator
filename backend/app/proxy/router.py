@@ -72,10 +72,26 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
     sup.mark_activity(server.id)
 
     endpoint = sup.endpoint(slug)
-    if endpoint is None and sup.wake(server.id):
+    if endpoint is None and (
         # Wake-on-request: the server was quiesced for inactivity. Hold the request
         # while the activation brings the bridge back (npx/uvx warm starts are
         # seconds; the bound matches one startup attempt's readiness window).
+        sup.wake(server.id)
+        # ...or an activation is ALREADY converging (a concurrent request's wake, an
+        # operator start): the first wake's request clears the idle marker before
+        # readiness, so a second request in that window must latch onto the same
+        # activation instead of 503ing mid-cold-start.
+        or (
+            server.enabled
+            and (
+                sup.activation_requested_at(server.id) is not None
+                or (
+                    (unit := sup.unit(server.id)) is not None
+                    and unit.state == "starting"
+                )
+            )
+        )
+    ):
         endpoint = await _await_wake(
             sup, server.id, slug, timeout=float(get_settings().start_timeout_s)
         )
@@ -85,19 +101,20 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
         )
     host, port = endpoint
 
-    query = request.url.query
-    target = f"http://{host}:{port}/{path}" + (f"?{query}" if query else "")
-    body = await request.body()
-    fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
-
-    client: httpx.AsyncClient = request.app.state.http
-    # Count the request as in flight for the WHOLE response lifetime, not just the
-    # dispatch: a Streamable-HTTP/SSE client can hold the stream open far longer
-    # than the idle window, and the idle sweep must not stop the bridge underneath
-    # it. request_finished (in relay's finally) also restarts the idle clock, so
-    # the window is measured from stream close.
+    # Count the request as in flight from the moment a bridge is selected until
+    # the response stream closes — covering the body read too, not just the
+    # dispatch: a slow upload or a long-held Streamable-HTTP/SSE stream can each
+    # outlast the idle window, and the sweep must not stop the bridge underneath
+    # either. request_finished (in relay's finally, or the failure path here)
+    # also restarts the idle clock, so the window is measured from stream close.
     sup.request_started(server.id)
     try:
+        query = request.url.query
+        target = f"http://{host}:{port}/{path}" + (f"?{query}" if query else "")
+        body = await request.body()
+        fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
+
+        client: httpx.AsyncClient = request.app.state.http
         upstream = await client.send(
             client.build_request(request.method, target, headers=fwd_headers, content=body),
             stream=True,

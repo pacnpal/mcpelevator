@@ -95,10 +95,14 @@
 			const raw = String(values[field.name] ?? '').trim();
 			if (!raw) continue; // blank optional field → let the tool default it
 			if (field.kind === 'enum') {
-				// Map the selected option (edited as text) back to the schema's own
-				// value, so e.g. {"enum": [1, 2]} sends the number 1, not "1".
-				const match = field.enumValues.find((v) => String(v) === raw);
-				out[field.name] = match !== undefined ? match : raw;
+				// The select's value is the option's INDEX into the schema's enum, so
+				// the original value (number, boolean, string) round-trips exactly —
+				// String() as identity would collide distinct values like [1, "1"].
+				const idx = Number(raw);
+				out[field.name] =
+					Number.isInteger(idx) && idx >= 0 && idx < field.enumValues.length
+						? field.enumValues[idx]
+						: raw;
 			} else if (field.kind === 'number') {
 				const n = Number(raw);
 				if (Number.isNaN(n)) throw new Error(`"${field.name}" must be a number.`);
@@ -205,8 +209,8 @@
 									class="w-full cursor-pointer rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 								>
 									<option value="">(unset)</option>
-									{#each field.enumValues.map(String) as v (v)}
-										<option value={v}>{v}</option>
+									{#each field.enumValues as v, i (i)}
+										<option value={String(i)}>{String(v)}</option>
 									{/each}
 								</select>
 							{:else if field.kind === 'json'}

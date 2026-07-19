@@ -420,6 +420,40 @@ def test_proxy_wakes_idle_server_and_serves_request():
             client.delete(f"/api/servers/{sid}", headers=LOOPBACK)
 
 
+def test_proxy_waits_for_activation_already_in_progress():
+    """Two concurrent cold-start requests: the first wake's activation clears the
+    idle marker before readiness, so the SECOND request (wake() == False) must
+    latch onto the in-progress activation instead of 503ing."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="wake-latch", auth="none")
+        sid = srv["id"]
+        try:
+            with Session(get_engine()) as session:
+                row = repo.get_server(session, sid)
+                row.enabled = True
+                repo.save_server(session, row)
+            client.app.state.http = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=_upstream)
+            )
+            sup = client.app.state.supervisor
+            sup.wake = lambda server_id: False  # not idle — the first request took it
+            sup.activation_requested_at = lambda server_id: utcnow()  # ...and it's queued
+            polls = {"n": 0}
+
+            def endpoint(slug):
+                # unavailable on the first check, ready on a later poll — the
+                # request must be held across that gap, not 503ed.
+                polls["n"] += 1
+                return ("backend", 9000) if polls["n"] > 1 else None
+
+            sup.endpoint = endpoint
+            r = client.get(f"/s/{srv['slug']}/mcp", headers=LOOPBACK)
+            assert r.status_code == 200, r.text
+            assert polls["n"] > 1
+        finally:
+            client.delete(f"/api/servers/{sid}", headers=LOOPBACK)
+
+
 def test_proxy_503_when_wake_declined():
     """A stopped (not idle) server still 503s — the wake path only covers idle."""
     with TestClient(app) as client:

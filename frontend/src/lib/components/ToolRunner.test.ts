@@ -138,13 +138,37 @@ describe('ToolRunner', () => {
 
 		const select = target.querySelector<HTMLSelectElement>('#tr-pick-level');
 		expect(select).not.toBeNull();
-		select!.value = '2';
+		select!.value = '1'; // option values are enum indices; index 1 → the number 2
 		select!.dispatchEvent(new Event('change', { bubbles: true }));
 		flushSync();
 		click(buttonByText(target, 'Run tool'));
 		await vi.waitFor(() => expect(api.callServerTool).toHaveBeenCalledOnce());
 		// the number 2 from the schema's enum — not the string "2"
 		expect(api.callServerTool).toHaveBeenCalledWith('srv-1', 'pick', { level: 2 });
+	});
+
+	it('distinguishes mixed-type enum values that share a string form', async () => {
+		api.callServerTool.mockResolvedValue(RESULT);
+		const mixed: ServerTool = {
+			name: 'mixed',
+			description: '',
+			input_schema: {
+				type: 'object',
+				properties: { v: { enum: [1, '1'] } },
+				required: ['v']
+			}
+		};
+		const target = render(mixed);
+		click(buttonByText(target, 'Try it'));
+		const select = target.querySelector<HTMLSelectElement>('#tr-mixed-v');
+		// both options render (index identity, so "1" and 1 don't collide)
+		expect(select!.querySelectorAll('option').length).toBe(3); // (unset) + 2
+		select!.value = '1'; // index 1 → the STRING "1"
+		select!.dispatchEvent(new Event('change', { bubbles: true }));
+		flushSync();
+		click(buttonByText(target, 'Run tool'));
+		await vi.waitFor(() => expect(api.callServerTool).toHaveBeenCalledOnce());
+		expect(api.callServerTool).toHaveBeenCalledWith('srv-1', 'mixed', { v: '1' });
 	});
 
 	it('falls back to raw JSON for a schema-less tool and validates the object shape', async () => {
