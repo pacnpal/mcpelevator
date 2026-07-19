@@ -894,6 +894,12 @@ async def stream_logs(
         _RECHECK_S = 5.0
         last_check = time.monotonic()
         try:
+            # Re-validate before the FIRST byte, not just on the periodic timer:
+            # the entry check preceded response start, and the backlog (which can
+            # carry configuration/diagnostic detail) must not reach a caller whose
+            # ownership was transferred away in that gap.
+            if not _visible_now(server_id, principal):
+                return
             for line in backlog:
                 yield _sse({"line": line})
             while True:

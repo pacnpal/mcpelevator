@@ -231,11 +231,21 @@ class _Pending:
     still awaiting upstream discovery, BEFORE the flow registers in ``_PENDING``,
     where there is nothing to cancel yet."""
 
-    def __init__(self, server_id: str, owner_id: Optional[str] = None, row_existed: bool = False):
+    def __init__(
+        self,
+        server_id: str,
+        owner_id: Optional[str] = None,
+        row_existed: bool = False,
+        oauth_sig: tuple = (),
+    ):
         loop = asyncio.get_running_loop()
         self.id = new_id()
         self.server_id = server_id
         self.owner_id = owner_id
+        # The OAuth-relevant config (upstream/scopes/client) the flow was started
+        # against — promotion re-judges it, so a grant obtained for the OLD config
+        # can't become the credential of a mid-flow-reconfigured server.
+        self.oauth_sig = oauth_sig
         # Did the server ROW exist in the DB when the flow began? Promotion treats
         # a now-missing row as "deleted mid-flow" (blocked) only when it did — a
         # flow driven against an unpersisted server object (tests) is exempt.
@@ -363,35 +373,56 @@ def _probe_headers(server) -> dict[str, str]:
     return headers
 
 
-def _server_row_state(server_id: str) -> tuple[bool, Optional[str]]:
-    """(exists, owner_id) for the server's COMMITTED row, read on a fresh session
-    against the engine (never a request session) so no identity map interferes."""
+def _server_row(server_id: str):
+    """The server's COMMITTED row (or None), read on a fresh session against the
+    engine (never a request session) so no identity map interferes. Plain columns
+    are loaded eagerly, so the returned object is safe to inspect after close."""
     from sqlmodel import Session
 
     from app.db import get_engine, repo
 
     with Session(get_engine()) as session:
-        row = repo.get_server(session, server_id)
-        return (row is not None, row.owner_id if row is not None else None)
+        return repo.get_server(session, server_id)
+
+
+def _oauth_signature_of(server) -> tuple:
+    """The OAuth-relevant configuration of a server(-like) object — the same shape
+    the PATCH handler uses to decide token cleanup. A grant is only valid for the
+    exact upstream/scopes/client the flow was STARTED against."""
+    return (
+        bool(getattr(server, "oauth", False)),
+        getattr(server, "command", ""),  # upstream URL — tokens bind to this resource
+        getattr(server, "oauth_scopes", "") or "",
+        getattr(server, "oauth_client_id", None),
+        getattr(server, "oauth_client_secret", None),
+    )
 
 
 def _promotion_blocked(pending: _Pending) -> Optional[str]:
     """Why this flow's grant must NOT be promoted (None = go ahead), judged against
-    the committed row at promotion time. A row that vanished since the flow began
-    means the server was DELETED mid-flow — its delete path cancels registered
-    flows and clears the credential store, but a flow still in its pre-registration
-    awaits escapes both, and promoting would recreate an orphaned credential file
-    for a server that no longer exists. An owner that changed means the grant
-    belongs to the FORMER owner's upstream account. A row that never existed
-    (``row_existed`` False — unpersisted test servers) is exempt from the deletion
-    check."""
-    exists, owner = _server_row_state(pending.server_id)
-    if not exists:
+    the committed row at promotion time. Registered pending flows are cancelled by
+    the delete/reassign/config-edit paths, but a flow still in its pre-registration
+    awaits escapes all of them — these checks are the backstop:
+
+    - a row that vanished (and existed at begin) means the server was DELETED
+      mid-flow; promoting would recreate an orphaned credential file;
+    - an owner that changed means the grant belongs to the FORMER owner's
+      upstream account;
+    - an OAuth config that changed (upstream/scopes/client) means the PATCH that
+      changed it already cleared the stored tokens — this grant belongs to the
+      OLD configuration and must not become the new upstream's credential.
+
+    A row that never existed (``row_existed`` False — unpersisted test servers)
+    is exempt from the deletion check and carries no config to re-judge."""
+    row = _server_row(pending.server_id)
+    if row is None:
         if pending.row_existed:
             return "server was deleted during authorization"
         return None
-    if owner != pending.owner_id:
+    if row.owner_id != pending.owner_id:
         return "server ownership changed during authorization — sign in again"
+    if _oauth_signature_of(row) != pending.oauth_sig:
+        return "server OAuth configuration changed during authorization — sign in again"
     return None
 
 
@@ -508,7 +539,7 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     # client-info/token-store reads below must still read as "existed at begin", so
     # promotion blocks (_promotion_blocked) instead of recreating an orphan
     # credential file for the deleted server.
-    row_existed, _ = _server_row_state(server.id)
+    row_existed = _server_row(server.id) is not None
 
     real = ServerTokenStorage(server.id)
     redirect_uris = [AnyHttpUrl(callback_url)]
@@ -558,7 +589,7 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         # never-persisted test-harness exemption mirrors _promotion_blocked): a
         # server deleted mid-flow must not get its cleared credential file
         # recreated by the registration pass-through.
-        persist_allowed=lambda: not row_existed or _server_row_state(server.id)[0],
+        persist_allowed=lambda: not row_existed or _server_row(server.id) is not None,
     )
 
     client_metadata = OAuthClientMetadata(
@@ -570,7 +601,10 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     )
 
     pending = _Pending(
-        server.id, owner_id=getattr(server, "owner_id", None), row_existed=row_existed
+        server.id,
+        owner_id=getattr(server, "owner_id", None),
+        row_existed=row_existed,
+        oauth_sig=_oauth_signature_of(server),
     )
 
     async def redirect_handler(authorization_url: str) -> None:
