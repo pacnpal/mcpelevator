@@ -17,6 +17,7 @@ from fastapi import Depends, HTTPException
 from sqlmodel import Session
 from starlette.requests import Request
 
+from app.auth.principal import ROLE_ADMIN
 from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Token
@@ -77,7 +78,7 @@ def admin_credential_presented(request: Request, session: Session) -> bool:
     if row.user_id is None:
         return True  # legacy/boot mint: resolves to admin
     user = repo.get_user(session, row.user_id)
-    return user is not None and user.role == "admin"
+    return user is not None and user.role == ROLE_ADMIN
 
 
 def would_lock_out(request: Request, session: Session, changes: dict[str, Any]) -> bool:
@@ -160,9 +161,14 @@ def mint_control_token(session: Session) -> str:
 
 
 def ensure_control_token(session: Session) -> str | None:
-    """Mint a control token if none exists (idempotent). Returns the plaintext once,
-    or ``None`` when one already exists or ``MCPE_ADMIN_TOKEN`` supplies the
-    credential. Called from startup and from the UI's generate-admin action."""
-    if get_settings().admin_token or repo.control_token_exists(session):
+    """Mint an ADMIN control token if no admin-resolving credential exists
+    (idempotent). Returns the plaintext once, or ``None`` when an admin login
+    already exists or ``MCPE_ADMIN_TOKEN`` supplies the credential. Called from
+    startup and from the UI's generate-admin action. Checks for an ADMIN
+    credential, not merely any control-scoped row: a member login token is a
+    valid control credential but can't reach Settings/Users — a box whose only
+    login is a member's must still get an admin token minted when enforcement
+    turns on (e.g. via a newly added off-host env setting + restart)."""
+    if get_settings().admin_token or repo.admin_credential_exists(session):
         return None
     return mint_control_token(session)

@@ -15,7 +15,7 @@ from app.auth.control_plane import (
     would_lock_out,
 )
 from app.auth.principal import Principal, require_admin
-from app.db import get_session
+from app.db import get_engine, get_session
 from app.registry import settings as runtime_settings
 
 router = APIRouter()
@@ -68,7 +68,14 @@ async def update_settings(
         #    is caught the same way: enforcement now reads on, no admin credential
         #    on this request -> rejected.
         if principal is principal_mod.LOCAL_ADMIN:
-            if enforcement_enabled(s) and not admin_credential_presented(request, s):
+            # Judged against the COMMITTED policy on a SEPARATE session: this
+            # guard runs post-flush, so reading enforcement via ``s`` would see
+            # this request's own staged values — and an anonymous pre-enable
+            # request staging control_plane_auth back to "auto" could then roll
+            # back a concurrently committed enable while appearing unenforced.
+            with Session(get_engine()) as committed:
+                enforced_before_this_write = enforcement_enabled(committed)
+            if enforced_before_this_write and not admin_credential_presented(request, s):
                 raise HTTPException(status_code=403, detail="admin role required")
         elif not principal_mod.admin_now(s, principal):
             raise HTTPException(status_code=403, detail="admin role required")

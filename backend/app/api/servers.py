@@ -373,10 +373,6 @@ async def update_server(
         if key in payload.model_fields_set:
             changes[key] = provided[key]
 
-    # Signature of the OAuth-relevant config before the edit, to decide token cleanup below.
-    existing = repo.get_server(session, server_id)
-    before = _oauth_signature(existing) if existing is not None else None
-    before_hash = existing.config_hash if existing is not None else None
     auth_changed = "auth_provider" in changes
     sup = request.app.state.supervisor
 
@@ -403,12 +399,23 @@ async def update_server(
             current = policy.require_visible_server(
                 fresh, repo.get_server(session, server_id)
             )
+            # Baselines for the post-write cleanup decisions, captured from the
+            # LOCKED row — a pre-lock snapshot could belong to a state another
+            # PATCH already changed, and misattributing that request's OAuth
+            # reconfiguration to this one would wipe a freshly obtained
+            # credential this PATCH never touched.
+            before_sig = _oauth_signature(current)
+            before_hash = current.config_hash
             if _launch_touched(current, changes):
                 policy.require_runner_allowed(
                     fresh, changes.get("runner", current.runner)
                 )
             if not owner_change_requested:
-                return service.update_server(session, server_id, changes)
+                return (
+                    service.update_server(session, server_id, changes),
+                    before_sig,
+                    before_hash,
+                )
             # The owner-transfer branch is admin-only — re-judged on the REFRESHED
             # principal: the entry-time is_admin check can be outrun by a demotion
             # committing while this request waited for the lock, and a now-member
@@ -435,7 +442,7 @@ async def update_server(
             # bump, no config_hash change, no bridge bounce).
             repo.set_owner(session, server_id, new_owner)
             updated.owner_id = new_owner
-            return updated
+            return updated, before_sig, before_hash
 
     try:
         # Threadpool: see create_server — the recomputed config_hash is a scrypt
@@ -445,7 +452,7 @@ async def update_server(
             request.app.state.groups.auth_transition() if auth_changed else nullcontext()
         )
         async with transition:
-            server = await run_in_threadpool(_write)
+            server, before_sig, before_hash = await run_in_threadpool(_write)
             if owner_change_requested and owner_at_entry != new_owner:
                 # A pending upstream-OAuth authorization belongs to the FORMER
                 # owner's browser session: cancel it so its public callback can't
@@ -463,7 +470,7 @@ async def update_server(
             # Remove the old endpoint before an auth transition can publish group
             # routes under the new policy. _stop pops the endpoint before waiting for
             # process teardown, so no request can enter with stale credentials.
-            oauth_changed = before is not None and before != _oauth_signature(server)
+            oauth_changed = before_sig != _oauth_signature(server)
             if oauth_changed:
                 oauth_flow.cancel_pending(server_id)
                 await sup.stop(server_id)

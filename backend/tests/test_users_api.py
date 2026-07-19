@@ -264,6 +264,27 @@ def test_member_credential_cannot_enable_enforcement():
             _reset()
 
 
+def test_bootstrap_mints_admin_despite_member_login():
+    """The startup bootstrap must key on an ADMIN-resolving credential: a box whose
+    only login is a member's (created while enforcement was off) still needs an
+    admin token minted when enforcement turns on via env + restart."""
+    with TestClient(app) as client:
+        try:
+            uid = client.post(
+                "/api/users", json={"name": "Mel", "role": "member"}, headers=LOOPBACK
+            ).json()["id"]
+            client.post(f"/api/users/{uid}/credentials", headers=LOOPBACK)
+            from app.auth.control_plane import ensure_control_token
+
+            with Session(get_engine()) as s:
+                minted = ensure_control_token(s)
+            assert minted is not None  # a member login alone must not satisfy it
+            with Session(get_engine()) as s:
+                assert ensure_control_token(s) is None  # idempotent once an admin exists
+        finally:
+            _reset()
+
+
 def test_dangling_user_credential_fails_closed():
     """A control token whose user row is gone must not authenticate (the gate and
     principal resolution agree)."""
