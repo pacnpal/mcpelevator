@@ -413,6 +413,13 @@ async def update_server(
                 )
             if not owner_change_requested:
                 return service.update_server(session, server_id, changes)
+            # The owner-transfer branch is admin-only — re-judged on the REFRESHED
+            # principal: the entry-time is_admin check can be outrun by a demotion
+            # committing while this request waited for the lock, and a now-member
+            # (who may still own the server, passing the visibility check above)
+            # must not execute the transfer.
+            if not fresh.is_admin:
+                raise HTTPException(status_code=403, detail="only admins may reassign owners")
             if new_owner is not None and repo.get_user(session, new_owner) is None:
                 raise ValueError(f"unknown user {new_owner!r}")
             updated = service.update_server(session, server_id, changes)

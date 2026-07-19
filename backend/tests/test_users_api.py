@@ -238,6 +238,32 @@ def test_member_login_token_does_not_satisfy_last_control_guard():
             _reset()
 
 
+def test_member_credential_cannot_enable_enforcement():
+    """Turning enforcement ON requires an ADMIN-resolving credential on the request:
+    a member login is a valid control token, but enabling enforcement with only it
+    would strand the box — Settings/Users unreachable by anyone."""
+    with TestClient(app) as client:
+        try:
+            # Enforcement off: the local operator creates a member and their login.
+            uid = client.post(
+                "/api/users", json={"name": "Mel", "role": "member"}, headers=LOOPBACK
+            ).json()["id"]
+            cred = client.post(f"/api/users/{uid}/credentials", headers=LOOPBACK).json()["token"]
+            # A member credential must not flip enforcement on...
+            r = client.patch(
+                "/api/settings", json={"control_plane_auth": "always"}, headers=_bearer(cred)
+            )
+            assert r.status_code == 400, r.text
+            # ...but an admin-resolving one (legacy user-less control token) may.
+            admin = _mint("control")
+            r = client.patch(
+                "/api/settings", json={"control_plane_auth": "always"}, headers=_bearer(admin)
+            )
+            assert r.status_code == 200, r.text
+        finally:
+            _reset()
+
+
 def test_dangling_user_credential_fails_closed():
     """A control token whose user row is gone must not authenticate (the gate and
     principal resolution agree)."""

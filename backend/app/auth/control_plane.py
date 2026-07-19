@@ -58,14 +58,37 @@ def enforcement_enabled(session: Session) -> bool:
     )
 
 
+def admin_credential_presented(request: Request, session: Session) -> bool:
+    """Does the request carry a credential that resolves to ADMIN — the env token,
+    a user-less control token, or an admin user's login? Unlike principal
+    resolution this ignores enforcement state entirely: it classifies the
+    presented token itself, for decisions about turning enforcement ON. A member's
+    login token is a valid control credential but must NOT satisfy this — enabling
+    enforcement while holding only member logins would strand the box with no way
+    to reach Settings or Users."""
+    token = _bearer(request)
+    if is_env_admin_token(token):
+        return True
+    if not token:
+        return False
+    row = repo.get_token_by_hash(session, hash_token(token))
+    if row is None or row.scope != "control":
+        return False
+    if row.user_id is None:
+        return True  # legacy/boot mint: resolves to admin
+    user = repo.get_user(session, row.user_id)
+    return user is not None and user.role == "admin"
+
+
 def would_lock_out(request: Request, session: Session, changes: dict[str, Any]) -> bool:
-    """True if applying ``changes`` would turn enforcement on while THIS request can't
-    authenticate as control, locking the operator out the moment it takes effect.
-    Enabling enforcement requires a control credential on the request (a control token
-    or ``MCPE_ADMIN_TOKEN``); a token row merely existing in the DB is not enough, since
-    this browser may not hold its plaintext."""
-    if control_auth(request, session) == "ok":
-        return False  # the caller already holds a usable control credential
+    """True if applying ``changes`` would turn enforcement on while THIS request
+    can't authenticate as an ADMIN, locking the operator out of the admin surfaces
+    the moment it takes effect. Enabling enforcement requires an admin-resolving
+    credential on the request (``admin_credential_presented``) — a token row merely
+    existing in the DB is not enough (this browser may not hold its plaintext),
+    and a member login is not enough (Settings/Users would become unreachable)."""
+    if admin_credential_presented(request, session):
+        return False  # the caller already holds a usable admin credential
     mode = changes.get("control_plane_auth", runtime_settings.control_plane_auth(session))
     bind = changes.get("bind_mode", runtime_settings.bind_mode(session))
     lan = changes.get("allow_private_lan", runtime_settings.allow_private_lan(session))

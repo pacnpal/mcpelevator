@@ -76,14 +76,10 @@ def _overprivileged_token_ids(session: Session, user_id: str) -> list[str]:
     return ids
 
 
-def _admin_now(session: Session, principal: Principal) -> bool:
-    """Is the CALLER still an admin, judged on state committed by the time we hold
-    the lock? The router-level ``require_admin`` ran at request entry; a demotion
-    can commit while this request waits for the lock (demotions commit under it),
-    and a just-demoted admin must not keep mutating users — e.g. re-promoting
-    themselves via a queued PATCH."""
-    fresh = principal_mod.refresh(session, principal)
-    return fresh is not None and fresh.is_admin
+# Caller re-authorization under the lock (see principal.admin_now): a demotion
+# can commit while a request waits, and a just-demoted admin must not keep
+# mutating users — e.g. re-promoting themselves via a queued PATCH.
+_admin_now = principal_mod.admin_now
 
 
 _FORBIDDEN = HTTPException(status_code=403, detail="admin role required")

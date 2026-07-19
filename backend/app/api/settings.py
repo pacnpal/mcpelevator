@@ -8,8 +8,9 @@ from starlette.requests import Request
 
 from app.api.schemas import SettingsInfo, SettingsUpdate
 from app.api.util import resync_groups
+from app.auth import principal as principal_mod
 from app.auth.control_plane import would_lock_out
-from app.auth.principal import require_admin
+from app.auth.principal import Principal, require_admin
 from app.db import get_session
 from app.registry import settings as runtime_settings
 
@@ -31,15 +32,26 @@ async def get_settings(session: Session = Depends(get_session)):
 # reads docker_runner/default_auth_provider — but writes are admin-only.
 @router.patch("/settings", response_model=SettingsInfo, dependencies=[Depends(require_admin)])
 async def update_settings(
-    payload: SettingsUpdate, request: Request, session: Session = Depends(get_session)
+    payload: SettingsUpdate,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_admin),
 ):
     changes = {k: v for k, v in payload.model_dump().items() if v is not None}
 
     def guard(s: Session) -> None:
-        # Re-checked inside the settings write transaction (under the write lock), so a
-        # token delete racing this enable can't remove the last control credential
-        # between the check and the commit. Refuse to switch enforcement on unless THIS
-        # request still authenticates as control; the UI guards this too.
+        # Both checks run inside the settings write transaction (under the write
+        # lock), so nothing can change between check and commit:
+        # 1) Re-authorize the CALLER — an auth-transition or lock wait may have
+        #    outlived their admin role (a demotion commits under the config lock),
+        #    and a former admin must not alter global settings.
+        if not principal_mod.admin_now(s, principal):
+            raise HTTPException(status_code=403, detail="admin role required")
+        # 2) Refuse to switch enforcement on unless THIS request presents an
+        #    ADMIN-resolving credential (would_lock_out) — a token delete racing
+        #    this enable can't remove the last admin credential between the check
+        #    and the commit, and a member login can't flip enforcement on and
+        #    strand the box; the UI guards this too.
         if would_lock_out(request, s, changes):
             raise HTTPException(
                 status_code=400,

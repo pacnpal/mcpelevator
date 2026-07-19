@@ -140,6 +140,17 @@ def refresh(session: Session, principal: Principal) -> Optional[Principal]:
     )
 
 
+def admin_now(session: Session, principal: Principal) -> bool:
+    """Is the CALLER still an admin, judged on committed state? For re-authorizing
+    INSIDE a serialized write (or after any await): the router-level
+    ``require_admin`` runs at request entry, and a demotion or deletion of the
+    caller can commit while the request waits. ``expire_all`` first so the request
+    session's identity map can't satisfy the re-read with the entry-time row."""
+    session.expire_all()
+    fresh = refresh(session, principal)
+    return fresh is not None and fresh.is_admin
+
+
 def current_principal(request: Request, session: Session = Depends(get_session)) -> Principal:
     """FastAPI dependency: the caller's principal. Raises the same 401 shape as
     ``require_control_plane`` when none resolves — handlers behind the gate should
