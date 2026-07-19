@@ -37,7 +37,11 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   authenticate to its upstream via OAuth instead of static `env` headers. The interactive
   authorization-code grant (DCR + PKCE) runs in the control plane (`/api/servers/{id}/oauth/authorize`
   → public `/api/oauth/callback`, anchored on the OAuth `state`) using the MCP SDK's
-  `OAuthClientProvider`; tokens land in a `0600` file store (`<data_dir>/oauth/<id>.json`) shared
+  `OAuthClientProvider`. Client identity is provider-adaptive: a static client id/secret when
+  set, else the instance's CIMD client-metadata document (public
+  `/api/oauth/client-metadata.json`, offered only from an https base) where the provider
+  advertises URL-based client ids, else DCR; tokens land in a `0600` file store
+  (`<data_dir>/oauth/<id>.json`) shared
   with the bridge, which reads them and auto-refreshes. Tokens live off the DB, so authenticating
   never re-hashes the row or bounces the bridge.
 - **Runners** (`runners/`): `npx`, `uvx`, `command`, `remote` (proxy an already-remote MCP URL),

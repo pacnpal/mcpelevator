@@ -369,6 +369,22 @@ def _ensure_consent_prompt(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
 
 
+def _client_metadata_url(callback_url: str) -> Optional[str]:
+    """The CIMD client-metadata URL to offer alongside the flow, derived from the
+    callback URL so both always share one base (the document lists that same callback
+    as its redirect_uri — a mismatch would fail the provider's validation). ``None``
+    unless the base is https with the expected callback path: CIMD client ids must be
+    https URLs the provider can fetch server-side, so a LAN/plain-http instance simply
+    doesn't offer one. Offering it is always safe — the SDK only uses it when the
+    authorization server advertises ``client_id_metadata_document_supported``, and
+    falls back to Dynamic Client Registration otherwise; a static client id (seeded
+    client info) bypasses both."""
+    suffix = "/api/oauth/callback"
+    if not callback_url.startswith("https://") or not callback_url.endswith(suffix):
+        return None
+    return callback_url.removesuffix(suffix) + "/api/oauth/client-metadata.json"
+
+
 def _extract_state(url: str) -> Optional[str]:
     try:
         values = parse_qs(urlparse(url).query).get("state")
@@ -667,6 +683,9 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         callback_handler=callback_handler,
         timeout=_FLOW_TIMEOUT,
         operator_scopes=server.oauth_scopes or None,
+        # URL-based client id (CIMD): used by the SDK only when the provider advertises
+        # support, so DCR/static-client behavior is unchanged everywhere else.
+        client_metadata_url=_client_metadata_url(callback_url),
     )
 
     _PENDING[pending.id] = pending

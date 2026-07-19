@@ -349,6 +349,63 @@ async def test_registration_rate_limit_surfaces_clean_429(monkeypatch):
         store.clear()
 
 
+def test_client_metadata_url_derivation():
+    # CIMD client ids must be https URLs the provider can fetch — an http (LAN) callback
+    # or an unexpected path yields None, so the flow simply doesn't offer one.
+    assert (
+        oauth_flow._client_metadata_url("https://mcp.example/api/oauth/callback")
+        == "https://mcp.example/api/oauth/client-metadata.json"
+    )
+    assert oauth_flow._client_metadata_url("http://192.168.1.5:9090/api/oauth/callback") is None
+    assert oauth_flow._client_metadata_url("https://mcp.example/elsewhere") is None
+
+
+async def test_begin_offers_cimd_url_only_for_https_callback(monkeypatch):
+    # The provider is handed the derived client-metadata URL (https base) or None (http
+    # base). Either way the flow itself is unchanged — the SDK only consumes the URL when
+    # the authorization server advertises CIMD support.
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    captured: dict = {}
+    real_provider = oauth_flow._ScopedOAuthClientProvider
+
+    class _Spy(real_provider):
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(oauth_flow, "_ScopedOAuthClientProvider", _Spy)
+
+    class _Srv:
+        id = "srv-cimd-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        assert (
+            captured["client_metadata_url"]
+            == "https://mcp.example/api/oauth/client-metadata.json"
+        )
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+
+        captured.clear()
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+        )
+        assert captured["client_metadata_url"] is None
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c2")
+    finally:
+        store.clear()
+
+
 async def test_drive_cancels_done_future_on_pre_url_failure(monkeypatch):
     # Regression: when the flow fails BEFORE handing back an authorization URL, done_future is
     # never awaited by anyone (complete_authorization only runs after the browser returns). It
@@ -893,6 +950,35 @@ def test_authorize_rate_limited_returns_429(monkeypatch):
             assert "rate-limiting" in r.json()["detail"]
         finally:
             c.delete(f"/api/servers/{sid}", headers=LOOPBACK)
+
+
+def test_client_metadata_document_is_public_and_self_referential():
+    # The CIMD document: served ungated (a provider fetching it holds no credential for
+    # us), client_id is its own URL, and the redirect_uri shares that base — the invariant
+    # the provider validates during a URL-based-client authorization.
+    with TestClient(app) as c:
+        r = c.get("/api/oauth/client-metadata.json", headers=LOOPBACK)
+        assert r.status_code == 200, r.text
+        doc = r.json()
+        assert doc["client_id"].endswith("/api/oauth/client-metadata.json")
+        base = doc["client_id"].rsplit("/api/oauth/client-metadata.json", 1)[0]
+        assert doc["redirect_uris"] == [f"{base}/api/oauth/callback"]
+        assert doc["token_endpoint_auth_method"] == "none"  # public client; PKCE secures it
+        assert doc["grant_types"] == ["authorization_code", "refresh_token"]
+        assert doc["response_types"] == ["code"]
+
+
+def test_client_metadata_document_honors_forwarded_proto():
+    # Behind an https-terminating proxy the app-hop scheme is http; the advertised
+    # client_id/redirect_uri must still be https or the provider rejects them.
+    with TestClient(app) as c:
+        r = c.get(
+            "/api/oauth/client-metadata.json",
+            headers={**LOOPBACK, "x-forwarded-proto": "https"},
+        )
+        doc = r.json()
+        assert doc["client_id"].startswith("https://")
+        assert doc["redirect_uris"][0].startswith("https://")
 
 
 def test_callback_unknown_state_redirects_with_error():

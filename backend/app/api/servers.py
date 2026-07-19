@@ -36,7 +36,7 @@ from app.api.schemas import (
     Transports,
     Urls,
 )
-from app.api.util import base_url, resync_groups
+from app.api.util import base_url, oauth_public_base, resync_groups
 from app.auth import oauth_flow, policy
 from app.auth import principal as principal_mod
 from app.auth.principal import Principal, current_principal
@@ -556,18 +556,11 @@ async def delete_server(
 def _oauth_callback_url(request: Request) -> str:
     """The public URL the upstream redirects the operator's browser back to after
     sign-in. Built from the same base as the copy-menu links so it matches the host
-    the operator actually reached us on (and the operator-declared public URL when set).
-
-    Behind an HTTPS-terminating reverse proxy without ``MCPE_PUBLIC_BASE_URL``, the ASGI
-    request scheme is the plain ``http`` of the proxy→app hop; honor ``X-Forwarded-Proto``
-    so the registered redirect URI is ``https`` (OAuth providers reject non-loopback http
-    callbacks). The operator-declared public URL still wins when set."""
-    base = base_url(request)
-    if not get_settings().public_base_url and base.startswith("http://"):
-        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
-        if forwarded == "https":
-            base = "https://" + base[len("http://"):]
-    return f"{base}/api/oauth/callback"
+    the operator actually reached us on (and the operator-declared public URL when
+    set), with the reverse-proxy https upgrade (``oauth_public_base``). The flow
+    derives the CIMD client-metadata URL from this same value, so the document the
+    provider fetches and the redirect URI it validates always share one base."""
+    return f"{oauth_public_base(request)}/api/oauth/callback"
 
 
 @router.post("/servers/{server_id}/oauth/authorize")

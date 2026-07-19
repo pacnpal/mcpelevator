@@ -195,7 +195,18 @@ A `remote` server authenticates **to the upstream** one of two ways:
   Registration + PKCE authorization-code grant), stores the tokens, and **refreshes
   them automatically**. Set `"oauth": true` on the server; leave `env` empty (OAuth
   supplies the `Authorization` header). Optional `oauth_scopes` and static
-  `oauth_client_id`/`oauth_client_secret` (blank = auto-register).
+  `oauth_client_id`/`oauth_client_secret` (blank = auto-register). A provider that
+  offers **no client registration at all** (GitHub's remote MCP server, for one)
+  requires the static client: register an app with the provider — its authorization
+  callback URL is `<your-base-url>/api/oauth/callback` — and set the Client ID and
+  secret here.
+
+  Instances reachable over public **https** also advertise a [**CIMD**](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
+  client-metadata document (`/api/oauth/client-metadata.json`), the MCP spec's
+  successor to Dynamic Client Registration: a provider that supports URL-based
+  client ids uses it automatically — zero registration, dynamic or otherwise. The
+  sign-in picks whichever the provider supports: static client if you set one,
+  else CIMD where advertised, else Dynamic Client Registration.
 
   Scopes are **discovered automatically** at sign-in (RFC 9728 / RFC 8414 / OIDC
   well-known metadata), so `oauth_scopes` is usually unnecessary — leave it blank.
