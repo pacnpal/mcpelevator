@@ -66,12 +66,16 @@ class Supervisor:
         self.interval = settings.health_interval_s
         self.units: dict[str, ServerUnit] = {}
         self._activation_requests: dict[str, datetime] = {}
-        # Idle quiescence (wake-on-request): last proxy traffic per server, and the
-        # set of enabled servers deliberately stopped for inactivity. An id in
-        # ``_idle`` is DESIRED-but-quiesced — reconcile skips starting it until an
-        # activation request (the proxy's wake, or an operator action) clears it.
+        # Idle quiescence (wake-on-request): last proxy traffic per server, the
+        # set of enabled servers deliberately stopped for inactivity, and the
+        # count of proxied requests currently in flight (a long-lived SSE stream
+        # holds one — it must keep its bridge alive even with no new requests).
+        # An id in ``_idle`` is DESIRED-but-quiesced — reconcile skips starting it
+        # until an activation request (the proxy's wake, or an operator action)
+        # clears it.
         self._last_activity: dict[str, datetime] = {}
         self._idle: set[str] = set()
+        self._in_flight: dict[str, int] = {}
         self._unit_lock = asyncio.Lock()
         self._nudge = asyncio.Event()
         self._stopping = False
@@ -130,6 +134,23 @@ class Supervisor:
         """Record proxy traffic for a server so the idle sweep doesn't quiesce it.
         Called on every proxied /s request (and for each member on /g requests)."""
         self._last_activity[server_id] = utcnow()
+
+    def request_started(self, server_id: str) -> None:
+        """A proxied request/stream to this server is now in flight. While any is
+        open, the idle sweep must not stop the bridge — a Streamable-HTTP/SSE
+        client can legitimately hold one response stream open past the idle
+        window without issuing another request."""
+        self._in_flight[server_id] = self._in_flight.get(server_id, 0) + 1
+
+    def request_finished(self, server_id: str) -> None:
+        """The matching end of ``request_started``. Restarts the idle clock: the
+        window is measured from when the last stream CLOSED, not when it began."""
+        remaining = self._in_flight.get(server_id, 0) - 1
+        if remaining > 0:
+            self._in_flight[server_id] = remaining
+        else:
+            self._in_flight.pop(server_id, None)
+        self.mark_activity(server_id)
 
     def is_idle(self, server_id: str) -> bool:
         return server_id in self._idle
@@ -319,17 +340,25 @@ class Supervisor:
                 self._idle.discard(server_id)
 
             # Idle sweep: a RUNNING unit whose idle window (per-server override, else
-            # the global default; 0 = never) has passed with no proxy traffic is
-            # quiesced — bridge stopped, state "idle", tools kept for the UI. The
-            # proxy wakes it on the next /s request.
+            # the global default; 0 = never) has passed with no proxy traffic AND no
+            # request/stream still in flight is quiesced — bridge stopped, state
+            # "idle", tools kept for the UI. The proxy wakes it on the next /s request.
             timeout = (
                 server.idle_timeout_s if server.idle_timeout_s is not None else default_idle
             )
+            if timeout <= 0:
+                # Idling is (now) disabled for this server. A previously quiesced
+                # server must RESUME — the operator turning idling off (per-server 0,
+                # or the global default dropping to 0) means "always running", and
+                # idle_timeout_s is excluded from config_hash so no activation
+                # request accompanies that edit.
+                self._idle.discard(server_id)
             if (
                 requested_at is None
                 and timeout > 0
                 and unit is not None
                 and unit.state == "running"
+                and self._in_flight.get(server_id, 0) == 0
             ):
                 last = self._last_activity.get(server_id)
                 if last is not None and (now - last).total_seconds() >= timeout:

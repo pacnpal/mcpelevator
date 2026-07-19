@@ -62,8 +62,9 @@ async def update_settings(
             await resync_groups(request)
     # Gate changes apply at once instead of waiting for the next poll interval (which an
     # operator may have lengthened): docker_runner stops running docker units via the
-    # nudged reconcile.
-    if "docker_runner" in changes:
+    # nudged reconcile, and an idle_timeout_s change re-evaluates quiescence (notably,
+    # dropping it to 0 resumes already-idle servers).
+    if changes.keys() & {"docker_runner", "idle_timeout_s"}:
         request.app.state.supervisor.nudge()
     # A default-auth change must converge the group hub BEFORE this returns, not on the
     # next reconcile: every /g dispatcher enforces the NEW default auth on the very next

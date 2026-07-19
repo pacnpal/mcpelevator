@@ -91,10 +91,20 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
 
     client: httpx.AsyncClient = request.app.state.http
-    upstream = await client.send(
-        client.build_request(request.method, target, headers=fwd_headers, content=body),
-        stream=True,
-    )
+    # Count the request as in flight for the WHOLE response lifetime, not just the
+    # dispatch: a Streamable-HTTP/SSE client can hold the stream open far longer
+    # than the idle window, and the idle sweep must not stop the bridge underneath
+    # it. request_finished (in relay's finally) also restarts the idle clock, so
+    # the window is measured from stream close.
+    sup.request_started(server.id)
+    try:
+        upstream = await client.send(
+            client.build_request(request.method, target, headers=fwd_headers, content=body),
+            stream=True,
+        )
+    except BaseException:
+        sup.request_finished(server.id)
+        raise
 
     resp_headers = {
         k: v for k, v in upstream.headers.items()
@@ -108,6 +118,7 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
                 yield chunk
         finally:
             await upstream.aclose()
+            sup.request_finished(server.id)
 
     return StreamingResponse(
         relay(),

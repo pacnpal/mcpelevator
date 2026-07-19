@@ -122,6 +122,31 @@ describe('ToolRunner', () => {
 		expect(target.textContent).toContain('boom');
 	});
 
+	it('sends numeric enum selections as their original schema value, not text', async () => {
+		api.callServerTool.mockResolvedValue(RESULT);
+		const enumTool: ServerTool = {
+			name: 'pick',
+			description: '',
+			input_schema: {
+				type: 'object',
+				properties: { level: { type: 'integer', enum: [1, 2, 3] } },
+				required: ['level']
+			}
+		};
+		const target = render(enumTool);
+		click(buttonByText(target, 'Try it'));
+
+		const select = target.querySelector<HTMLSelectElement>('#tr-pick-level');
+		expect(select).not.toBeNull();
+		select!.value = '2';
+		select!.dispatchEvent(new Event('change', { bubbles: true }));
+		flushSync();
+		click(buttonByText(target, 'Run tool'));
+		await vi.waitFor(() => expect(api.callServerTool).toHaveBeenCalledOnce());
+		// the number 2 from the schema's enum — not the string "2"
+		expect(api.callServerTool).toHaveBeenCalledWith('srv-1', 'pick', { level: 2 });
+	});
+
 	it('falls back to raw JSON for a schema-less tool and validates the object shape', async () => {
 		api.callServerTool.mockResolvedValue(RESULT);
 		const bare: ServerTool = { name: 'bare', description: '' };

@@ -152,6 +152,62 @@ async def test_global_default_applies_when_server_inherits(monkeypatch):
         _cleanup(sid)
 
 
+async def test_in_flight_stream_prevents_idling():
+    """An open proxied response stream (e.g. a long-lived SSE session) must keep
+    the bridge alive even when no NEW request has arrived inside the window."""
+    server = _make_server(
+        name="Streamer", runner="npx", command="npx", enabled=True, idle_timeout_s=30
+    )
+    sid = server.id
+    sup = Supervisor()
+    sup.units[sid] = _running_unit(server)
+    sup._last_activity[sid] = utcnow() - timedelta(hours=1)
+    sup.request_started(sid)
+    try:
+        await sup.reconcile_once()
+        assert sid in sup.units and not sup.is_idle(sid)
+        # Stream closes: the idle clock restarts from now, so the next pass
+        # still doesn't quiesce (fresh activity), but the server is sweepable again.
+        sup.request_finished(sid)
+        await sup.reconcile_once()
+        assert sid in sup.units and not sup.is_idle(sid)
+    finally:
+        sup.units.pop(sid, None)
+        _cleanup(sid)
+
+
+async def test_disabling_idle_timeout_resumes_quiesced_server(monkeypatch):
+    """A server already idle when its effective timeout drops to 0 (per-server
+    edit or global-default change) must resume — 'always running' means running."""
+    server = _make_server(
+        name="Resumer", runner="npx", command="npx", enabled=True, idle_timeout_s=30
+    )
+    sid = server.id
+    sup = Supervisor()
+    sup._idle.add(sid)
+    started: list[str] = []
+
+    async def fake_start(sv, *, activation_started_at=None):
+        started.append(sv.id)
+        sup.units[sv.id] = _running_unit(sv)
+        return None
+
+    monkeypatch.setattr(sup, "_try_start", fake_start)
+    try:
+        # Still quiesced while the timeout stands.
+        await sup.reconcile_once()
+        assert started == [] and sup.is_idle(sid)
+        # The operator pins the server always-on; reconcile alone must resume it.
+        with Session(get_engine()) as session:
+            service.update_server(session, sid, {"idle_timeout_s": 0})
+        await sup.reconcile_once()
+        assert started == [sid]
+        assert not sup.is_idle(sid)
+    finally:
+        sup.units.pop(sid, None)
+        _cleanup(sid)
+
+
 async def test_wake_restarts_quiesced_server(monkeypatch):
     server = _make_server(
         name="Waker", runner="npx", command="npx", enabled=True, idle_timeout_s=30

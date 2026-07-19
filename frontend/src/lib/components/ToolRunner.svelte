@@ -26,7 +26,10 @@
 		schema: JsonSchema;
 		required: boolean;
 		kind: 'string' | 'number' | 'boolean' | 'enum' | 'json';
-		enumValues: string[];
+		/** Original enum values from the schema (may be numbers/booleans) — the
+		 * select edits their String() form and submit maps back to the original,
+		 * so a numeric enum isn't sent as text. */
+		enumValues: unknown[];
 		description: string;
 	}
 
@@ -48,7 +51,7 @@
 			schema: propSchema,
 			required: required.has(name),
 			kind: fieldKind(propSchema),
-			enumValues: Array.isArray(propSchema.enum) ? (propSchema.enum as unknown[]).map(String) : [],
+			enumValues: Array.isArray(propSchema.enum) ? (propSchema.enum as unknown[]) : [],
 			description: typeof propSchema.description === 'string' ? propSchema.description : ''
 		}));
 	});
@@ -91,7 +94,12 @@
 			}
 			const raw = String(values[field.name] ?? '').trim();
 			if (!raw) continue; // blank optional field → let the tool default it
-			if (field.kind === 'number') {
+			if (field.kind === 'enum') {
+				// Map the selected option (edited as text) back to the schema's own
+				// value, so e.g. {"enum": [1, 2]} sends the number 1, not "1".
+				const match = field.enumValues.find((v) => String(v) === raw);
+				out[field.name] = match !== undefined ? match : raw;
+			} else if (field.kind === 'number') {
 				const n = Number(raw);
 				if (Number.isNaN(n)) throw new Error(`"${field.name}" must be a number.`);
 				out[field.name] = n;
@@ -197,7 +205,7 @@
 									class="w-full cursor-pointer rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 								>
 									<option value="">(unset)</option>
-									{#each field.enumValues as v (v)}
+									{#each field.enumValues.map(String) as v (v)}
 										<option value={v}>{v}</option>
 									{/each}
 								</select>
