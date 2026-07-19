@@ -382,7 +382,7 @@ def _client_metadata_url(callback_url: str) -> Optional[str]:
     suffix = "/api/oauth/callback"
     if not callback_url.startswith("https://") or not callback_url.endswith(suffix):
         return None
-    return callback_url[: -len(suffix)] + "/api/oauth/client-metadata.json"
+    return callback_url.removesuffix(suffix) + "/api/oauth/client-metadata.json"
 
 
 def _extract_state(url: str) -> Optional[str]:

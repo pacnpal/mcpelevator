@@ -58,5 +58,5 @@ def oauth_public_base(request: Request) -> str:
     if not get_settings().public_base_url and base.startswith("http://"):
         forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
         if forwarded == "https":
-            base = "https://" + base[len("http://"):]
+            base = base.replace("http://", "https://", 1)
     return base
