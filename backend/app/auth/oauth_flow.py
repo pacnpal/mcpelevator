@@ -476,36 +476,48 @@ async def _drive(
             "granted scopes or resource may not match what this server requires"
         )
         tokens = None
-    # Ownership AND existence are validated at PROMOTION time, against snapshots
-    # taken when the flow began: reassignment and deletion both cancel registered
-    # pending flows, but a flow still in its pre-registration awaits has nothing to
-    # cancel — this check is the backstop that closes that window for both.
     if tokens is not None:
-        blocked = _promotion_blocked(pending)
-        if blocked is not None:
-            inner_error = inner_error or RuntimeError(blocked)
-            tokens = None
-    if tokens is not None:
-        # Promote the freshly-obtained credentials to the shared store the bridge reads, in
-        # ONE atomic write that fully replaces any prior state. Building it in memory first
-        # means a failure leaves the previous (still-working) credential intact — no
-        # destructive pre-clear — and it doesn't carry forward an old refresh token (a new
-        # grant brings its own; the carry-forward is only for the bridge's refresh path).
+        # Validate-and-promote as ONE step under the config write lock — the same
+        # lock every ownership transfer, server delete, and OAuth reconfiguration
+        # commits under — so none of them can land between _promotion_blocked's
+        # read and the file write (the begin-time snapshots close the
+        # pre-registration window; the lock closes the check-to-write one). The
+        # promote itself is ONE atomic write that fully replaces any prior state:
+        # building it in memory first means a failure leaves the previous
+        # (still-working) credential intact — no destructive pre-clear — and it
+        # doesn't carry forward an old refresh token (a new grant brings its own).
+        # Runs in a worker thread: the lock is a threading lock that bulk imports
+        # can hold for seconds, and _drive lives on the event loop.
+        client_info = await mem.get_client_info()
+        oauth_metadata = getattr(provider.context, "oauth_metadata", None)
+        pr_metadata = getattr(provider.context, "protected_resource_metadata", None)
+
+        def _checked_promote() -> Optional[str]:
+            from app.registry import service  # local import: keep module load cycle-free
+
+            with service.config_write_lock():
+                blocked = _promotion_blocked(pending)
+                if blocked is not None:
+                    return blocked
+                real.promote(
+                    tokens=tokens,
+                    client_info=client_info,
+                    metadata=oauth_metadata,
+                    protected_resource_metadata=pr_metadata,
+                )
+                return None
+
         try:
-            real.promote(
-                tokens=tokens,
-                client_info=await mem.get_client_info(),
-                metadata=getattr(provider.context, "oauth_metadata", None),
-                protected_resource_metadata=getattr(
-                    provider.context, "protected_resource_metadata", None
-                ),
-            )
+            blocked = await asyncio.to_thread(_checked_promote)
         except Exception as exc:  # noqa: BLE001 — persistence failure = the grant didn't stick
             inner_error = exc
         else:
-            if not pending.done_future.done():
-                pending.done_future.set_result(None)
-            return
+            if blocked is not None:
+                inner_error = inner_error or RuntimeError(blocked)
+            else:
+                if not pending.done_future.done():
+                    pending.done_future.set_result(None)
+                return
 
     error = inner_error or RuntimeError("OAuth flow finished without returning tokens")
     logger.info("OAuth authorization for %s failed: %s", server.id, error)
