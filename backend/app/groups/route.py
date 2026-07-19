@@ -90,10 +90,12 @@ class GroupDispatch:
         # running member serving through the bundle doesn't idle out underneath it.
         # (Group requests don't WAKE idle members — the bundle mounts running
         # members only, and remounting happens on the reconcile that follows a wake.)
-        supervisor = getattr(getattr(scope.get("app"), "state", None), "supervisor", None)
-        if supervisor is not None:
+        # app.state.supervisor is assigned in the lifespan before any request is
+        # served, so access it directly — a missing attribute should fail fast.
+        app = scope.get("app")
+        if app is not None:
             for member_id in member_ids or []:
-                supervisor.mark_activity(member_id)
+                app.state.supervisor.mark_activity(member_id)
 
         inner = self._hub.app_for(name)
         if inner is None:
