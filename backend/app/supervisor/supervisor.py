@@ -204,10 +204,14 @@ class Supervisor:
     async def retry(self, server_id: str, authorized=None) -> bool:
         async with self._unit_lock:
             # ``authorized`` (a zero-arg callable, may raise) runs INSIDE the unit
-            # lock, at the last decision point before the stop: the API's entry
-            # check precedes awaits, so an ownership reassignment can land in that
-            # gap — this hook lets the caller re-judge on committed state right
-            # before the unit is touched.
+            # lock at BOTH decision points: before the stop (the API's entry check
+            # precedes awaits, so an ownership reassignment can land in that gap)
+            # and again after it — the stop itself awaits process teardown, and a
+            # reassignment commits under the independent config lock, so the fresh
+            # activation must be re-judged on committed state right before it is
+            # queued. A post-stop denial leaves the (already-failed) unit stopped
+            # with desired state untouched; it does not touch the new owner's
+            # server beyond that already-terminal unit.
             if authorized is not None:
                 authorized()
             unit = self.units.get(server_id)
@@ -217,6 +221,8 @@ class Supervisor:
             ):
                 return False
             await self._stop(server_id)
+            if authorized is not None:
+                authorized()
         self.request_activation(server_id)
         return True
 
