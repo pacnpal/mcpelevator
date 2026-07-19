@@ -322,12 +322,27 @@ def test_idle_timeout_validation_on_server_and_settings():
             detail = client.get(f"/api/servers/{srv['id']}", headers=LOOPBACK).json()
             assert detail["idle_timeout_s"] is None
 
+            # A JSON boolean must be rejected at the API boundary (StrictInt) —
+            # lax coercion would silently turn `true` into a 1-second shutdown.
+            assert (
+                client.patch(
+                    f"/api/servers/{srv['id']}", json={"idle_timeout_s": True}, headers=LOOPBACK
+                ).status_code
+                == 422
+            )
+
             # settings-level: invalid rejected, valid persisted (and restored)
             assert (
                 client.patch(
                     "/api/settings", json={"idle_timeout_s": -1}, headers=LOOPBACK
                 ).status_code
                 == 400
+            )
+            assert (
+                client.patch(
+                    "/api/settings", json={"idle_timeout_s": True}, headers=LOOPBACK
+                ).status_code
+                == 422
             )
             updated = client.patch(
                 "/api/settings", json={"idle_timeout_s": 900}, headers=LOOPBACK
@@ -337,6 +352,35 @@ def test_idle_timeout_validation_on_server_and_settings():
             client.patch("/api/settings", json={"idle_timeout_s": 0}, headers=LOOPBACK)
         finally:
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_group_request_counts_members_in_flight():
+    """A /g request holds every member's in-flight count for the whole delegation,
+    so a long-lived group stream can't have a member bridge idled out mid-session."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="grp-member", auth="none")
+        sid = srv["id"]
+        group = "inflight-grp"
+        try:
+            r = client.put(f"/api/groups/{group}", json={"members": [sid]}, headers=LOOPBACK)
+            assert r.status_code == 200, r.text
+            sup = client.app.state.supervisor
+            observed: dict = {}
+
+            async def inner(scope, receive, send):
+                observed["during"] = sup._in_flight.get(sid, 0)
+                from starlette.responses import Response
+
+                await Response("ok")(scope, receive, send)
+
+            client.app.state.groups.app_for = lambda name: inner
+            r = client.get(f"/g/{group}/mcp", headers=LOOPBACK)
+            assert r.status_code == 200, r.text
+            assert observed["during"] == 1          # held while the inner app ran
+            assert sup._in_flight.get(sid, 0) == 0  # released afterwards
+        finally:
+            client.delete(f"/api/groups/{group}", headers=LOOPBACK)
+            client.delete(f"/api/servers/{sid}", headers=LOOPBACK)
 
 
 # --- proxy wake-on-request ---------------------------------------------------- #

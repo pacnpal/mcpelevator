@@ -7,7 +7,7 @@ from typing import Literal, Optional
 
 from typing import Union
 
-from pydantic import BaseModel, StrictBool, StrictStr
+from pydantic import BaseModel, StrictBool, StrictInt, StrictStr
 
 # The auth providers a server may select. Constrained here so a malformed value
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
@@ -131,7 +131,9 @@ class ServerCreate(BaseModel):
     oauth_client_id: Optional[str] = None
     oauth_client_secret: Optional[str] = None
     # Idle quiescence: None = inherit the global setting; 0 = never idle out.
-    idle_timeout_s: Optional[int] = None
+    # StrictInt: lax mode coerces a JSON `true` to 1, which would silently
+    # configure a one-second shutdown instead of failing validation.
+    idle_timeout_s: Optional[StrictInt] = None
     enabled: bool = False
     # Provenance. Only a "catalog:<id>" value is honored (a registry install);
     # anything else falls back to "manual" server-side. See servers.create_server.
@@ -163,7 +165,8 @@ class ServerUpdate(BaseModel):
     oauth_client_secret: Optional[str] = None
     # Nullable like the OAuth client fields: an explicit null means "inherit the
     # global default" and is preserved by the PATCH handler (model_fields_set).
-    idle_timeout_s: Optional[int] = None
+    # StrictInt so a JSON `true` can't lax-coerce to a 1-second shutdown.
+    idle_timeout_s: Optional[StrictInt] = None
 
 
 class ServerClone(BaseModel):
@@ -245,8 +248,9 @@ class SettingsUpdate(BaseModel):
     # StrictBool for the same reason — the docker runner is root-equivalent, so a coerced
     # truthy value must never flip it on.
     docker_runner: Optional[StrictBool] = None
-    # Global default for idle quiescence in seconds (0 disables it).
-    idle_timeout_s: Optional[int] = None
+    # Global default for idle quiescence in seconds (0 disables it). StrictInt so
+    # a JSON `true` can't lax-coerce to a 1-second shutdown.
+    idle_timeout_s: Optional[StrictInt] = None
 
 
 # ---- Groups (the /g/<name> registry) ----------------------------------------

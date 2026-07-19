@@ -139,6 +139,37 @@ def test_call_tool_error_is_200_with_is_error(monkeypatch):
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 
 
+def test_call_counts_as_in_flight_for_idle_sweep(monkeypatch):
+    """A long-running playground call must hold the in-flight count for its whole
+    awaited lifetime, so the idle sweep can't stop the bridge mid-call."""
+    observed: dict = {}
+
+    async def fake_call(url, name, arguments, timeout):
+        sup = observed["sup"]
+        observed["during"] = sup._in_flight.get(observed["sid"], 0)
+        return _fake_result(content=[{"type": "text", "text": "ok"}])
+
+    monkeypatch.setattr(servers_api, "_call_bridge_tool", fake_call)
+    with TestClient(app) as client:
+        srv = create_server(client, name="pg-inflight")
+        sid = srv["id"]
+        sup = client.app.state.supervisor
+        observed.update(sup=sup, sid=sid)
+        try:
+            sup.units[sid] = _running_unit(
+                [{"name": "slow", "description": "", "input_schema": {}}]
+            )
+            r = client.post(
+                f"/api/servers/{sid}/tools/slow/call", json={"arguments": {}}, headers=LOOPBACK
+            )
+            assert r.status_code == 200, r.text
+            assert observed["during"] == 1     # counted while the call was awaited
+            assert sup._in_flight.get(sid, 0) == 0  # released afterwards
+        finally:
+            sup.units.pop(sid, None)
+            client.delete(f"/api/servers/{sid}", headers=LOOPBACK)
+
+
 def test_call_transport_failure_502(monkeypatch):
     async def fake_call(url, name, arguments, timeout):
         raise RuntimeError("connection refused")

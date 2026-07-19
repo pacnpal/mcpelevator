@@ -86,17 +86,6 @@ class GroupDispatch:
             await response(scope, receive, send)
             return
 
-        # Authenticated group traffic counts as activity for every member, so a
-        # running member serving through the bundle doesn't idle out underneath it.
-        # (Group requests don't WAKE idle members — the bundle mounts running
-        # members only, and remounting happens on the reconcile that follows a wake.)
-        # app.state.supervisor is assigned in the lifespan before any request is
-        # served, so access it directly — a missing attribute should fail fast.
-        app = scope.get("app")
-        if app is not None:
-            for member_id in member_ids or []:
-                app.state.supervisor.mark_activity(member_id)
-
         inner = self._hub.app_for(name)
         if inner is None:
             await Response("group not ready", status_code=503)(scope, receive, send)
@@ -107,4 +96,24 @@ class GroupDispatch:
         # app_root_path remains on the scope for external URL generation.
         sub_scope = dict(scope)
         sub_scope["root_path"] = routing_root_path + "/" + name
-        await inner(sub_scope, receive, send)
+
+        # Idle bookkeeping: an authenticated group request counts as in-flight
+        # traffic for every member for the WHOLE delegation — a long-lived
+        # Streamable-HTTP/SSE stream through the bundle must not have a member
+        # bridge quiesced from under it; request_finished restarts each member's
+        # idle clock when the stream closes. (Group requests don't WAKE idle
+        # members — the bundle mounts running members only, and remounting happens
+        # on the reconcile that follows a wake.) app.state.supervisor is assigned
+        # in the lifespan before any request is served — fail fast if missing.
+        app = scope.get("app")
+        if app is None:
+            await inner(sub_scope, receive, send)
+            return
+        supervisor = app.state.supervisor
+        for member_id in member_ids or []:
+            supervisor.request_started(member_id)
+        try:
+            await inner(sub_scope, receive, send)
+        finally:
+            for member_id in member_ids or []:
+                supervisor.request_finished(member_id)

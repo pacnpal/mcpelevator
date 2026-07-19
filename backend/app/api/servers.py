@@ -532,9 +532,12 @@ async def call_server_tool(
         raise HTTPException(status_code=409, detail="server is not running")
     if not any(t.get("name") == tool_name for t in unit.tools or []):
         raise HTTPException(status_code=404, detail=f"tool {tool_name!r} not found")
-    sup.mark_activity(server_id)  # a playground call is real traffic for the idle clock
     timeout = min(max(float(payload.timeout_s), 1.0), 300.0)
     started = time.monotonic()
+    # In-flight bookkeeping for the WHOLE awaited call (like the /s proxy path):
+    # a long-running tool execution must not have its bridge quiesced from under
+    # it by the idle sweep. request_finished also restarts the idle clock.
+    sup.request_started(server_id)
     try:
         result = await _call_bridge_tool(
             f"http://{unit.host}:{unit.port}/mcp", tool_name, payload.arguments, timeout
@@ -545,6 +548,8 @@ async def call_server_tool(
         ) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"tool call failed: {exc}") from exc
+    finally:
+        sup.request_finished(server_id)
     structured = result.structured_content
     return ToolCallResult(
         is_error=bool(result.is_error),
