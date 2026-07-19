@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from contextlib import nullcontext
 from datetime import timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from fastmcp import Client
 from sqlmodel import Session
 from starlette.responses import Response, StreamingResponse
 
@@ -29,6 +31,8 @@ from app.api.schemas import (
     ServerSummary,
     ServerUpdate,
     StartupStatus,
+    ToolCallRequest,
+    ToolCallResult,
     Transports,
     Urls,
 )
@@ -69,7 +73,9 @@ def _live_state(server: Server, sup, session: Session):
         ):
             return "starting", None, None, None, [], _queued_status(server)
         if unit is None:
-            if runtime is not None and runtime.state in ("failed", "unhealthy"):
+            # "idle" is a deliberate quiescence, not a startup in progress: surface it
+            # as-is (with the cached tool list) instead of the queued/starting shape.
+            if runtime is not None and runtime.state in ("failed", "unhealthy", "idle"):
                 return runtime.state, runtime.last_error, None, None, runtime.tools, None
             started_at = runtime.updated_at if runtime is not None else server.updated_at
             return "starting", None, None, None, [], _queued_status(server, started_at)
@@ -165,6 +171,7 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         oauth_client_id=server.oauth_client_id,
         oauth_has_client_secret=bool(server.oauth_client_secret),
         oauth_status=_oauth_status(server),
+        idle_timeout_s=server.idle_timeout_s,
         config_hash=server.config_hash,
         source=server.source,
         tools=tools or [],
@@ -233,9 +240,10 @@ async def update_server(
     changes = {k: v for k, v in provided.items() if v is not None}
     # The generic None-drop implements partial PATCH, but it also swallows an *explicit*
     # null on the nullable OAuth client fields — so clearing a static client id/secret to
-    # fall back to Dynamic Client Registration would be silently ignored. Preserve those two
-    # when the client actually sent them (model_fields_set) so null means "clear".
-    for key in ("oauth_client_id", "oauth_client_secret"):
+    # fall back to Dynamic Client Registration would be silently ignored. Preserve those
+    # when the client actually sent them (model_fields_set) so null means "clear" (and,
+    # for idle_timeout_s, "inherit the global default").
+    for key in ("oauth_client_id", "oauth_client_secret", "idle_timeout_s"):
         if key in payload.model_fields_set:
             changes[key] = provided[key]
 
@@ -483,6 +491,71 @@ async def import_servers(
         created=[_summary(s, sup, session, base) for s in created],
         skipped=[ImportSkipped(**s) for s in skipped],
         warnings=[ImportWarning(**w) for w in warnings],
+    )
+
+
+async def _call_bridge_tool(url: str, name: str, arguments: dict, timeout: float):
+    """One playground invocation against a bridge's loopback MCP endpoint.
+
+    A fresh short-lived FastMCP client session per call — matching the bridge's own
+    fresh-upstream-session-per-request proxy semantics, so a playground call behaves
+    exactly like a real client's. ``raise_on_error=False`` keeps a tool's own failure
+    (isError) as data rather than an exception; transport failures still raise.
+    Module-level so tests can monkeypatch the bridge hop."""
+    async with asyncio.timeout(timeout + 5):  # backstop over the per-call timeout
+        async with Client(url, timeout=timeout) as client:
+            return await client.call_tool(
+                name, arguments, timeout=timeout, raise_on_error=False
+            )
+
+
+@router.post("/servers/{server_id}/tools/{tool_name}/call", response_model=ToolCallResult)
+async def call_server_tool(
+    server_id: str,
+    tool_name: str,
+    request: Request,
+    payload: ToolCallRequest = Body(default_factory=ToolCallRequest),
+    session: Session = Depends(get_session),
+):
+    """Invoke one tool on a RUNNING server's bridge (the UI playground).
+
+    Runs over the control plane (admin-token gated like every /api server route), so
+    trying a tool never needs a data-plane bearer token. MCP error semantics are
+    mirrored: a tool's own failure comes back as ``is_error`` in a 200, while an
+    unreachable/broken bridge is a 502 and a timeout a 504."""
+    server = repo.get_server(session, server_id)
+    if server is None:
+        raise HTTPException(status_code=404, detail="server not found")
+    sup = request.app.state.supervisor
+    unit = sup.unit(server_id)
+    if unit is None or unit.state != "running" or unit.port is None:
+        raise HTTPException(status_code=409, detail="server is not running")
+    if not any(t.get("name") == tool_name for t in unit.tools or []):
+        raise HTTPException(status_code=404, detail=f"tool {tool_name!r} not found")
+    timeout = min(max(float(payload.timeout_s), 1.0), 300.0)
+    started = time.monotonic()
+    # In-flight bookkeeping for the WHOLE awaited call (like the /s proxy path):
+    # a long-running tool execution must not have its bridge quiesced from under
+    # it by the idle sweep. request_finished also restarts the idle clock.
+    sup.request_started(server_id)
+    try:
+        result = await _call_bridge_tool(
+            f"http://{unit.host}:{unit.port}/mcp", tool_name, payload.arguments, timeout
+        )
+    except (asyncio.TimeoutError, TimeoutError) as exc:
+        raise HTTPException(
+            status_code=504, detail=f"tool call timed out after {timeout:g}s"
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"tool call failed: {exc}") from exc
+    finally:
+        sup.request_finished(server_id)
+    structured = result.structured_content
+    return ToolCallResult(
+        is_error=bool(result.is_error),
+        content=[block.model_dump(mode="json") for block in result.content or []],
+        structured_content=structured if isinstance(structured, dict) else None,
+        duration_ms=int((time.monotonic() - started) * 1000),
     )
 
 

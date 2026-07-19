@@ -16,7 +16,9 @@
 		stopping: { label: 'Stopping', color: 'var(--color-state-starting)', pulse: true },
 		unhealthy: { label: 'Unhealthy', color: 'var(--color-state-unhealthy)', pulse: false },
 		failed: { label: 'Failed', color: 'var(--color-state-failed)', pulse: false },
-		stopped: { label: 'Stopped', color: 'var(--color-state-stopped)', pulse: false }
+		stopped: { label: 'Stopped', color: 'var(--color-state-stopped)', pulse: false },
+		// Deliberately asleep, wakes on the next request — calm (accent-ish), not alarming.
+		idle: { label: 'Idle', color: 'var(--color-state-idle, var(--color-state-stopped))', pulse: false }
 	};
 
 	const meta = $derived(

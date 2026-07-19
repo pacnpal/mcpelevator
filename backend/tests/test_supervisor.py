@@ -38,11 +38,13 @@ def test_tool_summary_records_output_schema_presence():
     assert tool_summary(with_schema) == {
         "name": "structured",
         "description": "d",
+        "input_schema": {"type": "object"},
         "has_output_schema": True,
     }
     assert tool_summary(without_schema) == {
         "name": "bare",
         "description": "",
+        "input_schema": {"type": "object"},
         "has_output_schema": False,
     }
 

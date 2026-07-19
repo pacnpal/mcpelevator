@@ -25,7 +25,9 @@ def utcnow() -> datetime:
 # --- enums kept as plain string constants for deterministic SQLite storage ---
 
 RUNNERS = ("npx", "uvx", "command", "docker", "remote")
-STATES = ("stopped", "starting", "running", "unhealthy", "failed", "stopping")
+# "idle" is an enabled server quiesced by the supervisor after its idle timeout;
+# the proxy reactivates it on the next request (wake-on-request).
+STATES = ("stopped", "starting", "running", "unhealthy", "failed", "stopping", "idle")
 
 
 class Server(SQLModel, table=True):
@@ -69,6 +71,12 @@ class Server(SQLModel, table=True):
     oauth_scopes: str = ""  # space-separated scopes to request (empty = server default)
     oauth_client_id: Optional[str] = None
     oauth_client_secret: Optional[str] = None
+
+    # Idle quiescence: seconds of no proxy traffic before the supervisor stops the
+    # bridge (state "idle") and the proxy restarts it on the next request. NULL =
+    # inherit the `idle_timeout_s` runtime setting; 0 = never idle this server.
+    # Excluded from config_hash — changing it must not bounce a running bridge.
+    idle_timeout_s: Optional[int] = None
 
     # desired runtime
     enabled: bool = False

@@ -10,7 +10,9 @@ export type ServerState =
 	| 'running'
 	| 'unhealthy'
 	| 'failed'
-	| 'stopping';
+	| 'stopping'
+	/** Enabled but quiesced for inactivity; the proxy wakes it on the next request. */
+	| 'idle';
 
 export type StartupPhase = 'queued' | 'setup' | 'bridge' | 'readiness' | 'retry_wait';
 
@@ -56,11 +58,26 @@ export interface ServerSummary {
 export interface ServerTool {
 	name: string;
 	description: string;
+	/** The tool's JSON input schema (from the readiness probe). The playground
+	 * builds its argument form from this. Absent on tool lists cached before the
+	 * field existed. */
+	input_schema?: Record<string, unknown>;
 	/** Whether the tool declares an MCP `outputSchema`. Schemas are authored by
 	 * the upstream server and proxied through unchanged; MCP clients recommend
 	 * tools declare one so models can better understand results.
 	 * Absent on tool lists cached before this field existed. */
 	has_output_schema?: boolean;
+}
+
+/** Result of POST /api/servers/{id}/tools/{name}/call (the tool playground).
+ * MCP semantics: `is_error` carries the tool's own failure — the call itself
+ * transported fine (HTTP 200). */
+export interface ToolCallResult {
+	is_error: boolean;
+	/** Raw MCP content blocks (TextContent, ImageContent, …). */
+	content: Record<string, unknown>[];
+	structured_content: Record<string, unknown> | null;
+	duration_ms: number;
 }
 
 /** Upstream-OAuth state for a remote server (GET /api/servers/{id}). */
@@ -96,6 +113,9 @@ export interface ServerDetail extends ServerSummary {
 	 * accepted on create/patch but never returned. */
 	oauth_has_client_secret: boolean;
 	oauth_status: OAuthStatus;
+	/** Idle quiescence override in seconds: null = inherit the global setting,
+	 * 0 = never idle this server out. */
+	idle_timeout_s: number | null;
 	config_hash: string;
 	source: string;
 	tools: ServerTool[];
@@ -123,6 +143,8 @@ export interface ServerCreate {
 	oauth_scopes?: string;
 	oauth_client_id?: string | null;
 	oauth_client_secret?: string | null;
+	/** Idle quiescence override in seconds (null = inherit, 0 = never idle). */
+	idle_timeout_s?: number | null;
 	enabled?: boolean;
 	/** Provenance. Only a `catalog:<id>` value is honored server-side (a registry install). */
 	source?: string | null;
@@ -297,6 +319,8 @@ export interface SettingsInfo {
 	oauth_accept_bearer: boolean;
 	/** Scopes advertised in RFC 9728 protected-resource metadata. */
 	oauth_scopes: string[];
+	/** Default idle quiescence in seconds for servers set to inherit (0 = off). */
+	idle_timeout_s: number;
 }
 
 /** A group's members: the wildcard "*" (every registered server, present and

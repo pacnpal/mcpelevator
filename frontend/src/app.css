@@ -38,6 +38,8 @@
 	--color-state-unhealthy: #fb923c;
 	--color-state-failed: #f87171;
 	--color-state-stopped: #71717a;
+	/* Deliberately asleep (idle quiescence) — calm blue, wakes on demand. */
+	--color-state-idle: #60a5fa;
 
 	--radius-card: 14px;
 

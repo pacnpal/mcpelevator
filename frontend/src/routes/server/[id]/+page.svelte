@@ -26,6 +26,7 @@
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
 	import StatePill from '$lib/components/StatePill.svelte';
+	import ToolRunner from '$lib/components/ToolRunner.svelte';
 	import { flashToast } from '$lib/toast.svelte';
 
 	type LoadState = 'loading' | 'ready' | 'error';
@@ -703,7 +704,24 @@
 					</div>
 					<CopyButton value={server.urls.mcp} label="Copy" />
 				</div>
-				<!-- REST/OpenAPI endpoint omitted: the surface isn't served yet (planned, M6). -->
+				{#if server.transports.rest_openapi}
+					<div class="flex items-center justify-between gap-3">
+						<div class="min-w-0 flex-1">
+							<p class="text-xs font-medium text-[var(--color-ink-muted)]">REST</p>
+							<p class="truncate font-mono text-xs text-[var(--color-ink)]">
+								{server.urls.rest ?? '— not exposed —'}
+							</p>
+							{#if server.urls.rest}
+								<p class="mt-0.5 text-[11px] text-[var(--color-ink-dim)]">
+									<code class="font-mono">POST {server.urls.rest}/&lt;tool&gt;</code> with the
+									tool's JSON arguments · OpenAPI at
+									<code class="font-mono">{server.urls.rest}/openapi.json</code>
+								</p>
+							{/if}
+						</div>
+						<CopyButton value={server.urls.rest} label="Copy" />
+					</div>
+				{/if}
 			</div>
 			{#if effectiveAuth === 'bearer'}
 				<p
@@ -868,6 +886,13 @@
 										{tool.description}
 									</span>
 								{/if}
+								<div class="mt-1">
+									<ToolRunner
+										serverId={server.id}
+										{tool}
+										runnable={server.state === 'running'}
+									/>
+								</div>
 							</li>
 						{/each}
 					</ul>

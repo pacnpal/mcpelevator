@@ -2,7 +2,7 @@
 
 **Elevate MCP servers into authenticated HTTP endpoints. Self-hosted, in one container.**
 
-Most [MCP](https://modelcontextprotocol.io) servers ship as **stdio** programs (`npx -y …`, `uvx …`, a command, a docker image). Stdio only works when the client can spawn the process locally, which **phones and most "any device" setups can't do**. mcpelevator runs those servers for you and exposes each one as a remote **Streamable HTTP** endpoint (the transport Claude mobile, Flutter clients, etc. connect to). Add a server, press start, copy the URL into your client. (A per-server REST/OpenAPI surface is on the roadmap, not yet served.)
+Most [MCP](https://modelcontextprotocol.io) servers ship as **stdio** programs (`npx -y …`, `uvx …`, a command, a docker image). Stdio only works when the client can spawn the process locally, which **phones and most "any device" setups can't do**. mcpelevator runs those servers for you and exposes each one as a remote **Streamable HTTP** endpoint (the transport Claude mobile, Flutter clients, etc. connect to). Add a server, press start, copy the URL into your client. Each server can also opt into a plain **REST/OpenAPI** surface (`/s/<slug>/rest/<tool>`), so curl, automation, and GPT Actions can call its tools without speaking MCP.
 
 Already-remote servers work too: point mcpelevator at an existing Streamable-HTTP/SSE MCP URL (the `remote` runner) and it proxies that upstream behind the same auth, supervision, and per-client copy menu as a local one — handy for putting bearer auth in front of a remote server, or giving every client one consistent endpoint.
 
@@ -127,6 +127,48 @@ changing its saved configuration, or through the API:
 ```bash
 curl -X POST "http://127.0.0.1:8080/api/servers/<server-id>/retry"
 ```
+
+### Idle shutdown (wake-on-request)
+
+Every enabled server normally keeps a resident bridge process. On a box with many
+registered servers, turn on **idle shutdown**: after a configurable window with no
+traffic, the supervisor stops the bridge (state **idle**) and the proxy transparently
+restarts it on the next request — the request is held until the server is ready
+(bounded by `MCPE_START_TIMEOUT_S`), so clients just see a slower first call, not an
+error. Memory then scales with what's *in use*, not with what's registered.
+
+Set the global default in **Settings → Idle shutdown** (`idle_timeout_s`, seconds;
+`0` = off, the default — existing installs keep today's always-running behavior),
+and override it per server in the server form (blank = inherit, `0` = pin the server
+always-on). Idle servers report a passing `/api/health/{slug}` status (`"idle"`) so
+load balancers don't eject a deliberately-sleeping endpoint. Group (`/g`) traffic
+counts as activity for the group's members, but doesn't wake already-idle ones.
+
+### Try a tool from the dashboard (playground)
+
+A running server's detail page lists its discovered tools — each with a **Try it**
+panel that builds an argument form from the tool's JSON input schema (with a raw-JSON
+fallback for complex shapes) and invokes the tool through the control plane. No MCP
+client or data-plane token needed: it's the fastest way to verify a server actually
+works — not just that it started — before pointing a real client at it.
+
+### Per-server REST/OpenAPI surface
+
+Turn on **REST / OpenAPI** in a server's Exposure section and the same supervised
+bridge additionally serves each tool as plain REST behind the identical auth/proxy
+path:
+
+```bash
+curl -X POST http://127.0.0.1:8080/s/memory/rest/create_entities \
+  -H 'content-type: application/json' -d '{"entities": [...]}'
+```
+
+- `POST /s/<slug>/rest/<tool>` — body is the tool's JSON arguments; the response is a
+  stable envelope `{is_error, content, structured_content}` mirroring MCP semantics
+  (a tool's own failure is `is_error: true` in a 200; unknown tool → 404).
+- `GET /s/<slug>/rest/openapi.json` — an OpenAPI 3.1 document generated from the live
+  tool list (request schemas included), ready to feed to GPT Actions or any OpenAPI
+  tooling. `GET /s/<slug>/rest` lists the tools.
 
 **Already remote?** Use the `remote` runner to proxy an existing Streamable-HTTP/SSE MCP URL — no local process. The launch spec reuses the same fields: `command` is the upstream URL, `args[0]` is the transport (`streamable-http` or `sse`), and `env` is the upstream HTTP headers.
 
@@ -306,7 +348,9 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 **Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop / retry, with optional setup scripts for local runners. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: local bearer tokens or external-AS OAuth JWTs for `/s` and `/g`, control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
 
-**Planned:** REST/OpenAPI surface per server · more catalog directories · polish.
+Also working: a **tool playground** on the server page (invoke any discovered tool from a schema-built form, no client needed), **idle shutdown with wake-on-request** (quiesce inactive servers, restart transparently on the next request), and an opt-in **REST/OpenAPI surface** per server (`/s/<slug>/rest/<tool>` + a generated `openapi.json`).
+
+**Planned:** more catalog directories · polish.
 
 ## Route reference
 
@@ -315,6 +359,7 @@ Two request grammars, both behind the same Host/Origin guard and per-request aut
 | Route | Serves |
 | --- | --- |
 | `/s/<slug>/mcp` | **One server.** `<slug>` is the server's routing key (operator-renameable). |
+| `/s/<slug>/rest/…` | **The same server as plain REST** (opt-in per server): `POST /rest/<tool>`, `GET /rest/openapi.json`, `GET /rest`. Same Host/Origin guard and per-server auth as `/mcp`. |
 | `/g/<name>/mcp` | **A group.** `<name>` is a registry entry; the URL serves the union of the group's running members' tools, each namespaced by the member's slug (`<slug>_<tool>`). |
 
 There is no `/s/all` or any other reserved slug beyond `summary` (which would shadow `/api/health/summary`) — single servers live only under `/s`, groups only under `/g`, so `all` is now an ordinary server slug if you want one.

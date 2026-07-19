@@ -7,7 +7,7 @@ from typing import Literal, Optional
 
 from typing import Union
 
-from pydantic import BaseModel, StrictBool, StrictStr
+from pydantic import BaseModel, StrictBool, StrictInt, StrictStr
 
 # The auth providers a server may select. Constrained here so a malformed value
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
@@ -65,6 +65,27 @@ class OAuthStatus(BaseModel):
     has_refresh_token: bool = False  # a refresh token exists (silent renewal until it lapses)
 
 
+class ToolCallRequest(BaseModel):
+    """Playground invocation of one tool on a running server's bridge."""
+
+    arguments: dict = {}
+    # Per-call wall clock in seconds; bounded so a hung upstream can't pin the
+    # control plane worker forever.
+    timeout_s: float = 60.0
+
+
+class ToolCallResult(BaseModel):
+    """MCP semantics mirrored over the control plane: ``is_error`` carries a tool's
+    own failure (the transport succeeded), matching CallToolResult.isError."""
+
+    is_error: bool = False
+    # Raw MCP content blocks (model_dump of TextContent / ImageContent / …) so the
+    # UI can render text and fall back to JSON for anything else.
+    content: list[dict] = []
+    structured_content: Optional[dict] = None
+    duration_ms: int = 0
+
+
 class ServerDetail(ServerSummary):
     command: str
     args: list[str] = []
@@ -82,6 +103,8 @@ class ServerDetail(ServerSummary):
     # (this response is polled by the UI), so only its presence is exposed.
     oauth_has_client_secret: bool = False
     oauth_status: OAuthStatus = OAuthStatus()
+    # Idle quiescence: None = inherit the global `idle_timeout_s` setting; 0 = never.
+    idle_timeout_s: Optional[int] = None
     config_hash: str = ""
     source: str = "manual"
     tools: list[dict] = []
@@ -107,6 +130,10 @@ class ServerCreate(BaseModel):
     oauth_scopes: str = ""
     oauth_client_id: Optional[str] = None
     oauth_client_secret: Optional[str] = None
+    # Idle quiescence: None = inherit the global setting; 0 = never idle out.
+    # StrictInt: lax mode coerces a JSON `true` to 1, which would silently
+    # configure a one-second shutdown instead of failing validation.
+    idle_timeout_s: Optional[StrictInt] = None
     enabled: bool = False
     # Provenance. Only a "catalog:<id>" value is honored (a registry install);
     # anything else falls back to "manual" server-side. See servers.create_server.
@@ -136,6 +163,10 @@ class ServerUpdate(BaseModel):
     oauth_scopes: Optional[str] = None
     oauth_client_id: Optional[str] = None
     oauth_client_secret: Optional[str] = None
+    # Nullable like the OAuth client fields: an explicit null means "inherit the
+    # global default" and is preserved by the PATCH handler (model_fields_set).
+    # StrictInt so a JSON `true` can't lax-coerce to a 1-second shutdown.
+    idle_timeout_s: Optional[StrictInt] = None
 
 
 class ServerClone(BaseModel):
@@ -196,6 +227,8 @@ class SettingsInfo(BaseModel):
     oauth_allowed_subjects: list[str] = []
     oauth_accept_bearer: bool = False
     oauth_scopes: list[str] = []
+    # Default idle quiescence for servers whose idle_timeout_s is unset (0 = off).
+    idle_timeout_s: int = 0
 
 
 class SettingsUpdate(BaseModel):
@@ -215,6 +248,9 @@ class SettingsUpdate(BaseModel):
     # StrictBool for the same reason — the docker runner is root-equivalent, so a coerced
     # truthy value must never flip it on.
     docker_runner: Optional[StrictBool] = None
+    # Global default for idle quiescence in seconds (0 disables it). StrictInt so
+    # a JSON `true` can't lax-coerce to a 1-second shutdown.
+    idle_timeout_s: Optional[StrictInt] = None
 
 
 # ---- Groups (the /g/<name> registry) ----------------------------------------

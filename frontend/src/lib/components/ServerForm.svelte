@@ -120,6 +120,11 @@
 			cwd: init.cwd ?? '',
 			mcpHttp: init.mcp_http ?? true,
 			restOpenapi: init.rest_openapi ?? false,
+			// Blank = inherit the global default (null); "0" pins the server always-on.
+			idleTimeoutText:
+				init.idle_timeout_s === null || init.idle_timeout_s === undefined
+					? ''
+					: String(init.idle_timeout_s),
 			startAfter: init.enabled ?? true,
 			authProvider: init.auth_provider ?? 'inherit',
 			oauth: init.oauth ?? false,
@@ -173,6 +178,7 @@
 	let cwd = $state(seed.cwd);
 	let mcpHttp = $state(seed.mcpHttp);
 	let restOpenapi = $state(seed.restOpenapi);
+	let idleTimeoutText = $state(seed.idleTimeoutText);
 	let authProvider = $state<ServerAuthProvider>(seed.authProvider);
 	let startAfter = $state(seed.startAfter);
 	let advancedOpen = $state(seed.setupScript.trim().length > 0);
@@ -256,6 +262,10 @@
 	const dockerBlocked = $derived(dockerDisabled && mode === 'create' && startAfter);
 	const nameValid = $derived(name.trim().length > 0);
 	const commandValid = $derived(command.trim().length > 0);
+	// Blank = inherit; otherwise a whole non-negative number of seconds.
+	const idleTimeoutValid = $derived(
+		idleTimeoutText.trim() === '' || /^\d+$/.test(idleTimeoutText.trim())
+	);
 
 	// The hardened `docker run …` the backend will synthesize, live as the operator types
 	// (an honest preview; the exact hardening flags are elided as […]). Mirrors the real
@@ -317,7 +327,13 @@
 	const slugChanged = $derived(mode === 'edit' && normalizedSlug !== originalSlug);
 
 	const canSubmit = $derived(
-		nameValid && commandValid && remoteUrlValid && !dockerBlocked && !setupBlocked && !busy
+		nameValid &&
+			commandValid &&
+			remoteUrlValid &&
+			idleTimeoutValid &&
+			!dockerBlocked &&
+			!setupBlocked &&
+			!busy
 	);
 
 	function buildEnv(): Record<string, string> {
@@ -371,6 +387,7 @@
 			cwd: isRemote || isDocker ? null : cwd.trim() ? cwd.trim() : null,
 			mcp_http: mcpHttp,
 			rest_openapi: restOpenapi,
+			idle_timeout_s: idleTimeoutText.trim() === '' ? null : Number(idleTimeoutText.trim()),
 			auth_provider: authProvider,
 			// Upstream OAuth only applies to remote; the backend forces it off elsewhere,
 			// but keep the payload honest so a runner switch clears it client-side too.
@@ -1116,9 +1133,60 @@
 				></span>
 			</span>
 		</label>
-		<!-- A per-server REST/OpenAPI surface is planned (M6) but not served yet, so the
-		     toggle is intentionally not offered. `rest_openapi` is preserved on existing
-		     rows; the control returns when the backend ships. -->
+		<label
+			class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
+		>
+			<span class="flex flex-col gap-0.5">
+				<span class="text-sm font-medium text-[var(--color-ink)]">REST / OpenAPI</span>
+				<span class="text-xs text-[var(--color-ink-dim)]">
+					Also serve each tool as plain REST
+					(<code class="font-mono">POST /s/&lt;slug&gt;/rest/&lt;tool&gt;</code>) with a
+					generated OpenAPI document — for curl, automation, and GPT Actions.
+				</span>
+			</span>
+			<input type="checkbox" bind:checked={restOpenapi} class="peer sr-only" />
+			<span
+				class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
+				style="background-color: {restOpenapi ? '' : 'var(--color-line-strong)'};"
+			>
+				<span
+					class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
+					style={restOpenapi ? 'transform: translateX(16px);' : ''}
+				></span>
+			</span>
+		</label>
+
+		<!-- Idle shutdown (wake-on-request) -->
+		<div class="flex flex-col gap-1.5">
+			<label for="srv-idle-timeout" class="text-xs font-medium text-[var(--color-ink-muted)]">
+				Idle shutdown <span class="text-[var(--color-ink-dim)]">(seconds, optional)</span>
+			</label>
+			<input
+				id="srv-idle-timeout"
+				type="text"
+				inputmode="numeric"
+				bind:value={idleTimeoutText}
+				autocomplete="off"
+				spellcheck="false"
+				placeholder="inherit global default"
+				aria-invalid={!idleTimeoutValid}
+				class="w-48 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				style={idleTimeoutValid
+					? 'border-color: var(--color-line);'
+					: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+			/>
+			{#if !idleTimeoutValid}
+				<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+					Enter a whole number of seconds (or leave blank to inherit).
+				</p>
+			{/if}
+			<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+				Stop this server after this long with no traffic; the next request wakes it
+				automatically. Blank inherits the default from
+				<a href="/settings" class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]">Settings</a>;
+				<code class="font-mono text-[var(--color-ink-muted)]">0</code> keeps it always running.
+			</p>
+		</div>
 	</fieldset>
 
 	<!-- Auth -->

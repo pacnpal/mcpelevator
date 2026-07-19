@@ -47,10 +47,15 @@ class _AttemptFailed(RuntimeError):
 
 
 def tool_summary(tool) -> dict:
-    """One cached-tool entry for the UI, from a probed ``mcp.types.Tool``."""
+    """One cached-tool entry for the UI, from a probed ``mcp.types.Tool``.
+
+    ``input_schema`` is the tool's full JSON input schema — the playground builds
+    its argument form from it, so it rides along in the cache rather than needing
+    a live round-trip to the bridge on every page view."""
     return {
         "name": tool.name,
         "description": tool.description or "",
+        "input_schema": tool.inputSchema or {},
         "has_output_schema": tool.outputSchema is not None,
     }
 
