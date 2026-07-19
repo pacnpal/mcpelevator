@@ -13,6 +13,8 @@ deterministic and fast):
 
 from __future__ import annotations
 
+from functools import partial
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -21,13 +23,11 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
-from app.db import get_engine, repo
-from app.db.models import Token
+from conftest import LOOPBACK, create_server, mint_token
+
+from app.db import get_engine
 from app.main import app
 from app.registry import settings as runtime_settings
-from app.util import hash_token, new_id, new_token
-
-LOOPBACK = {"host": "127.0.0.1"}
 
 
 # --- a fake backend bridge the proxy forwards to ----------------------------- #
@@ -80,25 +80,8 @@ def _point_proxy_at_upstream(client: TestClient) -> None:
     client.app.state.supervisor.endpoint = lambda slug: ("backend", 9000)
 
 
-def _create_server(client: TestClient, *, auth: str = "none") -> dict:
-    """Create a disabled server (no subprocess) and return its summary."""
-    r = client.post(
-        "/api/servers",
-        json={"name": "px", "command": "echo", "auth_provider": auth},
-        headers=LOOPBACK,
-    )
-    assert r.status_code == 201, r.text
-    return r.json()
-
-
-def _mint_token(scope: str = "all") -> str:
-    raw = new_token()
-    with Session(get_engine()) as session:
-        repo.create_token(
-            session,
-            Token(id=new_id(), name="t", token_hash=hash_token(raw), prefix=raw[:12], scope=scope),
-        )
-    return raw
+_create_server = partial(create_server, name="px", auth="none")
+_mint_token = mint_token
 
 
 # --- routing / backend availability ------------------------------------------ #

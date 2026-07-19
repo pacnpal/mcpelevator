@@ -26,7 +26,7 @@
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
 	import StatePill from '$lib/components/StatePill.svelte';
-	import Toast from '$lib/components/Toast.svelte';
+	import { flashToast } from '$lib/toast.svelte';
 
 	type LoadState = 'loading' | 'ready' | 'error';
 
@@ -40,14 +40,6 @@
 	let deleting = $state(false);
 	let confirmDelete = $state(false);
 	let cloning = $state(false);
-
-	let toast = $state<string | null>(null);
-	let toastTimer: ReturnType<typeof setTimeout> | undefined;
-	function flashToast(message: string) {
-		toast = message;
-		clearTimeout(toastTimer);
-		toastTimer = setTimeout(() => (toast = null), 6000);
-	}
 
 	let loadingId: string | null = null;
 	let mutationRevision = 0;
@@ -327,9 +319,6 @@
 		clearOauthTimers();
 		oauthBusy = false;
 		void load();
-		return () => {
-			clearTimeout(toastTimer);
-		};
 	});
 
 	let pollTick = $state(0);
@@ -956,14 +945,3 @@
 		</div>
 	{/if}
 </section>
-
-<!-- Toast -->
-{#if toast}
-	<div
-		class="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex justify-center px-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:justify-end sm:px-6"
-	>
-		<div class="w-full max-w-sm">
-			<Toast message={toast} onclose={() => (toast = null)} />
-		</div>
-	</div>
-{/if}

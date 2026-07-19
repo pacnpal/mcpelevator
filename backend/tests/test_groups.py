@@ -24,6 +24,8 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from conftest import LOOPBACK
+
 from app.db import get_engine, repo
 from app.db.models import Server, Token
 from app.groups import registry
@@ -33,7 +35,6 @@ from app.registry import service
 from app.registry import settings as runtime_settings
 from app.util import hash_token, new_id, new_token
 
-LOOPBACK = {"host": "127.0.0.1"}
 
 
 @pytest.fixture(autouse=True, scope="module")

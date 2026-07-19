@@ -11,13 +11,14 @@ import asyncio
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
+from conftest import LOOPBACK
+
 from app.db import get_engine, repo
 from app.main import app
 from app.registry import service
 from app.supervisor.supervisor import Supervisor
 from app.supervisor.unit import ServerUnit
 
-LOOPBACK = {"host": "127.0.0.1"}
 
 
 def test_setup_script_api_round_trip_and_runner_validation():

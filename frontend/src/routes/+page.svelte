@@ -5,24 +5,16 @@
 	import { hasActiveStartup, pollingInterval } from '$lib/startup';
 	import type { ServerSummary } from '$lib/types';
 	import ServerCard from '$lib/components/ServerCard.svelte';
-	import Toast from '$lib/components/Toast.svelte';
+	import { flashToast } from '$lib/toast.svelte';
 
 	type LoadState = 'loading' | 'ready' | 'error';
 
 	let servers = $state<ServerSummary[]>([]);
 	let loadState = $state<LoadState>('loading');
-	let toast = $state<string | null>(null);
-	let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
 	const runningCount = $derived(
 		servers.filter((s) => !hasActiveStartup(s) && s.state === 'running').length
 	);
-
-	function flashToast(message: string) {
-		toast = message;
-		clearTimeout(toastTimer);
-		toastTimer = setTimeout(() => (toast = null), 6000);
-	}
 
 	let loadInFlight = false;
 	let mutationRevision = 0;
@@ -81,7 +73,6 @@
 		return () => {
 			pollingStopped = true;
 			clearTimeout(pollTimer);
-			clearTimeout(toastTimer);
 		};
 	});
 
@@ -297,14 +288,3 @@
 		</div>
 	{/if}
 </section>
-
-<!-- Non-blocking toast -->
-{#if toast}
-	<div
-		class="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex justify-center px-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:justify-end sm:px-6"
-	>
-		<div class="w-full max-w-sm">
-			<Toast message={toast} onclose={() => (toast = null)} />
-		</div>
-	</div>
-{/if}

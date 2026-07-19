@@ -88,8 +88,10 @@ def _live_state(server: Server, sup, session: Session):
 
 
 
-def _summary(server: Server, sup, session: Session, base: str) -> ServerSummary:
-    state, last_error, pid, port, tools, startup_status = _live_state(server, sup, session)
+def _summary(server: Server, sup, session: Session, base: str, live=None) -> ServerSummary:
+    state, last_error, pid, port, tools, startup_status = live or _live_state(
+        server, sup, session
+    )
     auth = server.auth_provider
     if auth == "inherit":
         auth = runtime_settings.default_auth_provider(session)
@@ -146,8 +148,9 @@ def _oauth_status(server: Server) -> OAuthStatus:
 
 
 def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
-    summary = _summary(server, sup, session, base)
-    _, _, _, _, tools, _ = _live_state(server, sup, session)
+    live = _live_state(server, sup, session)
+    summary = _summary(server, sup, session, base, live)
+    tools = live[4]
     return ServerDetail(
         **summary.model_dump(),
         command=server.command,

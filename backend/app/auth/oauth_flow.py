@@ -118,12 +118,8 @@ def _classify_begin_error(exc: BaseException) -> OAuthBeginError:
 def _merge_scopes(*scope_strings: Optional[str]) -> Optional[str]:
     """Union space-delimited scope strings, preserving first-seen order and dropping
     duplicates. Returns ``None`` when nothing was supplied (so the SDK omits ``scope``)."""
-    seen: list[str] = []
-    for scope_string in scope_strings:
-        for scope in (scope_string or "").split():
-            if scope not in seen:
-                seen.append(scope)
-    return " ".join(seen) if seen else None
+    merged = dict.fromkeys(s for ss in scope_strings for s in (ss or "").split())
+    return " ".join(merged) if merged else None
 
 
 def _offline_access_default(context) -> bool:

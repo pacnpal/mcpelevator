@@ -27,18 +27,9 @@
 	import { isLoopbackHost, isPrivateIpHost, normalizeHost } from '$lib/host';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import CopyMenu from '$lib/components/CopyMenu.svelte';
-	import Toast from '$lib/components/Toast.svelte';
+	import { flashToast } from '$lib/toast.svelte';
 
 	type LoadState = 'loading' | 'ready' | 'error';
-
-	// ---- Toast ----------------------------------------------------------------
-	let toast = $state<{ message: string; tone: 'error' | 'info' } | null>(null);
-	let toastTimer: ReturnType<typeof setTimeout> | undefined;
-	function flashToast(message: string, tone: 'error' | 'info' = 'error') {
-		toast = { message, tone };
-		clearTimeout(toastTimer);
-		toastTimer = setTimeout(() => (toast = null), 6000);
-	}
 
 	// ---- Load -----------------------------------------------------------------
 	let loadState = $state<LoadState>('loading');
@@ -82,7 +73,6 @@
 
 	$effect(() => {
 		load();
-		return () => clearTimeout(toastTimer);
 	});
 
 	// ---- Access tokens --------------------------------------------------------
@@ -1588,10 +1578,3 @@
 	{/if}
 </section>
 
-{#if toast}
-	<div class="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex justify-center px-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
-		<div class="w-full max-w-md">
-			<Toast message={toast.message} tone={toast.tone} onclose={() => (toast = null)} />
-		</div>
-	</div>
-{/if}

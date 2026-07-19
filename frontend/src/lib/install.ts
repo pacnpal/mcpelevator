@@ -3,6 +3,7 @@
 // Note: we use `type: "http"` in JSON — the `streamable-http` alias breaks the
 // Cursor CLI parser, while `http` is accepted everywhere.
 
+import { isPrivateIpHost } from './host';
 import type { ServerSummary } from './types';
 
 export type InstallKind = 'url' | 'cmd' | 'json';
@@ -29,28 +30,17 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-// A loopback / private / link-local host that a vendor cloud can't dial.
+// A loopback / private / link-local host that a vendor cloud can't dial. Extends the
+// backend-mirroring classifier in `host.ts` with ranges that only matter for
+// reachability: 0.0.0.0/8 and CGNAT (100.64.0.0/10, e.g. Tailscale).
 function isPrivateHost(host: string): boolean {
-	const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/);
+	const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
 	if (v4) {
-		const a = Number(v4[1]);
-		const b = Number(v4[2]);
-		return (
-			a === 0 || // 0.0.0.0/8
-			a === 10 || // 10.0.0.0/8
-			a === 127 || // 127.0.0.0/8 loopback
-			(a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10 CGNAT/RFC 6598 (e.g. Tailscale)
-			(a === 169 && b === 254) || // 169.254.0.0/16 link-local
-			(a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
-			(a === 192 && b === 168) // 192.168.0.0/16
-		);
+		const [a, b, c, d] = v4.slice(1).map(Number);
+		if ([a, b, c, d].some((n) => n > 255)) return false;
+		if (a === 0 || (a === 100 && b >= 64 && b <= 127)) return true;
 	}
-	const h = host.toLowerCase();
-	return (
-		h === '::1' || // IPv6 loopback
-		/^f[cd][0-9a-f]{2}:/.test(h) || // fc00::/7 unique-local
-		/^fe[89ab][0-9a-f]:/.test(h) // fe80::/10 link-local
-	);
+	return isPrivateIpHost(host);
 }
 
 // Whether a URL is not reachable from the public internet — plain http, or an

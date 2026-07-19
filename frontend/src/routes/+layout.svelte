@@ -8,6 +8,8 @@
 	import favicon from '$lib/assets/favicon.svg';
 	import HealthDot from '$lib/components/HealthDot.svelte';
 	import Logo from '$lib/components/Logo.svelte';
+	import Toast from '$lib/components/Toast.svelte';
+	import { toast, dismissToast } from '$lib/toast.svelte';
 
 	let { children } = $props();
 
@@ -155,3 +157,13 @@
 		{@render children()}
 	</main>
 </div>
+
+{#if toast.current}
+	<div
+		class="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex justify-center px-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:justify-end sm:px-6"
+	>
+		<div class="w-full max-w-sm">
+			<Toast message={toast.current.message} tone={toast.current.tone} onclose={dismissToast} />
+		</div>
+	</div>
+{/if}

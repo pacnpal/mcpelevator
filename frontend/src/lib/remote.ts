@@ -8,7 +8,7 @@ export const REMOTE_TRANSPORTS: { value: string; label: string }[] = [
 	{ value: 'sse', label: 'SSE' }
 ];
 
-export const DEFAULT_REMOTE_TRANSPORT = 'streamable-http';
+const DEFAULT_REMOTE_TRANSPORT = 'streamable-http';
 
 const ALIASES: Record<string, string> = {
 	http: 'streamable-http',
