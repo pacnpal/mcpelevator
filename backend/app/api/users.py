@@ -23,7 +23,8 @@ from sqlmodel import Session
 from starlette.responses import Response
 
 from app.api.schemas import UserCreate, UserCredential, UserInfo, UserUpdate
-from app.auth.principal import require_admin
+from app.auth import principal as principal_mod
+from app.auth.principal import Principal, require_admin
 from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Token, User
@@ -75,6 +76,19 @@ def _overprivileged_token_ids(session: Session, user_id: str) -> list[str]:
     return ids
 
 
+def _admin_now(session: Session, principal: Principal) -> bool:
+    """Is the CALLER still an admin, judged on state committed by the time we hold
+    the lock? The router-level ``require_admin`` ran at request entry; a demotion
+    can commit while this request waits for the lock (demotions commit under it),
+    and a just-demoted admin must not keep mutating users — e.g. re-promoting
+    themselves via a queued PATCH."""
+    fresh = principal_mod.refresh(session, principal)
+    return fresh is not None and fresh.is_admin
+
+
+_FORBIDDEN = HTTPException(status_code=403, detail="admin role required")
+
+
 def _admin_login_would_remain(session: Session, *, excluding_user_id: str) -> bool:
     """Would an admin still be able to log in if this user lost admin power?
     MCPE_ADMIN_TOKEN always works, so it lifts the guard."""
@@ -103,28 +117,49 @@ async def list_users(session: Session = Depends(get_session)):
 
 
 @router.post("/users", response_model=UserInfo, status_code=201)
-async def create_user(payload: UserCreate, session: Session = Depends(get_session)):
+async def create_user(
+    payload: UserCreate,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_admin),
+):
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="name must not be empty")
     user = User(id=new_id(), name=name, role=payload.role, local_runners=payload.local_runners)
-    return _info(session, repo.create_user(session, user))
+
+    def _create():
+        with service.config_write_lock():
+            session.expire_all()
+            if not _admin_now(session, principal):
+                return None
+            return repo.create_user(session, user)
+
+    created = await run_in_threadpool(_create)
+    if created is None:
+        raise _FORBIDDEN
+    return _info(session, created)
 
 
 @router.patch("/users/{user_id}", response_model=UserInfo)
 async def update_user(
-    user_id: str, payload: UserUpdate, session: Session = Depends(get_session)
+    user_id: str,
+    payload: UserUpdate,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_admin),
 ):
     if payload.name is not None and not payload.name.strip():
         raise HTTPException(status_code=400, detail="name must not be empty")
 
     def _apply():
-        """The whole mutation — re-fetch, last-admin guard, demotion revocation,
-        field writes — under ONE hold of the config write lock, so two concurrent
-        demotions/deletions can't both pass the guard on each other's still-present
-        credential and remove every admin login between them."""
+        """The whole mutation — caller re-authorization, re-fetch, last-admin
+        guard, demotion revocation, field writes — under ONE hold of the config
+        write lock, so two concurrent demotions/deletions can't both pass the
+        guard on each other's still-present credential, and a just-demoted admin's
+        queued PATCH can't re-promote them."""
         with service.config_write_lock():
             session.expire_all()  # re-reads must see state committed while we waited
+            if not _admin_now(session, principal):
+                return "forbidden"
             user = repo.get_user(session, user_id)
             if user is None:
                 return "not_found"
@@ -155,6 +190,8 @@ async def update_user(
     # Threadpool: the lock is a threading lock shared with imports deriving scrypt
     # hashes — never wait for it on the event loop.
     result = await run_in_threadpool(_apply)
+    if result == "forbidden":
+        raise _FORBIDDEN
     if result == "not_found":
         raise HTTPException(status_code=404, detail="user not found")
     if result == "last_admin":
@@ -166,7 +203,11 @@ async def update_user(
 
 
 @router.delete("/users/{user_id}", status_code=204)
-async def delete_user(user_id: str, session: Session = Depends(get_session)):
+async def delete_user(
+    user_id: str,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_admin),
+):
     def _delete():
         """EVERY check runs under the same hold of the config write lock as the
         delete itself: the last-admin guard (two concurrent deletes of the two
@@ -179,6 +220,8 @@ async def delete_user(user_id: str, session: Session = Depends(get_session)):
         count | 'ok'."""
         with service.config_write_lock():
             session.expire_all()  # re-reads must see state committed while we waited
+            if not _admin_now(session, principal):
+                return "forbidden"
             user = repo.get_user(session, user_id)
             if user is None:
                 return "not_found"
@@ -195,6 +238,8 @@ async def delete_user(user_id: str, session: Session = Depends(get_session)):
     # Threadpool: the lock is a threading lock shared with imports deriving scrypt
     # hashes — never wait for it on the event loop.
     result = await run_in_threadpool(_delete)
+    if result == "forbidden":
+        raise _FORBIDDEN
     if result == "not_found":
         raise HTTPException(status_code=404, detail="user not found")
     if result == "last_admin":
@@ -214,21 +259,41 @@ async def delete_user(user_id: str, session: Session = Depends(get_session)):
 
 
 @router.post("/users/{user_id}/credentials", response_model=UserCredential, status_code=201)
-async def mint_credential(user_id: str, session: Session = Depends(get_session)):
+async def mint_credential(
+    user_id: str,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_admin),
+):
     """Mint a login (control) token for this user; plaintext returned exactly once.
     Minting is additive — existing credentials keep working (rotate by deleting
-    the old token from the tokens table)."""
-    user = repo.get_user(session, user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="user not found")
+    the old token from the tokens table). Validate-and-insert runs under the
+    config write lock like every credential mutation: the caller's admin role is
+    re-checked there (a demoted admin must not mint logins), and the insert can't
+    race the guards that count control tokens."""
     raw = new_token()
-    token = Token(
-        id=new_id(),
-        name=f"login: {user.name}",
-        token_hash=hash_token(raw),
-        prefix=raw[:12],
-        scope="control",
-        user_id=user.id,
-    )
-    repo.create_token(session, token)
-    return UserCredential(token_id=token.id, token=raw, prefix=token.prefix)
+
+    def _mint():
+        with service.config_write_lock():
+            session.expire_all()
+            if not _admin_now(session, principal):
+                return "forbidden"
+            user = repo.get_user(session, user_id)
+            if user is None:
+                return "not_found"
+            token = Token(
+                id=new_id(),
+                name=f"login: {user.name}",
+                token_hash=hash_token(raw),
+                prefix=raw[:12],
+                scope="control",
+                user_id=user.id,
+            )
+            repo.create_token(session, token)
+            return token
+
+    result = await run_in_threadpool(_mint)
+    if result == "forbidden":
+        raise _FORBIDDEN
+    if result == "not_found":
+        raise HTTPException(status_code=404, detail="user not found")
+    return UserCredential(token_id=result.id, token=raw, prefix=result.prefix)

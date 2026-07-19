@@ -201,8 +201,15 @@ class Supervisor:
         async with self._unit_lock:
             await self._stop(server_id)
 
-    async def retry(self, server_id: str) -> bool:
+    async def retry(self, server_id: str, authorized=None) -> bool:
         async with self._unit_lock:
+            # ``authorized`` (a zero-arg callable, may raise) runs INSIDE the unit
+            # lock, at the last decision point before the stop: the API's entry
+            # check precedes awaits, so an ownership reassignment can land in that
+            # gap — this hook lets the caller re-judge on committed state right
+            # before the unit is touched.
+            if authorized is not None:
+                authorized()
             unit = self.units.get(server_id)
             if unit is not None and (
                 unit.state not in ("failed", "unhealthy")

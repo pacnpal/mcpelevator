@@ -721,12 +721,15 @@ async def retry_server(
     state, _, _, _, _, startup_status = _live_state(server, sup, session)
     if startup_status is not None or state not in ("failed", "unhealthy"):
         raise HTTPException(status_code=409, detail="server is not in a retryable state")
-    # Re-validate against the committed row just before acting: retry isn't a DB
-    # write (the config lock doesn't govern it), so this fresh check is what keeps
-    # a former owner's queued retry from bouncing a just-reassigned server.
-    if not _visible_now(server_id, principal):
-        raise HTTPException(status_code=404, detail="server not found")
-    if not await sup.retry(server_id):
+    # Re-validate against the committed row at the LAST decision point — inside the
+    # supervisor's unit lock, just before it stops the unit: retry isn't a DB write
+    # (the config lock doesn't govern it), so this hook is what keeps a former
+    # owner's queued retry from bouncing a just-reassigned server.
+    def _authorize() -> None:
+        if not _visible_now(server_id, principal):
+            raise HTTPException(status_code=404, detail="server not found")
+
+    if not await sup.retry(server_id, authorized=_authorize):
         raise HTTPException(status_code=409, detail="server is no longer retryable")
     return _summary(server, sup, session, base_url(request))
 

@@ -496,6 +496,11 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     operator's browser to. Raises on a discovery/registration failure or timeout."""
     _reap_stale()
     _cancel_existing(server.id)
+    # Snapshot the row's existence BEFORE any await: a deletion landing during the
+    # client-info/token-store reads below must still read as "existed at begin", so
+    # promotion blocks (_promotion_blocked) instead of recreating an orphan
+    # credential file for the deleted server.
+    row_existed, _ = _server_row_state(server.id)
 
     real = ServerTokenStorage(server.id)
     redirect_uris = [AnyHttpUrl(callback_url)]
@@ -550,7 +555,6 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         scope=server.oauth_scopes or None,
     )
 
-    row_existed, _ = _server_row_state(server.id)
     pending = _Pending(
         server.id, owner_id=getattr(server, "owner_id", None), row_existed=row_existed
     )
