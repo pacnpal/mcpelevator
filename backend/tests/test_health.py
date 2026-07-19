@@ -10,23 +10,20 @@ simulate running/not-running deterministically.
 
 from __future__ import annotations
 
+from functools import partial
+
 from fastapi.testclient import TestClient
 
-from app.main import app
+from conftest import LOOPBACK, create_server
 
-LOOPBACK = {"host": "127.0.0.1"}
+from app.main import app
 
 # Fields that must never appear in a public health response — they're privileged
 # diagnostics/inventory that belong behind the gated control plane (/api/servers).
 _PRIVILEGED_FIELDS = {"state", "last_error", "enabled", "pid", "port"}
 
 
-def _create_server(client: TestClient) -> dict:
-    r = client.post(
-        "/api/servers", json={"name": "h", "command": "echo"}, headers=LOOPBACK
-    )
-    assert r.status_code == 201, r.text
-    return r.json()
+_create_server = partial(create_server, name="h")
 
 
 def test_control_plane_health_is_unchanged():

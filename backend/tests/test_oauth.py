@@ -19,12 +19,13 @@ import pytest
 from fastapi.testclient import TestClient
 from mcp.shared.auth import OAuthToken
 
+from conftest import LOOPBACK
+
 from app.auth import oauth_flow
 from app.auth.oauth_store import ServerTokenStorage
 from app.main import app
 from app.registry import service
 
-LOOPBACK = {"host": "127.0.0.1"}
 
 
 # --------------------------------------------------------------------------- #

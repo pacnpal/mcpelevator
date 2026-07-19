@@ -576,6 +576,3 @@ class ServerUnit:
         if self.proc is None or self.proc.returncode is not None:
             return None
         return self.proc.pid
-
-    def is_dead(self) -> bool:
-        return self.proc is None or self.proc.returncode is not None

@@ -14,7 +14,7 @@ to a clean 502.
 from __future__ import annotations
 
 import time
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol
 
 import httpx
 
@@ -128,14 +128,7 @@ class TTLCache:
                 self._store.pop(oldest, None)
         self._store[key] = (time.monotonic() + self._ttl, value)
 
-    def clear(self) -> None:
-        """
-        Clear all cached entries.
-        """
-        self._store.clear()
 
-
-@runtime_checkable
 class Source(Protocol):
     """One upstream MCP directory.
 

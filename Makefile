@@ -1,4 +1,4 @@
-.PHONY: dev-backend dev-frontend build test lock docker fmt
+.PHONY: dev-backend dev-frontend build test lock docker
 
 # Run the backend control plane with autoreload (http://127.0.0.1:8080).
 dev-backend:

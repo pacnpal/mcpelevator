@@ -47,43 +47,40 @@ from app.supervisor.supervisor import Supervisor
 _UNSET = object()
 
 
-def _bootstrap_private_lan() -> None:
-    """Seed the ``allow_private_lan`` runtime setting from ``MCPE_ALLOW_PRIVATE_LAN``
-    on first boot, so a headless box (no loopback browser to reach the UI) can enable
-    LAN access declaratively. Seeds only when the setting has never been written, so a
-    later UI toggle stays authoritative across restarts. Runs before the control-plane
-    bootstrap so the minted admin token reflects the now-on enforcement."""
-    if not get_settings().allow_private_lan:
+def _seed_setting_from_env(enabled: bool, key: str, message: str) -> None:
+    """Seed a runtime setting from its ``MCPE_*`` env flag on first boot, so a headless
+    box (no loopback browser to reach the UI) can enable it declaratively. Seeds only
+    when the setting has never been written, so a later UI toggle stays authoritative
+    across restarts."""
+    if not enabled:
         return
     with Session(get_engine()) as session:
-        if repo.setting_get(session, "allow_private_lan", _UNSET) is _UNSET:
-            runtime_settings.write(session, {"allow_private_lan": True})
-            # The control-plane bootstrap below prints a 127.0.0.1 login URL (base_url
-            # rewrites the 0.0.0.0 bind to loopback). That's wrong for a LAN device
-            # reading these logs, so point at the box's own LAN address instead.
-            port = get_settings().port
-            print(
-                f"[mcpelevator] MCPE_ALLOW_PRIVATE_LAN set — LAN access enabled. "
-                f"Log in from a LAN device at  http://<this-box-LAN-IP>:{port}/login  "
-                f"(see the admin-token notice below).",
-                flush=True,
-            )
+        if repo.setting_get(session, key, _UNSET) is _UNSET:
+            runtime_settings.write(session, {key: True})
+            print(message, flush=True)
+
+
+def _bootstrap_private_lan() -> None:
+    # Runs before the control-plane bootstrap so the minted admin token reflects the
+    # now-on enforcement. That bootstrap prints a 127.0.0.1 login URL (base_url rewrites
+    # the 0.0.0.0 bind to loopback) — wrong for a LAN device reading these logs, so
+    # point at the box's own LAN address instead.
+    _seed_setting_from_env(
+        get_settings().allow_private_lan,
+        "allow_private_lan",
+        f"[mcpelevator] MCPE_ALLOW_PRIVATE_LAN set — LAN access enabled. "
+        f"Log in from a LAN device at  http://<this-box-LAN-IP>:{get_settings().port}/login  "
+        f"(see the admin-token notice below).",
+    )
 
 
 def _bootstrap_docker_runner() -> None:
-    """Seed the ``docker_runner`` runtime setting from ``MCPE_DOCKER_RUNNER`` on first boot,
-    so a headless box can enable the (root-equivalent) docker runner declaratively. Seeds
-    only when the setting has never been written; a later UI toggle stays authoritative."""
-    if not get_settings().docker_runner:
-        return
-    with Session(get_engine()) as session:
-        if repo.setting_get(session, "docker_runner", _UNSET) is _UNSET:
-            runtime_settings.write(session, {"docker_runner": True})
-            print(
-                "[mcpelevator] MCPE_DOCKER_RUNNER set — docker runner enabled "
-                "(root-equivalent; runs images on the mounted Docker daemon).",
-                flush=True,
-            )
+    _seed_setting_from_env(
+        get_settings().docker_runner,
+        "docker_runner",
+        "[mcpelevator] MCPE_DOCKER_RUNNER set — docker runner enabled "
+        "(root-equivalent; runs images on the mounted Docker daemon).",
+    )
 
 
 def _bootstrap_control_plane_auth() -> None:

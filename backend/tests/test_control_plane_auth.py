@@ -11,23 +11,11 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
+from conftest import LOOPBACK, mint_token as _mint
+
 from app.db import get_engine, init_db, repo
-from app.db.models import Token
 from app.main import app
 from app.registry import settings as runtime_settings
-from app.util import hash_token, new_id, new_token
-
-LOOPBACK = {"host": "127.0.0.1"}  # passes the allowlist (TestClient peer is loopback)
-
-
-def _mint(scope: str) -> str:
-    """Insert a token of the given scope into the shared DB; return the plaintext."""
-    raw = new_token()
-    with Session(get_engine()) as s:
-        repo.create_token(
-            s, Token(id=new_id(), name=scope, token_hash=hash_token(raw), prefix=raw[:12], scope=scope)
-        )
-    return raw
 
 
 def _reset() -> None:
@@ -302,7 +290,9 @@ def test_allow_private_lan_env_does_not_override_a_user_choice(monkeypatch):
     try:
         with Session(get_engine()) as s:
             runtime_settings.write(s, {"allow_private_lan": False})  # explicit user choice
-        monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(allow_private_lan=True))
+        monkeypatch.setattr(
+            main, "get_settings", lambda: SimpleNamespace(allow_private_lan=True, port=8080)
+        )
         main._bootstrap_private_lan()  # row exists -> no reseed
         with Session(get_engine()) as s:
             assert runtime_settings.allow_private_lan(s) is False

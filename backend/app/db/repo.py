@@ -133,17 +133,6 @@ def setting_get(session: Session, key: str, default: Any = None) -> Any:
     return json.loads(row.value)
 
 
-def setting_set(session: Session, key: str, value: Any) -> None:
-    row = session.get(Setting, key)
-    encoded = json.dumps(value)
-    if row is None:
-        row = Setting(key=key, value=encoded)
-    else:
-        row.value = encoded
-    session.add(row)
-    session.commit()
-
-
 def setting_set_many(
     session: Session,
     items: dict[str, Any],

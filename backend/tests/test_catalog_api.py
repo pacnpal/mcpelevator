@@ -9,10 +9,11 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import LOOPBACK
+
 from app.catalog import base, registry
 from app.main import app
 
-LOOPBACK = {"host": "127.0.0.1"}
 
 # A registry list page (wrapped entries) and a detail document.
 _OFFICIAL_LIST = {
@@ -68,7 +69,7 @@ def _clear_cache():
         for src in registry.SOURCES.values():
             cache = getattr(src, "_cache", None)
             if cache is not None:
-                cache.clear()
+                cache._store.clear()
 
     clear()
     yield
