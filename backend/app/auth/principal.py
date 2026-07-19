@@ -34,6 +34,15 @@ ROLE_MEMBER = "member"
 _UNRESOLVED = object()
 
 
+def _effective_local_runners(user) -> bool:
+    """EFFECTIVE permission, not the stored flag: policy permits every runner for
+    admins regardless of the flag, and the SPA renders from this field — the two
+    must agree, or an admin whose row happens to hold false gets a crippled form.
+    The ONE calculation both resolution paths use (same discipline as
+    ``is_env_admin_token``), so they can never disagree."""
+    return bool(user.local_runners) or user.role == ROLE_ADMIN
+
+
 @dataclass(frozen=True)
 class Principal:
     """The resolved control-plane caller. ``user_id`` is None for the synthetic
@@ -105,11 +114,7 @@ def _resolve_uncached(request: Request, session: Session) -> Optional[Principal]
             if user is not None:
                 return Principal(
                     user_id=user.id, name=user.name, role=user.role,
-                    # EFFECTIVE permission, not the stored flag: policy permits
-                    # every runner for admins regardless of the flag, and the SPA
-                    # renders from this field — the two must agree, or an admin
-                    # whose row happens to hold false gets a crippled form.
-                    local_runners=bool(user.local_runners) or user.role == ROLE_ADMIN,
+                    local_runners=_effective_local_runners(user),
                 )
             # else: dangling credential — fail closed (enforcement is on here).
     return None
@@ -131,7 +136,7 @@ def refresh(session: Session, principal: Principal) -> Optional[Principal]:
         return None
     return Principal(
         user_id=user.id, name=user.name, role=user.role,
-        local_runners=bool(user.local_runners) or user.role == ROLE_ADMIN,
+        local_runners=_effective_local_runners(user),
     )
 
 

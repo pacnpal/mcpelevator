@@ -22,11 +22,11 @@ from app.util import hash_token, new_id, new_token
 router = APIRouter()
 
 
-def _info(session: Session, t: Token) -> TokenInfo:
-    user = repo.get_user(session, t.user_id) if t.user_id else None
+def _info(t: Token, owner_names: dict[str, str]) -> TokenInfo:
     return TokenInfo(
         id=t.id, name=t.name, prefix=t.prefix, scope=t.scope,
-        user_id=t.user_id, user_name=user.name if user else None,
+        user_id=t.user_id,
+        user_name=owner_names.get(t.user_id) if t.user_id else None,
         created_at=t.created_at,
     )
 
@@ -37,7 +37,9 @@ async def list_tokens(
     principal: Principal = Depends(current_principal),
 ):
     tokens = policy.visible_tokens(principal, repo.list_tokens(session))
-    return [_info(session, t) for t in tokens]
+    # Owner names bulk-loaded once (like the users listing) — not one get_user per row.
+    names = {u.id: u.name for u in repo.list_users(session)}
+    return [_info(t, names) for t in tokens]
 
 
 @router.post("/tokens", response_model=TokenCreated, status_code=201)

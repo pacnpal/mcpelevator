@@ -111,8 +111,9 @@ class Server(SQLModel, table=True):
     # Ownership: the User who created (or was assigned) this server. NULL means
     # admin-owned — the deterministic upgrade default (pre-multi-user rows migrate
     # to NULL), visible to admins only. Excluded from config_hash — reassigning an
-    # owner must not bounce a running bridge.
-    owner_id: Optional[str] = None
+    # owner must not bounce a running bridge. Indexed: every member request
+    # filters on it (visibility), as does count_servers_owned.
+    owner_id: Optional[str] = Field(default=None, index=True)
 
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -161,6 +162,7 @@ class Token(SQLModel, table=True):
     # The User this token belongs to. For scope="control" this IS the login
     # credential's identity: NULL resolves to admin (legacy tokens minted before
     # multi-user, and boot/recovery mints, keep full power). For data-plane scopes
-    # it records who minted the token, so members manage only their own.
-    user_id: Optional[str] = None
+    # it records who minted the token, so members manage only their own. Indexed:
+    # token visibility and per-user revocation sweeps filter on it.
+    user_id: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow)

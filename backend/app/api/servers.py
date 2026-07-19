@@ -140,6 +140,17 @@ def _fresh(session: Session, principal: Principal) -> Principal:
     return fresh
 
 
+def _visible_now(server_id: str, principal: Principal) -> bool:
+    """Is the server visible to the principal RIGHT NOW, judged on a fresh session
+    (committed truth, no request-session identity map)? For revalidating after an
+    await — a long playground call, a supervisor stop, a live log stream — where an
+    owner reassignment may have landed since the entry-time check."""
+    with Session(get_engine()) as check:
+        row = repo.get_server(check, server_id)
+        fresh = principal_mod.refresh(check, principal)
+        return row is not None and fresh is not None and policy.can_view_server(fresh, row)
+
+
 def _set_enabled_visible(
     session: Session, server_id: str, principal: Principal, enabled: bool
 ) -> Server:
@@ -710,6 +721,11 @@ async def retry_server(
     state, _, _, _, _, startup_status = _live_state(server, sup, session)
     if startup_status is not None or state not in ("failed", "unhealthy"):
         raise HTTPException(status_code=409, detail="server is not in a retryable state")
+    # Re-validate against the committed row just before acting: retry isn't a DB
+    # write (the config lock doesn't govern it), so this fresh check is what keeps
+    # a former owner's queued retry from bouncing a just-reassigned server.
+    if not _visible_now(server_id, principal):
+        raise HTTPException(status_code=404, detail="server not found")
     if not await sup.retry(server_id):
         raise HTTPException(status_code=409, detail="server is no longer retryable")
     return _summary(server, sup, session, base_url(request))
@@ -810,6 +826,12 @@ async def call_server_tool(
         raise HTTPException(status_code=502, detail=f"tool call failed: {exc}") from exc
     finally:
         sup.request_finished(server_id)
+    # A tool call may run for up to 300s — long enough for an owner reassignment
+    # to land. Re-validate before RETURNING the output: a former owner must not
+    # receive the new owner's server results; the response is discarded with the
+    # standard non-visible 404.
+    if not _visible_now(server_id, principal):
+        raise HTTPException(status_code=404, detail="server not found")
     structured = result.structured_content
     return ToolCallResult(
         is_error=bool(result.is_error),
@@ -846,13 +868,6 @@ async def stream_logs(
         "X-Accel-Buffering": "no",  # don't let any intermediary buffer the stream
     }
 
-    def _still_visible() -> bool:
-        # Fresh session per check: the committed truth, no identity-map staleness.
-        with Session(get_engine()) as check:
-            row = repo.get_server(check, server_id)
-            fresh = principal_mod.refresh(check, principal)
-            return row is not None and fresh is not None and policy.can_view_server(fresh, row)
-
     async def events():
         unit = sup.unit(server_id)
         if unit is None:
@@ -875,7 +890,7 @@ async def stream_logs(
                 if await request.is_disconnected() or sup.unit(server_id) is not unit:
                     break
                 if time.monotonic() - last_check > _RECHECK_S:
-                    if not _still_visible():
+                    if not _visible_now(server_id, principal):
                         break
                     last_check = time.monotonic()
                 try:

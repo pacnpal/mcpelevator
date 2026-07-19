@@ -33,6 +33,7 @@ def init_db() -> None:
     engine = get_engine()
     SQLModel.metadata.create_all(engine)
     _add_missing_columns(engine)
+    _create_missing_indexes(engine)
 
 
 def _sql_literal(value: Any) -> str:
@@ -89,6 +90,16 @@ def _add_missing_columns(engine) -> None:
                         f"{col_type}{not_null} DEFAULT {_column_default(col)}"
                     )
                 )
+
+
+def _create_missing_indexes(engine) -> None:
+    """Forward-only companion to ``_add_missing_columns``: ``create_all`` builds
+    indexes only for tables IT creates, so a model index declared on a column that
+    reaches an existing table via ADD COLUMN (e.g. ``server.owner_id``) would never
+    materialize on upgraded databases. ``checkfirst`` makes this idempotent."""
+    for table in SQLModel.metadata.sorted_tables:
+        for index in table.indexes:
+            index.create(engine, checkfirst=True)
 
 
 def get_session() -> Iterator[Session]:
