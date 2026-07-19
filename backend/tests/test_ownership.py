@@ -170,6 +170,23 @@ def test_owner_reassignment_is_admin_only():
             assert client.patch(
                 f"/api/servers/{mine['id']}", json={"owner_id": "nope"}, headers=admin
             ).status_code == 400
+
+            # Reassigning AWAY revokes the former owner's data-plane tokens for
+            # that server (their access is gone; their tokens must not linger),
+            # while an admin-minted token for the same server survives.
+            member_tok = client.post(
+                "/api/tokens", json={"name": "m", "scope": mine["id"]}, headers=member
+            ).json()
+            admin_tok = client.post(
+                "/api/tokens", json={"name": "a", "scope": mine["id"]}, headers=admin
+            ).json()
+            r = client.patch(
+                f"/api/servers/{mine['id']}", json={"owner_id": None}, headers=admin
+            )
+            assert r.status_code == 200 and r.json()["owner_id"] is None
+            remaining = {t["id"] for t in client.get("/api/tokens", headers=admin).json()}
+            assert member_tok["id"] not in remaining
+            assert admin_tok["id"] in remaining
         finally:
             _reset()
 
@@ -232,5 +249,24 @@ def test_member_import_skips_local_entries():
             assert body["created"][0]["owner_id"] == uid
             assert [s["name"] for s in body["skipped"]] == ["loc"]
             assert "local-runner" in body["skipped"][0]["reason"]
+        finally:
+            _reset()
+
+
+def test_permitted_member_import_owns_local_entries():
+    """Regression: the local-import branch must stamp the importer as owner too —
+    a NULL owner would make the created row vanish from the member's own list."""
+    with TestClient(app) as client:
+        try:
+            _, member, uid = _setup(client, local_runners=True)
+            payload = {"mcpServers": {"loc": {"command": "npx", "args": ["-y", "x"]}}}
+            r = client.post("/api/servers/import", json=payload, headers=member)
+            assert r.status_code == 201, r.text
+            created = r.json()["created"]
+            assert [s["name"] for s in created] == ["loc"]
+            assert created[0]["owner_id"] == uid
+            assert client.get(
+                f"/api/servers/{created[0]['id']}", headers=member
+            ).status_code == 200
         finally:
             _reset()

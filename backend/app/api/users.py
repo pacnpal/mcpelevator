@@ -15,6 +15,8 @@ token guard on token deletes.
 
 from __future__ import annotations
 
+from collections import Counter
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 from starlette.responses import Response
@@ -29,17 +31,46 @@ from app.util import hash_token, new_id, new_token
 router = APIRouter(dependencies=[Depends(require_admin)])
 
 
-def _info(session: Session, user: User) -> UserInfo:
-    tokens = [t for t in repo.list_tokens(session) if t.user_id == user.id]
+def _info(
+    session: Session,
+    user: User,
+    *,
+    servers_count: int | None = None,
+    tokens_count: int | None = None,
+) -> UserInfo:
+    """One user's API shape. The counts default to per-user queries (fine for the
+    single-user endpoints); ``list_users`` passes bulk-computed values instead so
+    listing N users costs a constant number of queries, not 2N+1."""
+    if tokens_count is None:
+        tokens_count = sum(1 for t in repo.list_tokens(session) if t.user_id == user.id)
+    if servers_count is None:
+        servers_count = repo.count_servers_owned(session, user.id)
     return UserInfo(
         id=user.id,
         name=user.name,
         role=user.role,
         local_runners=bool(user.local_runners),
-        servers_count=repo.count_servers_owned(session, user.id),
-        tokens_count=len(tokens),
+        servers_count=servers_count,
+        tokens_count=tokens_count,
         created_at=user.created_at,
     )
+
+
+def _overprivileged_token_ids(session: Session, user_id: str) -> list[str]:
+    """The user's data-plane tokens a MEMBER could not have minted: "all", any
+    group scope, and server scopes for servers they don't own. Control tokens are
+    excluded — they are the login itself and follow the user's current role."""
+    ids: list[str] = []
+    for token in repo.list_tokens(session):
+        if token.user_id != user_id or token.scope == "control":
+            continue
+        if token.scope == "all" or token.scope.startswith("group:"):
+            ids.append(token.id)
+            continue
+        server = repo.get_server(session, token.scope)
+        if server is None or server.owner_id != user_id:
+            ids.append(token.id)
+    return ids
 
 
 def _admin_login_would_remain(session: Session, *, excluding_user_id: str) -> bool:
@@ -52,7 +83,21 @@ def _admin_login_would_remain(session: Session, *, excluding_user_id: str) -> bo
 
 @router.get("/users", response_model=list[UserInfo])
 async def list_users(session: Session = Depends(get_session)):
-    return [_info(session, u) for u in repo.list_users(session)]
+    servers_by_user = Counter(
+        s.owner_id for s in repo.list_servers(session) if s.owner_id is not None
+    )
+    tokens_by_user = Counter(
+        t.user_id for t in repo.list_tokens(session) if t.user_id is not None
+    )
+    return [
+        _info(
+            session,
+            u,
+            servers_count=servers_by_user.get(u.id, 0),
+            tokens_count=tokens_by_user.get(u.id, 0),
+        )
+        for u in repo.list_users(session)
+    ]
 
 
 @router.post("/users", response_model=UserInfo, status_code=201)
@@ -83,6 +128,17 @@ async def update_user(
             raise HTTPException(
                 status_code=409,
                 detail="cannot demote the last admin — no other admin login would remain",
+            )
+        if user.role == "admin" and payload.role == "member":
+            # Demotion revokes the data-plane tokens the user could only mint AS an
+            # admin ("all", group scopes, and scopes for servers they don't own) —
+            # otherwise those tokens would keep authorizing endpoints the member
+            # role can't reach. Revoke BEFORE the role save so an interruption
+            # leaves the benign state (an admin with fewer tokens), never a member
+            # holding admin-grade credentials. Login (control) tokens stay: they
+            # simply resolve to the member role from now on.
+            repo.delete_tokens_by_ids(
+                session, _overprivileged_token_ids(session, user.id)
             )
         user.role = payload.role
     if payload.local_runners is not None:

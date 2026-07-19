@@ -345,8 +345,21 @@ async def update_server(
     if owner_change_requested:
         # After the config write succeeded: owner is identity, applied via its own
         # narrow writer (no updated_at bump, no config_hash change, no bridge bounce).
+        old_owner = existing_row.owner_id
         repo.set_owner(session, server_id, new_owner)
         server.owner_id = new_owner
+        if old_owner is not None and old_owner != new_owner:
+            # Reassigning revokes the FORMER owner's data-plane tokens for this
+            # server: they can no longer see or manage it, so a token they minted
+            # must not keep authorizing its /s endpoint. Tokens minted by admins
+            # (user_id NULL or another user) are untouched — those are deliberate
+            # grants, not the former owner's self-service.
+            stale = [
+                t.id
+                for t in repo.list_tokens(session)
+                if t.user_id == old_owner and t.scope == server_id
+            ]
+            repo.delete_tokens_by_ids(session, stale)
     return _summary(server, sup, session, base_url(request))
 
 

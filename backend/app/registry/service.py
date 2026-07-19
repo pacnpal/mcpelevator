@@ -1943,6 +1943,7 @@ def import_mcp_servers(
                     env=dict(entry.get("env") or {}),
                     source="import",
                     enabled=False,
+                    owner_id=owner_id,
                     warnings_sink=sink,
                 )
             )

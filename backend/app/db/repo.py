@@ -208,6 +208,22 @@ def delete_tokens_by_scope(session: Session, scope: str) -> int:
     return len(tokens)
 
 
+def delete_tokens_by_ids(session: Session, token_ids: list[str]) -> int:
+    """Hard-delete the given tokens in one transaction; returns the count removed.
+    Used for policy-driven revocations (owner reassignment, admin demotion) where
+    the caller has already decided WHICH rows lose validity — keeping the decision
+    in the policy layer and the write here, like every other SSOT mutation."""
+    removed = 0
+    for token_id in token_ids:
+        token = session.get(Token, token_id)
+        if token is not None:
+            session.delete(token)
+            removed += 1
+    if removed:
+        session.commit()
+    return removed
+
+
 def delete_token(
     session: Session,
     token_id: str,
@@ -219,19 +235,20 @@ def delete_token(
     When ``protect_last_control`` is given, the row is removed and the write lock taken
     (``flush``) *before* the predicate runs, so a concurrent settings change that just
     turned enforcement on is already visible (SQLite serializes writers). If the
-    predicate then returns True and no control token would remain, the transaction is
-    rolled back and 'last_control' is returned. This keeps the last admin token from
-    being deleted out from under enforcement, both for two concurrent deletes and for a
-    delete racing a settings change that enables enforcement."""
+    predicate then returns True and no ADMIN-capable control token would remain
+    (``admin_credential_exists`` — a member's login token is also ``control``-scoped
+    but must NOT satisfy the guard, or deleting the last admin credential would strand
+    the box with only member logins), the transaction is rolled back and 'last_control'
+    is returned. This keeps the last admin credential from being deleted out from under
+    enforcement, both for two concurrent deletes and for a delete racing a settings
+    change that enables enforcement."""
     token = session.get(Token, token_id)
     if token is None:
         return "not_found"
     session.delete(token)
     if token.scope == "control" and protect_last_control is not None:
         session.flush()  # take the write lock before re-reading enforcement state
-        if protect_last_control(session) and (
-            session.exec(select(Token).where(Token.scope == "control")).first() is None
-        ):
+        if protect_last_control(session) and not admin_credential_exists(session):
             session.rollback()
             return "last_control"
     session.commit()

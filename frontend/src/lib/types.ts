@@ -162,6 +162,9 @@ export interface ServerCreate {
  */
 export type ServerUpdate = Partial<Omit<ServerCreate, 'enabled'>> & {
 	slug?: string;
+	/** Admin-only: reassign the owning user (null = admin-owned). Reassigning
+	 * revokes the former owner's data-plane tokens for this server. */
+	owner_id?: string | null;
 };
 
 /** A single entry the importer declined to create, with a human reason. */

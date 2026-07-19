@@ -169,6 +169,75 @@ def test_last_admin_credential_guard():
             _reset()
 
 
+def test_demotion_revokes_overprivileged_tokens():
+    """admin -> member revokes the data-plane tokens only an admin could mint
+    ("all", group scopes, foreign-server scopes) while keeping the login token
+    and tokens for servers the user owns."""
+    with TestClient(app) as client:
+        try:
+            admin = _enforce()
+            a = client.post(
+                "/api/users", json={"name": "Ann", "role": "admin"}, headers=admin
+            ).json()
+            cred = client.post(f"/api/users/{a['id']}/credentials", headers=admin).json()["token"]
+            ann = _bearer(cred)
+            # Ann (as admin) mints an all-scoped token and one for a server she owns.
+            r = client.post(
+                "/api/servers",
+                json={"name": "anns", "runner": "remote", "command": "http://127.0.0.1:9/mcp"},
+                headers=ann,
+            )
+            own_server = r.json()["id"]
+            wide = client.post(
+                "/api/tokens", json={"name": "wide", "scope": "all"}, headers=ann
+            ).json()
+            own = client.post(
+                "/api/tokens", json={"name": "own", "scope": own_server}, headers=ann
+            ).json()
+
+            r = client.patch(f"/api/users/{a['id']}", json={"role": "member"}, headers=admin)
+            assert r.status_code == 200, r.text
+            remaining = {t["id"] for t in client.get("/api/tokens", headers=admin).json()}
+            assert wide["id"] not in remaining  # admin-grade scope: revoked
+            assert own["id"] in remaining  # a member could mint this: kept
+            # The login credential survives and now resolves to the member role.
+            status = client.get("/api/auth/status", headers=ann).json()
+            assert status["authenticated"] is True and status["user"]["role"] == "member"
+        finally:
+            _reset()
+
+
+def test_member_login_token_does_not_satisfy_last_control_guard():
+    """Regression: the token-delete guard must protect the last ADMIN credential.
+    A member's login token is also control-scoped, but it must not count — deleting
+    the last admin token while only member logins remain would strand the box."""
+    with TestClient(app) as client:
+        try:
+            admin = _enforce()  # one legacy (user-less => admin) control token
+            uid = client.post(
+                "/api/users", json={"name": "Mel", "role": "member"}, headers=admin
+            ).json()["id"]
+            client.post(f"/api/users/{uid}/credentials", headers=admin)  # member login token
+
+            tokens = client.get("/api/tokens", headers=admin).json()
+            admin_token_id = next(t["id"] for t in tokens if t["user_id"] is None)
+            # The member's control token exists, but deleting the only ADMIN
+            # credential is still refused.
+            r = client.delete(f"/api/tokens/{admin_token_id}", headers=admin)
+            assert r.status_code == 409
+
+            # A second ADMIN credential (an admin user with a login token) lifts it.
+            aid = client.post(
+                "/api/users", json={"name": "Ann", "role": "admin"}, headers=admin
+            ).json()["id"]
+            client.post(f"/api/users/{aid}/credentials", headers=admin)
+            assert client.delete(
+                f"/api/tokens/{admin_token_id}", headers=admin
+            ).status_code == 204
+        finally:
+            _reset()
+
+
 def test_dangling_user_credential_fails_closed():
     """A control token whose user row is gone must not authenticate (the gate and
     principal resolution agree)."""

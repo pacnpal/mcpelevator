@@ -30,6 +30,9 @@ from app.util import hash_token
 ROLE_ADMIN = "admin"
 ROLE_MEMBER = "member"
 
+# Sentinel distinguishing "not yet resolved this request" from a cached None.
+_UNRESOLVED = object()
+
 
 @dataclass(frozen=True)
 class Principal:
@@ -62,7 +65,20 @@ def _bearer(request: Request) -> str:
 def resolve(request: Request, session: Session) -> Optional[Principal]:
     """The request's principal, or None when it carries no usable control
     credential. Pure classification — never raises — so the auth-status endpoint
-    and the gating dependency share one decision."""
+    and the gating dependency share one decision.
+
+    Memoized on ``request.state`` (identity can't change mid-request — the header
+    is fixed), so a gated handler that both passes the gate and asks for the
+    principal costs one token/user lookup, not two."""
+    cached = getattr(request.state, "mcpe_principal", _UNRESOLVED)
+    if cached is not _UNRESOLVED:
+        return cached
+    principal = _resolve_uncached(request, session)
+    request.state.mcpe_principal = principal
+    return principal
+
+
+def _resolve_uncached(request: Request, session: Session) -> Optional[Principal]:
     from app.auth.control_plane import (  # circular-import guard
         enforcement_enabled,
         is_env_admin_token,
