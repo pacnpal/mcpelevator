@@ -46,6 +46,9 @@ export function shouldPollFast(server: StartupServer): boolean {
 		return true;
 	}
 	if (server.state === 'failed' || server.state === 'unhealthy') return false;
+	// "idle" is a stable resting state (deliberately quiesced, wakes on demand) —
+	// slow-poll it like running/stopped, not like a transition.
+	if (server.state === 'idle') return false;
 	return server.enabled ? server.state !== 'running' : server.state !== 'stopped';
 }
 

@@ -61,6 +61,11 @@ DEFAULTS: dict[str, Any] = {
     # servers, with normal bearer scope semantics — one endpoint for OAuth humans
     # and token-carrying automation. Off by default: pure-OAuth unless opted in.
     "oauth_accept_bearer": False,
+    # Default idle quiescence in SECONDS for servers whose own idle_timeout_s is
+    # unset: after this long with no proxy traffic the supervisor stops the bridge
+    # (state "idle") and the proxy restarts it on the next request. 0 (the default)
+    # disables idling, so existing installs keep today's always-running behavior.
+    "idle_timeout_s": 0,
 }
 
 
@@ -192,6 +197,10 @@ def write(
             value = deduped
         if key == "oauth_accept_bearer" and not isinstance(value, bool):
             raise ValueError(f"invalid oauth_accept_bearer: {value!r}")
+        if key == "idle_timeout_s":
+            # bool is an int subclass — reject it explicitly so `true` can't store as 1.
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"invalid idle_timeout_s: {value!r} (seconds, ≥ 0)")
         if key == "oauth_scopes":
             if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
                 raise ValueError(f"invalid oauth_scopes: {value!r}")
@@ -249,6 +258,11 @@ def allow_private_lan(session: Session) -> bool:
 
 def docker_runner(session: Session) -> bool:
     return repo.setting_get(session, "docker_runner", DEFAULTS["docker_runner"])
+
+
+def idle_timeout_s(session: Session) -> int:
+    """Global default idle-quiescence window in seconds (0 = idling disabled)."""
+    return repo.setting_get(session, "idle_timeout_s", DEFAULTS["idle_timeout_s"])
 
 
 def groups(session: Session) -> dict[str, Any]:

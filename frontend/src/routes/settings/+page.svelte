@@ -60,6 +60,7 @@
 			oauthAllowedSubjects = s.oauth_allowed_subjects.join(', ');
 			oauthScopes = s.oauth_scopes.join(', ');
 			oauthAcceptBearer = s.oauth_accept_bearer;
+			idleTimeoutText = String(s.idle_timeout_s);
 			tokens = t;
 			servers = srv;
 			groups = grp;
@@ -384,6 +385,24 @@
 	function confirmEnableDockerRunner() {
 		confirmEnableDocker = false;
 		patchSettings({ docker_runner: true }, 'docker_runner');
+	}
+
+	// ---- Idle shutdown (wake-on-request) ----------------------------------------
+	// Global default for servers whose own idle timeout is unset. 0 = off (today's
+	// always-running behavior). Edited as text, validated as a whole number.
+	let idleTimeoutText = $state('0');
+	const idleTimeoutValid = $derived(/^\d+$/.test(idleTimeoutText.trim()));
+	const idleTimeoutDirty = $derived(
+		settings !== null &&
+			idleTimeoutValid &&
+			Number(idleTimeoutText.trim()) !== settings.idle_timeout_s
+	);
+
+	async function saveIdleTimeout(e: SubmitEvent) {
+		e.preventDefault();
+		if (!settings || !idleTimeoutValid || savingField) return;
+		await patchSettings({ idle_timeout_s: Number(idleTimeoutText.trim()) }, 'idle_timeout_s');
+		if (settings) idleTimeoutText = String(settings.idle_timeout_s);
 	}
 
 	// ---- Groups (the /g/<name> registry) ----------------------------------------
@@ -1167,6 +1186,46 @@
 							</button>
 						</div>
 					</div>
+				{/if}
+			</fieldset>
+
+			<!-- Idle shutdown (wake-on-request) -->
+			<fieldset class="flex flex-col gap-2 border-0 p-0">
+				<legend class="text-sm font-medium text-[var(--color-ink)]">Idle shutdown</legend>
+				<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+					Stop a running server after this many seconds without traffic; the next request
+					wakes it automatically (the proxy holds the request while it starts). Saves memory
+					when many servers are registered but only a few are in use.
+					<code class="font-mono text-[var(--color-ink-muted)]">0</code> turns idling off.
+					Each server can override this in its own settings.
+				</p>
+				<form class="flex items-center gap-2" onsubmit={saveIdleTimeout}>
+					<input
+						type="text"
+						inputmode="numeric"
+						bind:value={idleTimeoutText}
+						autocomplete="off"
+						spellcheck="false"
+						aria-label="Default idle shutdown in seconds"
+						aria-invalid={!idleTimeoutValid}
+						class="w-32 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						style={idleTimeoutValid
+							? 'border-color: var(--color-line);'
+							: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+					/>
+					<span class="text-xs text-[var(--color-ink-dim)]">seconds</span>
+					<button
+						type="submit"
+						disabled={!idleTimeoutValid || !idleTimeoutDirty || savingField !== null}
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
+					>
+						Save
+					</button>
+				</form>
+				{#if !idleTimeoutValid}
+					<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+						Enter a whole number of seconds (0 turns idling off).
+					</p>
 				{/if}
 			</fieldset>
 

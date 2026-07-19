@@ -26,7 +26,8 @@ import type {
 	ServerUpdate,
 	SettingsInfo,
 	TokenCreated,
-	TokenInfo
+	TokenInfo,
+	ToolCallResult
 } from './types';
 
 const BASE = '/api';
@@ -279,6 +280,24 @@ export function retryServer(id: string): Promise<ServerSummary> {
 	return request<ServerSummary>(`/servers/${encodeURIComponent(id)}/retry`, {
 		method: 'POST'
 	});
+}
+
+/**
+ * Invoke one tool on a running server's bridge (the tool playground). Runs over
+ * the control plane, so no data-plane bearer token is needed. A tool's own
+ * failure comes back as `is_error` in a 200; a stopped server is a 409 and an
+ * unreachable bridge a 502.
+ */
+export function callServerTool(
+	id: string,
+	tool: string,
+	args: Record<string, unknown>
+): Promise<ToolCallResult> {
+	return jsonRequest<ToolCallResult>(
+		`/servers/${encodeURIComponent(id)}/tools/${encodeURIComponent(tool)}/call`,
+		'POST',
+		{ arguments: args }
+	);
 }
 
 export interface LogStreamHandlers {

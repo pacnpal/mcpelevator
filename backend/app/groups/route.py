@@ -69,6 +69,7 @@ class GroupDispatch:
         request = Request(scope, receive)
         with Session(get_engine()) as session:
             known = registry.exists(session, name)
+            member_ids = registry.resolve(session, name) if known else []
         if not known:
             # indistinguishable from a nonexistent slug (same shape as the proxy's 404)
             await Response("unknown group", status_code=404)(scope, receive, send)
@@ -84,6 +85,15 @@ class GroupDispatch:
             )
             await response(scope, receive, send)
             return
+
+        # Authenticated group traffic counts as activity for every member, so a
+        # running member serving through the bundle doesn't idle out underneath it.
+        # (Group requests don't WAKE idle members — the bundle mounts running
+        # members only, and remounting happens on the reconcile that follows a wake.)
+        supervisor = getattr(getattr(scope.get("app"), "state", None), "supervisor", None)
+        if supervisor is not None:
+            for member_id in member_ids or []:
+                supervisor.mark_activity(member_id)
 
         inner = self._hub.app_for(name)
         if inner is None:

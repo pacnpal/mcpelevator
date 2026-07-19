@@ -24,10 +24,15 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
 
 - **Desired-state reconciliation.** SQLite is the source of truth. A background supervisor task
   (`supervisor/`) converges running processes to the desired state (Kubernetes-style), so the
-  system is idempotent and survives restarts.
+  system is idempotent and survives restarts. It also owns **idle quiescence**: an enabled server
+  with no proxy traffic inside its idle window (per-server `idle_timeout_s`, else the
+  `idle_timeout_s` runtime setting; 0 = off) is stopped into an `idle` state, and the proxy wakes
+  it on the next `/s` request, holding the request until readiness (ADR-0002).
 - **One bridge process per enabled server** (`bridge/`, `runners/`): each runs its own uvicorn on
   a loopback port hosting a FastMCP proxy of the stdio command (or an upstream HTTP/SSE URL),
-  fault-isolated with a real PID and logs.
+  fault-isolated with a real PID and logs. When the server's `rest_openapi` exposure is on, the
+  same bridge also serves each tool as plain REST (`/rest/<tool>` + a generated
+  `/rest/openapi.json`), reached through the same `/s/<slug>/` proxy path and auth.
 - **Upstream OAuth** (`auth/oauth_store.py`, `auth/oauth_flow.py`): a `remote` server can
   authenticate to its upstream via OAuth instead of static `env` headers. The interactive
   authorization-code grant (DCR + PKCE) runs in the control plane (`/api/servers/{id}/oauth/authorize`

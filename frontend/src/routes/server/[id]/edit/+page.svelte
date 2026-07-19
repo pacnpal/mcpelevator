@@ -43,6 +43,7 @@
 					mcp_http: server.transports.mcp_http,
 					rest_openapi: server.transports.rest_openapi,
 					auth_provider: server.auth_provider,
+					idle_timeout_s: server.idle_timeout_s,
 					oauth: server.oauth,
 					oauth_scopes: server.oauth_scopes,
 					oauth_client_id: server.oauth_client_id

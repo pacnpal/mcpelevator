@@ -1520,6 +1520,18 @@ def _validate_slug(session: Session, raw: str, *, current_id: str) -> str:
     return slug
 
 
+def normalize_idle_timeout(value: Any) -> Optional[int]:
+    """Canonicalize a server's idle-quiescence override: ``None`` inherits the global
+    ``idle_timeout_s`` setting, ``0`` pins the server always-on, a positive int is the
+    window in seconds. bool is rejected explicitly (it's an int subclass, and ``true``
+    silently storing as 1 second would be a surprising near-instant idle)."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"invalid idle_timeout_s: {value!r} (seconds, ≥ 0)")
+    return value
+
+
 def _normalize_setup_script(runner: str, setup_script: str) -> str:
     if not setup_script.strip():
         return ""
@@ -1549,6 +1561,7 @@ def create_server(
     oauth_scopes: str = "",
     oauth_client_id: Optional[str] = None,
     oauth_client_secret: Optional[str] = None,
+    idle_timeout_s: Optional[int] = None,
     enabled: bool = False,
     source: str = "manual",
     warnings_sink: Optional[list[str]] = None,
@@ -1590,6 +1603,7 @@ def create_server(
             _require_docker_enabled(session)
     # Extra `docker run` options: validated for docker, forced empty elsewhere.
     run_args = normalize_run_args(runner, run_args)
+    idle_timeout_s = normalize_idle_timeout(idle_timeout_s)
 
     server = Server(
         id=new_id(),
@@ -1609,6 +1623,7 @@ def create_server(
         oauth_scopes=oauth_scopes,
         oauth_client_id=oauth_client_id,
         oauth_client_secret=oauth_client_secret,
+        idle_timeout_s=idle_timeout_s,
         enabled=enabled,
         source=source,
     )
@@ -1632,6 +1647,9 @@ _MUTABLE_FIELDS = {
     "oauth_scopes",
     "oauth_client_id",
     "oauth_client_secret",
+    # Like auth_provider, idle_timeout_s is enforced outside the bridge (by the
+    # supervisor), so it's mutable without entering config_hash — no restart on change.
+    "idle_timeout_s",
 }
 
 
@@ -1728,6 +1746,7 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     # commits this session later.
     try:
         server.run_args = normalize_run_args(server.runner, server.run_args)
+        server.idle_timeout_s = normalize_idle_timeout(server.idle_timeout_s)
     except ValueError:
         session.rollback()
         raise
@@ -1767,6 +1786,7 @@ def clone_server(session: Session, server_id: str, *, name: Optional[str] = None
         oauth_scopes=src.oauth_scopes or "",
         oauth_client_id=src.oauth_client_id,
         oauth_client_secret=src.oauth_client_secret,
+        idle_timeout_s=src.idle_timeout_s,
         enabled=False,
         source="clone",
     )

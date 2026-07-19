@@ -24,3 +24,11 @@ A runner whose upstream MCP server executes in mcpelevator's host environment. T
 **Setup script**:
 An optional multiline POSIX shell script attached to a Server. It prepares a local runner at the start of every Startup attempt and fails that attempt if an unhandled command fails; scripts must be safe to rerun. Files and other external effects persist, but shell-local state does not carry into the MCP child.
 _Avoid_: Setup commands, pre-start hook
+
+**Idle quiescence**:
+The supervisor stopping an enabled Server's bridge after its idle window passes with no authenticated proxy traffic. The Server's observed state is `idle`: still desired, deliberately not running, and wakeable.
+_Avoid_: Sleep, suspend, pause
+
+**Wake-on-request**:
+The proxy reactivating a quiesced Server when a request arrives for it, holding that request until the new activation is ready (or its startup window lapses).
+_Avoid_: Cold start, lazy start

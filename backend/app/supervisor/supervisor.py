@@ -66,6 +66,12 @@ class Supervisor:
         self.interval = settings.health_interval_s
         self.units: dict[str, ServerUnit] = {}
         self._activation_requests: dict[str, datetime] = {}
+        # Idle quiescence (wake-on-request): last proxy traffic per server, and the
+        # set of enabled servers deliberately stopped for inactivity. An id in
+        # ``_idle`` is DESIRED-but-quiesced — reconcile skips starting it until an
+        # activation request (the proxy's wake, or an operator action) clears it.
+        self._last_activity: dict[str, datetime] = {}
+        self._idle: set[str] = set()
         self._unit_lock = asyncio.Lock()
         self._nudge = asyncio.Event()
         self._stopping = False
@@ -118,6 +124,26 @@ class Supervisor:
     def cancel_activation_request(self, server_id: str) -> None:
         self._activation_requests.pop(server_id, None)
 
+    # --- idle quiescence (wake-on-request) -------------------------------- #
+
+    def mark_activity(self, server_id: str) -> None:
+        """Record proxy traffic for a server so the idle sweep doesn't quiesce it.
+        Called on every proxied /s request (and for each member on /g requests)."""
+        self._last_activity[server_id] = utcnow()
+
+    def is_idle(self, server_id: str) -> bool:
+        return server_id in self._idle
+
+    def wake(self, server_id: str) -> bool:
+        """Reactivate an idle server (the proxy's wake-on-request path). Returns
+        True when a wake was actually initiated — the caller may then await the
+        endpoint; False means the server wasn't idle (nothing to wake here)."""
+        if server_id not in self._idle:
+            return False
+        self.mark_activity(server_id)  # the wake IS activity — restart the idle clock
+        self.request_activation(server_id)
+        return True
+
     # --- start/stop a single unit ---------------------------------------- #
 
     async def _start(self, server, *, activation_started_at=None) -> None:
@@ -130,6 +156,9 @@ class Supervisor:
         )
         port = self.ports.allocate()
         self.units[server.id] = unit
+        # A fresh activation starts the idle clock: with no traffic ever, "idle since
+        # start" is measured from here, not from a stale pre-restart timestamp.
+        self._last_activity[server.id] = utcnow()
         try:
             await unit.start(port, activation_started_at=activation_started_at)
         except BaseException:
@@ -144,6 +173,10 @@ class Supervisor:
 
     async def stop(self, server_id: str) -> None:
         """Public stop (e.g. API-driven delete). Steady state is still reconciled."""
+        # An operator/API stop overrides quiescence bookkeeping: the server must not
+        # come back as "idle" (wakeable) after a delete/disable/disconnect.
+        self._idle.discard(server_id)
+        self._last_activity.pop(server_id, None)
         async with self._unit_lock:
             await self._stop(server_id)
 
@@ -179,6 +212,7 @@ class Supervisor:
         # session (``_write_runtime``) so a lock is only ever held for the duration of one row.
         with Session(get_engine()) as session:
             docker_on = runtime_settings.docker_runner(session)
+            default_idle = runtime_settings.idle_timeout_s(session)
             servers = list(repo.list_servers(session))
             disabled_runtime_stale = {}
             for server in servers:
@@ -265,10 +299,52 @@ class Supervisor:
                     tools=[],
                 )
 
+        # Quiescence bookkeeping only tracks desired servers: an id that left the
+        # desired set (disabled, deleted, forbidden) must not resume a stale idle
+        # marker on a later re-enable.
+        desired_ids = set(desired)
+        self._idle &= desired_ids
+        for server_id in list(self._last_activity):
+            if server_id not in desired_ids:
+                self._last_activity.pop(server_id, None)
+
         # start / restart desired
+        now = utcnow()
         for server_id, server in desired.items():
             unit = self.units.get(server_id)
             requested_at = self._activation_requests.pop(server_id, None)
+            if requested_at is not None:
+                # Any activation request (proxy wake, operator start/retry, config
+                # change) clears quiescence — the start path below takes over.
+                self._idle.discard(server_id)
+
+            # Idle sweep: a RUNNING unit whose idle window (per-server override, else
+            # the global default; 0 = never) has passed with no proxy traffic is
+            # quiesced — bridge stopped, state "idle", tools kept for the UI. The
+            # proxy wakes it on the next /s request.
+            timeout = (
+                server.idle_timeout_s if server.idle_timeout_s is not None else default_idle
+            )
+            if (
+                requested_at is None
+                and timeout > 0
+                and unit is not None
+                and unit.state == "running"
+            ):
+                last = self._last_activity.get(server_id)
+                if last is not None and (now - last).total_seconds() >= timeout:
+                    tools = unit.tools
+                    await self._stop(server_id)
+                    self._idle.add(server_id)
+                    self._write_runtime(
+                        server_id, state="idle", pid=None, port=None,
+                        last_error=None, restart_count=0, last_health=None, tools=tools,
+                    )
+                    continue
+
+            if server_id in self._idle:
+                continue  # desired but quiesced — stays down until a wake request
+
             start_error: Optional[str] = None
             if unit is None:
                 start_error = await self._try_start(server, activation_started_at=requested_at)

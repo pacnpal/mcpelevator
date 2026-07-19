@@ -48,7 +48,9 @@ async def health_summary(request: Request, session: Session = Depends(get_sessio
     for s in repo.list_servers(session):
         running = sup.endpoint(s.slug) is not None
         servers.append({"slug": s.slug, "running": running})
-        if s.enabled and not running:
+        # An idle server is intentionally quiesced and wakes on the next request,
+        # so it is not a failure — it must not degrade the overall status.
+        if s.enabled and not running and not sup.is_idle(s.id):
             ok = False
     return {"status": "ok" if ok else "degraded", "servers": servers}
 
@@ -68,7 +70,13 @@ async def health_slug(
     server = repo.get_server_by_slug(session, slug)
     if server is None:
         raise HTTPException(status_code=404, detail="unknown server")
-    running = request.app.state.supervisor.endpoint(server.slug) is not None
+    sup = request.app.state.supervisor
+    running = sup.endpoint(server.slug) is not None
+    if not running and sup.is_idle(server.id):
+        # Quiesced-but-wakeable: a request to /s/<slug> WILL be served (the proxy
+        # wakes the bridge and holds the request), so this is a passing status —
+        # a balancer must not eject the endpoint for being deliberately asleep.
+        return {"slug": server.slug, "running": False, "status": "idle"}
     body = {"slug": server.slug, "running": running, "status": "ok" if running else "unavailable"}
     if not running:
         return JSONResponse(status_code=503, content=body)

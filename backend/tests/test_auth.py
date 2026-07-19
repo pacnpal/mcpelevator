@@ -48,6 +48,7 @@ def test_settings_defaults_and_write(session):
         "oauth_allowed_subjects": [],
         "oauth_accept_bearer": False,
         "oauth_scopes": [],
+        "idle_timeout_s": 0,
     }
     runtime_settings.write(
         session,
