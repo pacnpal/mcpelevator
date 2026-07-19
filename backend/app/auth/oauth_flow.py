@@ -582,14 +582,25 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     persist_registration_to = (
         real if seed_client_info is None and (await real.get_tokens()) is None else None
     )
+    # The pending record carries the flow's begin-time snapshots (existence, owner,
+    # OAuth signature). Constructed BEFORE the ephemeral store so the registration
+    # pass-through below can be gated on the SAME judgment as token promotion.
+    pending = _Pending(
+        server.id,
+        owner_id=getattr(server, "owner_id", None),
+        row_existed=row_existed,
+        oauth_sig=_oauth_signature_of(server),
+    )
     mem = _MemoryTokenStorage(
         client_info=seed_client_info,
         persist_registration_to=persist_registration_to,
-        # Persist a fresh registration only while the server row still exists (the
-        # never-persisted test-harness exemption mirrors _promotion_blocked): a
-        # server deleted mid-flow must not get its cleared credential file
-        # recreated by the registration pass-through.
-        persist_allowed=lambda: not row_existed or _server_row(server.id) is not None,
+        # ONE judgment (_promotion_blocked) governs both this mid-flow write and
+        # the final token promotion: the row must still exist with the same owner
+        # and OAuth config the flow was started against — a server deleted or
+        # reconfigured mid-flow must not get the OLD provider's registration
+        # written into (or recreating) its credential file, where a later sign-in
+        # would reuse the stale client against the NEW upstream.
+        persist_allowed=lambda: _promotion_blocked(pending) is None,
     )
 
     client_metadata = OAuthClientMetadata(
@@ -598,13 +609,6 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],
         scope=server.oauth_scopes or None,
-    )
-
-    pending = _Pending(
-        server.id,
-        owner_id=getattr(server, "owner_id", None),
-        row_existed=row_existed,
-        oauth_sig=_oauth_signature_of(server),
     )
 
     async def redirect_handler(authorization_url: str) -> None:
