@@ -13,7 +13,7 @@ from typing import Any, Optional
 from sqlalchemy import update
 from sqlmodel import Session, select
 
-from app.db.models import Server, ServerRuntime, Setting, Token, utcnow
+from app.db.models import Server, ServerRuntime, Setting, Token, User, utcnow
 
 # --------------------------------------------------------------------------- #
 # servers (desired state)
@@ -64,6 +64,17 @@ def set_auth_provider(session: Session, server_id: str, auth_provider: str) -> N
     server = session.get(Server, server_id)
     if server is not None:
         server.auth_provider = auth_provider
+        session.add(server)
+        session.commit()
+
+
+def set_owner(session: Session, server_id: str, owner_id: Optional[str]) -> None:
+    """Update only the stored owner_id (no updated_at bump): ownership is identity,
+    not launch config — reassigning must neither look like a config edit nor feed
+    the startup-status clock."""
+    server = session.get(Server, server_id)
+    if server is not None:
+        server.owner_id = owner_id
         session.add(server)
         session.commit()
 
@@ -197,6 +208,22 @@ def delete_tokens_by_scope(session: Session, scope: str) -> int:
     return len(tokens)
 
 
+def delete_tokens_by_ids(session: Session, token_ids: list[str]) -> int:
+    """Hard-delete the given tokens in one transaction; returns the count removed.
+    Used for policy-driven revocations (owner reassignment, admin demotion) where
+    the caller has already decided WHICH rows lose validity — keeping the decision
+    in the policy layer and the write here, like every other SSOT mutation."""
+    removed = 0
+    for token_id in token_ids:
+        token = session.get(Token, token_id)
+        if token is not None:
+            session.delete(token)
+            removed += 1
+    if removed:
+        session.commit()
+    return removed
+
+
 def delete_token(
     session: Session,
     token_id: str,
@@ -208,19 +235,20 @@ def delete_token(
     When ``protect_last_control`` is given, the row is removed and the write lock taken
     (``flush``) *before* the predicate runs, so a concurrent settings change that just
     turned enforcement on is already visible (SQLite serializes writers). If the
-    predicate then returns True and no control token would remain, the transaction is
-    rolled back and 'last_control' is returned. This keeps the last admin token from
-    being deleted out from under enforcement, both for two concurrent deletes and for a
-    delete racing a settings change that enables enforcement."""
+    predicate then returns True and no ADMIN-capable control token would remain
+    (``admin_credential_exists`` — a member's login token is also ``control``-scoped
+    but must NOT satisfy the guard, or deleting the last admin credential would strand
+    the box with only member logins), the transaction is rolled back and 'last_control'
+    is returned. This keeps the last admin credential from being deleted out from under
+    enforcement, both for two concurrent deletes and for a delete racing a settings
+    change that enables enforcement."""
     token = session.get(Token, token_id)
     if token is None:
         return "not_found"
     session.delete(token)
     if token.scope == "control" and protect_last_control is not None:
         session.flush()  # take the write lock before re-reading enforcement state
-        if protect_last_control(session) and (
-            session.exec(select(Token).where(Token.scope == "control")).first() is None
-        ):
+        if protect_last_control(session) and not admin_credential_exists(session):
             session.rollback()
             return "last_control"
     session.commit()
@@ -229,3 +257,68 @@ def delete_token(
 
 def control_token_exists(session: Session) -> bool:
     return session.exec(select(Token).where(Token.scope == "control")).first() is not None
+
+
+# --------------------------------------------------------------------------- #
+# users (control-plane identities)
+# --------------------------------------------------------------------------- #
+
+
+def create_user(session: Session, user: User) -> User:
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+def get_user(session: Session, user_id: str) -> Optional[User]:
+    return session.get(User, user_id)
+
+
+def list_users(session: Session) -> list[User]:
+    return list(session.exec(select(User).order_by(User.created_at)).all())
+
+
+def save_user(session: Session, user: User) -> User:
+    user.updated_at = utcnow()
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+def count_servers_owned(session: Session, user_id: str) -> int:
+    return len(session.exec(select(Server.id).where(Server.owner_id == user_id)).all())
+
+
+def delete_user_and_tokens(session: Session, user_id: str) -> bool:
+    """Delete a user and revoke EVERY token bound to them (control credentials and
+    data-plane tokens alike) in one transaction, so a removed identity can't keep
+    authenticating. The caller has already refused the delete while the user owns
+    servers, so no Server.owner_id can dangle. Returns False when the user didn't
+    exist (idempotent for a retried delete)."""
+    user = session.get(User, user_id)
+    if user is None:
+        return False
+    for token in session.exec(select(Token).where(Token.user_id == user_id)).all():
+        session.delete(token)
+    session.delete(user)
+    session.commit()
+    return True
+
+
+def admin_credential_exists(session: Session, *, excluding_user_id: Optional[str] = None) -> bool:
+    """Is there at least one usable ADMIN login besides ``excluding_user_id``'s?
+    True when a control token exists that resolves to admin: one with no user
+    (legacy/boot mint) or one belonging to an admin user. The users API consults
+    this before demoting or deleting an admin so the last admin credential can't
+    be removed (MCPE_ADMIN_TOKEN, checked by the caller, always lifts the guard)."""
+    for token in session.exec(select(Token).where(Token.scope == "control")).all():
+        if token.user_id is None:
+            return True
+        if excluding_user_id is not None and token.user_id == excluding_user_id:
+            continue
+        user = session.get(User, token.user_id)
+        if user is not None and user.role == "admin":
+            return True
+    return False

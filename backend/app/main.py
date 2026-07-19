@@ -26,6 +26,7 @@ from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
 from app.api import tokens as tokens_api
+from app.api import users as users_api
 from app.auth.control_plane import (
     ensure_control_token,
     enforcement_enabled,
@@ -214,7 +215,10 @@ def create_app() -> FastAPI:
     app.include_router(catalog_api.router, prefix="/api", dependencies=gated)
     app.include_router(tokens_api.router, prefix="/api", dependencies=gated)
     app.include_router(settings_api.router, prefix="/api", dependencies=gated)
+    # Groups and user management are global, admin-owned surfaces (their routers
+    # also declare require_admin themselves — defense in depth at include time).
     app.include_router(groups_api.router, prefix="/api", dependencies=gated)
+    app.include_router(users_api.router, prefix="/api", dependencies=gated)
     # Group endpoints (/g/<name>/mcp) BEFORE the proxy catch-all and the SPA mount:
     # registration order wins. The hub is constructed here (state for the dispatcher)
     # but only starts serving groups once the lifespan wires it to the supervisor.

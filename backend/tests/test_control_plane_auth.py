@@ -87,21 +87,26 @@ def test_health_is_public_even_when_enforced():
 def test_auth_status_reflects_enforcement_and_credential():
     with TestClient(app) as client:
         try:
-            assert client.get("/api/auth/status", headers=LOOPBACK).json() == {
-                "enforced": False,
-                "authenticated": False,
+            # Enforcement off: not "authenticated" (no token), but the principal is
+            # the synthetic local admin so the SPA renders the full surface.
+            body = client.get("/api/auth/status", headers=LOOPBACK).json()
+            assert (body["enforced"], body["authenticated"]) == (False, False)
+            assert body["user"] == {
+                "id": None,
+                "name": "local operator",
+                "role": "admin",
+                "local_runners": True,
             }
             control = _mint("control")
             with Session(get_engine()) as s:
                 runtime_settings.write(s, {"control_plane_auth": "always"})
-            assert client.get("/api/auth/status", headers=LOOPBACK).json() == {
-                "enforced": True,
-                "authenticated": False,
-            }
-            assert client.get("/api/auth/status", headers=_bearer(control)).json() == {
-                "enforced": True,
-                "authenticated": True,
-            }
+            body = client.get("/api/auth/status", headers=LOOPBACK).json()
+            assert (body["enforced"], body["authenticated"]) == (True, False)
+            assert body["user"] is None  # no credential, enforcement on -> no principal
+            body = client.get("/api/auth/status", headers=_bearer(control)).json()
+            assert (body["enforced"], body["authenticated"]) == (True, True)
+            # A user-less control token (boot mint / pre-multi-user) is an admin.
+            assert body["user"]["role"] == "admin" and body["user"]["id"] is None
         finally:
             _reset()
 

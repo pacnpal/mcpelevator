@@ -5,7 +5,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import ServerForm from './ServerForm.svelte';
 
 const api = vi.hoisted(() => ({
-	getSettings: vi.fn().mockResolvedValue({ docker_runner: true })
+	getSettings: vi.fn().mockResolvedValue({ docker_runner: true }),
+	// Full-permission principal so the form offers every runner (the multi-user
+	// restriction path is exercised by the backend tests).
+	getAuthStatus: vi.fn().mockResolvedValue({
+		enforced: false,
+		authenticated: false,
+		user: { id: null, name: 'local operator', role: 'admin', local_runners: true }
+	})
 }));
 
 vi.mock('$lib/api', () => api);

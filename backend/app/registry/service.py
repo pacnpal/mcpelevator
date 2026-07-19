@@ -1564,6 +1564,7 @@ def create_server(
     idle_timeout_s: Optional[int] = None,
     enabled: bool = False,
     source: str = "manual",
+    owner_id: Optional[str] = None,
     warnings_sink: Optional[list[str]] = None,
 ) -> Server:
     if runner not in RUNNERS:
@@ -1626,6 +1627,10 @@ def create_server(
         idle_timeout_s=idle_timeout_s,
         enabled=enabled,
         source=source,
+        # Ownership is identity, not launch config: outside config_hash by
+        # construction (_hash_payload never includes it), so reassigning an owner
+        # can never bounce a running bridge.
+        owner_id=owner_id,
     )
     server.config_hash = compute_hash(server)
     return repo.create_server(session, server)
@@ -1755,7 +1760,13 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
 
 
 @_serialized_write
-def clone_server(session: Session, server_id: str, *, name: Optional[str] = None) -> Server:
+def clone_server(
+    session: Session,
+    server_id: str,
+    *,
+    name: Optional[str] = None,
+    owner_id: Optional[str] = None,
+) -> Server:
     """Create a new server from an existing one's launch + exposure config.
 
     The clone gets a fresh id and a unique slug derived from its name, and is always
@@ -1789,6 +1800,8 @@ def clone_server(session: Session, server_id: str, *, name: Optional[str] = None
         idle_timeout_s=src.idle_timeout_s,
         enabled=False,
         source="clone",
+        # The cloner (not the source's owner) owns the copy — cloning is a create.
+        owner_id=owner_id,
     )
 
 
@@ -1838,7 +1851,11 @@ def _infer_runner(command: str) -> str:
 
 @_serialized_write
 def import_mcp_servers(
-    session: Session, data: dict
+    session: Session,
+    data: dict,
+    *,
+    owner_id: Optional[str] = None,
+    allow_local: bool = True,
 ) -> tuple[list[Server], list[dict], list[dict]]:
     """Create servers from the standard Claude-Desktop ``mcpServers`` JSON shape.
 
@@ -1891,6 +1908,7 @@ def import_mcp_servers(
                         env=dict(entry.get("headers") or entry.get("env") or {}),
                         source="import",
                         enabled=False,
+                        owner_id=owner_id,
                     )
                 )
             # A malformed entry (e.g. non-mapping `headers`/`env` → dict() raises
@@ -1901,6 +1919,17 @@ def import_mcp_servers(
         command = entry.get("command")
         if not command:
             skipped.append({"name": str(name), "reason": "no command to launch"})
+            continue
+        # Per-entry (not whole-import) runner policy: a member without local-runner
+        # permission still imports the remote entries above; local ones surface here
+        # as reviewable skips instead of failing the batch.
+        if not allow_local:
+            skipped.append(
+                {
+                    "name": str(name),
+                    "reason": "your account may not create local-runner servers",
+                }
+            )
             continue
         sink: list[str] = []
         try:
@@ -1914,6 +1943,7 @@ def import_mcp_servers(
                     env=dict(entry.get("env") or {}),
                     source="import",
                     enabled=False,
+                    owner_id=owner_id,
                     warnings_sink=sink,
                 )
             )

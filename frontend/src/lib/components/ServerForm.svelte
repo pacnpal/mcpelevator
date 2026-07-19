@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
-	import { getSettings } from '$lib/api';
+	import { getAuthStatus, getSettings } from '$lib/api';
 	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '$lib/remote';
 	import type { Runner, ServerAuthProvider, ServerCreate } from '$lib/types';
 
@@ -60,10 +60,39 @@
 	// Whether the (root-equivalent, opt-in) docker runner is enabled. Fetched once; when
 	// off we surface a banner and block submitting a docker server. `null` = not yet known.
 	let dockerEnabled = $state<boolean | null>(null);
+	// Multi-user: whether this account may configure local runners (npx/uvx/command/
+	// docker — code execution on the box). The backend enforces this regardless; the
+	// form just hides what would only 403. Default true so a fetch failure (or a
+	// pre-multi-user backend) keeps the full form.
+	let localRunnersAllowed = $state(true);
 	onMount(() => {
 		getSettings()
 			.then((s) => (dockerEnabled = s.docker_runner))
 			.catch(() => (dockerEnabled = null));
+		getAuthStatus()
+			.then((a) => (localRunnersAllowed = a.user ? a.user.local_runners : true))
+			.catch(() => (localRunnersAllowed = true));
+	});
+
+	// Restricted accounts get `remote` plus whatever the form is CURRENTLY set to:
+	// in edit mode that keeps an admin-provisioned local server's runner visible
+	// (the backend allows non-launch edits, so the form must still render/submit),
+	// and in create mode the snap-to-remote effect below makes the extra entry moot.
+	const offeredRunners = $derived(
+		localRunnersAllowed
+			? RUNNERS
+			: RUNNERS.filter((r) => r.value === 'remote' || r.value === runner)
+	);
+
+	// A restricted account's CREATE form must not sit on the (default) npx runner
+	// it can't submit — snap to remote once the permission resolves. Edit mode is
+	// left alone: the seeded runner reflects a stored row, and the backend rejects
+	// launch-affecting changes with a clear 403 if they're not allowed.
+	$effect(() => {
+		if (!localRunnersAllowed && mode === 'create' && runner !== 'remote') {
+			runner = 'remote';
+			onRunnerChange();
+		}
 	});
 
 
@@ -486,7 +515,7 @@
 	<fieldset class="flex flex-col gap-2 border-0 p-0">
 		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Runner</legend>
 		<div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
-			{#each RUNNERS as r (r.value)}
+			{#each offeredRunners as r (r.value)}
 				<label
 					class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
 					style={runner === r.value

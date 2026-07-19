@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { errorMessage, getServer, updateServer } from '$lib/api';
-	import type { ServerCreate, ServerDetail, ServerUpdate } from '$lib/types';
+	import { errorMessage, getAuthStatus, getServer, listUsers, updateServer } from '$lib/api';
+	import type { ServerCreate, ServerDetail, ServerUpdate, UserInfo } from '$lib/types';
 	import ServerForm from '$lib/components/ServerForm.svelte';
 
 	type LoadState = 'loading' | 'ready' | 'error';
@@ -16,11 +16,28 @@
 	let saving = $state(false);
 	let saveError = $state<string | null>(null);
 
+	// Owner reassignment (admin-only). '' encodes admin-owned (null on the wire).
+	// The users list loads best-effort: a member (or a pre-multi-user backend)
+	// simply doesn't get the control.
+	let usersList = $state<UserInfo[]>([]);
+	let canReassign = $state(false);
+	let ownerChoice = $state('');
+
 	async function load() {
 		loadState = 'loading';
 		try {
 			server = await getServer(id);
+			ownerChoice = server.owner_id ?? '';
 			loadState = 'ready';
+			try {
+				const auth = await getAuthStatus();
+				if (auth.user?.role !== 'member') {
+					usersList = await listUsers();
+					canReassign = true;
+				}
+			} catch {
+				canReassign = false;
+			}
 		} catch (err) {
 			loadState = 'error';
 			loadError = errorMessage(err);
@@ -62,6 +79,11 @@
 		const { enabled: _enabled, ...rest } = payload;
 		void _enabled;
 		const body: ServerUpdate = rest;
+		// Only admins may send owner_id, and only when it actually changed — a
+		// member's PATCH must not carry the field at all (the backend 403s it).
+		if (canReassign && (ownerChoice || null) !== (server.owner_id ?? null)) {
+			body.owner_id = ownerChoice || null;
+		}
 		try {
 			await updateServer(server.id, body);
 			await goto(`/server/${server.id}`);
@@ -132,6 +154,32 @@
 				Saving changes restarts the server.
 			</p>
 		</div>
+
+		{#if canReassign && (usersList.length > 0 || server.owner_id)}
+			<div
+				class="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-4"
+			>
+				<div class="flex min-w-0 flex-col gap-0.5">
+					<label for="server-owner" class="text-sm font-medium text-[var(--color-ink)]">
+						Owner
+					</label>
+					<p class="text-xs text-[var(--color-ink-dim)]">
+						Who sees and manages this server. Reassigning revokes the former owner's
+						tokens for it. Applied when you save.
+					</p>
+				</div>
+				<select
+					id="server-owner"
+					bind:value={ownerChoice}
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
+				>
+					<option value="">Admin-owned</option>
+					{#each usersList as u (u.id)}
+						<option value={u.id}>{u.name} ({u.role})</option>
+					{/each}
+				</select>
+			</div>
+		{/if}
 
 		<ServerForm
 			mode="edit"

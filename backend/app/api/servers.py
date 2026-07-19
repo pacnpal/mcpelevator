@@ -37,10 +37,12 @@ from app.api.schemas import (
     Urls,
 )
 from app.api.util import base_url, resync_groups
-from app.auth import oauth_flow
+from app.auth import oauth_flow, policy
+from app.auth import principal as principal_mod
+from app.auth.principal import Principal, current_principal
 from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
-from app.db import get_session, repo
+from app.db import get_engine, get_session, repo
 from app.db.models import Server
 from app.groups import registry as group_registry
 from app.registry import service
@@ -94,6 +96,77 @@ def _live_state(server: Server, sup, session: Session):
 
 
 
+def _owner_name(session: Session, owner_id: str | None) -> str | None:
+    if owner_id is None:
+        return None
+    user = repo.get_user(session, owner_id)
+    return user.name if user is not None else None
+
+
+def _visible(
+    principal: Principal, session: Session, server_id: str
+) -> Server:
+    """Resolve + authorize a /servers/{id}-shaped route in one step: a server the
+    principal can't see 404s exactly like one that doesn't exist (policy module)."""
+    return policy.require_visible_server(principal, repo.get_server(session, server_id))
+
+
+_LAUNCH_FIELDS = {"runner", "command", "args", "run_args", "env", "cwd", "setup_script"}
+
+
+def _launch_touched(row: Server, changes: dict) -> bool:
+    """Would ``changes`` alter WHAT this server executes? Compares VALUES, not key
+    presence: the SPA's edit form resends the whole config, so a name-only save
+    carries unchanged launch fields and must not count. run_args is nullable in
+    storage (legacy rows hold NULL, read as []) while the form always sends a
+    list — normalized so NULL vs [] isn't a "change"."""
+    return any(
+        changes[k] != ((getattr(row, k) or []) if k == "run_args" else getattr(row, k))
+        for k in changes.keys() & _LAUNCH_FIELDS
+    )
+
+
+def _fresh(session: Session, principal: Principal) -> Principal:
+    """The principal's check-time view for authorization INSIDE a serialized write
+    (see principal.refresh). Fails closed with the standard 401 when the caller's
+    user row was deleted while the request was in flight."""
+    fresh = principal_mod.refresh(session, principal)
+    if fresh is None:
+        raise HTTPException(
+            status_code=401,
+            detail="control-plane auth required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return fresh
+
+
+def _visible_now(server_id: str, principal: Principal) -> bool:
+    """Is the server visible to the principal RIGHT NOW, judged on a fresh session
+    (committed truth, no request-session identity map)? For revalidating after an
+    await — a long playground call, a supervisor stop, a live log stream — where an
+    owner reassignment may have landed since the entry-time check."""
+    with Session(get_engine()) as check:
+        row = repo.get_server(check, server_id)
+        fresh = principal_mod.refresh(check, principal)
+        return row is not None and fresh is not None and policy.can_view_server(fresh, row)
+
+
+def _set_enabled_visible(
+    session: Session, server_id: str, principal: Principal, enabled: bool
+) -> Server:
+    """Toggle desired state with visibility RE-CHECKED under the config write lock:
+    the handler's entry check precedes the lock wait, and an owner reassignment
+    committing in that gap — under this same lock — must make the former owner's
+    toggle 404, not flip the new owner's server. Runs in a worker thread (the lock
+    is reentrant, so set_enabled's own acquisition is a no-op)."""
+    with service.config_write_lock():
+        session.expire_all()  # re-reads must see state committed while we waited
+        policy.require_visible_server(
+            _fresh(session, principal), repo.get_server(session, server_id)
+        )
+        return service.set_enabled(session, server_id, enabled)
+
+
 def _summary(server: Server, sup, session: Session, base: str, live=None) -> ServerSummary:
     state, last_error, pid, port, tools, startup_status = live or _live_state(
         server, sup, session
@@ -124,6 +197,8 @@ def _summary(server: Server, sup, session: Session, base: str, live=None) -> Ser
         port=port,
         tools_count=len(tools or []),
         startup_status=startup_status,
+        owner_id=server.owner_id,
+        owner_name=_owner_name(session, server.owner_id),
     )
 
 
@@ -179,15 +254,23 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
 
 
 @router.get("/servers", response_model=list[ServerSummary])
-async def list_servers(request: Request, session: Session = Depends(get_session)):
+async def list_servers(
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
     sup = request.app.state.supervisor
     base = base_url(request)
-    return [_summary(s, sup, session, base) for s in repo.list_servers(session)]
+    servers = policy.visible_servers(principal, repo.list_servers(session))
+    return [_summary(s, sup, session, base) for s in servers]
 
 
 @router.post("/servers", response_model=ServerSummary, status_code=201)
 async def create_server(
-    payload: ServerCreate, request: Request, session: Session = Depends(get_session)
+    payload: ServerCreate,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ):
     """
     Create a new server in the desired state.
@@ -209,10 +292,26 @@ async def create_server(
         fields["source"] = raw_source[:200]
     else:
         fields["source"] = "manual"
+    # Multi-user: runner permission is checked BEFORE anything persists (fast, for
+    # a clean error), and RE-CHECKED against the refreshed principal inside the
+    # config write lock — a permission revocation commits under that same lock, so
+    # a create that raced it must observe the revoked flag, not its entry-time
+    # snapshot. The creator becomes the owner (synthetic admins -> admin-owned).
+    policy.require_runner_allowed(principal, fields.get("runner") or "npx")
+    fields["owner_id"] = principal.user_id
+
+    def _create():
+        with service.config_write_lock():
+            session.expire_all()  # re-reads must see state committed while we waited
+            policy.require_runner_allowed(
+                _fresh(session, principal), fields.get("runner") or "npx"
+            )
+            return service.create_server(session, **fields)
+
     try:
         # Threadpool: the config write derives config_hash with scrypt (memory-hard by
         # design) — keep that off the event loop so /s proxy traffic isn't stalled.
-        server = await run_in_threadpool(service.create_server, session, **fields)
+        server = await run_in_threadpool(_create)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
@@ -222,10 +321,13 @@ async def create_server(
 
 
 @router.get("/servers/{server_id}", response_model=ServerDetail)
-async def get_server(server_id: str, request: Request, session: Session = Depends(get_session)):
-    server = repo.get_server(session, server_id)
-    if server is None:
-        raise HTTPException(status_code=404, detail="server not found")
+async def get_server(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    server = _visible(principal, session, server_id)
     return _detail(server, request.app.state.supervisor, session, base_url(request))
 
 
@@ -235,9 +337,33 @@ async def update_server(
     payload: ServerUpdate,
     request: Request,
     session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ):
+    existing_row = _visible(principal, session, server_id)
     provided = payload.model_dump()
     changes = {k: v for k, v in provided.items() if v is not None}
+
+    # Ownership reassignment is admin-only and handled OUTSIDE the config write
+    # (owner is identity, not launch config): pop it here, apply after the PATCH.
+    owner_change_requested = "owner_id" in payload.model_fields_set
+    new_owner = changes.pop("owner_id", None)
+    # Captured NOW: _write's expire_all invalidates existing_row, so a later
+    # attribute read would lazily reload the POST-transfer owner and the
+    # cancellation guard below would never see a change.
+    owner_at_entry = existing_row.owner_id
+    if owner_change_requested:
+        if not principal.is_admin:
+            raise HTTPException(status_code=403, detail="only admins may reassign owners")
+        if new_owner is not None and repo.get_user(session, new_owner) is None:
+            raise HTTPException(status_code=400, detail=f"unknown user {new_owner!r}")
+
+    # Runner policy on edit (fast pre-check; re-run inside the serialized write): a
+    # member without local-runner permission may still start/stop a local server an
+    # admin provisioned for them, but must not shape WHAT it executes — changing
+    # anything launch-affecting on (or converting a server into) a local runner
+    # requires the permission.
+    if _launch_touched(existing_row, changes):
+        policy.require_runner_allowed(principal, changes.get("runner", existing_row.runner))
     # The generic None-drop implements partial PATCH, but it also swallows an *explicit*
     # null on the nullable OAuth client fields — so clearing a static client id/secret to
     # fall back to Dynamic Client Registration would be silently ignored. Preserve those
@@ -247,24 +373,104 @@ async def update_server(
         if key in payload.model_fields_set:
             changes[key] = provided[key]
 
-    # Signature of the OAuth-relevant config before the edit, to decide token cleanup below.
-    existing = repo.get_server(session, server_id)
-    before = _oauth_signature(existing) if existing is not None else None
-    before_hash = existing.config_hash if existing is not None else None
     auth_changed = "auth_provider" in changes
     sup = request.app.state.supervisor
 
+    def _write():
+        """The whole PATCH as ONE serialized write under a single hold of the config
+        write lock (reentrant — update_server re-enters it). ALL authorization is
+        re-validated inside against check-time state, because the transitions that
+        could invalidate the fast pre-checks above (owner reassignment, user
+        deletion, a demotion or permission revocation) each commit under this same
+        lock: visibility (a just-reassigned-away server 404s instead of being
+        edited by its former owner), the local-runner permission (against the
+        REFRESHED principal), and — for an owner change — the target user's
+        existence BEFORE the config commit, so a user deleted since the pre-check
+        rejects the PATCH with nothing applied. Revoke-then-set for the former
+        owner's tokens: an interruption leaves the old owner minus some tokens
+        (they can re-mint), never a transferred server whose former owner still
+        holds live tokens."""
+        with service.config_write_lock():
+            # Drop every pre-lock snapshot: the session's identity map would
+            # otherwise satisfy the re-reads below from cached instances, and the
+            # whole point is to observe state committed while we waited.
+            session.expire_all()
+            fresh = _fresh(session, principal)
+            current = policy.require_visible_server(
+                fresh, repo.get_server(session, server_id)
+            )
+            # Baselines for the post-write cleanup decisions, captured from the
+            # LOCKED row — a pre-lock snapshot could belong to a state another
+            # PATCH already changed, and misattributing that request's OAuth
+            # reconfiguration to this one would wipe a freshly obtained
+            # credential this PATCH never touched.
+            before_sig = _oauth_signature(current)
+            before_hash = current.config_hash
+            if _launch_touched(current, changes):
+                policy.require_runner_allowed(
+                    fresh, changes.get("runner", current.runner)
+                )
+            if not owner_change_requested:
+                return (
+                    service.update_server(session, server_id, changes),
+                    before_sig,
+                    before_hash,
+                )
+            # The owner-transfer branch is admin-only — re-judged on the REFRESHED
+            # principal: the entry-time is_admin check can be outrun by a demotion
+            # committing while this request waited for the lock, and a now-member
+            # (who may still own the server, passing the visibility check above)
+            # must not execute the transfer.
+            if not fresh.is_admin:
+                raise HTTPException(status_code=403, detail="only admins may reassign owners")
+            if new_owner is not None and repo.get_user(session, new_owner) is None:
+                raise ValueError(f"unknown user {new_owner!r}")
+            updated = service.update_server(session, server_id, changes)
+            old_owner = current.owner_id
+            if old_owner is not None and old_owner != new_owner:
+                # The former owner's data-plane tokens for this server: they can no
+                # longer see or manage it, so a token they minted must not keep
+                # authorizing its /s endpoint. Tokens minted by admins (user_id
+                # NULL or another user) are deliberate grants and stay.
+                stale = [
+                    t.id
+                    for t in repo.list_tokens(session)
+                    if t.user_id == old_owner and t.scope == server_id
+                ]
+                repo.delete_tokens_by_ids(session, stale)
+            # Owner is identity, applied via its own narrow writer (no updated_at
+            # bump, no config_hash change, no bridge bounce).
+            repo.set_owner(session, server_id, new_owner)
+            updated.owner_id = new_owner
+            return updated, before_sig, before_hash
+
     try:
-        # Threadpool: see create_server — the recomputed config_hash is a scrypt derivation.
+        # Threadpool: see create_server — the recomputed config_hash is a scrypt
+        # derivation, and the config write lock is a threading lock shared with bulk
+        # imports — neither may sit on the event loop.
         transition = (
             request.app.state.groups.auth_transition() if auth_changed else nullcontext()
         )
         async with transition:
-            server = await run_in_threadpool(service.update_server, session, server_id, changes)
+            server, before_sig, before_hash = await run_in_threadpool(_write)
+            if owner_change_requested and owner_at_entry != new_owner:
+                # A pending upstream-OAuth authorization belongs to the FORMER
+                # owner's browser session: cancel it so its public callback can't
+                # later promote their grant onto the just-transferred server.
+                # Cancelled only AFTER the locked reauthorization committed the
+                # transfer — a PATCH that _write rejects (demoted caller, vanished
+                # target user) must not abort the current owner's sign-in as a
+                # side effect — and on the event loop, where the flow's asyncio
+                # task lives. The flow that ran during the write window is already
+                # blocked from promoting by its owner-snapshot binding. Stored
+                # tokens are left in place — transferring a working server,
+                # credentials included, is the admin's deliberate choice
+                # (disconnect first to hand it over cold).
+                oauth_flow.cancel_pending(server_id)
             # Remove the old endpoint before an auth transition can publish group
             # routes under the new policy. _stop pops the endpoint before waiting for
             # process teardown, so no request can enter with stale credentials.
-            oauth_changed = before is not None and before != _oauth_signature(server)
+            oauth_changed = before_sig != _oauth_signature(server)
             if oauth_changed:
                 oauth_flow.cancel_pending(server_id)
                 await sup.stop(server_id)
@@ -291,12 +497,18 @@ async def update_server(
     return _summary(server, sup, session, base_url(request))
 
 
-def _prune_then_delete(session: Session, server_id: str) -> bool:
+def _prune_then_delete(session: Session, server_id: str, principal: Principal) -> bool:
     """Prune the server from every group's explicit member list, then delete the row —
     both under a SINGLE hold of the config write lock. Run in the threadpool by the
     caller, never on the event loop: prune_server and service.delete_server each take
     that lock, and a bulk import holding it while deriving scrypt hashes would otherwise
     stall the loop (and all proxy/API traffic) here.
+
+    Visibility is RE-CHECKED here, inside the lock, against the refreshed principal:
+    the handler's entry check precedes an await (the process stop), and an owner
+    reassignment committing in that gap — under this same lock — must make the former
+    owner's delete 404, not destroy the new owner's server. (The already-issued stop is
+    a benign blip: desired state is untouched, so the reconciler restarts the bridge.)
 
     Prune FIRST so an interruption between the two commits leaves a benign state — the
     row lingers but no group references a missing id (which validate_at_startup would
@@ -304,20 +516,33 @@ def _prune_then_delete(session: Session, server_id: str) -> bool:
     also closes the window where a concurrent group write could re-add this server after
     the prune but before the delete. The lock is reentrant, so the inner acquisitions in
     prune_server / delete_server are cheap no-ops. A no-op prune for a nonexistent id.
-    Returns False when the server didn't exist (-> 404)."""
+    Returns False when the server doesn't exist or isn't visible (-> 404 either way)."""
     with service.config_write_lock():
+        session.expire_all()  # re-reads must see state committed while we waited
+        current = repo.get_server(session, server_id)
+        if current is None:
+            return False
+        fresh = principal_mod.refresh(session, principal)
+        if fresh is None or not policy.can_view_server(fresh, current):
+            return False
         group_registry.prune_server(session, server_id)
         return service.delete_server(session, server_id)
 
 
 @router.delete("/servers/{server_id}", status_code=204)
-async def delete_server(server_id: str, request: Request, session: Session = Depends(get_session)):
+async def delete_server(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    _visible(principal, session, server_id)
     sup = request.app.state.supervisor
     sup.cancel_activation_request(server_id)
     await sup.stop(server_id)  # tear down the process before removing desired state
     # Prune + delete in the worker thread (see _prune_then_delete): both take the config
     # write lock, so the wait must not sit on the event loop.
-    if not await run_in_threadpool(_prune_then_delete, session, server_id):
+    if not await run_in_threadpool(_prune_then_delete, session, server_id, principal):
         raise HTTPException(status_code=404, detail="server not found")
     # Cancel any in-flight authorization and drop stored upstream OAuth credentials for this
     # (now-deleted) server — otherwise a late callback could re-promote tokens and leave an
@@ -346,13 +571,16 @@ def _oauth_callback_url(request: Request) -> str:
 
 
 @router.post("/servers/{server_id}/oauth/authorize")
-async def start_oauth(server_id: str, request: Request, session: Session = Depends(get_session)):
+async def start_oauth(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
     """Begin the interactive OAuth flow for a remote server: contact the upstream,
     register/discover, and return the provider authorization URL for the SPA to send
     the browser to. The operator finishes at ``/api/oauth/callback``."""
-    server = repo.get_server(session, server_id)
-    if server is None:
-        raise HTTPException(status_code=404, detail="server not found")
+    server = _visible(principal, session, server_id)
     if server.runner != "remote" or not server.oauth:
         raise HTTPException(status_code=400, detail="this server does not use OAuth")
     try:
@@ -368,15 +596,16 @@ async def start_oauth(server_id: str, request: Request, session: Session = Depen
 
 @router.post("/servers/{server_id}/oauth/disconnect", response_model=ServerDetail)
 async def disconnect_oauth(
-    server_id: str, request: Request, session: Session = Depends(get_session)
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ):
     """Forget the stored upstream tokens so the operator can re-authenticate from
     scratch (e.g. to switch accounts). A running bridge holds its access token in
     memory, so an enabled server is restarted immediately: it re-reads the now-empty
     store and stops serving with the revoked credential until re-authenticated."""
-    server = repo.get_server(session, server_id)
-    if server is None:
-        raise HTTPException(status_code=404, detail="server not found")
+    server = _visible(principal, session, server_id)
     # Only a remote OAuth server has anything to disconnect; reject others so a stale UI
     # action or stray API call can't bounce an unrelated running server.
     if server.runner != "remote" or not server.oauth:
@@ -392,7 +621,30 @@ async def disconnect_oauth(
     # Unconditional — sup.stop is idempotent, and gating on ``enabled`` would miss a bridge
     # still winding down from a just-toggled row.
     await sup.stop(server_id)
-    ServerTokenStorage(server_id).clear()
+
+    def _clear_if_still_visible() -> bool:
+        """Re-validate ownership AFTER the awaited stop, under the config write lock:
+        transfer intentionally preserves the stored upstream credential, so an owner
+        reassignment landing in the stop gap must make the former owner's disconnect
+        404 instead of wiping the new owner's token file."""
+        with service.config_write_lock():
+            session.expire_all()
+            fresh = principal_mod.refresh(session, principal)
+            current = repo.get_server(session, server_id)
+            if fresh is None or current is None or not policy.can_view_server(fresh, current):
+                return False
+            ServerTokenStorage(server_id).clear()
+            return True
+
+    if not await run_in_threadpool(_clear_if_still_visible):
+        sup.nudge()  # bring the stopped bridge back — its credentials are untouched
+        raise HTTPException(status_code=404, detail="server not found")
+    # Rebuild the response from a row re-read AND re-authorized after the awaited
+    # work: the detail body carries command/env/OAuth config, and a transfer
+    # committing after the lock released must not have that leak to the former
+    # owner via the pre-fetched object.
+    session.expire_all()
+    server = _visible(principal, session, server_id)
     # The server stays enabled, so the reconciler restarts it; with no tokens it can't
     # authenticate upstream and surfaces as needing re-auth — the intended "disconnected"
     # state (matches the connect path, which also restarts to pick up fresh tokens).
@@ -407,12 +659,31 @@ async def clone_server(
     request: Request,
     payload: ServerClone = Body(default_factory=ServerClone),
     session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ):
     """Duplicate a server's config into a new, disabled server (a fresh id + unique
     slug). The operator reviews/edits the copy, then enables it."""
+    src = _visible(principal, session, server_id)
+    # Cloning IS creating: the same runner policy applies (fast pre-check here,
+    # re-run against check-time state inside the serialized write below), and the
+    # cloner owns the copy.
+    policy.require_runner_allowed(principal, src.runner)
+
+    def _clone():
+        with service.config_write_lock():
+            session.expire_all()  # re-reads must see state committed while we waited
+            fresh = _fresh(session, principal)
+            current = policy.require_visible_server(
+                fresh, repo.get_server(session, server_id)
+            )
+            policy.require_runner_allowed(fresh, current.runner)
+            return service.clone_server(
+                session, server_id, name=payload.name, owner_id=principal.user_id
+            )
+
     try:
         # Threadpool: see create_server — the clone's config_hash is a scrypt derivation.
-        server = await run_in_threadpool(service.clone_server, session, server_id, name=payload.name)
+        server = await run_in_threadpool(_clone)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
@@ -422,13 +693,18 @@ async def clone_server(
 
 
 @router.post("/servers/{server_id}/enable", response_model=ServerSummary)
-async def enable_server(server_id: str, request: Request, session: Session = Depends(get_session)):
-    existing = repo.get_server(session, server_id)
-    was_enabled = bool(existing.enabled) if existing is not None else False
+async def enable_server(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    existing = _visible(principal, session, server_id)
+    was_enabled = bool(existing.enabled)
     try:
         # Threadpool: set_enabled takes the registry write lock, and an import in a worker
         # can hold that lock across many derivations — don't wait for it on the event loop.
-        server = await run_in_threadpool(service.set_enabled, session, server_id, True)
+        server = await run_in_threadpool(_set_enabled_visible, session, server_id, principal, True)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
@@ -443,10 +719,16 @@ async def enable_server(server_id: str, request: Request, session: Session = Dep
 
 
 @router.post("/servers/{server_id}/disable", response_model=ServerSummary)
-async def disable_server(server_id: str, request: Request, session: Session = Depends(get_session)):
+async def disable_server(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    _visible(principal, session, server_id)
     try:
         # Threadpool: see enable_server — the lock wait must not block the loop.
-        server = await run_in_threadpool(service.set_enabled, session, server_id, False)
+        server = await run_in_threadpool(_set_enabled_visible, session, server_id, principal, False)
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     sup = request.app.state.supervisor
@@ -456,17 +738,28 @@ async def disable_server(server_id: str, request: Request, session: Session = De
 
 
 @router.post("/servers/{server_id}/retry", response_model=ServerSummary)
-async def retry_server(server_id: str, request: Request, session: Session = Depends(get_session)):
-    server = repo.get_server(session, server_id)
-    if server is None:
-        raise HTTPException(status_code=404, detail="server not found")
+async def retry_server(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    server = _visible(principal, session, server_id)
     if not server.enabled:
         raise HTTPException(status_code=409, detail="disabled servers cannot be retried")
     sup = request.app.state.supervisor
     state, _, _, _, _, startup_status = _live_state(server, sup, session)
     if startup_status is not None or state not in ("failed", "unhealthy"):
         raise HTTPException(status_code=409, detail="server is not in a retryable state")
-    if not await sup.retry(server_id):
+    # Re-validate against the committed row at the LAST decision point — inside the
+    # supervisor's unit lock, just before it stops the unit: retry isn't a DB write
+    # (the config lock doesn't govern it), so this hook is what keeps a former
+    # owner's queued retry from bouncing a just-reassigned server.
+    def _authorize() -> None:
+        if not _visible_now(server_id, principal):
+            raise HTTPException(status_code=404, detail="server not found")
+
+    if not await sup.retry(server_id, authorized=_authorize):
         raise HTTPException(status_code=409, detail="server is no longer retryable")
     return _summary(server, sup, session, base_url(request))
 
@@ -476,13 +769,30 @@ async def import_servers(
     request: Request,
     payload: dict = Body(...),
     session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ):
     """Bulk-create from a standard mcpServers JSON config. Imported servers are
-    disabled by default — the user reviews, then enables."""
+    disabled by default — the user reviews, then enables. The importer owns every
+    created row; local-runner entries a restricted member may not create land in
+    ``skipped`` (per entry), so their remote entries still import."""
+    def _import():
+        # allow_local is derived from the REFRESHED principal inside the lock (the
+        # lock import_mcp_servers re-enters), so a permission revocation committed
+        # while this request queued is observed, not the entry-time snapshot.
+        with service.config_write_lock():
+            session.expire_all()
+            fresh = _fresh(session, principal)
+            return service.import_mcp_servers(
+                session,
+                payload,
+                owner_id=principal.user_id,
+                allow_local=policy.can_use_runner(fresh, "npx"),
+            )
+
     try:
         # Threadpool: a bulk import derives one scrypt config_hash per server — N stacked
         # derivations must not sit on the event loop.
-        created, skipped, warnings = await run_in_threadpool(service.import_mcp_servers, session, payload)
+        created, skipped, warnings = await run_in_threadpool(_import)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
@@ -516,6 +826,7 @@ async def call_server_tool(
     request: Request,
     payload: ToolCallRequest = Body(default_factory=ToolCallRequest),
     session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ):
     """Invoke one tool on a RUNNING server's bridge (the UI playground).
 
@@ -523,9 +834,7 @@ async def call_server_tool(
     trying a tool never needs a data-plane bearer token. MCP error semantics are
     mirrored: a tool's own failure comes back as ``is_error`` in a 200, while an
     unreachable/broken bridge is a 502 and a timeout a 504."""
-    server = repo.get_server(session, server_id)
-    if server is None:
-        raise HTTPException(status_code=404, detail="server not found")
+    _visible(principal, session, server_id)
     sup = request.app.state.supervisor
     unit = sup.unit(server_id)
     if unit is None or unit.state != "running" or unit.port is None:
@@ -550,6 +859,12 @@ async def call_server_tool(
         raise HTTPException(status_code=502, detail=f"tool call failed: {exc}") from exc
     finally:
         sup.request_finished(server_id)
+    # A tool call may run for up to 300s — long enough for an owner reassignment
+    # to land. Re-validate before RETURNING the output: a former owner must not
+    # receive the new owner's server results; the response is discarded with the
+    # standard non-visible 404.
+    if not _visible_now(server_id, principal):
+        raise HTTPException(status_code=404, detail="server not found")
     structured = result.structured_content
     return ToolCallResult(
         is_error=bool(result.is_error),
@@ -564,16 +879,20 @@ def _sse(obj: dict) -> str:
 
 
 @router.get("/servers/{server_id}/logs")
-async def stream_logs(server_id: str, request: Request, session: Session = Depends(get_session)):
+async def stream_logs(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
     """SSE stream of a server's live bridge logs.
 
     Replays the current activation's bounded in-memory backlog, then tails new
     lines until the client disconnects or that activation is replaced. Terminal
     activation logs remain available until Retry, edit, disable, or delete.
-    404 if the server row doesn't exist.
+    404 if the server row doesn't exist (or isn't visible to the caller).
     """
-    if repo.get_server(session, server_id) is None:
-        raise HTTPException(status_code=404, detail="server not found")
+    _visible(principal, session, server_id)
 
     sup = request.app.state.supervisor
     headers = {
@@ -591,12 +910,28 @@ async def stream_logs(server_id: str, request: Request, session: Session = Depen
         # this same event loop, so no line can slip in to be missed or duplicated.
         queue = unit.logs.subscribe()
         backlog = unit.logs.snapshot()
+        # Ownership can change under a long-lived stream (a transfer doesn't bounce
+        # the unit), so visibility is re-validated at most every _RECHECK_S seconds
+        # — a former owner's open stream goes quiet and closes shortly after the
+        # server changes hands, instead of tailing the new owner's logs forever.
+        _RECHECK_S = 5.0
+        last_check = time.monotonic()
         try:
+            # Re-validate before the FIRST byte, not just on the periodic timer:
+            # the entry check preceded response start, and the backlog (which can
+            # carry configuration/diagnostic detail) must not reach a caller whose
+            # ownership was transferred away in that gap.
+            if not _visible_now(server_id, principal):
+                return
             for line in backlog:
                 yield _sse({"line": line})
             while True:
                 if await request.is_disconnected() or sup.unit(server_id) is not unit:
                     break
+                if time.monotonic() - last_check > _RECHECK_S:
+                    if not _visible_now(server_id, principal):
+                        break
+                    last_check = time.monotonic()
                 try:
                     line = await asyncio.wait_for(queue.get(), timeout=15)
                     yield _sse({"line": line})

@@ -52,6 +52,10 @@ class ServerSummary(BaseModel):
     port: Optional[int] = None
     tools_count: int = 0
     startup_status: Optional[StartupStatus] = None
+    # Ownership (multi-user): None = admin-owned. owner_name is denormalized so
+    # the admin dashboard can label rows without a second fetch.
+    owner_id: Optional[str] = None
+    owner_name: Optional[str] = None
 
 
 class OAuthStatus(BaseModel):
@@ -167,6 +171,9 @@ class ServerUpdate(BaseModel):
     # global default" and is preserved by the PATCH handler (model_fields_set).
     # StrictInt so a JSON `true` can't lax-coerce to a 1-second shutdown.
     idle_timeout_s: Optional[StrictInt] = None
+    # Admin-only reassignment; explicit null = make it admin-owned. Ignored (403)
+    # for members. Preserved-on-null like the OAuth client fields.
+    owner_id: Optional[str] = None
 
 
 class ServerClone(BaseModel):
@@ -208,6 +215,10 @@ class TokenInfo(BaseModel):
     name: str
     prefix: str
     scope: str
+    # Owning user (None for tokens minted before multi-user, by boot, or by a
+    # synthetic admin). user_name is denormalized for the admin token table.
+    user_id: Optional[str] = None
+    user_name: Optional[str] = None
     created_at: datetime
 
 
@@ -271,9 +282,59 @@ class GroupUpsert(BaseModel):
     members: GroupMembers
 
 
+Role = Literal["admin", "member"]
+
+
+class AuthUser(BaseModel):
+    """The authenticated principal, as the SPA sees it. ``id`` is None for the
+    synthetic admins (enforcement off / MCPE_ADMIN_TOKEN / a legacy user-less
+    control token) — always role=admin, so the UI shows the full surface."""
+
+    id: Optional[str] = None
+    name: str
+    role: Role
+    local_runners: bool = True
+
+
 class AuthStatus(BaseModel):
     enforced: bool  # is a control token required right now?
     authenticated: bool  # did this request carry a valid control token?
+    user: Optional[AuthUser] = None  # the resolved principal when authenticated
+
+
+# ---- Users (multi-user control plane) ---------------------------------------
+
+
+class UserInfo(BaseModel):
+    id: str
+    name: str
+    role: Role
+    local_runners: bool
+    servers_count: int = 0  # servers owned (drives the delete guard in the UI)
+    tokens_count: int = 0  # tokens bound to this user (control + data-plane)
+    created_at: datetime
+
+
+class UserCreate(BaseModel):
+    name: str
+    role: Role = "member"
+    # StrictBool: gates code execution on this box — a truthy-coerced value must
+    # never silently widen an account (same rationale as docker_runner).
+    local_runners: StrictBool = False
+
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[Role] = None
+    local_runners: Optional[StrictBool] = None
+
+
+class UserCredential(BaseModel):
+    """A freshly minted login (control) token for a user — plaintext exactly once."""
+
+    token_id: str
+    token: str
+    prefix: str
 
 
 # ---- Catalog (MCP registry browse + install) --------------------------------

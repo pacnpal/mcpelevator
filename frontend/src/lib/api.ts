@@ -27,7 +27,9 @@ import type {
 	SettingsInfo,
 	TokenCreated,
 	TokenInfo,
-	ToolCallResult
+	ToolCallResult,
+	UserCredential,
+	UserInfo
 } from './types';
 
 const BASE = '/api';
@@ -414,6 +416,41 @@ export function deleteToken(id: string): Promise<void> {
 	return request<void>(`/tokens/${encodeURIComponent(id)}`, {
 		method: 'DELETE'
 	});
+}
+
+// ---- Users (multi-user control plane; admin-only) ---------------------------
+
+/** List control-plane users with their server/token counts. */
+export function listUsers(): Promise<UserInfo[]> {
+	return request<UserInfo[]>('/users');
+}
+
+/** Create a user. `local_runners` gates code-executing runners (npx/uvx/command/docker). */
+export function createUser(
+	name: string,
+	role: 'admin' | 'member',
+	local_runners: boolean
+): Promise<UserInfo> {
+	return jsonRequest<UserInfo>('/users', 'POST', { name, role, local_runners });
+}
+
+/** Patch a user's name, role, or local-runner permission. A 409 surfaces the
+ * last-admin guard (no other admin login would remain). */
+export function updateUser(
+	id: string,
+	patch: Partial<Pick<UserInfo, 'name' | 'role' | 'local_runners'>>
+): Promise<UserInfo> {
+	return jsonRequest<UserInfo>(`/users/${encodeURIComponent(id)}`, 'PATCH', patch);
+}
+
+/** Delete a user (revokes all their tokens). 409 while they still own servers. */
+export function deleteUser(id: string): Promise<void> {
+	return request<void>(`/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/** Mint a login (control) token for a user — plaintext returned exactly once. */
+export function mintUserCredential(id: string): Promise<UserCredential> {
+	return jsonRequest<UserCredential>(`/users/${encodeURIComponent(id)}/credentials`, 'POST', {});
 }
 
 // ---- Groups (the /g/<name> registry) ----------------------------------------

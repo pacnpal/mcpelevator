@@ -202,6 +202,7 @@ class _MemoryTokenStorage(TokenStorage):
         client_info: Optional[OAuthClientInformationFull] = None,
         *,
         persist_registration_to: Optional[ServerTokenStorage] = None,
+        persist_allowed=None,
     ):
         self._tokens: Optional[OAuthToken] = None
         self._client_info = client_info
@@ -211,6 +212,11 @@ class _MemoryTokenStorage(TokenStorage):
         # browser step doesn't discard the registration and force the next sign-in to register
         # again (burning the provider's registration quota).
         self._persist_registration_to = persist_registration_to
+        # Zero-arg predicate consulted at write time: this pass-through fires
+        # MID-FLOW, before the promotion-time deletion check, so without it a
+        # server deleted during the flow's early awaits would get its credential
+        # file recreated with the newly registered client (secret included).
+        self._persist_allowed = persist_allowed
 
     async def get_tokens(self) -> Optional[OAuthToken]:
         return self._tokens
@@ -223,7 +229,9 @@ class _MemoryTokenStorage(TokenStorage):
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         self._client_info = client_info
-        if self._persist_registration_to is not None:
+        if self._persist_registration_to is not None and (
+            self._persist_allowed is None or self._persist_allowed()
+        ):
             # set_client_info touches only the client_info key of the file, leaving any tokens
             # untouched — and this is only wired when there were no tokens to begin with, so it
             # can never rebind a client that a live credential's refresh depends on.
@@ -231,12 +239,34 @@ class _MemoryTokenStorage(TokenStorage):
 
 
 class _Pending:
-    """One in-flight authorization the operator has started but not yet completed."""
+    """One in-flight authorization the operator has started but not yet completed.
 
-    def __init__(self, server_id: str):
+    ``owner_id`` snapshots the server's owner at the moment the flow began: the
+    grant belongs to whoever started the sign-in, so promotion re-checks that the
+    server still has that owner (see ``_drive``). Cancellation on reassignment
+    alone can't cover this — a transfer can land while ``begin_authorization`` is
+    still awaiting upstream discovery, BEFORE the flow registers in ``_PENDING``,
+    where there is nothing to cancel yet."""
+
+    def __init__(
+        self,
+        server_id: str,
+        owner_id: Optional[str] = None,
+        row_existed: bool = False,
+        oauth_sig: tuple = (),
+    ):
         loop = asyncio.get_running_loop()
         self.id = new_id()
         self.server_id = server_id
+        self.owner_id = owner_id
+        # The OAuth-relevant config (upstream/scopes/client) the flow was started
+        # against — promotion re-judges it, so a grant obtained for the OLD config
+        # can't become the credential of a mid-flow-reconfigured server.
+        self.oauth_sig = oauth_sig
+        # Did the server ROW exist in the DB when the flow began? Promotion treats
+        # a now-missing row as "deleted mid-flow" (blocked) only when it did — a
+        # flow driven against an unpersisted server object (tests) is exempt.
+        self.row_existed = row_existed
         self.state: Optional[str] = None  # OAuth ``state``, learned from the auth URL
         self.code: Optional[str] = None  # filled in by the callback
         self.url_future: asyncio.Future[str] = loop.create_future()
@@ -360,6 +390,59 @@ def _probe_headers(server) -> dict[str, str]:
     return headers
 
 
+def _server_row(server_id: str):
+    """The server's COMMITTED row (or None), read on a fresh session against the
+    engine (never a request session) so no identity map interferes. Plain columns
+    are loaded eagerly, so the returned object is safe to inspect after close."""
+    from sqlmodel import Session
+
+    from app.db import get_engine, repo
+
+    with Session(get_engine()) as session:
+        return repo.get_server(session, server_id)
+
+
+def _oauth_signature_of(server) -> tuple:
+    """The OAuth-relevant configuration of a server(-like) object — the same shape
+    the PATCH handler uses to decide token cleanup. A grant is only valid for the
+    exact upstream/scopes/client the flow was STARTED against."""
+    return (
+        bool(getattr(server, "oauth", False)),
+        getattr(server, "command", ""),  # upstream URL — tokens bind to this resource
+        getattr(server, "oauth_scopes", "") or "",
+        getattr(server, "oauth_client_id", None),
+        getattr(server, "oauth_client_secret", None),
+    )
+
+
+def _promotion_blocked(pending: _Pending) -> Optional[str]:
+    """Why this flow's grant must NOT be promoted (None = go ahead), judged against
+    the committed row at promotion time. Registered pending flows are cancelled by
+    the delete/reassign/config-edit paths, but a flow still in its pre-registration
+    awaits escapes all of them — these checks are the backstop:
+
+    - a row that vanished (and existed at begin) means the server was DELETED
+      mid-flow; promoting would recreate an orphaned credential file;
+    - an owner that changed means the grant belongs to the FORMER owner's
+      upstream account;
+    - an OAuth config that changed (upstream/scopes/client) means the PATCH that
+      changed it already cleared the stored tokens — this grant belongs to the
+      OLD configuration and must not become the new upstream's credential.
+
+    A row that never existed (``row_existed`` False — unpersisted test servers)
+    is exempt from the deletion check and carries no config to re-judge."""
+    row = _server_row(pending.server_id)
+    if row is None:
+        if pending.row_existed:
+            return "server was deleted during authorization"
+        return None
+    if row.owner_id != pending.owner_id:
+        return "server ownership changed during authorization — sign in again"
+    if _oauth_signature_of(row) != pending.oauth_sig:
+        return "server OAuth configuration changed during authorization — sign in again"
+    return None
+
+
 async def _drive(
     server,
     provider: OAuthClientProvider,
@@ -411,26 +494,47 @@ async def _drive(
         )
         tokens = None
     if tokens is not None:
-        # Promote the freshly-obtained credentials to the shared store the bridge reads, in
-        # ONE atomic write that fully replaces any prior state. Building it in memory first
-        # means a failure leaves the previous (still-working) credential intact — no
-        # destructive pre-clear — and it doesn't carry forward an old refresh token (a new
-        # grant brings its own; the carry-forward is only for the bridge's refresh path).
+        # Validate-and-promote as ONE step under the config write lock — the same
+        # lock every ownership transfer, server delete, and OAuth reconfiguration
+        # commits under — so none of them can land between _promotion_blocked's
+        # read and the file write (the begin-time snapshots close the
+        # pre-registration window; the lock closes the check-to-write one). The
+        # promote itself is ONE atomic write that fully replaces any prior state:
+        # building it in memory first means a failure leaves the previous
+        # (still-working) credential intact — no destructive pre-clear — and it
+        # doesn't carry forward an old refresh token (a new grant brings its own).
+        # Runs in a worker thread: the lock is a threading lock that bulk imports
+        # can hold for seconds, and _drive lives on the event loop.
+        client_info = await mem.get_client_info()
+        oauth_metadata = getattr(provider.context, "oauth_metadata", None)
+        pr_metadata = getattr(provider.context, "protected_resource_metadata", None)
+
+        def _checked_promote() -> Optional[str]:
+            from app.registry import service  # local import: keep module load cycle-free
+
+            with service.config_write_lock():
+                blocked = _promotion_blocked(pending)
+                if blocked is not None:
+                    return blocked
+                real.promote(
+                    tokens=tokens,
+                    client_info=client_info,
+                    metadata=oauth_metadata,
+                    protected_resource_metadata=pr_metadata,
+                )
+                return None
+
         try:
-            real.promote(
-                tokens=tokens,
-                client_info=await mem.get_client_info(),
-                metadata=getattr(provider.context, "oauth_metadata", None),
-                protected_resource_metadata=getattr(
-                    provider.context, "protected_resource_metadata", None
-                ),
-            )
+            blocked = await asyncio.to_thread(_checked_promote)
         except Exception as exc:  # noqa: BLE001 — persistence failure = the grant didn't stick
             inner_error = exc
         else:
-            if not pending.done_future.done():
-                pending.done_future.set_result(None)
-            return
+            if blocked is not None:
+                inner_error = inner_error or RuntimeError(blocked)
+            else:
+                if not pending.done_future.done():
+                    pending.done_future.set_result(None)
+                return
 
     error = inner_error or RuntimeError("OAuth flow finished without returning tokens")
     logger.info("OAuth authorization for %s failed: %s", server.id, error)
@@ -460,6 +564,11 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     operator's browser to. Raises on a discovery/registration failure or timeout."""
     _reap_stale()
     _cancel_existing(server.id)
+    # Snapshot the row's existence BEFORE any await: a deletion landing during the
+    # client-info/token-store reads below must still read as "existed at begin", so
+    # promotion blocks (_promotion_blocked) instead of recreating an orphan
+    # credential file for the deleted server.
+    row_existed = _server_row(server.id) is not None
 
     real = ServerTokenStorage(server.id)
     redirect_uris = [AnyHttpUrl(callback_url)]
@@ -502,8 +611,25 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     persist_registration_to = (
         real if seed_client_info is None and (await real.get_tokens()) is None else None
     )
+    # The pending record carries the flow's begin-time snapshots (existence, owner,
+    # OAuth signature). Constructed BEFORE the ephemeral store so the registration
+    # pass-through below can be gated on the SAME judgment as token promotion.
+    pending = _Pending(
+        server.id,
+        owner_id=getattr(server, "owner_id", None),
+        row_existed=row_existed,
+        oauth_sig=_oauth_signature_of(server),
+    )
     mem = _MemoryTokenStorage(
-        client_info=seed_client_info, persist_registration_to=persist_registration_to
+        client_info=seed_client_info,
+        persist_registration_to=persist_registration_to,
+        # ONE judgment (_promotion_blocked) governs both this mid-flow write and
+        # the final token promotion: the row must still exist with the same owner
+        # and OAuth config the flow was started against — a server deleted or
+        # reconfigured mid-flow must not get the OLD provider's registration
+        # written into (or recreating) its credential file, where a later sign-in
+        # would reuse the stale client against the NEW upstream.
+        persist_allowed=lambda: _promotion_blocked(pending) is None,
     )
 
     client_metadata = OAuthClientMetadata(
@@ -513,8 +639,6 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         response_types=["code"],
         scope=server.oauth_scopes or None,
     )
-
-    pending = _Pending(server.id)
 
     async def redirect_handler(authorization_url: str) -> None:
         authorization_url = _repair_authorization_url(authorization_url)

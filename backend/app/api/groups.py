@@ -19,18 +19,25 @@ from starlette.responses import Response
 
 from app.api.schemas import GroupInfo, GroupUpsert
 from app.api.util import base_url, resync_groups
+from app.auth import principal as principal_mod
+from app.auth.principal import Principal, require_admin
 from app.db import get_session, repo
 from app.groups import registry
 from app.registry import service
 
-router = APIRouter()
+# Groups are a global, admin-owned surface: they can bundle ANY server (including
+# "*" = everything), so members must not read or shape them.
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 def _url(request: Request, name: str) -> str:
     return f"{base_url(request)}/g/{name}/mcp"
 
 
-def _delete_group_and_tokens(session: Session, name: str) -> bool:
+_FORBIDDEN = HTTPException(status_code=403, detail="admin role required")
+
+
+def _delete_group_and_tokens(session: Session, name: str, principal: Principal) -> bool:
     """Revoke the group's tokens and remove its registry entry under a SINGLE hold of the
     config write lock. Run in the threadpool by the caller: the lock is a threading
     RLock, so waiting on it (while a server import/create holds it deriving config hashes)
@@ -43,6 +50,11 @@ def _delete_group_and_tokens(session: Session, name: str) -> bool:
     interruption leaves the benign state (tokens gone, group lingers). Returns False when
     the group didn't exist (-> 404)."""
     with service.config_write_lock():
+        # Re-authorize under the lock: a demotion of the caller can commit while
+        # this request queued behind an import — the entry-time require_admin must
+        # not let a now-member delete a global group and revoke its tokens.
+        if not principal_mod.admin_now(session, principal):
+            raise _FORBIDDEN
         if not registry.exists(session, name):
             return False
         repo.delete_tokens_by_scope(session, f"group:{name}")
@@ -64,11 +76,20 @@ async def upsert_group(
     payload: GroupUpsert,
     request: Request,
     session: Session = Depends(get_session),
+    principal: Principal = Depends(require_admin),
 ):
+    def _write():
+        # One lock hold (reentrant — write_group re-enters it): re-authorize the
+        # caller on committed state, then validate-and-write the registry entry.
+        with service.config_write_lock():
+            if not principal_mod.admin_now(session, principal):
+                raise _FORBIDDEN
+            return registry.write_group(session, name, payload.members)
+
     try:
-        # Threadpool: write_group takes the config write lock (shared with server
-        # creates/imports deriving scrypt hashes), so the wait must stay off the loop.
-        stored = await run_in_threadpool(registry.write_group, session, name, payload.members)
+        # Threadpool: the config write lock is shared with server creates/imports
+        # deriving scrypt hashes, so the wait must stay off the loop.
+        stored = await run_in_threadpool(_write)
     except ValueError as exc:  # bad name grammar or an unknown member id
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await resync_groups(request)
@@ -77,10 +98,13 @@ async def upsert_group(
 
 @router.delete("/groups/{name}", status_code=204)
 async def delete_group(
-    name: str, request: Request, session: Session = Depends(get_session)
+    name: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_admin),
 ):
     # Revoke + remove under the config write lock, off the event loop (see helper).
-    if not await run_in_threadpool(_delete_group_and_tokens, session, name):
+    if not await run_in_threadpool(_delete_group_and_tokens, session, name, principal):
         raise HTTPException(status_code=404, detail="group not found")
     await resync_groups(request)
     return Response(status_code=204)

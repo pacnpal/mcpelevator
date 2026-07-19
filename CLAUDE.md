@@ -64,6 +64,17 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   auth that gates the sensitive `/api` routers only when enforcement is on (default `auto`: when
   the box is exposed off-host); `/api/health*` and `/api/auth/status` stay public. See README
   "Security" for the full model.
+- **Multi-user control plane** (`auth/principal.py`, `auth/policy.py`, `api/users.py`): WHO is
+  resolved in exactly one place (`principal.resolve` — enforcement off ⇒ synthetic local admin,
+  `MCPE_ADMIN_TOKEN` ⇒ env admin, a user-less control token ⇒ legacy admin, a user-bound one ⇒
+  that user's role/flags) and WHAT they may do lives entirely in `policy` (server/token
+  visibility, the local-runner permission, member token-scope limits) — routers call those
+  predicates, never re-derive rules. Users hold no passwords: credentials are `control` tokens
+  bound via `Token.user_id`; `Server.owner_id` (NULL = admin-owned, the upgrade default) drives
+  visibility, and non-visible resources 404 like nonexistent ones. Ownership is identity, not
+  launch config — it stays out of `config_hash`, so reassigning never bounces a bridge. This is
+  authorization, not isolation: local runners execute as the process user (README "Security",
+  trust caveat).
 - **Catalog** (`catalog/`): backend proxies public MCP directories (official registry, Glama) into
   reviewable launch specs; the SPA stays same-origin.
 - **Frontend** (`frontend/src/`): SvelteKit (Svelte 5) SPA, `adapter-static`, no SSR — rendered

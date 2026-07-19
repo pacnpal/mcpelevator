@@ -1,19 +1,25 @@
 <script lang="ts">
 	import {
 		createToken,
+		createUser,
 		deleteGroup,
 		deleteToken,
+		deleteUser,
 		errorMessage,
 		getAuthStatus,
 		getSettings,
 		listGroups,
 		listServers,
 		listTokens,
+		listUsers,
+		mintUserCredential,
 		putGroup,
-		updateSettings
+		updateSettings,
+		updateUser
 	} from '$lib/api';
 	import type {
 		AuthProvider,
+		AuthUser,
 		BindMode,
 		ControlPlaneAuth,
 		GroupInfo,
@@ -21,7 +27,9 @@
 		ServerSummary,
 		SettingsInfo,
 		TokenCreated,
-		TokenInfo
+		TokenInfo,
+		UserCredential,
+		UserInfo
 	} from '$lib/types';
 	import { clearToken, setToken } from '$lib/auth';
 	import { isLoopbackHost, isPrivateIpHost, normalizeHost } from '$lib/host';
@@ -39,6 +47,11 @@
 	let tokens = $state<TokenInfo[]>([]);
 	let servers = $state<ServerSummary[]>([]);
 	let groups = $state<GroupInfo[]>([]);
+	let users = $state<UserInfo[]>([]);
+	// The authenticated principal (null before the first load resolves). Members get
+	// a reduced page: their tokens only — no security settings, groups, or users.
+	let authUser = $state<AuthUser | null>(null);
+	const isAdmin = $derived(authUser?.role !== 'member');
 	// Whether THIS browser holds a working control token (not just whether one exists
 	// in the backend). That's what decides if enabling enforcement would lock us out.
 	let hasUsableAdminCredential = $state(false);
@@ -47,12 +60,17 @@
 		loadState = 'loading';
 		loadError = null;
 		try {
-			const [s, t, srv, grp, auth] = await Promise.all([
+			// Resolve the principal FIRST: groups/users are admin-only endpoints, so a
+			// member's page must not request them (a 403 would fail the whole load).
+			const auth = await getAuthStatus();
+			authUser = auth.user;
+			const admin = auth.user?.role !== 'member';
+			const [s, t, srv, grp, usr] = await Promise.all([
 				getSettings(),
 				listTokens(),
 				listServers(),
-				listGroups(),
-				getAuthStatus()
+				admin ? listGroups() : Promise.resolve([]),
+				admin ? listUsers() : Promise.resolve([])
 			]);
 			settings = s;
 			oauthConfigUrl = s.oauth_config_url;
@@ -64,6 +82,7 @@
 			tokens = t;
 			servers = srv;
 			groups = grp;
+			users = usr;
 			hasUsableAdminCredential = auth.authenticated;
 			loadState = 'ready';
 		} catch (err) {
@@ -84,7 +103,15 @@
 	let creating = $state(false);
 	let createdToken = $state<TokenCreated | null>(null);
 
-	const newNameValid = $derived(newTokenName.trim().length > 0);
+	// Members can't mint 'all'-scoped tokens — default their scope to the first
+	// server they own (the select below only offers their servers).
+	$effect(() => {
+		if (authUser?.role === 'member' && newTokenScope === 'all') {
+			newTokenScope = servers[0]?.id ?? '';
+		}
+	});
+
+	const newNameValid = $derived(newTokenName.trim().length > 0 && newTokenScope !== '');
 
 	async function handleCreateToken(e: SubmitEvent) {
 		e.preventDefault();
@@ -185,6 +212,84 @@
 			month: 'short',
 			day: 'numeric'
 		});
+	}
+
+	// ---- Users (multi-user control plane; admin-only) -------------------------
+
+	let newUserName = $state('');
+	let newUserRole = $state<'admin' | 'member'>('member');
+	let newUserLocal = $state(false);
+	let creatingUser = $state(false);
+	// One-time login-token reveal, keyed to the user it was minted for.
+	let mintedFor = $state<{ userId: string; userName: string; token: string } | null>(null);
+	let confirmDeleteUserId = $state<string | null>(null);
+	let busyUserId = $state<string | null>(null);
+
+	async function handleCreateUser(e: SubmitEvent) {
+		e.preventDefault();
+		if (creatingUser || !newUserName.trim()) return;
+		creatingUser = true;
+		try {
+			const user = await createUser(newUserName.trim(), newUserRole, newUserLocal);
+			users = [...users, user];
+			newUserName = '';
+			newUserRole = 'member';
+			newUserLocal = false;
+			// A user without a credential can't log in — mint one right away so the
+			// admin has something to hand over.
+			const cred = await mintUserCredential(user.id);
+			mintedFor = { userId: user.id, userName: user.name, token: cred.token };
+			users = users.map((u) => (u.id === user.id ? { ...u, tokens_count: u.tokens_count + 1 } : u));
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			creatingUser = false;
+		}
+	}
+
+	async function handleMintCredential(user: UserInfo) {
+		if (busyUserId) return;
+		busyUserId = user.id;
+		try {
+			const cred = await mintUserCredential(user.id);
+			mintedFor = { userId: user.id, userName: user.name, token: cred.token };
+			users = users.map((u) => (u.id === user.id ? { ...u, tokens_count: u.tokens_count + 1 } : u));
+			tokens = await listTokens(); // the credential is a control token — keep the table in sync
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			busyUserId = null;
+		}
+	}
+
+	async function patchUser(user: UserInfo, patch: Parameters<typeof updateUser>[1]) {
+		if (busyUserId) return;
+		busyUserId = user.id;
+		try {
+			const updated = await updateUser(user.id, patch);
+			users = users.map((u) => (u.id === user.id ? updated : u));
+		} catch (err) {
+			flashToast(errorMessage(err)); // e.g. the last-admin guard (409)
+		} finally {
+			busyUserId = null;
+		}
+	}
+
+	async function handleDeleteUser(id: string) {
+		if (busyUserId) return;
+		busyUserId = id;
+		try {
+			await deleteUser(id);
+			users = users.filter((u) => u.id !== id);
+			if (mintedFor?.userId === id) mintedFor = null;
+			tokens = await listTokens(); // their tokens were revoked with them
+			flashToast('User deleted', 'info');
+		} catch (err) {
+			flashToast(errorMessage(err)); // e.g. still owns servers (409)
+		} finally {
+			busyUserId = null;
+			confirmDeleteUserId = null;
+		}
 	}
 
 	// ---- Security settings ----------------------------------------------------
@@ -712,8 +817,10 @@
 						bind:value={newTokenScope}
 						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
 					>
-						<option value="all">All servers &amp; groups</option>
-						{#if groups.length > 0}
+						{#if isAdmin}
+							<option value="all">All servers &amp; groups</option>
+						{/if}
+						{#if isAdmin && groups.length > 0}
 							<optgroup label="Groups">
 								{#each groups as group (group.name)}
 									<option value={`group:${group.name}`}>Group: {group.name}</option>
@@ -743,7 +850,9 @@
 				</button>
 			</form>
 
-			<!-- Admin (control-plane) token: the credential the SPA logs in with. -->
+			<!-- Admin (control-plane) token: the credential the SPA logs in with.
+			     Admin-only — members receive their login token from an admin. -->
+			{#if isAdmin}
 			<div
 				class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed border-[var(--color-line)] px-3 py-2.5"
 			>
@@ -761,6 +870,7 @@
 					Generate admin token
 				</button>
 			</div>
+			{/if}
 
 			<!-- Token list -->
 			{#if tokens.length === 0}
@@ -805,6 +915,9 @@
 								<span class="font-mono text-xs text-[var(--color-ink-dim)]">
 									{token.prefix}…
 									<span class="text-[var(--color-ink-dim)]">· {formatDate(token.created_at)}</span>
+									{#if isAdmin && token.user_name}
+										<span class="text-[var(--color-ink-dim)]">· {token.user_name}</span>
+									{/if}
 								</span>
 							</div>
 							{#if confirmRevokeId === token.id}
@@ -850,7 +963,196 @@
 			{/if}
 		</div>
 
+		<!-- =============================== Users ================================ -->
+		{#if isAdmin}
+		<div
+			class="flex flex-col gap-5 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
+		>
+			<div class="flex flex-col gap-1">
+				<h2 class="text-sm font-semibold text-[var(--color-ink)]">Users</h2>
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					Members see and manage only the servers and tokens they own. Users log in with
+					a login token you mint here — shown once, like every token.
+					<span class="font-medium text-[var(--color-ink-muted)]">Local runners execute
+					code on this box as the mcpelevator process user; grant that permission only to
+					people you trust with the machine.</span>
+				</p>
+			</div>
+
+			<!-- One-time login-token reveal -->
+			{#if mintedFor}
+				<div
+					class="flex flex-col gap-2 rounded-lg border p-4"
+					style="border-color: color-mix(in oklab, var(--color-accent) 45%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);"
+				>
+					<p class="text-xs text-[var(--color-ink-muted)]">
+						Login token for
+						<span class="font-medium text-[var(--color-ink)]">{mintedFor.userName}</span>
+						— copy it now; it won't be shown again.
+					</p>
+					<div class="flex items-center gap-2">
+						<code
+							class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
+						>
+							{mintedFor.token}
+						</code>
+						<CopyButton value={mintedFor.token} label="Copy login token" />
+						<button
+							type="button"
+							onclick={() => (mintedFor = null)}
+							class="shrink-0 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+						>
+							Done
+						</button>
+					</div>
+				</div>
+			{/if}
+
+			<!-- Create user -->
+			<form class="flex flex-wrap items-end gap-3" onsubmit={handleCreateUser}>
+				<div class="flex min-w-0 grow flex-col gap-1.5">
+					<label for="user-name" class="text-xs font-medium text-[var(--color-ink-muted)]">Name</label>
+					<input
+						id="user-name"
+						type="text"
+						bind:value={newUserName}
+						autocomplete="off"
+						spellcheck="false"
+						placeholder="e.g. ada"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+					/>
+				</div>
+				<div class="flex min-w-0 flex-col gap-1.5">
+					<label for="user-role" class="text-xs font-medium text-[var(--color-ink-muted)]">Role</label>
+					<select
+						id="user-role"
+						bind:value={newUserRole}
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
+					>
+						<option value="member">member</option>
+						<option value="admin">admin</option>
+					</select>
+				</div>
+				<label
+					class="flex items-center gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs font-medium text-[var(--color-ink-muted)]"
+					title="Allow npx / uvx / command / docker servers (code execution on this box)"
+				>
+					<input type="checkbox" bind:checked={newUserLocal} class="accent-[var(--color-accent)]" />
+					local runners
+				</label>
+				<button
+					type="submit"
+					disabled={!newUserName.trim() || creatingUser}
+					aria-busy={creatingUser}
+					class="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+				>
+					Add user
+				</button>
+			</form>
+
+			<!-- User list -->
+			{#if users.length === 0}
+				<p
+					class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-6 text-center text-xs text-[var(--color-ink-dim)]"
+				>
+					No users yet. You're operating as the built-in admin; add users to give
+					teammates their own scoped access.
+				</p>
+			{:else}
+				<ul class="flex flex-col divide-y divide-[var(--color-line)]">
+					{#each users as user (user.id)}
+						<li class="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
+							<div class="flex min-w-0 flex-col gap-1">
+								<span class="flex min-w-0 items-center gap-2">
+									<span class="truncate text-sm font-medium text-[var(--color-ink)]">{user.name}</span>
+									<span
+										class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
+										style={user.role === 'admin'
+											? 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'
+											: 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'}
+									>
+										{user.role}
+									</span>
+									{#if user.local_runners}
+										<span
+											class="shrink-0 rounded-full border border-[var(--color-line)] px-2 py-0.5 text-[10px] font-medium whitespace-nowrap text-[var(--color-ink-muted)]"
+											title="May configure npx / uvx / command / docker servers (code execution on this box)"
+										>
+											local runners
+										</span>
+									{/if}
+								</span>
+								<span class="text-xs text-[var(--color-ink-dim)]">
+									{user.servers_count} server{user.servers_count === 1 ? '' : 's'} ·
+									{user.tokens_count} token{user.tokens_count === 1 ? '' : 's'}
+								</span>
+							</div>
+							<div class="flex shrink-0 flex-wrap items-center gap-1.5">
+								{#if confirmDeleteUserId === user.id}
+									<button
+										type="button"
+										onclick={() => handleDeleteUser(user.id)}
+										disabled={busyUserId === user.id}
+										aria-busy={busyUserId === user.id}
+										class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+										style="background-color: var(--color-state-failed);"
+									>
+										Delete
+									</button>
+									<button
+										type="button"
+										onclick={() => (confirmDeleteUserId = null)}
+										disabled={busyUserId === user.id}
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+									>
+										Cancel
+									</button>
+								{:else}
+									<button
+										type="button"
+										onclick={() => handleMintCredential(user)}
+										disabled={busyUserId !== null}
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink)] transition hover:border-[var(--color-line-strong)] disabled:opacity-50"
+									>
+										Mint login token
+									</button>
+									<button
+										type="button"
+										onclick={() =>
+											patchUser(user, { role: user.role === 'admin' ? 'member' : 'admin' })}
+										disabled={busyUserId !== null}
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+									>
+										{user.role === 'admin' ? 'Make member' : 'Make admin'}
+									</button>
+									<button
+										type="button"
+										onclick={() => patchUser(user, { local_runners: !user.local_runners })}
+										disabled={busyUserId !== null}
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+									>
+										{user.local_runners ? 'Revoke local runners' : 'Allow local runners'}
+									</button>
+									<button
+										type="button"
+										onclick={() => (confirmDeleteUserId = user.id)}
+										disabled={busyUserId !== null}
+										class="rounded-lg border px-3 py-1.5 text-xs font-medium transition active:translate-y-px disabled:opacity-50"
+										style="border-color: color-mix(in oklab, var(--color-state-failed) 35%, transparent); color: var(--color-state-failed);"
+									>
+										Delete
+									</button>
+								{/if}
+							</div>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</div>
+		{/if}
+
 		<!-- ============================== Security =============================== -->
+		{#if isAdmin}
 		<div
 			class="flex flex-col gap-6 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
 		>
@@ -1634,6 +1936,7 @@
 				{/if}
 			</fieldset>
 		</div>
+		{/if}
 	{/if}
 </section>
 

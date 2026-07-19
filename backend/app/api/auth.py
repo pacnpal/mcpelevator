@@ -18,8 +18,8 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse
 from sqlmodel import Session
 
-from app.api.schemas import AuthStatus
-from app.auth import oauth_flow
+from app.api.schemas import AuthStatus, AuthUser
+from app.auth import oauth_flow, principal as principal_mod
 from app.auth.control_plane import control_auth, enforcement_enabled
 from app.db import get_session, repo
 
@@ -30,9 +30,19 @@ router = APIRouter()
 
 @router.get("/auth/status", response_model=AuthStatus)
 async def auth_status(request: Request, session: Session = Depends(get_session)) -> AuthStatus:
+    # ``user`` reflects the request's PRINCIPAL, which exists even when
+    # ``authenticated`` is false with enforcement off (the synthetic local admin) —
+    # that's what lets the zero-config SPA render the full admin surface.
+    p = principal_mod.resolve(request, session)
+    user = (
+        AuthUser(id=p.user_id, name=p.name, role=p.role, local_runners=p.local_runners)
+        if p is not None
+        else None
+    )
     return AuthStatus(
         enforced=enforcement_enabled(session),
         authenticated=control_auth(request, session) == "ok",
+        user=user,
     )
 
 

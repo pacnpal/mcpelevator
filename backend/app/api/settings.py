@@ -8,8 +8,14 @@ from starlette.requests import Request
 
 from app.api.schemas import SettingsInfo, SettingsUpdate
 from app.api.util import resync_groups
-from app.auth.control_plane import would_lock_out
-from app.db import get_session
+from app.auth import principal as principal_mod
+from app.auth.control_plane import (
+    admin_credential_presented,
+    enforcement_enabled,
+    would_lock_out,
+)
+from app.auth.principal import Principal, require_admin
+from app.db import get_engine, get_session
 from app.registry import settings as runtime_settings
 
 router = APIRouter()
@@ -26,22 +32,53 @@ async def get_settings(session: Session = Depends(get_session)):
     return _info(runtime_settings.read_all(session))
 
 
-@router.patch("/settings", response_model=SettingsInfo)
+# GET stays readable by any authenticated principal — the SPA's add-server form
+# reads docker_runner/default_auth_provider — but writes are admin-only.
+@router.patch("/settings", response_model=SettingsInfo, dependencies=[Depends(require_admin)])
 async def update_settings(
-    payload: SettingsUpdate, request: Request, session: Session = Depends(get_session)
+    payload: SettingsUpdate,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_admin),
 ):
     changes = {k: v for k, v in payload.model_dump().items() if v is not None}
 
     def guard(s: Session) -> None:
-        # Re-checked inside the settings write transaction (under the write lock), so a
-        # token delete racing this enable can't remove the last control credential
-        # between the check and the commit. Refuse to switch enforcement on unless THIS
-        # request still authenticates as control; the UI guards this too.
+        # Both checks run inside the settings write transaction (under the write
+        # lock, AFTER the staged changes flushed), so nothing can change between
+        # check and commit:
+        # 1) Refuse to switch enforcement on unless THIS request presents an
+        #    ADMIN-resolving credential (would_lock_out) — a token delete racing
+        #    this enable can't remove the last admin credential between the check
+        #    and the commit, and a member login can't flip enforcement on and
+        #    strand the box; the UI guards this too.
         if would_lock_out(request, s, changes):
             raise HTTPException(
                 status_code=400,
                 detail="authenticate with an admin token before enabling control-plane auth",
             )
+        # 2) Re-authorize the CALLER. Token-bound principals re-check their
+        #    credential and role (a demotion/revocation commits under the config
+        #    lock and must fail this queued write). The enforcement-off synthetic
+        #    needs its own rule because enforcement_enabled here reads the STAGED
+        #    values: when this very request is the one flipping enforcement on,
+        #    the local operator is still the legitimate caller — provided they
+        #    presented an admin credential (which check 1 already demanded). A
+        #    CONCURRENT flip (committed by another request while this one queued)
+        #    is caught the same way: enforcement now reads on, no admin credential
+        #    on this request -> rejected.
+        if principal is principal_mod.LOCAL_ADMIN:
+            # Judged against the COMMITTED policy on a SEPARATE session: this
+            # guard runs post-flush, so reading enforcement via ``s`` would see
+            # this request's own staged values — and an anonymous pre-enable
+            # request staging control_plane_auth back to "auto" could then roll
+            # back a concurrently committed enable while appearing unenforced.
+            with Session(get_engine()) as committed:
+                enforced_before_this_write = enforcement_enabled(committed)
+            if enforced_before_this_write and not admin_credential_presented(request, s):
+                raise HTTPException(status_code=403, detail="admin role required")
+        elif not principal_mod.admin_now(s, principal):
+            raise HTTPException(status_code=403, detail="admin role required")
 
     auth_changed = "default_auth_provider" in changes
     try:
