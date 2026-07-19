@@ -115,70 +115,96 @@ async def create_user(payload: UserCreate, session: Session = Depends(get_sessio
 async def update_user(
     user_id: str, payload: UserUpdate, session: Session = Depends(get_session)
 ):
-    user = repo.get_user(session, user_id)
-    if user is None:
+    if payload.name is not None and not payload.name.strip():
+        raise HTTPException(status_code=400, detail="name must not be empty")
+
+    def _apply():
+        """The whole mutation — re-fetch, last-admin guard, demotion revocation,
+        field writes — under ONE hold of the config write lock, so two concurrent
+        demotions/deletions can't both pass the guard on each other's still-present
+        credential and remove every admin login between them."""
+        with service.config_write_lock():
+            user = repo.get_user(session, user_id)
+            if user is None:
+                return "not_found"
+            if payload.name is not None:
+                user.name = payload.name.strip()
+            if payload.role is not None and payload.role != user.role:
+                if user.role == "admin" and not _admin_login_would_remain(
+                    session, excluding_user_id=user.id
+                ):
+                    return "last_admin"
+                if user.role == "admin" and payload.role == "member":
+                    # Demotion revokes the data-plane tokens the user could only
+                    # mint AS an admin ("all", group scopes, and scopes for servers
+                    # they don't own) — otherwise those tokens would keep
+                    # authorizing endpoints the member role can't reach. Revoke
+                    # BEFORE the role save so an interruption leaves the benign
+                    # state (an admin with fewer tokens), never a member holding
+                    # admin-grade credentials. Login (control) tokens stay: they
+                    # simply resolve to the member role from now on.
+                    repo.delete_tokens_by_ids(
+                        session, _overprivileged_token_ids(session, user.id)
+                    )
+                user.role = payload.role
+            if payload.local_runners is not None:
+                user.local_runners = payload.local_runners
+            return repo.save_user(session, user)
+
+    # Threadpool: the lock is a threading lock shared with imports deriving scrypt
+    # hashes — never wait for it on the event loop.
+    result = await run_in_threadpool(_apply)
+    if result == "not_found":
         raise HTTPException(status_code=404, detail="user not found")
-    if payload.name is not None:
-        name = payload.name.strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="name must not be empty")
-        user.name = name
-    if payload.role is not None and payload.role != user.role:
-        if user.role == "admin" and not _admin_login_would_remain(
-            session, excluding_user_id=user.id
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="cannot demote the last admin — no other admin login would remain",
-            )
-        if user.role == "admin" and payload.role == "member":
-            # Demotion revokes the data-plane tokens the user could only mint AS an
-            # admin ("all", group scopes, and scopes for servers they don't own) —
-            # otherwise those tokens would keep authorizing endpoints the member
-            # role can't reach. Revoke BEFORE the role save so an interruption
-            # leaves the benign state (an admin with fewer tokens), never a member
-            # holding admin-grade credentials. Login (control) tokens stay: they
-            # simply resolve to the member role from now on.
-            repo.delete_tokens_by_ids(
-                session, _overprivileged_token_ids(session, user.id)
-            )
-        user.role = payload.role
-    if payload.local_runners is not None:
-        user.local_runners = payload.local_runners
-    return _info(session, repo.save_user(session, user))
+    if result == "last_admin":
+        raise HTTPException(
+            status_code=409,
+            detail="cannot demote the last admin — no other admin login would remain",
+        )
+    return _info(session, result)
 
 
 @router.delete("/users/{user_id}", status_code=204)
 async def delete_user(user_id: str, session: Session = Depends(get_session)):
-    user = repo.get_user(session, user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="user not found")
-    if user.role == "admin" and not _admin_login_would_remain(session, excluding_user_id=user.id):
-        raise HTTPException(
-            status_code=409,
-            detail="cannot delete the last admin — no other admin login would remain",
-        )
-
-    def _delete() -> int:
-        """Check-and-delete under the config write lock — the same lock owner
-        reassignment holds while writing owner_id — so a reassignment can't land
-        between our owns-servers check and the delete and leave a server pointing
-        at a user that no longer exists. Returns the owned count (0 = deleted)."""
+    def _delete():
+        """EVERY check runs under the same hold of the config write lock as the
+        delete itself: the last-admin guard (two concurrent deletes of the two
+        remaining admins must not both pass by seeing each other's still-present
+        credential — the lock serializes them, so the second re-reads a world where
+        the first admin is gone and is refused) and the owns-servers check (the
+        same lock owner reassignment holds while writing owner_id, so a
+        reassignment can't land between check and delete and leave a server
+        pointing at a deleted user). Returns 'not_found' | 'last_admin' | an owned
+        count | 'ok'."""
         with service.config_write_lock():
+            user = repo.get_user(session, user_id)
+            if user is None:
+                return "not_found"
+            if user.role == "admin" and not _admin_login_would_remain(
+                session, excluding_user_id=user.id
+            ):
+                return "last_admin"
             owned = repo.count_servers_owned(session, user_id)
             if owned:
                 return owned
             repo.delete_user_and_tokens(session, user_id)
-            return 0
+            return "ok"
 
     # Threadpool: the lock is a threading lock shared with imports deriving scrypt
     # hashes — never wait for it on the event loop.
-    owned = await run_in_threadpool(_delete)
-    if owned:
+    result = await run_in_threadpool(_delete)
+    if result == "not_found":
+        raise HTTPException(status_code=404, detail="user not found")
+    if result == "last_admin":
+        raise HTTPException(
+            status_code=409,
+            detail="cannot delete the last admin — no other admin login would remain",
+        )
+    if result != "ok":
         raise HTTPException(
             status_code=409,
             detail=(
-                f"user still owns {owned} server(s) — delete them or reassign their "
+                f"user still owns {result} server(s) — delete them or reassign their "
                 "owner before deleting the user"
             ),
         )

@@ -316,13 +316,58 @@ async def update_server(
     auth_changed = "auth_provider" in changes
     sup = request.app.state.supervisor
 
+    if owner_change_requested and existing_row.owner_id != new_owner:
+        # A pending upstream-OAuth authorization belongs to the FORMER owner's
+        # browser session: cancel it so its public callback can't later promote
+        # their upstream grant onto the just-transferred server. Stored tokens are
+        # left in place — transferring a working server, credentials included, is
+        # the admin's deliberate choice (disconnect first to hand it over cold).
+        oauth_flow.cancel_pending(server_id)
+
+    def _write():
+        """The whole PATCH as ONE serialized write. Without an owner change this is
+        just the config update. With one, everything runs under a single hold of the
+        config write lock (reentrant — update_server re-enters it): the target user
+        is re-validated BEFORE the config commit, so a user deleted since the fast
+        pre-check above rejects the PATCH with nothing applied (no partial commit),
+        and a concurrent user deletion — which takes the same lock for its
+        owns-servers check — can never interleave and leave a dangling owner_id.
+        Revoke-then-set for the former owner's tokens: an interruption leaves the
+        old owner minus some tokens (they can re-mint), never a transferred server
+        whose former owner still holds live tokens."""
+        if not owner_change_requested:
+            return service.update_server(session, server_id, changes)
+        with service.config_write_lock():
+            if new_owner is not None and repo.get_user(session, new_owner) is None:
+                raise ValueError(f"unknown user {new_owner!r}")
+            updated = service.update_server(session, server_id, changes)
+            old_owner = existing_row.owner_id
+            if old_owner is not None and old_owner != new_owner:
+                # The former owner's data-plane tokens for this server: they can no
+                # longer see or manage it, so a token they minted must not keep
+                # authorizing its /s endpoint. Tokens minted by admins (user_id
+                # NULL or another user) are deliberate grants and stay.
+                stale = [
+                    t.id
+                    for t in repo.list_tokens(session)
+                    if t.user_id == old_owner and t.scope == server_id
+                ]
+                repo.delete_tokens_by_ids(session, stale)
+            # Owner is identity, applied via its own narrow writer (no updated_at
+            # bump, no config_hash change, no bridge bounce).
+            repo.set_owner(session, server_id, new_owner)
+            updated.owner_id = new_owner
+            return updated
+
     try:
-        # Threadpool: see create_server — the recomputed config_hash is a scrypt derivation.
+        # Threadpool: see create_server — the recomputed config_hash is a scrypt
+        # derivation, and the config write lock is a threading lock shared with bulk
+        # imports — neither may sit on the event loop.
         transition = (
             request.app.state.groups.auth_transition() if auth_changed else nullcontext()
         )
         async with transition:
-            server = await run_in_threadpool(service.update_server, session, server_id, changes)
+            server = await run_in_threadpool(_write)
             # Remove the old endpoint before an auth transition can publish group
             # routes under the new policy. _stop pops the endpoint before waiting for
             # process teardown, so no request can enter with stale credentials.
@@ -350,48 +395,6 @@ async def update_server(
 
     if not auth_changed and changes.keys() & {"mcp_http", "slug"}:
         await resync_groups(request)  # membership/namespace changed — no async gap
-    if owner_change_requested:
-        old_owner = existing_row.owner_id
-        if old_owner != new_owner:
-            # A pending upstream-OAuth authorization belongs to the FORMER owner's
-            # browser session: cancel it so its public callback can't later promote
-            # their upstream grant onto the just-transferred server. Stored tokens
-            # are left in place — transferring a working server, credentials
-            # included, is the admin's deliberate choice (disconnect first to hand
-            # it over cold).
-            oauth_flow.cancel_pending(server_id)
-
-        def _apply_owner() -> bool:
-            """Apply the reassignment under the config write lock — the same lock
-            the user-delete path holds for its owns-servers check — so a concurrent
-            user deletion can't slip between our existence check and this write and
-            leave a dangling owner_id. Revoke-then-set: an interruption leaves the
-            old owner minus some tokens (they can re-mint), never a transferred
-            server whose former owner still holds live tokens."""
-            with service.config_write_lock():
-                if new_owner is not None and repo.get_user(session, new_owner) is None:
-                    return False  # deleted concurrently since the pre-check
-                if old_owner is not None and old_owner != new_owner:
-                    # The former owner's data-plane tokens for this server: they can
-                    # no longer see or manage it, so a token they minted must not
-                    # keep authorizing its /s endpoint. Tokens minted by admins
-                    # (user_id NULL or another user) are deliberate grants and stay.
-                    stale = [
-                        t.id
-                        for t in repo.list_tokens(session)
-                        if t.user_id == old_owner and t.scope == server_id
-                    ]
-                    repo.delete_tokens_by_ids(session, stale)
-                # Owner is identity, applied via its own narrow writer (no
-                # updated_at bump, no config_hash change, no bridge bounce).
-                repo.set_owner(session, server_id, new_owner)
-                return True
-
-        # Threadpool: the config write lock is a threading lock shared with bulk
-        # imports deriving scrypt hashes — never wait for it on the event loop.
-        if not await run_in_threadpool(_apply_owner):
-            raise HTTPException(status_code=400, detail=f"unknown user {new_owner!r}")
-        server.owner_id = new_owner
     return _summary(server, sup, session, base_url(request))
 
 

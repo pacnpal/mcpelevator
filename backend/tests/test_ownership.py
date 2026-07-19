@@ -216,10 +216,18 @@ def test_owner_reassignment_is_admin_only():
             )
             assert r.status_code == 200 and r.json()["owner_id"] == uid
             assert client.get(f"/api/servers/{theirs['id']}", headers=member).status_code == 200
-            # Unknown user id is a 400, not a silent orphan.
-            assert client.patch(
-                f"/api/servers/{mine['id']}", json={"owner_id": "nope"}, headers=admin
-            ).status_code == 400
+            # Unknown user id is a 400, not a silent orphan — and the rejection is
+            # ATOMIC: config changes riding the same PATCH must not commit first.
+            r = client.patch(
+                f"/api/servers/{mine['id']}",
+                json={"name": "half-applied", "owner_id": "nope"},
+                headers=admin,
+            )
+            assert r.status_code == 400
+            assert (
+                client.get(f"/api/servers/{mine['id']}", headers=admin).json()["name"]
+                == "mine"
+            )
 
             # Reassigning AWAY revokes the former owner's data-plane tokens for
             # that server (their access is gone; their tokens must not linger),
