@@ -37,7 +37,8 @@ from app.api.schemas import (
     Urls,
 )
 from app.api.util import base_url, resync_groups
-from app.auth import oauth_flow
+from app.auth import oauth_flow, policy
+from app.auth.principal import Principal, current_principal
 from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
 from app.db import get_session, repo
@@ -94,6 +95,21 @@ def _live_state(server: Server, sup, session: Session):
 
 
 
+def _owner_name(session: Session, owner_id: str | None) -> str | None:
+    if owner_id is None:
+        return None
+    user = repo.get_user(session, owner_id)
+    return user.name if user is not None else None
+
+
+def _visible(
+    principal: Principal, session: Session, server_id: str
+) -> Server:
+    """Resolve + authorize a /servers/{id}-shaped route in one step: a server the
+    principal can't see 404s exactly like one that doesn't exist (policy module)."""
+    return policy.require_visible_server(principal, repo.get_server(session, server_id))
+
+
 def _summary(server: Server, sup, session: Session, base: str, live=None) -> ServerSummary:
     state, last_error, pid, port, tools, startup_status = live or _live_state(
         server, sup, session
@@ -124,6 +140,8 @@ def _summary(server: Server, sup, session: Session, base: str, live=None) -> Ser
         port=port,
         tools_count=len(tools or []),
         startup_status=startup_status,
+        owner_id=server.owner_id,
+        owner_name=_owner_name(session, server.owner_id),
     )
 
 
@@ -179,15 +197,23 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
 
 
 @router.get("/servers", response_model=list[ServerSummary])
-async def list_servers(request: Request, session: Session = Depends(get_session)):
+async def list_servers(
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
     sup = request.app.state.supervisor
     base = base_url(request)
-    return [_summary(s, sup, session, base) for s in repo.list_servers(session)]
+    servers = policy.visible_servers(principal, repo.list_servers(session))
+    return [_summary(s, sup, session, base) for s in servers]
 
 
 @router.post("/servers", response_model=ServerSummary, status_code=201)
 async def create_server(
-    payload: ServerCreate, request: Request, session: Session = Depends(get_session)
+    payload: ServerCreate,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ):
     """
     Create a new server in the desired state.
@@ -209,6 +235,10 @@ async def create_server(
         fields["source"] = raw_source[:200]
     else:
         fields["source"] = "manual"
+    # Multi-user: runner permission is checked BEFORE anything persists, and the
+    # creator becomes the owner (synthetic admins have no user_id -> admin-owned).
+    policy.require_runner_allowed(principal, fields.get("runner") or "npx")
+    fields["owner_id"] = principal.user_id
     try:
         # Threadpool: the config write derives config_hash with scrypt (memory-hard by
         # design) — keep that off the event loop so /s proxy traffic isn't stalled.
@@ -222,10 +252,13 @@ async def create_server(
 
 
 @router.get("/servers/{server_id}", response_model=ServerDetail)
-async def get_server(server_id: str, request: Request, session: Session = Depends(get_session)):
-    server = repo.get_server(session, server_id)
-    if server is None:
-        raise HTTPException(status_code=404, detail="server not found")
+async def get_server(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    server = _visible(principal, session, server_id)
     return _detail(server, request.app.state.supervisor, session, base_url(request))
 
 
@@ -235,9 +268,30 @@ async def update_server(
     payload: ServerUpdate,
     request: Request,
     session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ):
+    existing_row = _visible(principal, session, server_id)
     provided = payload.model_dump()
     changes = {k: v for k, v in provided.items() if v is not None}
+
+    # Ownership reassignment is admin-only and handled OUTSIDE the config write
+    # (owner is identity, not launch config): pop it here, apply after the PATCH.
+    owner_change_requested = "owner_id" in payload.model_fields_set
+    new_owner = changes.pop("owner_id", None)
+    if owner_change_requested:
+        if not principal.is_admin:
+            raise HTTPException(status_code=403, detail="only admins may reassign owners")
+        if new_owner is not None and repo.get_user(session, new_owner) is None:
+            raise HTTPException(status_code=400, detail=f"unknown user {new_owner!r}")
+
+    # Runner policy on edit: a member without local-runner permission may still
+    # start/stop a local server an admin provisioned for them, but must not shape
+    # WHAT it executes — changing anything launch-affecting on (or converting a
+    # server into) a local runner requires the permission.
+    target_runner = changes.get("runner", existing_row.runner)
+    launch_fields = {"runner", "command", "args", "run_args", "env", "cwd", "setup_script"}
+    if changes.keys() & launch_fields:
+        policy.require_runner_allowed(principal, target_runner)
     # The generic None-drop implements partial PATCH, but it also swallows an *explicit*
     # null on the nullable OAuth client fields — so clearing a static client id/secret to
     # fall back to Dynamic Client Registration would be silently ignored. Preserve those
@@ -288,6 +342,11 @@ async def update_server(
 
     if not auth_changed and changes.keys() & {"mcp_http", "slug"}:
         await resync_groups(request)  # membership/namespace changed — no async gap
+    if owner_change_requested:
+        # After the config write succeeded: owner is identity, applied via its own
+        # narrow writer (no updated_at bump, no config_hash change, no bridge bounce).
+        repo.set_owner(session, server_id, new_owner)
+        server.owner_id = new_owner
     return _summary(server, sup, session, base_url(request))
 
 
@@ -311,7 +370,13 @@ def _prune_then_delete(session: Session, server_id: str) -> bool:
 
 
 @router.delete("/servers/{server_id}", status_code=204)
-async def delete_server(server_id: str, request: Request, session: Session = Depends(get_session)):
+async def delete_server(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    _visible(principal, session, server_id)
     sup = request.app.state.supervisor
     sup.cancel_activation_request(server_id)
     await sup.stop(server_id)  # tear down the process before removing desired state
@@ -346,13 +411,16 @@ def _oauth_callback_url(request: Request) -> str:
 
 
 @router.post("/servers/{server_id}/oauth/authorize")
-async def start_oauth(server_id: str, request: Request, session: Session = Depends(get_session)):
+async def start_oauth(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
     """Begin the interactive OAuth flow for a remote server: contact the upstream,
     register/discover, and return the provider authorization URL for the SPA to send
     the browser to. The operator finishes at ``/api/oauth/callback``."""
-    server = repo.get_server(session, server_id)
-    if server is None:
-        raise HTTPException(status_code=404, detail="server not found")
+    server = _visible(principal, session, server_id)
     if server.runner != "remote" or not server.oauth:
         raise HTTPException(status_code=400, detail="this server does not use OAuth")
     try:
@@ -368,15 +436,16 @@ async def start_oauth(server_id: str, request: Request, session: Session = Depen
 
 @router.post("/servers/{server_id}/oauth/disconnect", response_model=ServerDetail)
 async def disconnect_oauth(
-    server_id: str, request: Request, session: Session = Depends(get_session)
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ):
     """Forget the stored upstream tokens so the operator can re-authenticate from
     scratch (e.g. to switch accounts). A running bridge holds its access token in
     memory, so an enabled server is restarted immediately: it re-reads the now-empty
     store and stops serving with the revoked credential until re-authenticated."""
-    server = repo.get_server(session, server_id)
-    if server is None:
-        raise HTTPException(status_code=404, detail="server not found")
+    server = _visible(principal, session, server_id)
     # Only a remote OAuth server has anything to disconnect; reject others so a stale UI
     # action or stray API call can't bounce an unrelated running server.
     if server.runner != "remote" or not server.oauth:
@@ -407,12 +476,19 @@ async def clone_server(
     request: Request,
     payload: ServerClone = Body(default_factory=ServerClone),
     session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ):
     """Duplicate a server's config into a new, disabled server (a fresh id + unique
     slug). The operator reviews/edits the copy, then enables it."""
+    src = _visible(principal, session, server_id)
+    # Cloning IS creating: the same runner policy applies, and the cloner owns the copy.
+    policy.require_runner_allowed(principal, src.runner)
     try:
         # Threadpool: see create_server — the clone's config_hash is a scrypt derivation.
-        server = await run_in_threadpool(service.clone_server, session, server_id, name=payload.name)
+        server = await run_in_threadpool(
+            service.clone_server, session, server_id,
+            name=payload.name, owner_id=principal.user_id,
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="server not found")
     except ValueError as exc:
@@ -422,9 +498,14 @@ async def clone_server(
 
 
 @router.post("/servers/{server_id}/enable", response_model=ServerSummary)
-async def enable_server(server_id: str, request: Request, session: Session = Depends(get_session)):
-    existing = repo.get_server(session, server_id)
-    was_enabled = bool(existing.enabled) if existing is not None else False
+async def enable_server(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    existing = _visible(principal, session, server_id)
+    was_enabled = bool(existing.enabled)
     try:
         # Threadpool: set_enabled takes the registry write lock, and an import in a worker
         # can hold that lock across many derivations — don't wait for it on the event loop.
@@ -443,7 +524,13 @@ async def enable_server(server_id: str, request: Request, session: Session = Dep
 
 
 @router.post("/servers/{server_id}/disable", response_model=ServerSummary)
-async def disable_server(server_id: str, request: Request, session: Session = Depends(get_session)):
+async def disable_server(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    _visible(principal, session, server_id)
     try:
         # Threadpool: see enable_server — the lock wait must not block the loop.
         server = await run_in_threadpool(service.set_enabled, session, server_id, False)
@@ -456,10 +543,13 @@ async def disable_server(server_id: str, request: Request, session: Session = De
 
 
 @router.post("/servers/{server_id}/retry", response_model=ServerSummary)
-async def retry_server(server_id: str, request: Request, session: Session = Depends(get_session)):
-    server = repo.get_server(session, server_id)
-    if server is None:
-        raise HTTPException(status_code=404, detail="server not found")
+async def retry_server(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    server = _visible(principal, session, server_id)
     if not server.enabled:
         raise HTTPException(status_code=409, detail="disabled servers cannot be retried")
     sup = request.app.state.supervisor
@@ -476,13 +566,23 @@ async def import_servers(
     request: Request,
     payload: dict = Body(...),
     session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ):
     """Bulk-create from a standard mcpServers JSON config. Imported servers are
-    disabled by default — the user reviews, then enables."""
+    disabled by default — the user reviews, then enables. The importer owns every
+    created row; local-runner entries a restricted member may not create land in
+    ``skipped`` (per entry), so their remote entries still import."""
     try:
         # Threadpool: a bulk import derives one scrypt config_hash per server — N stacked
         # derivations must not sit on the event loop.
-        created, skipped, warnings = await run_in_threadpool(service.import_mcp_servers, session, payload)
+        created, skipped, warnings = await run_in_threadpool(
+            lambda: service.import_mcp_servers(
+                session,
+                payload,
+                owner_id=principal.user_id,
+                allow_local=policy.can_use_runner(principal, "npx"),
+            )
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
@@ -516,6 +616,7 @@ async def call_server_tool(
     request: Request,
     payload: ToolCallRequest = Body(default_factory=ToolCallRequest),
     session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ):
     """Invoke one tool on a RUNNING server's bridge (the UI playground).
 
@@ -523,9 +624,7 @@ async def call_server_tool(
     trying a tool never needs a data-plane bearer token. MCP error semantics are
     mirrored: a tool's own failure comes back as ``is_error`` in a 200, while an
     unreachable/broken bridge is a 502 and a timeout a 504."""
-    server = repo.get_server(session, server_id)
-    if server is None:
-        raise HTTPException(status_code=404, detail="server not found")
+    _visible(principal, session, server_id)
     sup = request.app.state.supervisor
     unit = sup.unit(server_id)
     if unit is None or unit.state != "running" or unit.port is None:
@@ -564,16 +663,20 @@ def _sse(obj: dict) -> str:
 
 
 @router.get("/servers/{server_id}/logs")
-async def stream_logs(server_id: str, request: Request, session: Session = Depends(get_session)):
+async def stream_logs(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
     """SSE stream of a server's live bridge logs.
 
     Replays the current activation's bounded in-memory backlog, then tails new
     lines until the client disconnects or that activation is replaced. Terminal
     activation logs remain available until Retry, edit, disable, or delete.
-    404 if the server row doesn't exist.
+    404 if the server row doesn't exist (or isn't visible to the caller).
     """
-    if repo.get_server(session, server_id) is None:
-        raise HTTPException(status_code=404, detail="server not found")
+    _visible(principal, session, server_id)
 
     sup = request.app.state.supervisor
     headers = {

@@ -19,11 +19,14 @@ from starlette.responses import Response
 
 from app.api.schemas import GroupInfo, GroupUpsert
 from app.api.util import base_url, resync_groups
+from app.auth.principal import require_admin
 from app.db import get_session, repo
 from app.groups import registry
 from app.registry import service
 
-router = APIRouter()
+# Groups are a global, admin-owned surface: they can bundle ANY server (including
+# "*" = everything), so members must not read or shape them.
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 def _url(request: Request, name: str) -> str:

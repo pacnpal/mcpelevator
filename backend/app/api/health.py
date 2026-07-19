@@ -22,7 +22,9 @@ from fastapi.responses import JSONResponse
 from sqlmodel import Session
 
 from app import __version__
+from app.auth import policy
 from app.auth.control_plane import require_control_plane
+from app.auth.principal import Principal, current_principal
 from app.db import get_session, repo
 
 router = APIRouter()
@@ -34,7 +36,11 @@ async def health() -> dict:
 
 
 @router.get("/health/summary", dependencies=[Depends(require_control_plane)])
-async def health_summary(request: Request, session: Session = Depends(get_session)) -> dict:
+async def health_summary(
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+) -> dict:
     """Pass/fail readiness for every server, plus an overall flag. ``ok`` is true
     when no *enabled* server is failing to run — disabled servers are intentionally
     down and don't count against it. Readiness comes from the in-memory supervisor
@@ -45,7 +51,9 @@ async def health_summary(request: Request, session: Session = Depends(get_sessio
     sup = request.app.state.supervisor
     servers = []
     ok = True
-    for s in repo.list_servers(session):
+    # Multi-user: the summary is scoped to what the caller may see (a member's
+    # balancer view covers exactly their servers; admins see the whole box).
+    for s in policy.visible_servers(principal, repo.list_servers(session)):
         running = sup.endpoint(s.slug) is not None
         servers.append({"slug": s.slug, "running": running})
         # An idle server is intentionally quiesced and wakes on the next request,
@@ -57,7 +65,10 @@ async def health_summary(request: Request, session: Session = Depends(get_sessio
 
 @router.get("/health/{slug}", response_model=None, dependencies=[Depends(require_control_plane)])
 async def health_slug(
-    slug: str, request: Request, session: Session = Depends(get_session)
+    slug: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ) -> dict | JSONResponse:
     """Per-server readiness. 404 if the slug is unknown; 503 when the server exists
     but isn't currently accepting connections (so a balancer gets a failing status
@@ -68,7 +79,9 @@ async def health_slug(
     (``summary`` can never reach here: it's a reserved slug, so the static
     ``/health/summary`` route can't be shadowed by a server named "summary".)"""
     server = repo.get_server_by_slug(session, slug)
-    if server is None:
+    if server is None or not policy.can_view_server(principal, server):
+        # Non-visible == nonexistent: the probe surface must not leak other
+        # users' slugs to a member's balancer.
         raise HTTPException(status_code=404, detail="unknown server")
     sup = request.app.state.supervisor
     running = sup.endpoint(server.slug) is not None

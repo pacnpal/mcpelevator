@@ -9,6 +9,7 @@ from starlette.requests import Request
 from app.api.schemas import SettingsInfo, SettingsUpdate
 from app.api.util import resync_groups
 from app.auth.control_plane import would_lock_out
+from app.auth.principal import require_admin
 from app.db import get_session
 from app.registry import settings as runtime_settings
 
@@ -26,7 +27,9 @@ async def get_settings(session: Session = Depends(get_session)):
     return _info(runtime_settings.read_all(session))
 
 
-@router.patch("/settings", response_model=SettingsInfo)
+# GET stays readable by any authenticated principal — the SPA's add-server form
+# reads docker_runner/default_auth_provider — but writes are admin-only.
+@router.patch("/settings", response_model=SettingsInfo, dependencies=[Depends(require_admin)])
 async def update_settings(
     payload: SettingsUpdate, request: Request, session: Session = Depends(get_session)
 ):

@@ -52,6 +52,11 @@ export interface ServerSummary {
 	pid: number | null;
 	port: number | null;
 	tools_count: number;
+	/** Owning user (null = admin-owned). `owner_name` is denormalized for the
+	 * admin dashboard; members only ever see their own servers. Optional so
+	 * synthetic summaries (e.g. the group copy-menu shim) need not carry it. */
+	owner_id?: string | null;
+	owner_name?: string | null;
 }
 
 /** A tool discovered on a running server. */
@@ -335,10 +340,41 @@ export interface GroupInfo {
 	url: string;
 }
 
+/** The authenticated principal. `id` is null for the synthetic admins
+ * (enforcement off / MCPE_ADMIN_TOKEN / a pre-multi-user control token). */
+export interface AuthUser {
+	id: string | null;
+	name: string;
+	role: 'admin' | 'member';
+	/** May this user configure servers that execute code on the box (npx/uvx/command/docker)? */
+	local_runners: boolean;
+}
+
 /** Shape of GET /api/auth/status — the SPA polls this to decide whether to show login. */
 export interface AuthStatus {
 	enforced: boolean;
 	authenticated: boolean;
+	/** The request's principal; present even when `authenticated` is false with
+	 * enforcement off (the synthetic local admin). Null = no principal. */
+	user: AuthUser | null;
+}
+
+/** A control-plane user (admin-only surface, GET /api/users). */
+export interface UserInfo {
+	id: string;
+	name: string;
+	role: 'admin' | 'member';
+	local_runners: boolean;
+	servers_count: number;
+	tokens_count: number;
+	created_at: string;
+}
+
+/** Response of POST /api/users/{id}/credentials — the login token, plaintext exactly once. */
+export interface UserCredential {
+	token_id: string;
+	token: string;
+	prefix: string;
 }
 
 /** A bearer access token, listed by prefix only (the plaintext is never re-shown). */
@@ -348,6 +384,9 @@ export interface TokenInfo {
 	prefix: string;
 	/** `'all'` = every bearer-protected server; a server id = that one server; `'control'` = a control-plane admin token. */
 	scope: string;
+	/** Owning user (null for tokens minted before multi-user / by synthetic admins). */
+	user_id: string | null;
+	user_name: string | null;
 	created_at: string;
 }
 

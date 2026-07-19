@@ -77,6 +77,14 @@ def _bearer(request: Request) -> str:
     return token.strip() if scheme.lower() == "bearer" else ""
 
 
+def is_env_admin_token(token: str) -> bool:
+    """Does ``token`` match the ``MCPE_ADMIN_TOKEN`` break-glass credential? The ONE
+    comparison both the gate (``control_auth``) and identity resolution
+    (``principal.resolve``) use, so they can never disagree on break-glass access."""
+    admin = get_settings().admin_token
+    return bool(token and admin and secrets.compare_digest(token, admin))
+
+
 def control_auth(request: Request, session: Session) -> Literal["ok", "missing", "wrong_scope"]:
     """Classify the request's control-plane credential. Pure (no raising) so the
     gate and ``/api/auth/status`` share one decision: ``ok`` = a control token (or
@@ -85,13 +93,18 @@ def control_auth(request: Request, session: Session) -> Literal["ok", "missing",
     token = _bearer(request)
     if not token:
         return "missing"
-    admin = get_settings().admin_token
-    if admin and secrets.compare_digest(token, admin):
+    if is_env_admin_token(token):
         return "ok"
     row = repo.get_token_by_hash(session, hash_token(token))
     if row is None:
         return "missing"
-    return "ok" if row.scope == "control" else "wrong_scope"
+    if row.scope != "control":
+        return "wrong_scope"
+    # A user-bound credential whose user row is gone fails closed, matching
+    # principal.resolve — the gate and identity resolution must agree.
+    if row.user_id is not None and repo.get_user(session, row.user_id) is None:
+        return "missing"
+    return "ok"
 
 
 def require_control_plane(request: Request, session: Session = Depends(get_session)) -> None:

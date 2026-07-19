@@ -25,9 +25,34 @@ def utcnow() -> datetime:
 # --- enums kept as plain string constants for deterministic SQLite storage ---
 
 RUNNERS = ("npx", "uvx", "command", "docker", "remote")
+# Control-plane roles. "admin" sees and manages everything; "member" sees only the
+# servers/tokens they own. Plain strings (not Enum) for deterministic SQLite storage.
+ROLES = ("admin", "member")
 # "idle" is an enabled server quiesced by the supervisor after its idle timeout;
 # the proxy reactivates it on the next request (wake-on-request).
 STATES = ("stopped", "starting", "running", "unhealthy", "failed", "stopping", "idle")
+
+
+class User(SQLModel, table=True):
+    """A control-plane identity. Users don't hold passwords — they hold control
+    tokens (``Token.user_id``), minted by an admin and pasted at login, so the
+    existing bearer machinery is the whole credential story. ``role`` decides
+    reach: an admin sees everything; a member sees only what they own.
+
+    ``local_runners`` gates whether the user may configure servers that execute
+    code on this box (npx/uvx/command/docker). Local runners run as the
+    mcpelevator process user, so this is an authorization line, NOT an isolation
+    boundary — multi-user assumes mutually trusting users (see README Security).
+    """
+
+    __tablename__ = "user"
+
+    id: str = Field(primary_key=True)
+    name: str
+    role: str = "member"  # one of ROLES
+    local_runners: bool = True
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class Server(SQLModel, table=True):
@@ -83,6 +108,12 @@ class Server(SQLModel, table=True):
     config_hash: str = ""  # idempotency anchor
     source: str = "manual"  # manual | import | catalog:<id>
 
+    # Ownership: the User who created (or was assigned) this server. NULL means
+    # admin-owned — the deterministic upgrade default (pre-multi-user rows migrate
+    # to NULL), visible to admins only. Excluded from config_hash — reassigning an
+    # owner must not bounce a running bridge.
+    owner_id: Optional[str] = None
+
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -127,4 +158,9 @@ class Token(SQLModel, table=True):
     # "all" authorizes every bearer-protected server; a server.id restricts the
     # token to that one server (enforced in app/auth/bearer.py).
     scope: str = "all"
+    # The User this token belongs to. For scope="control" this IS the login
+    # credential's identity: NULL resolves to admin (legacy tokens minted before
+    # multi-user, and boot/recovery mints, keep full power). For data-plane scopes
+    # it records who minted the token, so members manage only their own.
+    user_id: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
