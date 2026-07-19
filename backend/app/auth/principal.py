@@ -96,7 +96,11 @@ def _resolve_uncached(request: Request, session: Session) -> Optional[Principal]
             if user is not None:
                 return Principal(
                     user_id=user.id, name=user.name, role=user.role,
-                    local_runners=bool(user.local_runners),
+                    # EFFECTIVE permission, not the stored flag: policy permits
+                    # every runner for admins regardless of the flag, and the SPA
+                    # renders from this field — the two must agree, or an admin
+                    # whose row happens to hold false gets a crippled form.
+                    local_runners=bool(user.local_runners) or user.role == ROLE_ADMIN,
                 )
             # else: dangling credential — fall through to the enforcement check
             # (fails closed when enforcement is on).

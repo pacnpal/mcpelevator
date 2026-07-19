@@ -74,8 +74,14 @@
 			.catch(() => (localRunnersAllowed = true));
 	});
 
+	// Restricted accounts get `remote` plus whatever the form is CURRENTLY set to:
+	// in edit mode that keeps an admin-provisioned local server's runner visible
+	// (the backend allows non-launch edits, so the form must still render/submit),
+	// and in create mode the snap-to-remote effect below makes the extra entry moot.
 	const offeredRunners = $derived(
-		localRunnersAllowed ? RUNNERS : RUNNERS.filter((r) => r.value === 'remote')
+		localRunnersAllowed
+			? RUNNERS
+			: RUNNERS.filter((r) => r.value === 'remote' || r.value === runner)
 	);
 
 	// A restricted account's CREATE form must not sit on the (default) npx runner

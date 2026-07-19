@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from sqlmodel import Session
 from starlette.responses import Response
 
@@ -26,6 +27,7 @@ from app.auth.principal import require_admin
 from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Token, User
+from app.registry import service
 from app.util import hash_token, new_id, new_token
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -151,7 +153,27 @@ async def delete_user(user_id: str, session: Session = Depends(get_session)):
     user = repo.get_user(session, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="user not found")
-    owned = repo.count_servers_owned(session, user_id)
+    if user.role == "admin" and not _admin_login_would_remain(session, excluding_user_id=user.id):
+        raise HTTPException(
+            status_code=409,
+            detail="cannot delete the last admin — no other admin login would remain",
+        )
+
+    def _delete() -> int:
+        """Check-and-delete under the config write lock — the same lock owner
+        reassignment holds while writing owner_id — so a reassignment can't land
+        between our owns-servers check and the delete and leave a server pointing
+        at a user that no longer exists. Returns the owned count (0 = deleted)."""
+        with service.config_write_lock():
+            owned = repo.count_servers_owned(session, user_id)
+            if owned:
+                return owned
+            repo.delete_user_and_tokens(session, user_id)
+            return 0
+
+    # Threadpool: the lock is a threading lock shared with imports deriving scrypt
+    # hashes — never wait for it on the event loop.
+    owned = await run_in_threadpool(_delete)
     if owned:
         raise HTTPException(
             status_code=409,
@@ -160,12 +182,6 @@ async def delete_user(user_id: str, session: Session = Depends(get_session)):
                 "owner before deleting the user"
             ),
         )
-    if user.role == "admin" and not _admin_login_would_remain(session, excluding_user_id=user.id):
-        raise HTTPException(
-            status_code=409,
-            detail="cannot delete the last admin — no other admin login would remain",
-        )
-    repo.delete_user_and_tokens(session, user_id)
     return Response(status_code=204)
 
 

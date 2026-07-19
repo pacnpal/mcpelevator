@@ -126,7 +126,57 @@ def test_local_runner_permission():
             assert client.patch(
                 f"/api/servers/{sid}", json={"name": "renamed"}, headers=member
             ).status_code == 200  # non-launch fields stay editable
+            # The SPA's edit form resends the whole config: unchanged launch VALUES
+            # must not trip the gate (presence != change).
+            assert client.patch(
+                f"/api/servers/{sid}",
+                json={"name": "again", "runner": "npx", "command": "echo", "args": [], "env": {}},
+                headers=member,
+            ).status_code == 200
             assert client.post(f"/api/servers/{sid}/clone", headers=member).status_code == 403
+        finally:
+            _reset()
+
+
+def test_admin_local_runner_permission_is_effective():
+    """policy always permits every runner for admins; the principal's
+    local_runners field must agree (an admin row storing false is irrelevant),
+    or the SPA would render a crippled form."""
+    with TestClient(app) as client:
+        try:
+            admin, _, _ = _setup(client)
+            a = client.post(
+                "/api/users",
+                json={"name": "Ann", "role": "admin", "local_runners": False},
+                headers=admin,
+            ).json()
+            cred = client.post(f"/api/users/{a['id']}/credentials", headers=admin).json()["token"]
+            ann = _bearer(cred)
+            assert client.get("/api/auth/status", headers=ann).json()["user"]["local_runners"] is True
+            assert client.post(
+                "/api/servers", json={"name": "npx ok", "command": "echo"}, headers=ann
+            ).status_code == 201
+        finally:
+            _reset()
+
+
+def test_reassignment_cancels_pending_oauth(monkeypatch):
+    """An in-flight upstream-OAuth authorization belongs to the former owner —
+    transfer must cancel it so a late callback can't promote their grant onto
+    the reassigned server."""
+    from app.api import servers as servers_api
+
+    cancelled: list[str] = []
+    monkeypatch.setattr(servers_api.oauth_flow, "cancel_pending", cancelled.append)
+    with TestClient(app) as client:
+        try:
+            admin, member, uid = _setup(client)
+            theirs = _mk(client, admin, "transferring")
+            r = client.patch(
+                f"/api/servers/{theirs['id']}", json={"owner_id": uid}, headers=admin
+            )
+            assert r.status_code == 200
+            assert theirs["id"] in cancelled
         finally:
             _reset()
 
