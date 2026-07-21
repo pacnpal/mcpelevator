@@ -192,3 +192,89 @@ def test_bridge_never_forwards_caller_headers_to_remote_upstream():
     with patch.object(host, "_build_transport", return_value=transport):
         host.build_proxy({"name": "remote"})
     assert transport.forward_incoming_headers is False
+
+
+# --- disabled-tools filtering (issue #105) ------------------------------------
+
+
+def _upstream_three_tools() -> FastMCP:
+    upstream = FastMCP("upstream")
+
+    @upstream.tool
+    def add(a: int, b: int) -> int:
+        """Add two integers."""
+        return a + b
+
+    @upstream.tool
+    def secret() -> str:
+        """Internal-only; should be hideable."""
+        return "classified"
+
+    @upstream.tool
+    def echo(s: str) -> str:
+        """Echo the input."""
+        return s
+
+    return upstream
+
+
+def _proxy_with_disabled(disabled: list[str]) -> FastMCP:
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_three_tools())
+    ):
+        return host.build_proxy({"command": "ignored", "name": "t", "disabled_tools": disabled})
+
+
+@pytest.mark.asyncio
+async def test_disabled_tool_hidden_from_list():
+    """A disabled tool must not appear in tools/list on the bridge surface."""
+    proxy = _proxy_with_disabled(["secret"])
+    async with Client(proxy) as client:
+        names = {t.name for t in await client.list_tools()}
+    assert names == {"add", "echo"}  # secret filtered out
+
+
+@pytest.mark.asyncio
+async def test_disabled_tool_refused_on_call():
+    """Hiding also disables: calling a disabled tool errors like an unknown one, so a
+    client holding a stale list can't still invoke it."""
+    proxy = _proxy_with_disabled(["secret"])
+    async with Client(proxy) as client:
+        with pytest.raises(Exception):  # noqa: PT011 — client surfaces a ToolError/McpError
+            await client.call_tool("secret", {})
+        # A non-disabled tool still works end to end.
+        result = await client.call_tool("add", {"a": 2, "b": 3})
+    assert result.data == 5
+
+
+@pytest.mark.asyncio
+async def test_no_disabled_tools_installs_no_filter():
+    """Empty list = expose everything (the default); no middleware attached."""
+    proxy = _proxy_with_disabled([])
+    async with Client(proxy) as client:
+        names = {t.name for t in await client.list_tools()}
+    assert names == {"add", "secret", "echo"}
+
+
+def test_build_proxy_skips_middleware_when_no_disabled_tools():
+    """The middleware is only added when there's something to hide, so an unfiltered
+    server pays nothing. Asserted against the sentinel proxy so add_middleware would
+    raise if it were called."""
+    with (
+        patch.object(host, "ProxyClient", autospec=True),
+        patch.object(host, "create_proxy", return_value=sentinel.proxy),
+    ):
+        # sentinel.proxy has no add_middleware — a call would AttributeError.
+        assert host.build_proxy({"command": "echo", "name": "t"}) is sentinel.proxy
+
+
+def test_build_proxy_installs_middleware_when_disabled_tools_present():
+    proxy = MagicMock()
+    with (
+        patch.object(host, "ProxyClient", autospec=True),
+        patch.object(host, "create_proxy", return_value=proxy),
+    ):
+        host.build_proxy({"command": "echo", "name": "t", "disabled_tools": ["secret"]})
+    assert proxy.add_middleware.call_count == 1
+    mw = proxy.add_middleware.call_args.args[0]
+    assert isinstance(mw, host.DisabledToolsMiddleware)

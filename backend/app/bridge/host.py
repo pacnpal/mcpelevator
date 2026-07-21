@@ -35,8 +35,10 @@ import os
 
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
+from fastmcp.exceptions import NotFoundError
 from fastmcp.server import create_proxy
 from fastmcp.server.dependencies import get_context
+from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.providers.proxy import ProxyClient
 from mcp.types import ClientCapabilities, Root, RootsCapability
 
@@ -251,6 +253,45 @@ def _build_oauth_auth(oauth: dict):
     return provider
 
 
+class DisabledToolsMiddleware(Middleware):
+    """Hides a configured set of upstream tools from every surface this bridge serves.
+
+    The operator disables individual tools (issue #105 — a passthrough server often
+    ships internal-only tools that just waste the model's context). Filtering here, in
+    the bridge, covers all three exposed surfaces at once because they all resolve tools
+    through this same FastMCP instance: the Streamable-HTTP ``tools/list`` + ``tools/call``,
+    the REST/OpenAPI routes (which call ``list_tools`` over an in-memory client), and the
+    group hub (which proxies this bridge's ``/mcp`` over HTTP).
+
+    Two hooks, so hiding a tool also disables it:
+
+    * ``on_list_tools`` drops the disabled tools from what any client discovers.
+    * ``on_call_tool`` refuses a disabled tool with ``NotFoundError`` — the same error a
+      genuinely unknown tool raises — so a client holding a stale list can't still call it.
+
+    The list is applied by NAME. It's part of the launch spec (``config_hash``), so a change
+    restarts the bridge and this middleware is rebuilt from the new set — the control plane's
+    tool-discovery probe then caches only the surviving tools, and the UI re-adds the disabled
+    names (which it holds in the DB row) so they stay togglable.
+    """
+
+    def __init__(self, disabled: list[str]):
+        self._disabled = frozenset(disabled)
+
+    async def on_list_tools(self, context: MiddlewareContext, call_next):
+        tools = await call_next(context)
+        if not self._disabled:
+            return tools
+        return [tool for tool in tools if tool.name not in self._disabled]
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        if context.message.name in self._disabled:
+            # Mirror the "unknown tool" path exactly: a hidden tool must be
+            # indistinguishable from one that was never registered.
+            raise NotFoundError(f"Unknown tool: {context.message.name}")
+        return await call_next(context)
+
+
 def _build_transport(spec: dict):
     """Pick the upstream transport from the spec's ``transport`` discriminator.
 
@@ -298,6 +339,11 @@ def build_proxy(spec: dict) -> FastMCP:
     # the fresh-session-per-request isolation — keeps FastMCP's proxy defaults.
     client = ProxyClient(transport, roots=_forward_roots)
     proxy = create_proxy(client, name=spec.get("name") or "mcpelevator-proxy")
+    # Hide operator-disabled tools from every surface (MCP list/call, REST, group hub) —
+    # they all resolve tools through this proxy. See DisabledToolsMiddleware.
+    disabled = spec.get("disabled_tools") or []
+    if disabled:
+        proxy.add_middleware(DisabledToolsMiddleware(disabled))
     # The outer proxy already authenticated the caller. Forwarding its headers from
     # this bridge to a remote MCP server would disclose bearer/OAuth credentials to
     # that upstream. Static headers and upstream OAuth live on the transport itself.

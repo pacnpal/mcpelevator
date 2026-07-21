@@ -10,7 +10,8 @@
 		errorMessage,
 		getServer,
 		retryServer,
-		startOauth
+		startOauth,
+		updateServer
 	} from '$lib/api';
 	import { listenForOauthResult, openOauthPopup, popupCanRelay } from '$lib/oauthPopup';
 	import {
@@ -21,7 +22,7 @@
 		primaryServerAction,
 		startupPhaseLabel
 	} from '$lib/startup';
-	import type { ServerDetail } from '$lib/types';
+	import type { ServerDetail, ServerTool } from '$lib/types';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
@@ -106,6 +107,64 @@
 			if (requestedId === id) flashToast(errorMessage(err));
 		} finally {
 			busy = false;
+		}
+	}
+
+	// Per-tool enable/disable (issue #105). The disabled set lives on the server row
+	// (`disabled_tools`); the bridge hides those tools from every surface. A hidden tool
+	// drops out of discovery, so it's absent from `server.tools` — the row list below
+	// unions the discovered tools with the disabled names so a hidden tool stays visible
+	// (and re-enableable) here.
+	const disabledTools = $derived(new Set(server?.disabled_tools ?? []));
+
+	// One row per known tool: the discovered ones (in discovery order) plus any disabled
+	// name that discovery no longer returns (appended, sorted). `enabled` drives the switch.
+	const toolRows = $derived.by(() => {
+		if (!server) return [] as { tool: ServerTool; enabled: boolean }[];
+		const seen = new Set<string>();
+		const rows: { tool: ServerTool; enabled: boolean }[] = [];
+		for (const tool of server.tools) {
+			seen.add(tool.name);
+			rows.push({ tool, enabled: !disabledTools.has(tool.name) });
+		}
+		for (const name of [...disabledTools].sort()) {
+			if (seen.has(name)) continue;
+			// Disabled and no longer discovered: synthesize a minimal row so it can be re-enabled.
+			rows.push({ tool: { name, description: '' }, enabled: false });
+		}
+		return rows;
+	});
+
+	// Tool names with a toggle request in flight (switch shows disabled/pending).
+	let togglingTools = $state<Set<string>>(new Set());
+
+	async function toggleTool(name: string, enable: boolean) {
+		if (!server || togglingTools.has(name)) return;
+		const requestedId = id;
+		const current = server.disabled_tools ?? [];
+		const next = enable ? current.filter((t) => t !== name) : [...current, name];
+		togglingTools = new Set(togglingTools).add(name);
+		// Optimistic: reflect the switch immediately; the PATCH restarts the bridge and the
+		// silent reload below reconciles the discovered tool list. Bump the revision now so
+		// an in-flight background poll can't resolve and clobber the switch state.
+		mutationRevision += 1;
+		server = { ...server, disabled_tools: next };
+		try {
+			await updateServer(requestedId, { disabled_tools: next });
+			if (requestedId !== id) return; // navigated away mid-flight
+			mutationRevision += 1;
+			await load(true);
+		} catch (err) {
+			if (requestedId === id) {
+				flashToast(errorMessage(err));
+				await load(true); // resync from the server after a failed toggle
+			}
+		} finally {
+			if (requestedId === id) {
+				const pending = new Set(togglingTools);
+				pending.delete(name);
+				togglingTools = pending;
+			}
 		}
 	}
 
@@ -855,44 +914,77 @@
 					<h2 class="text-sm font-semibold text-[var(--color-ink)]">Tools</h2>
 					<span class="font-mono text-xs text-[var(--color-ink-dim)]">{server.tools_count}</span>
 				</div>
-				{#if server.tools.length === 0}
+				{#if toolRows.length === 0}
 					<p class="text-xs text-[var(--color-ink-dim)]">
 						{server.state === 'running'
 							? 'No tools discovered.'
 							: 'Tools are discovered once the server is running.'}
 					</p>
 				{:else}
+					<p class="text-xs text-[var(--color-ink-dim)]">
+						Toggle a tool off to hide it from clients (MCP, REST, and groups). Disabled tools
+						are also refused if called. Changing this restarts the server.
+					</p>
 					<ul class="flex flex-col divide-y divide-[var(--color-line)]">
-						{#each server.tools as tool (tool.name)}
-							<li class="flex flex-col gap-0.5 py-2 first:pt-0 last:pb-0">
-								<span class="flex flex-wrap items-center gap-1.5">
-									<span class="font-mono text-xs font-medium text-[var(--color-ink)]">
-										{tool.name}
+						{#each toolRows as { tool, enabled } (tool.name)}
+							<li class="flex items-start justify-between gap-3 py-2 first:pt-0 last:pb-0">
+								<div class="flex min-w-0 flex-col gap-0.5" class:opacity-50={!enabled}>
+									<span class="flex flex-wrap items-center gap-1.5">
+										<span class="font-mono text-xs font-medium text-[var(--color-ink)]">
+											{tool.name}
+										</span>
+										{#if !enabled}
+											<span
+												class="rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-dim)]"
+											>
+												disabled
+											</span>
+										{/if}
+										{#if enabled && tool.has_output_schema === false}
+											<!-- Mirrors the hint MCP clients show for schema-less tools. The
+											     schema lives in the upstream server's tool definition and is
+											     proxied through unchanged, so this is diagnostic only. -->
+											<span
+												class="rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-dim)]"
+												title="This tool doesn't declare an outputSchema. MCP clients recommend adding one so models can better understand the tool's results. It comes from the upstream server's tool definition — mcpelevator proxies schemas through unchanged, so the fix belongs upstream."
+											>
+												no output schema
+											</span>
+										{/if}
 									</span>
-									{#if tool.has_output_schema === false}
-										<!-- Mirrors the hint MCP clients show for schema-less tools. The
-										     schema lives in the upstream server's tool definition and is
-										     proxied through unchanged, so this is diagnostic only. -->
-										<span
-											class="rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-dim)]"
-											title="This tool doesn't declare an outputSchema. MCP clients recommend adding one so models can better understand the tool's results. It comes from the upstream server's tool definition — mcpelevator proxies schemas through unchanged, so the fix belongs upstream."
-										>
-											no output schema
+									{#if tool.description}
+										<span class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+											{tool.description}
 										</span>
 									{/if}
-								</span>
-								{#if tool.description}
-									<span class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
-										{tool.description}
-									</span>
-								{/if}
-								<div class="mt-1">
-									<ToolRunner
-										serverId={server.id}
-										{tool}
-										runnable={server.state === 'running'}
-									/>
+									{#if enabled}
+										<div class="mt-1">
+											<ToolRunner
+												serverId={server.id}
+												{tool}
+												runnable={server.state === 'running'}
+											/>
+										</div>
+									{/if}
 								</div>
+								<button
+									type="button"
+									role="switch"
+									aria-checked={enabled}
+									aria-label={`${enabled ? 'Disable' : 'Enable'} ${tool.name}`}
+									title={enabled ? 'Exposed — click to hide from clients' : 'Hidden — click to expose'}
+									disabled={togglingTools.has(tool.name)}
+									onclick={() => toggleTool(tool.name, !enabled)}
+									class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 {enabled
+										? 'bg-[var(--color-accent)]'
+										: 'bg-[var(--color-line)]'}"
+								>
+									<span
+										class="inline-block size-4 rounded-full bg-white shadow-sm transition {enabled
+											? 'translate-x-[18px]'
+											: 'translate-x-0.5'}"
+									></span>
+								</button>
 							</li>
 						{/each}
 					</ul>

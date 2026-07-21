@@ -51,6 +51,39 @@ def test_setup_script_api_round_trip_and_runner_validation():
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
+def test_disabled_tools_api_round_trip():
+    """disabled_tools is accepted on create, normalized (trimmed/deduped/sorted),
+    echoed on GET, and replaceable via PATCH ([] re-exposes everything)."""
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "Hidden",
+                "runner": "command",
+                "command": "/bin/true",
+                "disabled_tools": ["  z_tool ", "a_tool", "a_tool"],
+            },
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.status_code == 200
+            assert detail.json()["disabled_tools"] == ["a_tool", "z_tool"]
+
+            patched = c.patch(
+                f"/api/servers/{server_id}",
+                json={"disabled_tools": []},
+                headers=LOOPBACK,
+            )
+            assert patched.status_code == 200, patched.text
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["disabled_tools"] == []
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
 def test_enabled_create_returns_queued_without_stale_runtime(monkeypatch):
     async def parked_reconciler(self):
         await asyncio.Event().wait()

@@ -63,4 +63,5 @@ def build(server: Server) -> ProcessSpec:
         env=dict(server.env or {}),  # upstream HTTP headers
         transport=transport,
         oauth=oauth,
+        disabled_tools=list(server.disabled_tools or []),
     )

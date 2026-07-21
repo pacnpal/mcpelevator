@@ -177,6 +177,43 @@ def test_unknown_runner_rejected(session):
         service.create_server(session, name="x", runner="bogus", command="x")
 
 
+def test_disabled_tools_normalized_on_create(session):
+    """The hide list is trimmed, de-duplicated, and sorted on the way in."""
+    a = _mk(session, disabled_tools=["  b ", "a", "b", "", "a"])
+    assert a.disabled_tools == ["a", "b"]
+
+
+def test_disabled_tools_default_empty(session):
+    """No hide list = expose everything (the default)."""
+    a = _mk(session)
+    assert a.disabled_tools == []
+
+
+def test_disabled_tools_change_bounces_bridge(session):
+    """A change to the hide list is applied inside the bridge, so it MUST move the
+    config_hash (the reconciler restarts the bridge to re-apply the filter)."""
+    a = _mk(session)
+    before = a.config_hash
+    service.update_server(session, a.id, {"disabled_tools": ["internal_tool"]})
+    after = repo.get_server(session, a.id).config_hash
+    assert after != before
+
+
+def test_disabled_tools_hash_is_order_independent(session):
+    """Reordering the same hide set must NOT bounce the bridge (idempotency anchor)."""
+    a = _mk(session, disabled_tools=["a", "b"])
+    before = a.config_hash
+    service.update_server(session, a.id, {"disabled_tools": ["b", "a"]})
+    after = repo.get_server(session, a.id).config_hash
+    assert after == before
+
+
+def test_disabled_tools_survive_clone(session):
+    a = _mk(session, disabled_tools=["secret"])
+    clone = service.clone_server(session, a.id)
+    assert clone.disabled_tools == ["secret"]
+
+
 def test_remote_server_canonicalizes_and_validates(session):
     s = service.create_server(
         session,

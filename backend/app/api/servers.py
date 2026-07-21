@@ -247,6 +247,7 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         oauth_has_client_secret=bool(server.oauth_client_secret),
         oauth_status=_oauth_status(server),
         idle_timeout_s=server.idle_timeout_s,
+        disabled_tools=list(server.disabled_tools or []),
         config_hash=server.config_hash,
         source=server.source,
         tools=tools or [],

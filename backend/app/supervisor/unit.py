@@ -300,6 +300,7 @@ class ServerUnit:
             "transport": self.spec.transport,
             "minimal_env": self.spec.minimal_env,
             "oauth": self.spec.oauth,
+            "disabled_tools": list(self.spec.disabled_tools or []),
             "name": self.name,
             **self.exposure,
         }

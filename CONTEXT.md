@@ -25,6 +25,10 @@ A runner whose upstream MCP server executes in mcpelevator's host environment. T
 An optional multiline POSIX shell script attached to a Server. It prepares a local runner at the start of every Startup attempt and fails that attempt if an unhandled command fails; scripts must be safe to rerun. Files and other external effects persist, but shell-local state does not carry into the MCP child.
 _Avoid_: Setup commands, pre-start hook
 
+**Disabled tool**:
+An upstream tool the operator has hidden from a Server (by name, in the Server's `disabled_tools`). The bridge drops it from every exposed surface — MCP `tools/list`, the REST/OpenAPI routes, and any group — and refuses it if called, so it's indistinguishable from a tool that was never registered. Part of the launch spec: changing the set restarts the bridge.
+_Avoid_: Removed tool, deleted tool
+
 **Idle quiescence**:
 The supervisor stopping an enabled Server's bridge after its idle window passes with no authenticated proxy traffic. The Server's observed state is `idle`: still desired, deliberately not running, and wakeable.
 _Avoid_: Sleep, suspend, pause
