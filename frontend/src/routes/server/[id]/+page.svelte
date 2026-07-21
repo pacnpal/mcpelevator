@@ -115,63 +115,86 @@
 	// drops out of discovery, so it's absent from `server.tools` — the row list below
 	// unions the discovered tools with the disabled names so a hidden tool stays visible
 	// (and re-enableable) here.
-	const disabledTools = $derived(new Set(server?.disabled_tools ?? []));
+	// Tool hide list, staged as a bulk edit. `base` is what's persisted on the server;
+	// `pendingDisabled` holds the operator's unsaved switch flips (null when in sync). One
+	// **Apply** sends a single PATCH → one bridge restart for the whole batch, which also
+	// removes the concurrent-PATCH race a per-toggle apply had (only ever one write).
+	const baseDisabled = $derived(new Set(server?.disabled_tools ?? []));
+	let pendingDisabled = $state<Set<string> | null>(null);
+	const effectiveDisabled = $derived(pendingDisabled ?? baseDisabled);
+	let applyingTools = $state(false); // Apply PATCH + reload in flight
 
-	// One row per known tool: the discovered ones (in discovery order) plus any disabled
-	// name that discovery no longer returns (appended, sorted). `enabled` drives the switch.
+	function setsEqual(a: Set<string>, b: Set<string>): boolean {
+		return a.size === b.size && [...a].every((x) => b.has(x));
+	}
+
+	const toolChangesDirty = $derived(
+		pendingDisabled !== null && !setsEqual(pendingDisabled, baseDisabled)
+	);
+
+	// Drop staged edits when the viewed server changes (this component is reused across
+	// same-route navigations — clone, sidebar). Guarded so it doesn't loop on its own write.
+	let stagedForServerId: string | null = null;
+	$effect(() => {
+		const sid = server?.id ?? null;
+		if (sid !== stagedForServerId) {
+			stagedForServerId = sid;
+			pendingDisabled = null;
+		}
+	});
+
+	// One row per known tool: the discovered ones (in discovery order) plus any name that is
+	// disabled (persisted OR staged) but no longer discovered (appended, sorted). `enabled`
+	// reflects the STAGED state so the switch shows where the operator has set it.
 	const toolRows = $derived.by(() => {
 		if (!server) return [] as { tool: ServerTool; enabled: boolean }[];
 		const seen = new Set<string>();
 		const rows: { tool: ServerTool; enabled: boolean }[] = [];
 		for (const tool of server.tools) {
 			seen.add(tool.name);
-			rows.push({ tool, enabled: !disabledTools.has(tool.name) });
+			rows.push({ tool, enabled: !effectiveDisabled.has(tool.name) });
 		}
-		for (const name of [...disabledTools].sort()) {
+		const undiscovered = new Set([...baseDisabled, ...(pendingDisabled ?? [])]);
+		for (const name of [...undiscovered].sort()) {
 			if (seen.has(name)) continue;
 			// Disabled and no longer discovered: synthesize a minimal row so it can be re-enabled.
-			rows.push({ tool: { name, description: '' }, enabled: false });
+			rows.push({ tool: { name, description: '' }, enabled: !effectiveDisabled.has(name) });
 		}
 		return rows;
 	});
 
-	// Tool names with a toggle request in flight (switch shows disabled/pending).
-	let togglingTools = $state<Set<string>>(new Set());
+	// Local-only switch flip: stage the change, don't touch the server until Apply. Skip
+	// while an Apply or a lifecycle op (start/stop/delete/clone) is in flight.
+	function toggleToolPending(name: string, enable: boolean) {
+		if (!server || applyingTools || busy || deleting || cloning) return;
+		const next = new Set(pendingDisabled ?? baseDisabled);
+		if (enable) next.delete(name);
+		else next.add(name);
+		// Back in sync with the server → clear the staged set so background polls flow through.
+		pendingDisabled = setsEqual(next, baseDisabled) ? null : next;
+	}
 
-	async function toggleTool(name: string, enable: boolean) {
-		// Serialize toggles: block a new one while ANY toggle is in flight (not just this
-		// tool's). Each PATCH sends a full replacement list built from the local snapshot,
-		// so two concurrent toggles could race — the one that grabs the write lock last
-		// clobbers the other's change with its staler list, silently re-exposing a tool —
-		// and the single `loadingId` would drop the second reconciliation load. Also skip
-		// while a lifecycle op is in flight: a delete would 404 the PATCH, a start/stop
-		// would compete with the reactivation a hide change triggers (mirrors doClone()).
-		if (!server || togglingTools.size > 0 || busy || deleting || cloning) return;
+	function revertToolChanges() {
+		if (!applyingTools) pendingDisabled = null;
+	}
+
+	async function applyToolChanges() {
+		if (!server || !toolChangesDirty || applyingTools || busy || deleting || cloning) return;
 		const requestedId = id;
-		const current = server.disabled_tools ?? [];
-		const next = enable ? current.filter((t) => t !== name) : [...current, name];
-		togglingTools = new Set(togglingTools).add(name);
-		// Optimistic: reflect the switch immediately; the PATCH restarts the bridge and the
-		// silent reload below reconciles the discovered tool list. Bump the revision now so
-		// an in-flight background poll can't resolve and clobber the switch state.
+		const next = [...(pendingDisabled ?? baseDisabled)].sort();
+		applyingTools = true;
+		// Bump now so an in-flight background poll can't resolve and clobber the staged state.
 		mutationRevision += 1;
-		server = { ...server, disabled_tools: next };
 		try {
 			await updateServer(requestedId, { disabled_tools: next });
 			if (requestedId !== id) return; // navigated away mid-flight
+			pendingDisabled = null; // persisted — base now matches
 			mutationRevision += 1;
-			await load(true);
+			await load(true); // reconcile the discovered tool list after the restart
 		} catch (err) {
-			if (requestedId === id) {
-				flashToast(errorMessage(err));
-				await load(true); // resync from the server after a failed toggle
-			}
+			if (requestedId === id) flashToast(errorMessage(err));
 		} finally {
-			if (requestedId === id) {
-				const pending = new Set(togglingTools);
-				pending.delete(name);
-				togglingTools = pending;
-			}
+			if (requestedId === id) applyingTools = false;
 		}
 	}
 
@@ -929,11 +952,13 @@
 					</p>
 				{:else}
 					<p class="text-xs text-[var(--color-ink-dim)]">
-						Toggle a tool off to hide it from clients (MCP, REST, and groups). Disabled tools
-						are also refused if called. Changing this restarts the server.
+						Toggle tools off to hide them from clients (MCP, REST, and groups); hidden tools
+						are also refused if called. Changes are staged — click <strong>Apply</strong> to
+						save them in one restart.
 					</p>
 					<ul class="flex flex-col divide-y divide-[var(--color-line)]">
 						{#each toolRows as { tool, enabled } (tool.name)}
+							{@const changed = baseDisabled.has(tool.name) === enabled}
 							<li class="flex items-start justify-between gap-3 py-2 first:pt-0 last:pb-0">
 								<div class="flex min-w-0 flex-col gap-0.5" class:opacity-50={!enabled}>
 									<span class="flex flex-wrap items-center gap-1.5">
@@ -945,6 +970,13 @@
 												class="rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-dim)]"
 											>
 												disabled
+											</span>
+										{/if}
+										{#if changed}
+											<span
+												class="rounded-md border border-[var(--color-accent)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-accent)]"
+											>
+												unsaved
 											</span>
 										{/if}
 										{#if enabled && tool.has_output_schema === false}
@@ -980,8 +1012,8 @@
 									aria-checked={enabled}
 									aria-label={`${enabled ? 'Disable' : 'Enable'} ${tool.name}`}
 									title={enabled ? 'Exposed — click to hide from clients' : 'Hidden — click to expose'}
-									disabled={busy || deleting || cloning || togglingTools.size > 0}
-									onclick={() => toggleTool(tool.name, !enabled)}
+									disabled={busy || deleting || cloning || applyingTools}
+									onclick={() => toggleToolPending(tool.name, !enabled)}
 									class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 {enabled
 										? 'bg-[var(--color-accent)]'
 										: 'bg-[var(--color-line)]'}"
@@ -995,6 +1027,33 @@
 							</li>
 						{/each}
 					</ul>
+					{#if toolChangesDirty}
+						<div
+							class="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[var(--color-accent)] bg-[var(--color-surface-2)] px-4 py-3"
+						>
+							<p class="text-xs text-[var(--color-ink-dim)]">
+								Unsaved tool changes. Applying restarts the server once.
+							</p>
+							<div class="flex items-center gap-2">
+								<button
+									type="button"
+									onclick={revertToolChanges}
+									disabled={applyingTools}
+									class="rounded-md border border-[var(--color-line)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink)] transition hover:bg-[var(--color-surface)] disabled:cursor-not-allowed disabled:opacity-50"
+								>
+									Revert
+								</button>
+								<button
+									type="button"
+									onclick={applyToolChanges}
+									disabled={applyingTools || busy || deleting || cloning}
+									class="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+								>
+									{applyingTools ? 'Applying…' : 'Apply changes'}
+								</button>
+							</div>
+						</div>
+					{/if}
 				{/if}
 			</div>
 		{/if}
