@@ -139,7 +139,10 @@
 	let togglingTools = $state<Set<string>>(new Set());
 
 	async function toggleTool(name: string, enable: boolean) {
-		if (!server || togglingTools.has(name)) return;
+		// Don't toggle while a lifecycle op is in flight: a delete would make the PATCH
+		// 404, and a start/stop would compete with the reactivation a hide change triggers.
+		// Mirrors doClone()'s guard.
+		if (!server || togglingTools.has(name) || busy || deleting || cloning) return;
 		const requestedId = id;
 		const current = server.disabled_tools ?? [];
 		const next = enable ? current.filter((t) => t !== name) : [...current, name];
@@ -973,7 +976,7 @@
 									aria-checked={enabled}
 									aria-label={`${enabled ? 'Disable' : 'Enable'} ${tool.name}`}
 									title={enabled ? 'Exposed — click to hide from clients' : 'Hidden — click to expose'}
-									disabled={togglingTools.has(tool.name)}
+									disabled={busy || deleting || cloning || togglingTools.has(tool.name)}
 									onclick={() => toggleTool(tool.name, !enabled)}
 									class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 {enabled
 										? 'bg-[var(--color-accent)]'
