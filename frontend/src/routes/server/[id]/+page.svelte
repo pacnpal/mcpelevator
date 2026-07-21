@@ -194,15 +194,19 @@
 		} catch (err) {
 			if (requestedId === id) flashToast(errorMessage(err));
 		} finally {
-			if (requestedId === id) applyingTools = false;
+			// Clear unconditionally (like busy/cloning): if the operator navigated to another
+			// server mid-apply, the id guard would otherwise leave this true and freeze the
+			// new view's switches + Apply. The route-change effect only resets pendingDisabled.
+			applyingTools = false;
 		}
 	}
 
 	async function doClone() {
-		// Don't start a clone while an enable/disable or delete is still in flight —
-		// the toggle response is id-guarded above, but blocking here keeps the source
-		// page from kicking off conflicting actions right before it navigates away.
-		if (!server || cloning || busy || deleting) return;
+		// Don't start a clone while an enable/disable, delete, or tool-apply is still in
+		// flight — the toggle response is id-guarded above, but blocking here keeps the source
+		// page from kicking off conflicting actions right before it navigates away (and a
+		// navigate mid-apply is exactly what would strand the apply flag on the next view).
+		if (!server || cloning || busy || deleting || applyingTools) return;
 		// Capture the route + target id: if the user leaves this page before the
 		// clone resolves, don't navigate to the copy or toast on the wrong route.
 		const requestedId = id;
@@ -581,7 +585,7 @@
 				<button
 					type="button"
 					onclick={doClone}
-					disabled={cloning || busy || deleting}
+					disabled={cloning || busy || deleting || applyingTools}
 					aria-busy={cloning}
 					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3.5 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
 				>
