@@ -10,7 +10,8 @@
 		errorMessage,
 		getServer,
 		retryServer,
-		startOauth
+		startOauth,
+		updateServer
 	} from '$lib/api';
 	import { listenForOauthResult, openOauthPopup, popupCanRelay } from '$lib/oauthPopup';
 	import {
@@ -21,7 +22,7 @@
 		primaryServerAction,
 		startupPhaseLabel
 	} from '$lib/startup';
-	import type { ServerDetail } from '$lib/types';
+	import type { ServerDetail, ServerTool } from '$lib/types';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
@@ -109,11 +110,103 @@
 		}
 	}
 
+	// Per-tool enable/disable (issue #105). The disabled set lives on the server row
+	// (`disabled_tools`); the bridge hides those tools from every surface. A hidden tool
+	// drops out of discovery, so it's absent from `server.tools` — the row list below
+	// unions the discovered tools with the disabled names so a hidden tool stays visible
+	// (and re-enableable) here.
+	// Tool hide list, staged as a bulk edit. `base` is what's persisted on the server;
+	// `pendingDisabled` holds the operator's unsaved switch flips (null when in sync). One
+	// **Apply** sends a single PATCH → one bridge restart for the whole batch, which also
+	// removes the concurrent-PATCH race a per-toggle apply had (only ever one write).
+	const baseDisabled = $derived(new Set(server?.disabled_tools ?? []));
+	let pendingDisabled = $state<Set<string> | null>(null);
+	const effectiveDisabled = $derived(pendingDisabled ?? baseDisabled);
+	let applyingTools = $state(false); // Apply PATCH + reload in flight
+
+	function setsEqual(a: Set<string>, b: Set<string>): boolean {
+		return a.size === b.size && [...a].every((x) => b.has(x));
+	}
+
+	const toolChangesDirty = $derived(
+		pendingDisabled !== null && !setsEqual(pendingDisabled, baseDisabled)
+	);
+
+	// Drop staged edits when the viewed server changes (this component is reused across
+	// same-route navigations — clone, sidebar). Guarded so it doesn't loop on its own write.
+	let stagedForServerId: string | null = null;
+	$effect(() => {
+		const sid = server?.id ?? null;
+		if (sid !== stagedForServerId) {
+			stagedForServerId = sid;
+			pendingDisabled = null;
+		}
+	});
+
+	// One row per known tool: the discovered ones (in discovery order) plus any name that is
+	// disabled (persisted OR staged) but no longer discovered (appended, sorted). `enabled`
+	// reflects the STAGED state so the switch shows where the operator has set it.
+	const toolRows = $derived.by(() => {
+		if (!server) return [] as { tool: ServerTool; enabled: boolean }[];
+		const seen = new Set<string>();
+		const rows: { tool: ServerTool; enabled: boolean }[] = [];
+		for (const tool of server.tools) {
+			seen.add(tool.name);
+			rows.push({ tool, enabled: !effectiveDisabled.has(tool.name) });
+		}
+		const undiscovered = new Set([...baseDisabled, ...(pendingDisabled ?? [])]);
+		for (const name of [...undiscovered].sort()) {
+			if (seen.has(name)) continue;
+			// Disabled and no longer discovered: synthesize a minimal row so it can be re-enabled.
+			rows.push({ tool: { name, description: '' }, enabled: !effectiveDisabled.has(name) });
+		}
+		return rows;
+	});
+
+	// Local-only switch flip: stage the change, don't touch the server until Apply. Skip
+	// while an Apply or a lifecycle op (start/stop/delete/clone) is in flight.
+	function toggleToolPending(name: string, enable: boolean) {
+		if (!server || applyingTools || busy || deleting || cloning) return;
+		const next = new Set(pendingDisabled ?? baseDisabled);
+		if (enable) next.delete(name);
+		else next.add(name);
+		// Back in sync with the server → clear the staged set so background polls flow through.
+		pendingDisabled = setsEqual(next, baseDisabled) ? null : next;
+	}
+
+	function revertToolChanges() {
+		if (!applyingTools) pendingDisabled = null;
+	}
+
+	async function applyToolChanges() {
+		if (!server || !toolChangesDirty || applyingTools || busy || deleting || cloning) return;
+		const requestedId = id;
+		const next = [...(pendingDisabled ?? baseDisabled)].sort();
+		applyingTools = true;
+		// Bump now so an in-flight background poll can't resolve and clobber the staged state.
+		mutationRevision += 1;
+		try {
+			await updateServer(requestedId, { disabled_tools: next });
+			if (requestedId !== id) return; // navigated away mid-flight
+			pendingDisabled = null; // persisted — base now matches
+			mutationRevision += 1;
+			await load(true); // reconcile the discovered tool list after the restart
+		} catch (err) {
+			if (requestedId === id) flashToast(errorMessage(err));
+		} finally {
+			// Clear unconditionally (like busy/cloning): if the operator navigated to another
+			// server mid-apply, the id guard would otherwise leave this true and freeze the
+			// new view's switches + Apply. The route-change effect only resets pendingDisabled.
+			applyingTools = false;
+		}
+	}
+
 	async function doClone() {
-		// Don't start a clone while an enable/disable or delete is still in flight —
-		// the toggle response is id-guarded above, but blocking here keeps the source
-		// page from kicking off conflicting actions right before it navigates away.
-		if (!server || cloning || busy || deleting) return;
+		// Don't start a clone while an enable/disable, delete, or tool-apply is still in
+		// flight — the toggle response is id-guarded above, but blocking here keeps the source
+		// page from kicking off conflicting actions right before it navigates away (and a
+		// navigate mid-apply is exactly what would strand the apply flag on the next view).
+		if (!server || cloning || busy || deleting || applyingTools) return;
 		// Capture the route + target id: if the user leaves this page before the
 		// clone resolves, don't navigate to the copy or toast on the wrong route.
 		const requestedId = id;
@@ -492,7 +585,7 @@
 				<button
 					type="button"
 					onclick={doClone}
-					disabled={cloning || busy || deleting}
+					disabled={cloning || busy || deleting || applyingTools}
 					aria-busy={cloning}
 					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3.5 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
 				>
@@ -855,47 +948,116 @@
 					<h2 class="text-sm font-semibold text-[var(--color-ink)]">Tools</h2>
 					<span class="font-mono text-xs text-[var(--color-ink-dim)]">{server.tools_count}</span>
 				</div>
-				{#if server.tools.length === 0}
+				{#if toolRows.length === 0}
 					<p class="text-xs text-[var(--color-ink-dim)]">
 						{server.state === 'running'
 							? 'No tools discovered.'
 							: 'Tools are discovered once the server is running.'}
 					</p>
 				{:else}
+					<p class="text-xs text-[var(--color-ink-dim)]">
+						Toggle tools off to hide them from clients (MCP, REST, and groups); hidden tools
+						are also refused if called. Changes are staged — click <strong>Apply</strong> to
+						save them in one restart.
+					</p>
 					<ul class="flex flex-col divide-y divide-[var(--color-line)]">
-						{#each server.tools as tool (tool.name)}
-							<li class="flex flex-col gap-0.5 py-2 first:pt-0 last:pb-0">
-								<span class="flex flex-wrap items-center gap-1.5">
-									<span class="font-mono text-xs font-medium text-[var(--color-ink)]">
-										{tool.name}
+						{#each toolRows as { tool, enabled } (tool.name)}
+							{@const changed = baseDisabled.has(tool.name) === enabled}
+							<li class="flex items-start justify-between gap-3 py-2 first:pt-0 last:pb-0">
+								<div class="flex min-w-0 flex-col gap-0.5" class:opacity-50={!enabled}>
+									<span class="flex flex-wrap items-center gap-1.5">
+										<span class="font-mono text-xs font-medium text-[var(--color-ink)]">
+											{tool.name}
+										</span>
+										{#if !enabled}
+											<span
+												class="rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-dim)]"
+											>
+												disabled
+											</span>
+										{/if}
+										{#if changed}
+											<span
+												class="rounded-md border border-[var(--color-accent)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-accent)]"
+											>
+												unsaved
+											</span>
+										{/if}
+										{#if enabled && tool.has_output_schema === false}
+											<!-- Mirrors the hint MCP clients show for schema-less tools. The
+											     schema lives in the upstream server's tool definition and is
+											     proxied through unchanged, so this is diagnostic only. -->
+											<span
+												class="rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-dim)]"
+												title="This tool doesn't declare an outputSchema. MCP clients recommend adding one so models can better understand the tool's results. It comes from the upstream server's tool definition — mcpelevator proxies schemas through unchanged, so the fix belongs upstream."
+											>
+												no output schema
+											</span>
+										{/if}
 									</span>
-									{#if tool.has_output_schema === false}
-										<!-- Mirrors the hint MCP clients show for schema-less tools. The
-										     schema lives in the upstream server's tool definition and is
-										     proxied through unchanged, so this is diagnostic only. -->
-										<span
-											class="rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-dim)]"
-											title="This tool doesn't declare an outputSchema. MCP clients recommend adding one so models can better understand the tool's results. It comes from the upstream server's tool definition — mcpelevator proxies schemas through unchanged, so the fix belongs upstream."
-										>
-											no output schema
+									{#if tool.description}
+										<span class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+											{tool.description}
 										</span>
 									{/if}
-								</span>
-								{#if tool.description}
-									<span class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
-										{tool.description}
-									</span>
-								{/if}
-								<div class="mt-1">
-									<ToolRunner
-										serverId={server.id}
-										{tool}
-										runnable={server.state === 'running'}
-									/>
+									{#if enabled}
+										<div class="mt-1">
+											<ToolRunner
+												serverId={server.id}
+												{tool}
+												runnable={server.state === 'running'}
+											/>
+										</div>
+									{/if}
 								</div>
+								<button
+									type="button"
+									role="switch"
+									aria-checked={enabled}
+									aria-label={`${enabled ? 'Disable' : 'Enable'} ${tool.name}`}
+									title={enabled ? 'Exposed — click to hide from clients' : 'Hidden — click to expose'}
+									disabled={busy || deleting || cloning || applyingTools}
+									onclick={() => toggleToolPending(tool.name, !enabled)}
+									class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 {enabled
+										? 'bg-[var(--color-accent)]'
+										: 'bg-[var(--color-line)]'}"
+								>
+									<span
+										class="inline-block size-4 rounded-full bg-white shadow-sm transition {enabled
+											? 'translate-x-[18px]'
+											: 'translate-x-0.5'}"
+									></span>
+								</button>
 							</li>
 						{/each}
 					</ul>
+					{#if toolChangesDirty}
+						<div
+							class="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[var(--color-accent)] bg-[var(--color-surface-2)] px-4 py-3"
+						>
+							<p class="text-xs text-[var(--color-ink-dim)]">
+								Unsaved tool changes. Applying restarts the server once.
+							</p>
+							<div class="flex items-center gap-2">
+								<button
+									type="button"
+									onclick={revertToolChanges}
+									disabled={applyingTools}
+									class="rounded-md border border-[var(--color-line)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink)] transition hover:bg-[var(--color-surface)] disabled:cursor-not-allowed disabled:opacity-50"
+								>
+									Revert
+								</button>
+								<button
+									type="button"
+									onclick={applyToolChanges}
+									disabled={applyingTools || busy || deleting || cloning}
+									class="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+								>
+									{applyingTools ? 'Applying…' : 'Apply changes'}
+								</button>
+							</div>
+						</div>
+					{/if}
 				{/if}
 			</div>
 		{/if}

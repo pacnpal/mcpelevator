@@ -81,6 +81,15 @@ class Server(SQLModel, table=True):
     cwd: Optional[str] = None
     setup_script: str = ""
 
+    # JSON array of upstream tool names to hide from every exposed surface (MCP
+    # tools/list + call, the REST/OpenAPI routes, and the group hub, which all funnel
+    # through the bridge). Empty/NULL = expose every discovered tool (the default).
+    # A hidden tool is dropped from listings AND refused on call, so a client holding a
+    # stale list can't still invoke it. Part of the launch spec (config_hash), so a
+    # change restarts the bridge — the reconciler re-applies the filter deterministically.
+    # Nullable: rows predating the column hold NULL, read as [].
+    disabled_tools: Optional[list] = Field(default=None, sa_column=Column(JSON))
+
     # exposure (folded 1:1)
     mcp_http: bool = True
     rest_openapi: bool = False

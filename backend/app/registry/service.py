@@ -1301,6 +1301,10 @@ def _hash_payload(server: Server) -> dict[str, Any]:
         "setup_script": server.setup_script or "",
         "mcp_http": server.mcp_http,
         "rest_openapi": server.rest_openapi,
+        # The hide list is applied inside the bridge (a FastMCP middleware), so it's part
+        # of the launch spec — a change must restart the bridge to re-apply it. Normalized
+        # (sorted, deduped) so reordering the same set doesn't perturb the hash.
+        "disabled_tools": normalize_disabled_tools(server.disabled_tools),
         # OAuth config drives how the bridge authenticates upstream, so it IS part
         # of the launch spec — a change must restart the bridge. (The tokens live in
         # a file store, not the row, so *authenticating* leaves the hash untouched.)
@@ -1532,6 +1536,25 @@ def normalize_idle_timeout(value: Any) -> Optional[int]:
     return value
 
 
+def normalize_disabled_tools(value: Any) -> list[str]:
+    """Canonicalize the per-server hide list: a list of non-empty tool-name strings,
+    trimmed, de-duplicated, and SORTED so the stored value (and thus config_hash) is
+    order-independent — reordering the same set must not bounce the bridge. ``None``
+    (a pre-field row, or a PATCH that omits it) reads as ``[]`` = expose everything."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("disabled_tools must be a list of tool names")
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("disabled_tools must be a list of tool names")
+        name = item.strip()
+        if name and name not in names:
+            names.append(name)
+    return sorted(names)
+
+
 def _normalize_setup_script(runner: str, setup_script: str) -> str:
     if not setup_script.strip():
         return ""
@@ -1556,6 +1579,7 @@ def create_server(
     setup_script: str = "",
     mcp_http: bool = True,
     rest_openapi: bool = False,
+    disabled_tools: Optional[list[str]] = None,
     auth_provider: str = "inherit",
     oauth: bool = False,
     oauth_scopes: str = "",
@@ -1605,6 +1629,7 @@ def create_server(
     # Extra `docker run` options: validated for docker, forced empty elsewhere.
     run_args = normalize_run_args(runner, run_args)
     idle_timeout_s = normalize_idle_timeout(idle_timeout_s)
+    disabled_tools = normalize_disabled_tools(disabled_tools)
 
     server = Server(
         id=new_id(),
@@ -1619,6 +1644,7 @@ def create_server(
         setup_script=setup_script,
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
+        disabled_tools=disabled_tools,
         auth_provider=auth_provider,
         oauth=oauth,
         oauth_scopes=oauth_scopes,
@@ -1647,6 +1673,7 @@ _MUTABLE_FIELDS = {
     "setup_script",
     "mcp_http",
     "rest_openapi",
+    "disabled_tools",
     "auth_provider",
     "oauth",
     "oauth_scopes",
@@ -1752,6 +1779,7 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     try:
         server.run_args = normalize_run_args(server.runner, server.run_args)
         server.idle_timeout_s = normalize_idle_timeout(server.idle_timeout_s)
+        server.disabled_tools = normalize_disabled_tools(server.disabled_tools)
     except ValueError:
         session.rollback()
         raise
@@ -1792,6 +1820,7 @@ def clone_server(
         setup_script=src.setup_script or "",
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,
+        disabled_tools=list(src.disabled_tools or []),
         auth_provider=src.auth_provider,
         oauth=bool(src.oauth),
         oauth_scopes=src.oauth_scopes or "",

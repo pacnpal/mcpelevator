@@ -121,6 +121,11 @@ export interface ServerDetail extends ServerSummary {
 	/** Idle quiescence override in seconds: null = inherit the global setting,
 	 * 0 = never idle this server out. */
 	idle_timeout_s: number | null;
+	/** Upstream tool names hidden from every exposed surface (MCP list/call, REST,
+	 * groups). Empty = expose every discovered tool (the default). A hidden tool no
+	 * longer appears in `tools` (it drops out of discovery), so the UI unions this
+	 * list back in to keep it togglable. */
+	disabled_tools: string[];
 	config_hash: string;
 	source: string;
 	tools: ServerTool[];
@@ -150,6 +155,8 @@ export interface ServerCreate {
 	oauth_client_secret?: string | null;
 	/** Idle quiescence override in seconds (null = inherit, 0 = never idle). */
 	idle_timeout_s?: number | null;
+	/** Upstream tool names to hide from every exposed surface. [] re-exposes all. */
+	disabled_tools?: string[];
 	enabled?: boolean;
 	/** Provenance. Only a `catalog:<id>` value is honored server-side (a registry install). */
 	source?: string | null;

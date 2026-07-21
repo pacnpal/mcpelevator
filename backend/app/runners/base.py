@@ -35,6 +35,10 @@ class ProcessSpec:
     env: dict[str, str] = field(default_factory=dict)  # server-specific vars / headers
     cwd: str | None = None
     setup_script: str = ""
+    # Upstream tool names to hide from every exposed surface. The bridge installs a
+    # FastMCP middleware that drops these from tools/list and refuses them on call
+    # (see app.bridge.host). Empty = expose everything (the default).
+    disabled_tools: list[str] = field(default_factory=list)
     transport: str = "stdio"  # stdio | streamable-http | sse
     # For a remote runner that authenticates via OAuth: the config the bridge needs to
     # build an OAuth httpx auth on the upstream transport (server id -> token file,
@@ -76,4 +80,5 @@ def passthrough(server: Server) -> ProcessSpec:
         env=dict(server.env or {}),
         cwd=server.cwd,
         setup_script=server.setup_script or "",
+        disabled_tools=list(server.disabled_tools or []),
     )

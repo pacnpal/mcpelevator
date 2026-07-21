@@ -152,6 +152,22 @@ fallback for complex shapes) and invokes the tool through the control plane. No 
 client or data-plane token needed: it's the fastest way to verify a server actually
 works — not just that it started — before pointing a real client at it.
 
+### Disable specific tools
+
+Some servers ship internal-only or rarely-used tools that just waste the model's
+context. On a running server's detail page, each discovered tool has a **toggle
+switch** — flip one off and mcpelevator hides that tool from **every** exposed
+surface: the MCP `tools/list`, the REST/OpenAPI routes, and any group the server
+belongs to. Hiding also **disables**: a hidden tool is refused if called by name, so
+a client holding a stale list can't still invoke it.
+
+The hide list lives on the server (`disabled_tools`), so it **persists across bridge
+and container restarts** like the rest of the server's config. The default is to
+expose every tool; toggling one restarts that server's bridge to re-apply the filter
+(a few seconds), and a re-enabled tool reappears on the next discovery. Set it over
+the API too: `PATCH /api/servers/<id>` with `{"disabled_tools": ["internal_tool"]}`
+(send `[]` to expose everything again).
+
 ### Per-server REST/OpenAPI surface
 
 Turn on **REST / OpenAPI** in a server's Exposure section and the same supervised
@@ -363,7 +379,7 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 **Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop / retry, with optional setup scripts for local runners. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: local bearer tokens or external-AS OAuth JWTs for `/s` and `/g`, control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
 
-Also working: a **tool playground** on the server page (invoke any discovered tool from a schema-built form, no client needed), **idle shutdown with wake-on-request** (quiesce inactive servers, restart transparently on the next request), an opt-in **REST/OpenAPI surface** per server (`/s/<slug>/rest/<tool>` + a generated `openapi.json`), and a **multi-user control plane** (admin/member roles, per-user server ownership and token scoping, a per-user local-runner permission, and login-token credentials minted from Settings → Users — see README Security for the trust model).
+Also working: a **tool playground** on the server page (invoke any discovered tool from a schema-built form, no client needed), **per-tool disable** (toggle individual tools off to hide them from every surface — MCP, REST, and groups — and refuse them if called), **idle shutdown with wake-on-request** (quiesce inactive servers, restart transparently on the next request), an opt-in **REST/OpenAPI surface** per server (`/s/<slug>/rest/<tool>` + a generated `openapi.json`), and a **multi-user control plane** (admin/member roles, per-user server ownership and token scoping, a per-user local-runner permission, and login-token credentials minted from Settings → Users — see README Security for the trust model).
 
 **Planned:** more catalog directories · polish.
 

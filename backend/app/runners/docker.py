@@ -363,4 +363,5 @@ def build(server: Server) -> ProcessSpec:
         # (e.g. from converting a command server) could break `docker run`. Never pass it.
         cwd=None,
         minimal_env=True,
+        disabled_tools=list(server.disabled_tools or []),
     )

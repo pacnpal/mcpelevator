@@ -109,6 +109,8 @@ class ServerDetail(ServerSummary):
     oauth_status: OAuthStatus = OAuthStatus()
     # Idle quiescence: None = inherit the global `idle_timeout_s` setting; 0 = never.
     idle_timeout_s: Optional[int] = None
+    # Upstream tool names hidden from every exposed surface. Empty = expose all (default).
+    disabled_tools: list[str] = []
     config_hash: str = ""
     source: str = "manual"
     tools: list[dict] = []
@@ -128,6 +130,9 @@ class ServerCreate(BaseModel):
     setup_script: str = ""
     mcp_http: bool = True
     rest_openapi: bool = False
+    # Upstream tool names to hide from every exposed surface (empty = expose all).
+    # Normalized (trimmed, deduped, sorted) server-side.
+    disabled_tools: list[StrictStr] = []
     auth_provider: AuthProvider = "inherit"
     # Upstream OAuth (remote runner only; forced off elsewhere server-side).
     oauth: bool = False
@@ -159,6 +164,8 @@ class ServerUpdate(BaseModel):
     setup_script: Optional[str] = None
     mcp_http: Optional[bool] = None
     rest_openapi: Optional[bool] = None
+    # Replace the whole hide list; [] re-exposes every tool. Omitted (null) = unchanged.
+    disabled_tools: Optional[list[StrictStr]] = None
     auth_provider: Optional[AuthProvider] = None
     # StrictBool (unlike mcp_http/rest_openapi above): oauth gates a security-sensitive
     # upstream-auth mode, so a truthy-coerced "yes"/1 must never silently flip it on — the
