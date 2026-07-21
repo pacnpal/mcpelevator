@@ -9,6 +9,13 @@
 # `expired_at` so the suppression self-expires and the alert resurfaces for
 # re-triage rather than being buried forever). Only suppress a finding we
 # genuinely cannot act on yet — never a fixable one.
+#
+# Package-level suppression lives in the companion `.trivy/ignore-policy.rego`
+# (wired into the same scan jobs via `ignore-policy`): it drops the continuous
+# stream of Linux *kernel* CVEs Trivy maps to `linux-libc-dev` — compile-time
+# kernel headers that ship no running code, unreachable in a container running
+# on the host kernel. That class can't be enumerated as CVE ids here (it grows
+# every scan), so it is scoped by package name there rather than listed here.
 
 vulnerabilities:
   # Two Go standard-library vulnerabilities baked into the `docker` CLI binary
