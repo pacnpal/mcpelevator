@@ -86,6 +86,11 @@ jobs:
           # on yet (e.g. Go stdlib CVEs baked into the upstream-built docker CLI
           # binary, pending a docker-ce-cli rebuild). See the file for rationale.
           trivyignores: .trivyignore.yaml
+          # Package-scoped Rego suppression for the continuous stream of Linux
+          # *kernel* CVEs Trivy maps to linux-libc-dev (compile-time kernel
+          # headers pulled in by the native build toolchain; not reachable in a
+          # container, which runs on the host kernel). See the file for rationale.
+          ignore-policy: .trivy/ignore-policy.rego
 
       - name: Upload Trivy results to the Security tab
         uses: github/codeql-action/upload-sarif@ab28d5ce09b08e4700b2296d39d684a7ac71d1e7 # v4
