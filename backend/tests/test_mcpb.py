@@ -101,6 +101,25 @@ def test_mcpb_rejects_relative_command_paths():
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
+def test_mcpb_command_path_classification():
+    """Both path flavors: relative rejects, PATH-names and absolute paths export."""
+    from app.db.models import Server
+    from app import mcpb
+
+    def row(command: str) -> Server:
+        return Server(id="x", slug="s", name="S", runner="command",
+                      command=command, args=[], env={})
+
+    for cmd in (r".\server.exe", r"bin\server.exe", "./server", "bin/server"):
+        try:
+            mcpb.manifest(row(cmd))
+            raise AssertionError(f"{cmd!r} should have been rejected")
+        except ValueError as exc:
+            assert "relative path" in str(exc)
+    for cmd in ("npx", "/usr/local/bin/server", r"C:\tools\server.exe", r"\\host\share\server.exe"):
+        assert mcpb.manifest(row(cmd))["server"]["mcp_config"]["command"] == cmd
+
+
 def test_mcpb_rejects_remote_servers():
     with TestClient(app) as c:
         created = c.post(

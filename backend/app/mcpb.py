@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import zipfile
 
 from app import __version__
@@ -40,12 +41,16 @@ def manifest(server: Server) -> dict:
             "this server depends on a working directory or setup script, "
             "which a .mcpb bundle cannot carry"
         )
-    # A relative command path (./server, bin/server) resolves against the
+    # A relative command path (./server, bin\server.exe) resolves against the
     # elevator's own working directory — it cannot exist where a client launches
-    # the bundle. Bare names (npx, python) PATH-resolve and absolute paths are
-    # well-defined, so both stay exportable. Args are not analyzed: whether
-    # "server.py" is a file or a token is undecidable here.
-    if "/" in spec.command and not spec.command.startswith("/"):
+    # the bundle. Bare names (npx, python) PATH-resolve; absolute paths
+    # (/usr/bin/x, C:\tools\x.exe, \\host\share\x) are well-defined — both stay
+    # exportable. Args are not analyzed: whether "server.py" is a file reference
+    # or an opaque token is undecidable here.
+    cmd = spec.command
+    is_path = "/" in cmd or "\\" in cmd
+    is_absolute = cmd.startswith(("/", "\\\\")) or bool(re.match(r"[A-Za-z]:[\\/]", cmd))
+    if is_path and not is_absolute:
         raise ValueError(
             "this server's command is a relative path, "
             "which won't resolve outside the elevator"
