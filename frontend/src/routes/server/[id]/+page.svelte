@@ -117,13 +117,16 @@
 	// with the bearer header, then handed to the browser as an object-URL download.
 	async function saveMcpb() {
 		if (!server || downloadingMcpb) return;
+		// Capture the target before the await: clone reuses this component (same-route
+		// nav), so `server` can change mid-download and must not rename the file.
+		const { id: serverId, slug } = server;
 		downloadingMcpb = true;
 		try {
-			const blob = await downloadMcpb(server.id);
+			const blob = await downloadMcpb(serverId);
 			const url = URL.createObjectURL(blob);
 			const a = document.createElement('a');
 			a.href = url;
-			a.download = `${server.slug}.mcpb`;
+			a.download = `${slug}.mcpb`;
 			a.click();
 			URL.revokeObjectURL(url);
 		} catch (err) {

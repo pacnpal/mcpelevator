@@ -241,6 +241,13 @@ export async function downloadMcpb(id: string): Promise<Blob> {
 		headers: token ? { authorization: `Bearer ${token}` } : {}
 	});
 	if (!res.ok) {
+		// Same 401 handling as request(): drop the stale token and bounce to /login.
+		if (res.status === 401) {
+			clearToken();
+			if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+				void goto('/login');
+			}
+		}
 		let body = '';
 		try {
 			body = await res.text();
