@@ -15,6 +15,7 @@ import io
 import json
 import zipfile
 
+from app import __version__
 from app.db.models import Server
 from app.runners import build_spec
 
@@ -22,14 +23,23 @@ from app.runners import build_spec
 def manifest(server: Server) -> dict:
     """The MCPB ``manifest.json`` for a local stdio server.
 
-    Raises ``ValueError`` for a non-stdio (remote) server. ``env`` is embedded
-    verbatim — the download is control-plane-gated, and the same principal
-    already reads those values on the server detail endpoint. ``cwd`` and
-    ``setup_script`` have no MCPB equivalent and are not represented.
+    Raises ``ValueError`` for a non-stdio (remote) server, and for a spec that
+    depends on launch context a bundle can't carry (``cwd``/``setup_script``) —
+    exporting those would hand out a bundle that can't reproduce the server.
+    ``env`` is embedded verbatim — the download is control-plane-gated, and the
+    same principal already reads those values on the server detail endpoint.
+    ``disabled_tools`` is deliberately NOT enforced: it filters the elevator's
+    exposed surfaces, and the downloader is the operator who set that policy —
+    a local run is their own machine, outside the elevator's enforcement.
     """
     spec = build_spec(server)
     if spec.transport != "stdio":
         raise ValueError("only local stdio servers can be exported as .mcpb")
+    if spec.cwd or spec.setup_script:
+        raise ValueError(
+            "this server depends on a working directory or setup script, "
+            "which a .mcpb bundle cannot carry"
+        )
     mcp_config: dict = {"command": spec.command, "args": list(spec.args)}
     if spec.env:
         mcp_config["env"] = dict(spec.env)
@@ -39,7 +49,9 @@ def manifest(server: Server) -> dict:
         "manifest_version": "0.2",
         "name": server.slug,
         "display_name": server.name,
-        "version": "1.0.0",
+        # The elevator's own version (release-tag-derived, never hardcoded — see
+        # app.__init__), so re-exports after an upgrade register as updates.
+        "version": __version__.lstrip("v"),
         "description": f"{server.name} ({server.runner}: {server.command}) — exported from mcpelevator",
         "author": {"name": "mcpelevator"},
         "server": {

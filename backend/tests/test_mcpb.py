@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from conftest import LOOPBACK
 
+from app import __version__
 from app.main import app
 
 
@@ -42,6 +43,7 @@ def test_mcpb_download_round_trip():
             m = _manifest_from(r.content)
             assert m["manifest_version"] == "0.2"
             assert m["name"] == server["slug"]
+            assert m["version"] == __version__.lstrip("v")
             assert m["server"]["mcp_config"] == {
                 "command": "npx",
                 "args": ["-y", "@modelcontextprotocol/server-everything"],
@@ -49,6 +51,30 @@ def test_mcpb_download_round_trip():
             }
         finally:
             c.delete(f"/api/servers/{server['id']}", headers=LOOPBACK)
+
+
+def test_mcpb_rejects_unexportable_launch_context():
+    """cwd/setup_script have no MCPB equivalent — refuse rather than hand out a
+    bundle that can't reproduce the server."""
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "Prepared",
+                "runner": "command",
+                "command": "/bin/true",
+                "setup_script": "printf 'ready\\n'\n",
+            },
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            r = c.get(f"/api/servers/{server_id}/mcpb", headers=LOOPBACK)
+            assert r.status_code == 400
+            assert "setup script" in r.json()["detail"]
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
 def test_mcpb_rejects_remote_servers():

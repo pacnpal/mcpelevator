@@ -841,7 +841,8 @@
 						<CopyButton value={server.urls.rest} label="Copy" />
 					</div>
 				{/if}
-				{#if server.runner !== 'remote'}
+				<!-- cwd/setup_script have no MCPB equivalent (the backend refuses those too). -->
+				{#if server.runner !== 'remote' && !server.cwd && !server.setup_script}
 					<div class="flex items-center justify-between gap-3">
 						<div class="min-w-0 flex-1">
 							<p class="text-xs font-medium text-[var(--color-ink-muted)]">Run locally</p>
