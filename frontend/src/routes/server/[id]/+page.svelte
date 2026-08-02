@@ -6,6 +6,7 @@
 		deleteServer,
 		disableServer,
 		disconnectOauth,
+		downloadMcpb,
 		enableServer,
 		errorMessage,
 		getServer,
@@ -107,6 +108,28 @@
 			if (requestedId === id) flashToast(errorMessage(err));
 		} finally {
 			busy = false;
+		}
+	}
+
+	let downloadingMcpb = $state(false);
+
+	// Save the backend-generated .mcpb bundle (local stdio servers only). Fetched
+	// with the bearer header, then handed to the browser as an object-URL download.
+	async function saveMcpb() {
+		if (!server || downloadingMcpb) return;
+		downloadingMcpb = true;
+		try {
+			const blob = await downloadMcpb(server.id);
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = `${server.slug}.mcpb`;
+			a.click();
+			URL.revokeObjectURL(url);
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			downloadingMcpb = false;
 		}
 	}
 
@@ -813,6 +836,25 @@
 							{/if}
 						</div>
 						<CopyButton value={server.urls.rest} label="Copy" />
+					</div>
+				{/if}
+				{#if server.runner !== 'remote'}
+					<div class="flex items-center justify-between gap-3">
+						<div class="min-w-0 flex-1">
+							<p class="text-xs font-medium text-[var(--color-ink-muted)]">Run locally</p>
+							<p class="text-xs text-[var(--color-ink-dim)]">
+								Download a <code class="font-mono">.mcpb</code> bundle of this server's launch
+								config — install it in Claude Desktop to run the server on your own machine.
+							</p>
+						</div>
+						<button
+							type="button"
+							onclick={saveMcpb}
+							disabled={downloadingMcpb}
+							class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
+						>
+							Download .mcpb
+						</button>
 					</div>
 				{/if}
 			</div>

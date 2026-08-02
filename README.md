@@ -186,6 +186,8 @@ curl -X POST http://127.0.0.1:8080/s/memory/rest/create_entities \
   tool list (request schemas included), ready to feed to GPT Actions or any OpenAPI
   tooling. `GET /s/<slug>/rest` lists the tools.
 
+**Prefer to run it locally after all?** Every local (stdio) server offers a **Download `.mcpb`** button on its detail page (`GET /api/servers/<id>/mcpb`): a generated [MCPB bundle](https://github.com/anthropics/mcpb) of the server's exact launch config (command, args, env), ready to install in Claude Desktop. It's built on the fly from the same runner spec the bridge launches, so it never drifts from what the elevator runs. Remote servers have nothing to run locally and don't offer one.
+
 **Already remote?** Use the `remote` runner to proxy an existing Streamable-HTTP/SSE MCP URL — no local process. The launch spec reuses the same fields: `command` is the upstream URL, `args[0]` is the transport (`streamable-http` or `sse`), and `env` is the upstream HTTP headers.
 
 ```bash

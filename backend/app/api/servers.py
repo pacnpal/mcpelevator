@@ -36,6 +36,7 @@ from app.api.schemas import (
     Transports,
     Urls,
 )
+from app import mcpb
 from app.api.util import base_url, oauth_public_base, resync_groups
 from app.auth import oauth_flow, policy
 from app.auth import principal as principal_mod
@@ -552,6 +553,29 @@ async def delete_server(
     ServerTokenStorage(server_id).clear()
     await resync_groups(request)
     return Response(status_code=204)
+
+
+@router.get("/servers/{server_id}/mcpb")
+async def download_mcpb(
+    server_id: str,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    """Download the server's launch spec as a ``.mcpb`` bundle (see app.mcpb).
+
+    Generated per request from the row — the DB stays the single source of
+    truth. 400 for a remote server (nothing to run locally)."""
+    server = _visible(principal, session, server_id)
+    try:
+        data = mcpb.bundle(server)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        # slug is validated url-safe at the service boundary, so it's header-safe here.
+        headers={"Content-Disposition": f'attachment; filename="{server.slug}.mcpb"'},
+    )
 
 
 def _oauth_callback_url(request: Request) -> str:
