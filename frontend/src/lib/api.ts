@@ -229,6 +229,36 @@ export function updateServer(
 	);
 }
 
+/**
+ * Download the generated `.mcpb` bundle for a local stdio server. Raw fetch
+ * (not `request()`): the body is a zip, not JSON, and it needs the same
+ * bearer header an `<a href>` can't carry.
+ */
+export async function downloadMcpb(id: string): Promise<Blob> {
+	const url = `${BASE}/servers/${encodeURIComponent(id)}/mcpb`;
+	const token = getToken();
+	const res = await fetch(url, {
+		headers: token ? { authorization: `Bearer ${token}` } : {}
+	});
+	if (!res.ok) {
+		// Same 401 handling as request(): drop the stale token and bounce to /login.
+		if (res.status === 401) {
+			clearToken();
+			if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+				void goto('/login');
+			}
+		}
+		let body = '';
+		try {
+			body = await res.text();
+		} catch {
+			// ignore — body may be unreadable on some error responses
+		}
+		throw new ApiError(res.status, body, url);
+	}
+	return res.blob();
+}
+
 export function deleteServer(id: string): Promise<void> {
 	return request<void>(`/servers/${encodeURIComponent(id)}`, {
 		method: 'DELETE'
