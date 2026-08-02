@@ -80,6 +80,23 @@ def test_mcpb_rejects_unexportable_launch_context():
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
+def test_mcpb_rejects_relative_command_paths():
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Local build", "runner": "command", "command": "./server"},
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            r = c.get(f"/api/servers/{server_id}/mcpb", headers=LOOPBACK)
+            assert r.status_code == 400
+            assert "relative path" in r.json()["detail"]
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
 def test_mcpb_rejects_remote_servers():
     with TestClient(app) as c:
         created = c.post(

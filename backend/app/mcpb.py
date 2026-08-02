@@ -40,6 +40,16 @@ def manifest(server: Server) -> dict:
             "this server depends on a working directory or setup script, "
             "which a .mcpb bundle cannot carry"
         )
+    # A relative command path (./server, bin/server) resolves against the
+    # elevator's own working directory — it cannot exist where a client launches
+    # the bundle. Bare names (npx, python) PATH-resolve and absolute paths are
+    # well-defined, so both stay exportable. Args are not analyzed: whether
+    # "server.py" is a file or a token is undecidable here.
+    if "/" in spec.command and not spec.command.startswith("/"):
+        raise ValueError(
+            "this server's command is a relative path, "
+            "which won't resolve outside the elevator"
+        )
     # Version = elevator release (release-tag-derived, never hardcoded — see
     # app.__init__) + the row's config_hash as semver build metadata (hex + dots,
     # which is valid there), so a same-release config edit still yields a
