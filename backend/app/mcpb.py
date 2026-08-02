@@ -55,7 +55,11 @@ def manifest(server: Server) -> dict:
         # 0.2 is the MCPB baseline every bundle-aware client accepts; nothing
         # here needs a newer manifest feature.
         "manifest_version": "0.2",
-        "name": server.slug,
+        # Package identity = the immutable server id: a slug rename or a
+        # same-slug server on another instance must not fork/collide the
+        # installed extension. The human-facing name lives in display_name
+        # (and the download filename stays <slug>.mcpb — cosmetic only).
+        "name": server.id,
         "display_name": server.name,
         "version": version,
         "description": f"{server.name} ({server.runner}: {server.command}) — exported from mcpelevator",

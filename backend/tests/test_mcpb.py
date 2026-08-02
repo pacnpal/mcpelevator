@@ -42,7 +42,8 @@ def test_mcpb_download_round_trip():
             )
             m = _manifest_from(r.content)
             assert m["manifest_version"] == "0.2"
-            assert m["name"] == server["slug"]
+            assert m["name"] == server["id"]  # immutable identity, not the renameable slug
+            assert m["display_name"] == "Everything"
             detail = c.get(f"/api/servers/{server['id']}", headers=LOOPBACK).json()
             base = __version__.lstrip("v").split("+", 1)[0]
             assert m["version"] == f"{base}+{detail['config_hash']}"
