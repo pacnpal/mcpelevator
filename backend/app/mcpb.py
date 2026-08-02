@@ -40,6 +40,14 @@ def manifest(server: Server) -> dict:
             "this server depends on a working directory or setup script, "
             "which a .mcpb bundle cannot carry"
         )
+    # Version = elevator release (release-tag-derived, never hardcoded — see
+    # app.__init__) + the row's config_hash as semver build metadata (hex + dots,
+    # which is valid there), so a same-release config edit still yields a
+    # distinguishable version string. Split off any existing build metadata
+    # (the "0.0.0+unknown" fallback) — semver allows only one "+".
+    version = __version__.lstrip("v").split("+", 1)[0]
+    if server.config_hash:
+        version = f"{version}+{server.config_hash}"
     mcp_config: dict = {"command": spec.command, "args": list(spec.args)}
     if spec.env:
         mcp_config["env"] = dict(spec.env)
@@ -49,9 +57,7 @@ def manifest(server: Server) -> dict:
         "manifest_version": "0.2",
         "name": server.slug,
         "display_name": server.name,
-        # The elevator's own version (release-tag-derived, never hardcoded — see
-        # app.__init__), so re-exports after an upgrade register as updates.
-        "version": __version__.lstrip("v"),
+        "version": version,
         "description": f"{server.name} ({server.runner}: {server.command}) — exported from mcpelevator",
         "author": {"name": "mcpelevator"},
         "server": {
