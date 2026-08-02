@@ -113,6 +113,9 @@ class ServerDetail(ServerSummary):
     disabled_tools: list[str] = []
     config_hash: str = ""
     source: str = "manual"
+    # Whether GET /servers/{id}/mcpb would produce a bundle (app.mcpb.exportable);
+    # the UI shows the download only when true, with no mirrored eligibility rule.
+    mcpb_exportable: bool = False
     tools: list[dict] = []
 
 

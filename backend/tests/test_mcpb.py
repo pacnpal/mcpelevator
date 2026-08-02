@@ -47,6 +47,7 @@ def test_mcpb_download_round_trip():
             detail = c.get(f"/api/servers/{server['id']}", headers=LOOPBACK).json()
             base = __version__.lstrip("v").split("+", 1)[0]
             assert m["version"] == f"{base}+{detail['config_hash']}"
+            assert detail["mcpb_exportable"] is True
             assert m["server"]["mcp_config"] == {
                 "command": "npx",
                 "args": ["-y", "@modelcontextprotocol/server-everything"],
@@ -76,6 +77,9 @@ def test_mcpb_rejects_unexportable_launch_context():
             r = c.get(f"/api/servers/{server_id}/mcpb", headers=LOOPBACK)
             assert r.status_code == 400
             assert "setup script" in r.json()["detail"]
+            # The detail response advertises the same verdict the endpoint enforces.
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK).json()
+            assert detail["mcpb_exportable"] is False
         finally:
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 

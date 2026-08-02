@@ -84,6 +84,16 @@ def manifest(server: Server) -> dict:
     }
 
 
+def exportable(server: Server) -> bool:
+    """Would :func:`manifest` accept this server? The single eligibility source
+    for the UI (via the detail response) — no mirrored client-side rule to drift."""
+    try:
+        manifest(server)
+        return True
+    except ValueError:
+        return False
+
+
 def bundle(server: Server) -> bytes:
     """The ``.mcpb`` file bytes: a zip containing only ``manifest.json``."""
     buf = io.BytesIO()

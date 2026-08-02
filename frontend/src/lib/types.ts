@@ -121,6 +121,9 @@ export interface ServerDetail extends ServerSummary {
 	/** Idle quiescence override in seconds: null = inherit the global setting,
 	 * 0 = never idle this server out. */
 	idle_timeout_s: number | null;
+	/** Whether GET /servers/{id}/mcpb would produce a bundle — the backend's
+	 * eligibility verdict, so the UI carries no mirrored rule. */
+	mcpb_exportable: boolean;
 	/** Upstream tool names hidden from every exposed surface (MCP list/call, REST,
 	 * groups). Empty = expose every discovered tool (the default). A hidden tool no
 	 * longer appears in `tools` (it drops out of discovery), so the UI unions this

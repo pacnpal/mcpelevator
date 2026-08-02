@@ -251,6 +251,7 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         disabled_tools=list(server.disabled_tools or []),
         config_hash=server.config_hash,
         source=server.source,
+        mcpb_exportable=mcpb.exportable(server),
         tools=tools or [],
     )
 
