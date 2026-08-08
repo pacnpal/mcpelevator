@@ -89,13 +89,14 @@ def test_build_proxy_installs_custom_roots_handler():
     hand that client to create_proxy. Asserting the wiring (not just the return
     type) catches regressions that drop the custom handler or revert to the
     deprecated FastMCP.as_proxy path."""
+    proxy = MagicMock()
     with (
         patch.object(host, "ProxyClient", autospec=True) as proxy_client_cls,
-        patch.object(host, "create_proxy", return_value=sentinel.proxy) as create_proxy_mock,
+        patch.object(host, "create_proxy", return_value=proxy) as create_proxy_mock,
     ):
         result = host.build_proxy({"command": "echo", "args": ["hi"], "name": "t"})
 
-    assert result is sentinel.proxy
+    assert result is proxy
     assert proxy_client_cls.call_args.kwargs["roots"] is host._forward_roots
     create_proxy_mock.assert_called_once_with(proxy_client_cls.return_value, name="t")
 
@@ -268,18 +269,19 @@ async def test_no_disabled_tools_installs_no_filter():
     assert names == {"add", "secret", "echo"}
 
 
-def test_build_proxy_skips_transform_when_no_tool_policy():
-    """The transform is only added when there's something to apply, so an unmodified
-    server pays nothing. Asserted against the sentinel proxy so add_transform would
-    raise if it were called."""
+def test_build_proxy_always_installs_the_transform():
+    """Installed even with no policy: it also strips our reserved identity key from
+    upstream tools, and a server can forge that key whether or not a policy is set."""
+    proxy = MagicMock()
     with (
         patch.object(host, "ProxyClient", autospec=True),
-        patch.object(host, "create_proxy", return_value=sentinel.proxy),
+        patch.object(host, "create_proxy", return_value=proxy),
     ):
-        # sentinel.proxy has no add_transform — a call would AttributeError.
-        assert host.build_proxy({"command": "echo", "name": "t"}) is sentinel.proxy
-    # An override map whose entries are all empty is likewise nothing to apply.
-    assert host._tool_transform({"tool_overrides": {"add": {}}}) is None
+        host.build_proxy({"command": "echo", "name": "t"})
+    assert proxy.add_transform.call_count == 1
+    assert isinstance(proxy.add_transform.call_args.args[0], host.ToolTransform)
+    # An override map whose entries are all empty applies nothing.
+    assert host._tool_transform({"tool_overrides": {"add": {}}})._transforms == {}
 
 
 def test_build_proxy_installs_transform_when_tool_policy_present():
@@ -503,3 +505,46 @@ async def test_upstream_cannot_forge_the_identity_marker():
         served = (await client.list_tools())[0]
     assert host.UPSTREAM_META_KEY not in served.meta
     assert served.meta["vendor"] == "keep"  # the rest of the upstream's meta is untouched
+
+
+@pytest.mark.asyncio
+async def test_hiding_a_tool_frees_its_name_for_a_rename():
+    """A hidden tool exposes no name, so another tool may take it. FastMCP's own transform
+    reserves a target for EVERY entry and raises on a duplicate — which made this
+    combination (accepted by both the UI and the API) a ValueError at proxy build, i.e. a
+    bridge that crash-loops and takes the server offline."""
+    proxy = _proxy_with(disabled_tools=["echo"], tool_overrides={"add": {"name": "echo"}})
+    async with Client(proxy) as client:
+        assert {t.name for t in await client.list_tools()} == {"echo", "secret"}
+        assert (await client.call_tool("echo", {"a": 1, "b": 2})).data == 3  # renamed add
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("add", {"a": 1, "b": 2})
+
+
+@pytest.mark.asyncio
+async def test_refusing_a_rename_does_not_unhide_the_tool():
+    """Hiding wins over renaming — including when the rename is refused because its target
+    is taken. Dropping the whole config in that branch would expose a tool the operator
+    disabled."""
+    proxy = _proxy_with(disabled_tools=["add"], tool_overrides={"add": {"name": "echo"}})
+    async with Client(proxy) as client:
+        names = {t.name for t in await client.list_tools()}
+        assert "add" not in names and "echo" in names
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("add", {"a": 1, "b": 2})
+        assert (await client.call_tool("echo", {"s": "hi"})).data == "hi"  # native echo
+
+
+@pytest.mark.asyncio
+async def test_identity_marker_is_scrubbed_without_any_policy():
+    """The scrub can't be conditional on a policy: an upstream can forge the reserved key
+    whether or not the operator has configured anything for that server."""
+    tool = _tool_with(meta={"keep": 1, host.UPSTREAM_META_KEY: {"name": "forged"}})
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t"})  # no overrides at all
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert host.UPSTREAM_META_KEY not in served.meta
+    assert served.meta["keep"] == 1

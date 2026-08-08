@@ -312,11 +312,21 @@ def test_tool_overrides_reject_rename_onto_another_overridden_tool(session):
         _mk(session, tool_overrides={"a": {"name": "b"}, "b": {"description": "kept"}})
 
 
-def test_tool_overrides_allow_swapping_a_renamed_name(session):
-    """But renaming ONTO a name another tool is renaming AWAY from is fine — nothing
-    ends up sharing a name."""
-    a = _mk(session, tool_overrides={"a": {"name": "b"}, "b": {"name": "c"}})
-    assert a.tool_overrides == {"a": {"name": "b"}, "b": {"name": "c"}}
+def test_tool_overrides_reject_rename_chains(session):
+    """A chain (`a`->`b` while `b`->`c`) is refused too. The bridge decides whether a
+    rename target is free from the LIVE upstream names — where `b` is still `b` — so it
+    would refuse `a`->`b` and the chain would silently do nothing. Better a clear error
+    here than a stored policy that never applies."""
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={"a": {"name": "b"}, "b": {"name": "c"}})
+
+
+def test_tool_overrides_allow_rename_onto_a_hidden_tools_name(session):
+    """Hiding a tool frees its name: a hidden tool exposes none, so another tool may take
+    it. The bridge applies exactly this combination."""
+    a = _mk(session, disabled_tools=["b"], tool_overrides={"a": {"name": "b"}})
+    assert a.tool_overrides == {"a": {"name": "b"}}
+    assert a.disabled_tools == ["b"]
 
 
 def test_tool_overrides_reject_malformed_shapes(session):

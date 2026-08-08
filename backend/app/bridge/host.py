@@ -298,13 +298,28 @@ class _ToolTransform(ToolTransform):
     # internals (`fn`, `return_type`, `run_in_thread`), which belong to the wrapper.
     _CARRIED_FIELDS = ("icons", "execution")
 
+    def __init__(self, transforms):
+        # Own the reverse map rather than inheriting it: a HIDDEN tool exposes no name, so
+        # it must not reserve one. FastMCP's constructor reserves a target for every entry
+        # and raises on a duplicate, which made "hide `b`, rename `a` to `b`" — a
+        # combination the UI and API both accept — a ValueError at proxy build, i.e. a
+        # bridge that crash-loops and takes the server offline.
+        self._transforms = transforms
+        self._name_reverse = {}
+        for source, config in transforms.items():
+            if not config.enabled:
+                continue
+            self._name_reverse[config.name or source] = source
+
     @staticmethod
     def _scrub(tool):
         """Drop our reserved identity key from an upstream tool (see the class docstring)."""
         meta = tool.meta or {}
         if UPSTREAM_META_KEY not in meta:
             return tool
-        return tool.model_copy(update={"meta": {k: v for k, v in meta.items() if k != UPSTREAM_META_KEY}})
+        return tool.model_copy(
+            update={"meta": {k: v for k, v in meta.items() if k != UPSTREAM_META_KEY}}
+        )
 
     @classmethod
     def _restore(cls, source, transformed):
@@ -319,15 +334,30 @@ class _ToolTransform(ToolTransform):
                 update[field] = value
         return transformed.model_copy(update=update) if update else transformed
 
+    def _hides(self, name):
+        config = self._transforms.get(name)
+        return config is not None and not config.enabled
+
     def _renames_to(self, name):
         """The name this tool would be renamed to, or None if it isn't renamed."""
         config = self._transforms.get(name)
         target = config.name if config is not None else None
         return target if target and target != name else None
 
+    def _apply(self, source, config, *, rename):
+        """Apply ``config`` to ``source``; ``rename=False`` drops just the rename, keeping
+        the rest of the policy. Refusing a rename must never also un-hide a tool or discard
+        its description override."""
+        if not rename and config.name:
+            fields = config.model_dump(exclude_unset=True)
+            fields.pop("name", None)
+            config = ToolTransformConfig(**fields)
+        return self._restore(source, config.apply(source))
+
     async def list_tools(self, tools):
         sources = [self._scrub(tool) for tool in tools]
-        live = {tool.name for tool in sources}
+        # A hidden tool answers to no name, so it doesn't hold one against a rename.
+        taken = {tool.name for tool in sources if not self._hides(tool.name)}
         result = []
         for source in sources:
             config = self._transforms.get(source.name)
@@ -335,26 +365,26 @@ class _ToolTransform(ToolTransform):
                 result.append(source)
                 continue
             target = self._renames_to(source.name)
-            if target is not None and target in live:
-                result.append(source)  # rename refused: the name is already taken
-                continue
-            result.append(self._restore(source, config.apply(source)))
+            result.append(self._apply(source, config, rename=target not in taken))
         return result
 
     async def get_tool(self, name, call_next, *, version=None):
-        # Whoever natively carries this name wins it — that settles both misrouting cases.
+        # Whoever natively answers to this name wins it — that settles both misrouting
+        # cases (a rename shadowing a live tool, and a stale rename stranding one).
         direct = await call_next(name, version=version)
+        held = direct is not None and not self._hides(name)
         original_name = self._name_reverse.get(name, name)
 
         if original_name != name:  # `name` is some tool's rename target
-            if direct is not None:
-                return self._scrub(direct)
+            if held:
+                return self._scrub(direct)  # taken: the rename doesn't apply
             source = await call_next(original_name, version=version)
             if source is None:
-                return None  # the rename's source is gone and nothing else owns the name
+                # The rename's source is gone; fall back to whatever carries the name.
+                return self._scrub(direct) if direct is not None else None
             source = self._scrub(source)
-            transformed = self._transforms[original_name].apply(source)
-            return self._restore(source, transformed) if transformed.name == name else None
+            transformed = self._apply(source, self._transforms[original_name], rename=True)
+            return transformed if transformed.name == name else None
 
         if direct is None:
             return None
@@ -364,15 +394,16 @@ class _ToolTransform(ToolTransform):
             return source
         target = self._renames_to(name)
         if target is not None:
-            # Renamed away, so this name is dead — unless the rename was refused, in which
-            # case the tool keeps serving under its own name.
-            taken = await call_next(target, version=version) is not None
-            return source if taken else None
-        transformed = config.apply(source)
-        return self._restore(source, transformed) if transformed.name == name else None
+            other = await call_next(target, version=version)
+            if other is None or self._hides(target):
+                return None  # renamed away: this name is dead
+            # Rename refused because the target is taken — the tool keeps its own name,
+            # but the rest of its policy (hiding, description) still applies.
+            return self._apply(source, config, rename=False)
+        return self._apply(source, config, rename=True)
 
 
-def _tool_transform(spec: dict) -> ToolTransform | None:
+def _tool_transform(spec: dict) -> ToolTransform:
     """The single place per-tool policy is applied to what this bridge serves.
 
     Two operator controls, one mechanism:
@@ -400,9 +431,10 @@ def _tool_transform(spec: dict) -> ToolTransform | None:
     what clients see, and the UI maps those names back to their upstream keys via the same
     overrides it holds in the DB row.
 
-    Returns ``None`` when nothing is configured, so an unmodified server pays nothing. A key
-    naming a tool the upstream doesn't (or no longer) exposes is a no-op — including when its
-    rename target matches a real upstream tool, which takes ``_ToolTransform`` to hold.
+    Always returns a transform, even with an empty policy: ``_ToolTransform`` also strips our
+    reserved identity key from upstream tools, and a server can forge that key whether or not
+    anyone has set a policy on it. A key naming a tool the upstream doesn't (or no longer)
+    exposes is a no-op — including when its rename target matches a real upstream tool.
     """
     disabled = set(spec.get("disabled_tools") or [])
     overrides: dict = spec.get("tool_overrides") or {}
@@ -426,7 +458,7 @@ def _tool_transform(spec: dict) -> ToolTransform | None:
             fields["enabled"] = False
         if fields:
             configs[tool] = ToolTransformConfig(**fields)
-    return _ToolTransform(configs) if configs else None
+    return _ToolTransform(configs)
 
 
 def _build_transport(spec: dict):
@@ -479,9 +511,10 @@ def build_proxy(spec: dict) -> FastMCP:
     # Apply the operator's per-tool policy (hidden tools, renames, descriptions) to every
     # surface (MCP list/call, REST, group hub) — they all resolve tools through this
     # proxy. See _tool_transform.
-    transform = _tool_transform(spec)
-    if transform is not None:
-        proxy.add_transform(transform)
+    # Always installed, even with no policy configured: besides applying the operator's
+    # overrides, the transform strips our reserved identity key from upstream tools, and a
+    # server can forge that key whether or not anyone has set a policy on it.
+    proxy.add_transform(_tool_transform(spec))
     # The outer proxy already authenticated the caller. Forwarding its headers from
     # this bridge to a remote MCP server would disclose bearer/OAuth credentials to
     # that upstream. Static headers and upstream OAuth live on the transport itself.

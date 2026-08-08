@@ -1644,12 +1644,15 @@ def normalize_tool_overrides(value: Any) -> dict[str, dict[str, str]]:
         # field out of the row (and out of the hash) instead of storing an empty shell.
         if entry:
             overrides[tool] = entry
-    # A rename must not land on another OVERRIDDEN tool's upstream name — that tool exists
-    # (it's being overridden) and would be shadowed. Checked after the pass so it holds
-    # regardless of key order.
+    # A rename must not land on another OVERRIDDEN tool's upstream name. That tool exists
+    # (it's being overridden), so the bridge refuses the rename rather than shadow it — and
+    # a policy the bridge silently won't apply is worse than a clear error here. This
+    # includes chains (`a`->`b` while `b`->`c`): the bridge decides occupancy from the LIVE
+    # upstream names, where `b` is still `b`, so the chain would no-op. Renaming onto a
+    # HIDDEN tool's name is fine and not caught here — a hidden tool exposes no name, so it
+    # holds none against a rename (the bridge applies that combination).
     for name, tool in renamed_to.items():
-        other = overrides.get(name)
-        if name != tool and other is not None and "name" not in other:
+        if name != tool and name in overrides:
             raise ValueError(f"renaming {tool!r} to {name!r} would collide with that tool")
     return {tool: overrides[tool] for tool in sorted(overrides)}
 
