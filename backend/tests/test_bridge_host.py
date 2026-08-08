@@ -584,3 +584,33 @@ async def test_override_preserves_an_open_ended_input_schema():
         async with Client(proxy) as client:
             served = (await client.list_tools())[0]
         assert served.inputSchema == open_ended, policy
+
+
+@pytest.mark.asyncio
+async def test_override_keeps_a_dynamic_schema_tool_callable():
+    """The advertised schema surviving isn't enough — the tool has to still WORK. FastMCP's
+    transform derives its forwarding closure from the schema it rebuilds, so a tool with an
+    open-ended schema rejected every argument it was handed (valid ones included) after a
+    description-only edit. Relabelling copies the source tool instead of rebuilding it, so
+    dispatch stays the upstream's."""
+    upstream = FastMCP("upstream")
+
+    def dyn(a: int) -> dict:
+        """Dynamic."""
+        return {"a": a}
+
+    upstream.add_tool(
+        FastMCPTool.from_function(dyn, name="dyn").model_copy(
+            update={"parameters": {"type": "object", "additionalProperties": True}}
+        )
+    )
+
+    for policy, exposed in (({"description": "D."}, "dyn"), ({"name": "renamed"}, "renamed")):
+        with patch.object(host, "_build_transport", return_value=FastMCPTransport(upstream)):
+            proxy = host.build_proxy(
+                {"command": "x", "name": "t", "tool_overrides": {"dyn": policy}}
+            )
+        async with Client(proxy) as client:
+            result = await client.call_tool(exposed, {"a": 7}, raise_on_error=False)
+        assert result.is_error is False, policy
+        assert result.structured_content == {"a": 7}, policy

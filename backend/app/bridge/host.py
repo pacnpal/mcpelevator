@@ -296,10 +296,6 @@ class _ToolTransform(ToolTransform):
       only this transform can ever put it there.
     """
 
-    # Client-visible fields FastMCP's transform NULLS OUT. Deliberately excludes its
-    # internals (`fn`, `return_type`, `run_in_thread`), which belong to the wrapper.
-    _CARRIED_FIELDS = ("icons", "execution")
-
     def __init__(self, transforms: dict[str, ToolTransformConfig]) -> None:
         # Own the reverse map rather than inheriting it: a HIDDEN tool exposes no name, so
         # it must not reserve one. FastMCP's constructor reserves a target for every entry
@@ -323,26 +319,6 @@ class _ToolTransform(ToolTransform):
             update={"meta": {k: v for k, v in meta.items() if k != UPSTREAM_META_KEY}}
         )
 
-    @classmethod
-    def _restore(cls, source: Tool, transformed: Tool) -> Tool:
-        """Carry the parts of the upstream definition the transform dropped."""
-        update = {}
-        merged = {**(source.meta or {}), **(transformed.meta or {})}
-        if merged != (transformed.meta or {}):
-            update["meta"] = merged
-        for field in cls._CARRIED_FIELDS:
-            value = getattr(source, field, None)
-            if value is not None and getattr(transformed, field, None) is None:
-                update[field] = value
-        # The input schema is REBUILT rather than nulled, and the rebuild isn't faithful: an
-        # open-ended `{"type": "object", "additionalProperties": true}` comes back as empty
-        # `properties` with `additionalProperties: false`, so a tool taking dynamic keys
-        # becomes uncallable with its real arguments after a description-only edit. The
-        # operator changed the labels; the contract is the upstream's to declare.
-        if source.parameters != transformed.parameters:
-            update["parameters"] = source.parameters
-        return transformed.model_copy(update=update) if update else transformed
-
     def _hides(self, name: str) -> bool:
         config = self._transforms.get(name)
         return config is not None and not config.enabled
@@ -354,14 +330,25 @@ class _ToolTransform(ToolTransform):
         return target if target and target != name else None
 
     def _apply(self, source: Tool, config: ToolTransformConfig, *, rename: bool) -> Tool:
-        """Apply ``config`` to ``source``; ``rename=False`` drops just the rename, keeping
-        the rest of the policy. Refusing a rename must never also un-hide a tool or discard
-        its description override."""
-        if not rename and config.name:
-            fields = config.model_dump(exclude_unset=True)
-            fields.pop("name", None)
-            config = ToolTransformConfig(**fields)
-        return self._restore(source, config.apply(source))
+        """Relabel ``source`` in place of transforming it.
+
+        ``ToolTransformConfig.apply`` REBUILDS the tool, and the rebuild isn't faithful: it
+        drops ``icons`` and ``execution``, replaces rather than merges ``_meta``, and — worst
+        — regenerates the input schema and the forwarding closure from it, so a tool with an
+        open-ended schema ends up rejecting every argument it is handed, valid ones included.
+        None of that machinery is needed here: this transform never rewrites arguments, only
+        labels. Copying the source tool with new labels keeps its schema, its metadata and
+        its dispatch exactly as the upstream declared them, by construction rather than by
+        restoring fields one at a time as they're discovered missing.
+        """
+        update: dict = {}
+        if rename and config.name:
+            update["name"] = config.name
+            # Carry the pre-rename identity (see the class docstring).
+            update["meta"] = {**(source.meta or {}), UPSTREAM_META_KEY: {"name": source.name}}
+        if config.description:
+            update["description"] = config.description
+        return source.model_copy(update=update) if update else source
 
     async def list_tools(self, tools: Sequence[Tool]) -> Sequence[Tool]:
         sources = [self._scrub(tool) for tool in tools]
@@ -369,18 +356,22 @@ class _ToolTransform(ToolTransform):
         taken = {tool.name for tool in sources if not self._hides(tool.name)}
         result = []
         for source in sources:
+            if self._hides(source.name):
+                continue  # hidden: absent from discovery
             config = self._transforms.get(source.name)
             if config is None:
                 result.append(source)
                 continue
             target = self._renames_to(source.name)
-            result.append(self._apply(source, config, rename=target not in taken))
+            result.append(self._apply(source, config, rename=target is not None and target not in taken))
         return result
 
     async def _resolve_native(
         self, direct: Tool, name: str, call_next, version
     ) -> Tool | None:
         """Resolve ``name`` as the tool that natively carries it, under its OWN policy."""
+        if self._hides(name):
+            return None  # hidden tools are refused, not just unlisted
         source = self._scrub(direct)
         config = self._transforms.get(name)
         if config is None:
@@ -407,11 +398,9 @@ class _ToolTransform(ToolTransform):
                 # provided its source is actually there.
                 source = await call_next(original_name, version=version)
                 if source is not None:
-                    source = self._scrub(source)
-                    transformed = self._apply(
-                        source, self._transforms[original_name], rename=True
+                    return self._apply(
+                        self._scrub(source), self._transforms[original_name], rename=True
                     )
-                    return transformed if transformed.name == name else None
                 if direct is None:
                     return None
                 # Stale rename. The name reverts to the tool that carries it — under that

@@ -305,11 +305,15 @@ def test_tool_overrides_reject_colliding_renames(session):
         _mk(session, tool_overrides={"a": {"name": "same"}, "b": {"name": "same"}})
 
 
-def test_tool_overrides_reject_rename_onto_another_overridden_tool(session):
-    """Renaming onto a tool that's known to exist (it's overridden too) is the same
-    collision, caught regardless of key order."""
-    with pytest.raises(ValueError):
-        _mk(session, tool_overrides={"a": {"name": "b"}, "b": {"description": "kept"}})
+def test_tool_overrides_allow_rename_onto_a_labels_only_override_key(session):
+    """An override key is NOT evidence its tool still exists — keys are explicitly allowed
+    to go stale — so a key carrying only labels doesn't hold its name against a rename.
+    The bridge decides occupancy from the live list and refuses the rename if the tool is
+    really there; refusing here would force an operator to discard a temporarily-absent
+    tool's saved policy just to use an otherwise free name. Only a key that is itself
+    RENAMING contests the name (see the chain test below)."""
+    a = _mk(session, tool_overrides={"a": {"name": "b"}, "b": {"description": "kept"}})
+    assert a.tool_overrides == {"a": {"name": "b"}, "b": {"description": "kept"}}
 
 
 def test_tool_overrides_reject_rename_chains(session):

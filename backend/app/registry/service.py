@@ -1684,7 +1684,13 @@ def normalize_tool_overrides(
     # own — an operator shouldn't have to delete a hidden tool's saved description to rename
     # something onto its freed name.
     for name, tool in renamed_to.items():
-        if name != tool and name in overrides and name not in hidden:
+        # Only a tool that is EXPOSED and being RENAMED contests a name here. A key with
+        # labels but no rename is not evidence its tool still exists — override keys are
+        # explicitly allowed to go stale — and the bridge decides occupancy from the live
+        # list anyway, so refusing on that basis would force an operator to discard a
+        # temporarily-absent tool's saved policy to use an otherwise free name.
+        other = overrides.get(name)
+        if name != tool and other is not None and "name" in other and name not in hidden:
             raise ValueError(f"renaming {tool!r} to {name!r} would collide with that tool")
     result = {tool: overrides[tool] for tool in sorted(overrides)}
     # Bound what actually ships to the bridge, not just its parts.
