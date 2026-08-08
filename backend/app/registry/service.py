@@ -1607,7 +1607,11 @@ def normalize_tool_overrides(
         raise ValueError("tool_overrides must be a map of tool name -> override")
     overrides: dict[str, dict[str, str]] = {}
     seen_tools: set[str] = set()  # every normalized key, incl. ones that normalize away
-    renamed_to: dict[str, str] = {}  # new name -> the upstream tool claiming it
+    # A HIDDEN tool exposes no name, so its own rename never applies: it neither claims a
+    # target nor collides with anything. Keeping a hidden tool's saved labels must not block
+    # an unrelated rename (the bridge skips disabled configs when reserving names).
+    hidden = set(normalize_disabled_tools(list(disabled)))
+    renamed_to: dict[str, str] = {}  # new name -> the EXPOSED upstream tool claiming it
     for key, override in value.items():
         if not isinstance(key, str) or not key.strip():
             raise ValueError("tool_overrides keys must be non-empty tool names")
@@ -1652,11 +1656,12 @@ def normalize_tool_overrides(
                 raise ValueError(
                     f"invalid tool name {name!r}: use up to 64 letters, digits, '_', '.' or '-'"
                 )
-            if name in renamed_to:
-                raise ValueError(
-                    f"tools {renamed_to[name]!r} and {tool!r} are both renamed to {name!r}"
-                )
-            renamed_to[name] = tool
+            if tool not in hidden:
+                if name in renamed_to:
+                    raise ValueError(
+                        f"tools {renamed_to[name]!r} and {tool!r} are both renamed to {name!r}"
+                    )
+                renamed_to[name] = tool
         # Nothing left after trimming = no override at all. Dropping it keeps a cleared
         # field out of the row (and out of the hash) instead of storing an empty shell.
         if entry:
@@ -1671,7 +1676,6 @@ def normalize_tool_overrides(
     # the bridge applies that combination. It stays exempt even when it keeps labels of its
     # own — an operator shouldn't have to delete a hidden tool's saved description to rename
     # something onto its freed name.
-    hidden = set(normalize_disabled_tools(list(disabled)))
     for name, tool in renamed_to.items():
         if name != tool and name in overrides and name not in hidden:
             raise ValueError(f"renaming {tool!r} to {name!r} would collide with that tool")

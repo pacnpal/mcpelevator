@@ -2387,3 +2387,18 @@ def test_tool_overrides_reject_an_oversized_description(session):
         _mk(session, tool_overrides={"t": {"description": "x" * 4097}})
     # The cap is generous enough for any real description.
     assert _mk(session, tool_overrides={"t": {"description": "x" * 4096}}).tool_overrides
+
+
+def test_tool_overrides_ignore_a_hidden_tools_rename_in_collision_checks(session):
+    """A hidden tool exposes no name, so its own rename never applies — it can neither
+    claim a target nor collide with one. Keeping a hidden tool's saved labels must not
+    block an unrelated rename; the bridge skips disabled configs when reserving names."""
+    a = _mk(
+        session,
+        disabled_tools=["a"],
+        tool_overrides={"a": {"name": "x"}, "b": {"name": "x"}},
+    )
+    assert a.tool_overrides == {"a": {"name": "x"}, "b": {"name": "x"}}
+    # With both exposed it's a genuine conflict again.
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={"a": {"name": "x"}, "b": {"name": "x"}})
