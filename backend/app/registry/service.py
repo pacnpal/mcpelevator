@@ -1833,6 +1833,9 @@ def create_server(
         owner_id=owner_id,
     )
     server.config_hash = compute_hash(server)
+    # Same gate as update_server: a config the bridge could never be exec'd with is
+    # refused here rather than deterministically failing activation later.
+    _require_launchable_spec(server)
     return repo.create_server(session, server)
 
 

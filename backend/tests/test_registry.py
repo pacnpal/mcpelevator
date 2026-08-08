@@ -2440,3 +2440,11 @@ def test_update_refuses_a_config_too_large_to_launch(session):
     reloaded = repo.get_server(session, a.id)
     assert reloaded.config_hash == before
     assert reloaded.env == {}
+
+
+def test_create_refuses_a_config_too_large_to_launch(session):
+    """The same gate as update: individually valid inputs can still assemble into a spec
+    the bridge can't be exec'd with. Creating such a server would leave a row that fails
+    activation the moment it's enabled."""
+    with pytest.raises(ValueError, match="too large to launch"):
+        _mk(session, env={"HUGE": "x" * (129 * 1024)})
