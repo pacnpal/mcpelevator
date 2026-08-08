@@ -61,7 +61,10 @@ def test_disabled_tools_api_round_trip():
                 "name": "Hidden",
                 "runner": "command",
                 "command": "/bin/true",
-                "disabled_tools": ["z_tool", "a_tool", "a_tool"],
+                # " a_tool " is a DIFFERENT tool from "a_tool": the name is the upstream's
+                # identity, so it has to cross the HTTP boundary untouched or the hide
+                # would be written against a tool that doesn't exist.
+                "disabled_tools": ["z_tool", "a_tool", "a_tool", " a_tool "],
             },
             headers=LOOPBACK,
         )
@@ -70,7 +73,7 @@ def test_disabled_tools_api_round_trip():
         try:
             detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
             assert detail.status_code == 200
-            assert detail.json()["disabled_tools"] == ["a_tool", "z_tool"]
+            assert detail.json()["disabled_tools"] == [" a_tool ", "a_tool", "z_tool"]
 
             patched = c.patch(
                 f"/api/servers/{server_id}",

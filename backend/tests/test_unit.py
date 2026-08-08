@@ -9,9 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app.bridge.host import UPSTREAM_META_KEY
 from app.db.models import Server
-from app.supervisor.unit import ServerUnit, tool_summary
+from app.supervisor.unit import ServerUnit, _AttemptFailed, tool_summary
 
 
 FIXTURE = Path(__file__).with_name("stdio_server_fixture.py")
@@ -360,9 +362,6 @@ def test_oversized_launch_spec_fails_legibly(tmp_path):
     unit = ServerUnit(server)
     unit.port = 12345
 
-    try:
+    # An oversized spec must not reach create_subprocess_exec.
+    with pytest.raises(_AttemptFailed, match="too large"):
         unit._bridge_env(unit._bridge_payload())
-    except Exception as exc:
-        assert "too large" in str(exc)
-    else:
-        raise AssertionError("an oversized spec must not reach create_subprocess_exec")

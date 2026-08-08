@@ -1138,6 +1138,13 @@
 						{#each toolRows as { key, tool, enabled, discovered } (key)}
 							{@const override = effectiveOverrides[key] ?? {}}
 							{@const renamedTo = override.name?.trim() ?? ''}
+							<!-- The operator has staged CLEARING a saved description. `tool.description` is
+							     what the bridge currently serves — i.e. the very override being cleared —
+							     so falling back to it would show text that Apply removes, and the upstream's
+							     own wording isn't available here to show instead (the bridge serves the
+							     overridden one). Say what will happen rather than display a stale value. -->
+							{@const restoringDescription =
+								!override.description?.trim() && !!baseOverrides[key]?.description}
 							{@const changed =
 								baseDisabled.has(key) === enabled ||
 								!sameLabel(override.name, baseOverrides[key]?.name) ||
@@ -1191,7 +1198,11 @@
 											</span>
 										{/if}
 									</span>
-									{#if override.description || tool.description}
+									{#if restoringDescription}
+										<span class="text-xs leading-relaxed text-[var(--color-ink-dim)] italic">
+											The upstream's description is restored on Apply.
+										</span>
+									{:else if override.description || tool.description}
 										<span class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
 											{override.description || tool.description}
 										</span>
@@ -1223,7 +1234,9 @@
 												<textarea
 													rows="3"
 													value={override.description ?? ''}
-													placeholder={tool.description || "The upstream's description"}
+													placeholder={restoringDescription
+														? "The upstream's description"
+														: tool.description || "The upstream's description"}
 													disabled={toolEditsBlocked}
 													oninput={(e) =>
 														setOverridePending(key, 'description', e.currentTarget.value)}

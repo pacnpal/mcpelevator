@@ -2417,12 +2417,12 @@ def test_tool_overrides_reject_an_oversized_description(session):
 def test_tool_overrides_reject_an_oversized_map(session):
     """The per-field cap doesn't bound the map: enough maximum-length descriptions — or one
     absurd key — reach the same exec limit by accumulation. The total is what ships."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="too large"):
         _mk(
             session,
             tool_overrides={f"tool_{i}": {"description": "x" * 4096} for i in range(40)},
         )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="too large"):
         _mk(session, tool_overrides={"k" * 200_000: {"description": "ok"}})
     # A realistically-sized policy across many tools is unaffected.
     realistic = {
@@ -2443,7 +2443,7 @@ def test_tool_overrides_ignore_a_hidden_tools_rename_in_collision_checks(session
     )
     assert a.tool_overrides == {"a": {"name": "x"}, "b": {"name": "x"}}
     # With both exposed it's a genuine conflict again.
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="both renamed to"):
         _mk(session, tool_overrides={"a": {"name": "x"}, "b": {"name": "x"}})
 
 
