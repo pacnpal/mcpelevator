@@ -261,6 +261,66 @@ def _build_oauth_auth(oauth: dict):
 UPSTREAM_META_KEY = "io.mcpelevator/upstream"
 
 
+class _ToolTransform(ToolTransform):
+    """FastMCP's ``ToolTransform`` with three gaps closed. Elevation must be faithful: an
+    operator relabelling a tool is changing its NAME and DESCRIPTION, nothing else.
+
+    1. **Upstream ``_meta`` is preserved.** ``ToolTransformConfig.meta`` REPLACES rather than
+       merges, so stamping our identity marker (see ``_tool_transform``) would otherwise
+       drop the upstream's own meta — vendor extensions and client presentation hints — from
+       every renamed tool. We merge, with our namespaced key winning only itself.
+
+    2. **``execution`` survives.** ``TransformedTool.from_tool`` doesn't copy it (FastMCP
+       3.4.4), so an upstream tool declaring MCP task support (``taskSupport: required``)
+       would lose that declaration through ANY override — including a description-only edit
+       — and clients would then issue an ordinary call the tool rejects.
+
+    3. **A stale rename doesn't strand a real tool.** ``get_tool`` reverse-maps the requested
+       name to the rename's source; when that source is gone upstream it returned ``None``,
+       so an override left over from a removed tool made a REAL upstream tool of the same
+       name uncallable — while ``tools/list`` still advertised it (``list_tools`` iterates
+       actual tools, so it never consults the dangling entry). Now an unresolvable rename
+       yields the name back to whoever actually owns it, which is what "a stale override key
+       is a no-op" has to mean.
+    """
+
+    @staticmethod
+    def _restore(source, transformed):
+        """Carry over the parts of the upstream definition the transform drops (1 and 2)."""
+        update = {}
+        merged = {**(source.meta or {}), **(transformed.meta or {})}
+        if merged != (transformed.meta or {}):
+            update["meta"] = merged
+        if source.execution is not None and transformed.execution is None:
+            update["execution"] = source.execution
+        return transformed.model_copy(update=update) if update else transformed
+
+    async def list_tools(self, tools):
+        # super() returns one entry per input tool, in order, so the pairing is positional.
+        transformed = await super().list_tools(tools)
+        return [
+            self._restore(source, tool) if tool is not source else tool
+            for source, tool in zip(tools, transformed)
+        ]
+
+    async def get_tool(self, name, call_next, *, version=None):
+        original_name = self._name_reverse.get(name, name)
+        source = await call_next(original_name, version=version)
+        if source is None:
+            # (3) The transform claims this name for a rename whose source isn't there.
+            # Let the name resolve to the tool that actually carries it, if any.
+            if original_name != name:
+                return await call_next(name, version=version)
+            return None
+        if original_name in self._transforms:
+            transformed = self._transforms[original_name].apply(source)
+            # A renamed tool answers to its new name only.
+            if transformed.name != name:
+                return None
+            return self._restore(source, transformed)
+        return source if source.name == name else None
+
+
 def _tool_transform(spec: dict) -> ToolTransform | None:
     """The single place per-tool policy is applied to what this bridge serves.
 
@@ -290,7 +350,8 @@ def _tool_transform(spec: dict) -> ToolTransform | None:
     overrides it holds in the DB row.
 
     Returns ``None`` when nothing is configured, so an unmodified server pays nothing. A key
-    naming a tool the upstream doesn't (or no longer) exposes is a harmless no-op.
+    naming a tool the upstream doesn't (or no longer) exposes is a no-op — including when its
+    rename target matches a real upstream tool, which takes ``_ToolTransform`` to hold.
     """
     disabled = set(spec.get("disabled_tools") or [])
     overrides: dict = spec.get("tool_overrides") or {}
@@ -314,7 +375,7 @@ def _tool_transform(spec: dict) -> ToolTransform | None:
             fields["enabled"] = False
         if fields:
             configs[tool] = ToolTransformConfig(**fields)
-    return ToolTransform(configs) if configs else None
+    return _ToolTransform(configs) if configs else None
 
 
 def _build_transport(spec: dict):

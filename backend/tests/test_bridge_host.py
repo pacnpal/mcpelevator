@@ -17,6 +17,7 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import FastMCPTransport
 from fastmcp.exceptions import ToolError
+from fastmcp.tools.tool import Tool as FastMCPTool
 from mcp.server.session import ServerSession
 from mcp.types import Root
 
@@ -396,3 +397,59 @@ async def test_description_only_override_leaves_identity_alone():
     async with Client(proxy) as client:
         tools = {t.name: t for t in await client.list_tools()}
     assert host.UPSTREAM_META_KEY not in (tools["add"].meta or {})
+
+
+# --- fidelity: an override changes the LABELS, nothing else ---------------------
+
+
+def _tool_with(**fields):
+    """An upstream tool carrying fields FastMCP's transform is known to drop."""
+
+    def fn(x: int) -> int:
+        """Upstream tool."""
+        return x
+
+    return FastMCPTool.from_function(fn, name="tasky").model_copy(update=fields)
+
+
+def _upstream_with_tool(tool) -> FastMCP:
+    upstream = FastMCP("upstream")
+    upstream.add_tool(tool)
+    return upstream
+
+
+@pytest.mark.asyncio
+async def test_override_preserves_upstream_meta_and_execution():
+    """Relabelling must not silently rewrite the rest of the tool definition.
+
+    Two things FastMCP's own transform drops: ``ToolTransformConfig.meta`` REPLACES the
+    upstream's `_meta` (so our identity marker would evict vendor extensions and client
+    presentation hints), and ``from_tool`` doesn't copy ``execution`` (so a tool declaring
+    MCP task support would lose ``taskSupport`` — and clients would then make an ordinary
+    call it rejects — through even a description-only edit)."""
+    tool = _tool_with(meta={"vendor": {"hint": "keep-me"}}, execution={"taskSupport": "required"})
+
+    for policy in ({"description": "Desc only."}, {"name": "renamed"}):
+        with patch.object(
+            host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+        ):
+            proxy = host.build_proxy(
+                {"command": "x", "name": "t", "tool_overrides": {"tasky": policy}}
+            )
+        async with Client(proxy) as client:
+            served = (await client.list_tools())[0]
+
+        assert served.meta["vendor"] == {"hint": "keep-me"}, policy
+        assert served.execution.taskSupport == "required", policy
+
+
+@pytest.mark.asyncio
+async def test_stale_rename_does_not_strand_a_real_tool_of_that_name():
+    """A leftover override for a tool the upstream dropped must not reserve its target
+    name. FastMCP reverse-maps a call on that name to the vanished source and answers
+    "Unknown tool" — while tools/list still advertises the REAL tool of that name, which
+    is then listed but uncallable. The name belongs to whoever actually carries it."""
+    proxy = _proxy_with(tool_overrides={"ghost": {"name": "echo"}})
+    async with Client(proxy) as client:
+        assert {t.name for t in await client.list_tools()} == {"add", "secret", "echo"}
+        assert (await client.call_tool("echo", {"s": "hi"})).data == "hi"
