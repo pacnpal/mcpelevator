@@ -1545,10 +1545,16 @@ def normalize_idle_timeout(value: Any) -> Optional[int]:
 
 
 def normalize_disabled_tools(value: Any) -> list[str]:
-    """Canonicalize the per-server hide list: a list of non-empty tool-name strings,
-    trimmed, de-duplicated, and SORTED so the stored value (and thus config_hash) is
-    order-independent — reordering the same set must not bounce the bridge. ``None``
-    (a pre-field row, or a PATCH that omits it) reads as ``[]`` = expose everything."""
+    """Canonicalize the per-server hide list: non-empty tool names, de-duplicated and
+    SORTED so the stored value (and thus config_hash) is order-independent — reordering the
+    same set must not bounce the bridge. ``None`` (a pre-field row, or a PATCH that omits
+    it) reads as ``[]`` = expose everything.
+
+    Names are kept EXACTLY as given. An MCP tool name is an unconstrained string, so one
+    may legitimately carry surrounding whitespace — and such a name is precisely the sort an
+    operator reaches for this feature to deal with. Trimming it here would rewrite the
+    identity, the bridge would never match the real tool, and hiding it would silently do
+    nothing. Same rule as ``normalize_tool_overrides`` keys, which must agree with these."""
     if value is None:
         return []
     if not isinstance(value, list):
@@ -1557,9 +1563,8 @@ def normalize_disabled_tools(value: Any) -> list[str]:
     for item in value:
         if not isinstance(item, str):
             raise ValueError("disabled_tools must be a list of tool names")
-        name = item.strip()
-        if name and name not in names:
-            names.append(name)
+        if item and item not in names:
+            names.append(item)
     return sorted(names)
 
 
@@ -1615,23 +1620,18 @@ def normalize_tool_overrides(
     if not isinstance(value, dict):
         raise ValueError("tool_overrides must be a map of tool name -> override")
     overrides: dict[str, dict[str, str]] = {}
-    seen_tools: set[str] = set()  # every normalized key, incl. ones that normalize away
     # A HIDDEN tool exposes no name, so its own rename never applies: it neither claims a
     # target nor collides with anything. Keeping a hidden tool's saved labels must not block
     # an unrelated rename (the bridge skips disabled configs when reserving names).
     hidden = set(normalize_disabled_tools(list(disabled)))
     renamed_to: dict[str, str] = {}  # new name -> the EXPOSED upstream tool claiming it
     for key, override in value.items():
-        if not isinstance(key, str) or not key.strip():
+        if not isinstance(key, str) or not key:
             raise ValueError("tool_overrides keys must be non-empty tool names")
-        tool = key.strip()
-        if tool in seen_tools:
-            # Two keys that trim to the same tool (" x " and "x"): silently keeping the
-            # last would make the stored policy depend on request order, which is exactly
-            # what this function promises it doesn't. Tracked separately from `overrides`,
-            # which only holds entries that survived normalization.
-            raise ValueError(f"duplicate tool_overrides entry for {tool!r}")
-        seen_tools.add(tool)
+        # The key is the upstream tool's IDENTITY, kept exactly as given — see
+        # normalize_disabled_tools. (Distinct keys can't collide, so there's nothing to
+        # de-duplicate; only the VALUES below are operator prose worth trimming.)
+        tool = key
         if not isinstance(override, dict):
             raise ValueError(f"tool_overrides[{tool!r}] must be an override object")
         unknown = set(override) - {"name", "description"}

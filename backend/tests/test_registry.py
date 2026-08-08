@@ -178,9 +178,12 @@ def test_unknown_runner_rejected(session):
 
 
 def test_disabled_tools_normalized_on_create(session):
-    """The hide list is trimmed, de-duplicated, and sorted on the way in."""
+    """The hide list is de-duplicated and sorted on the way in — but names are kept
+    EXACTLY. An MCP tool name is an unconstrained string, so one may legitimately carry
+    surrounding whitespace; trimming would rewrite the identity and the bridge would never
+    match the real tool, so hiding it would silently do nothing."""
     a = _mk(session, disabled_tools=["  b ", "a", "b", "", "a"])
-    assert a.disabled_tools == ["a", "b"]
+    assert a.disabled_tools == ["  b ", "a", "b"]
 
 
 def test_disabled_tools_default_empty(session):
@@ -228,9 +231,10 @@ def test_tool_overrides_normalized_on_create(session):
             "noop_tool": {"name": "", "description": ""},
         },
     )
+    # Values are trimmed (operator prose); the KEY is kept exactly (upstream identity).
     assert a.tool_overrides == {
+        " z_tool ": {"name": "renamed"},
         "a_tool": {"description": "Does the thing."},
-        "z_tool": {"name": "renamed"},
     }
 
 
@@ -281,14 +285,11 @@ def test_tool_overrides_reject_unusable_rename(session):
     }
 
 
-def test_tool_overrides_reject_duplicate_keys_after_trimming(session):
-    """Two keys that trim to the same tool would make the stored policy depend on
-    request order — the one thing normalization promises it doesn't."""
-    with pytest.raises(ValueError):
-        _mk(session, tool_overrides={" t ": {"name": "a"}, "t": {"name": "b"}})
-    # Caught even when the earlier entry normalizes away to nothing.
-    with pytest.raises(ValueError):
-        _mk(session, tool_overrides={" t ": {"name": "  "}, "t": {"name": "b"}})
+def test_tool_overrides_keep_distinct_keys_distinct(session):
+    """`" t "` and `"t"` are different upstream tools, and each keeps its own entry —
+    an override must reach the tool the operator actually named."""
+    a = _mk(session, tool_overrides={" t ": {"name": "a"}, "t": {"name": "b"}})
+    assert a.tool_overrides == {" t ": {"name": "a"}, "t": {"name": "b"}}
 
 
 def test_tool_overrides_reject_unknown_fields(session):

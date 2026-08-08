@@ -161,6 +161,9 @@ surface: the MCP `tools/list`, the REST/OpenAPI routes, and any group the server
 belongs to. Hiding also **disables**: a hidden tool is refused if called by name, so
 a client holding a stale list can't still invoke it.
 
+Tool names are matched exactly — an MCP name may legitimately contain surrounding
+whitespace, and rewriting it would stop the hide from reaching the real tool.
+
 The hide list lives on the server (`disabled_tools`), so it **persists across bridge
 and container restarts** like the rest of the server's config. The default is to
 expose every tool; toggling one restarts that server's bridge to re-apply the filter

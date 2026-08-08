@@ -52,8 +52,8 @@ def test_setup_script_api_round_trip_and_runner_validation():
 
 
 def test_disabled_tools_api_round_trip():
-    """disabled_tools is accepted on create, normalized (trimmed/deduped/sorted),
-    echoed on GET, and replaceable via PATCH ([] re-exposes everything)."""
+    """disabled_tools is accepted on create, normalized (deduped/sorted — names kept
+    exactly), echoed on GET, and replaceable via PATCH ([] re-exposes everything)."""
     with TestClient(app) as c:
         created = c.post(
             "/api/servers",
@@ -61,7 +61,7 @@ def test_disabled_tools_api_round_trip():
                 "name": "Hidden",
                 "runner": "command",
                 "command": "/bin/true",
-                "disabled_tools": ["  z_tool ", "a_tool", "a_tool"],
+                "disabled_tools": ["z_tool", "a_tool", "a_tool"],
             },
             headers=LOOPBACK,
         )
@@ -95,7 +95,7 @@ def test_tool_overrides_api_round_trip():
                 "runner": "command",
                 "command": "/bin/true",
                 "tool_overrides": {
-                    " do_thing ": {"name": "run_report", "description": " Runs it. "},
+                    "do_thing": {"name": "run_report", "description": " Runs it. "},
                     "other": {"description": ""},
                 },
             },
