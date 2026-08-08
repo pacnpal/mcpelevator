@@ -1656,6 +1656,12 @@ def normalize_tool_overrides(
                 )
             if field:
                 entry[field_name] = field
+        # Renaming a tool to the name it already has is not a rename. Canonicalize it away
+        # so it's exactly equivalent to leaving the field blank: otherwise it would be
+        # stored and hashed (restarting the bridge to apply nothing), and — once its tool
+        # went stale — would hold its own name against an unrelated tool renaming onto it.
+        if entry.get("name") == tool:
+            del entry["name"]
         name = entry.get("name")
         if name is not None:
             # `.` and `..` match the charset but are dot-segments: a client resolves
@@ -1692,7 +1698,7 @@ def normalize_tool_overrides(
         # list anyway, so refusing on that basis would force an operator to discard a
         # temporarily-absent tool's saved policy to use an otherwise free name.
         other = overrides.get(name)
-        if name != tool and other is not None and "name" in other and name not in hidden:
+        if other is not None and "name" in other and name not in hidden:
             raise ValueError(f"renaming {tool!r} to {name!r} would collide with that tool")
     result = {tool: overrides[tool] for tool in sorted(overrides)}
     # Bound what actually ships to the bridge, not just its parts.

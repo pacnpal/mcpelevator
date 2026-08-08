@@ -292,6 +292,26 @@ def test_tool_overrides_keep_distinct_keys_distinct(session):
     assert a.tool_overrides == {" t ": {"name": "a"}, "t": {"name": "b"}}
 
 
+def test_tool_overrides_drop_a_self_rename(session):
+    """Renaming a tool to the name it already has is not a rename, so it's canonicalized
+    away — exactly equivalent to leaving the field blank. Storing it would hash into the
+    launch spec and bounce the bridge to apply nothing (the transform treats a same-name
+    rename as no rename), and a stale one would hold its own name (see below)."""
+    a = _mk(session, tool_overrides={"t": {"name": "t"}})
+    assert a.tool_overrides == {}
+    # The entry's OTHER field survives — only the no-op rename is dropped.
+    b = _mk(session, tool_overrides={"t": {"name": "t", "description": "kept"}})
+    assert b.tool_overrides == {"t": {"description": "kept"}}
+
+
+def test_tool_overrides_allow_rename_onto_a_self_renamed_key(session):
+    """A self-rename claims no name, so it can't block an unrelated tool from taking it.
+    Left in place it would look like a live tool named `b` renaming to `b` and refuse
+    `a`->`b` as a duplicate target — even though `b` may not exist upstream at all."""
+    a = _mk(session, tool_overrides={"a": {"name": "b"}, "b": {"name": "b"}})
+    assert a.tool_overrides == {"a": {"name": "b"}}
+
+
 def test_tool_overrides_reject_unknown_fields(session):
     """A typo'd member ("desc") must not be silently dropped — that reads as a saved
     override that does nothing."""

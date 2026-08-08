@@ -152,7 +152,17 @@
 	let pendingDisabled = $state<Set<string> | null>(null);
 	const effectiveDisabled = $derived(pendingDisabled ?? baseDisabled);
 
-	const baseOverrides = $derived(server?.tool_overrides ?? {});
+	// Null-prototype, for the same reason `setOverridePending` builds one: an upstream tool
+	// may legally be named `constructor`, `toString` or `__proto__`, and on an ordinary
+	// object a lookup for one of those answers from Object.prototype instead of missing —
+	// so a tool named `constructor` with no override would read as renamed to "Object",
+	// prefill the editor with it, and count toward collisions. Own properties only.
+	const baseOverrides = $derived(
+		Object.assign(
+			Object.create(null) as Record<string, ToolOverride>,
+			server?.tool_overrides ?? {}
+		)
+	);
 	let pendingOverrides = $state<Record<string, ToolOverride> | null>(null);
 	const effectiveOverrides = $derived(pendingOverrides ?? baseOverrides);
 
@@ -198,6 +208,8 @@
 		}
 	});
 
+	type ToolRow = { key: string; tool: ServerTool; enabled: boolean; discovered: boolean };
+
 	// One row per known tool, keyed by its UPSTREAM name: the discovered tools (in discovery
 	// order) plus any name that is only known from the row — disabled, or overridden but not
 	// currently discovered — appended, sorted. `enabled`/`override` reflect the STAGED state,
@@ -208,14 +220,18 @@
 	// NOT from reversing the rename map. An exposed name isn't unique: a stale override key
 	// whose target happens to match a real upstream tool would re-identify that tool, and
 	// the operator's edits would then be staged against the wrong one.
+	//
+	// `discovered` marks the rows backed by a live tool. The rest are names we only know
+	// from the row, so nothing may treat them as tools that exist: no playground (every
+	// call would fail as an unknown tool) and no claim on a name.
 	const toolRows = $derived.by(() => {
-		if (!server) return [] as { key: string; tool: ServerTool; enabled: boolean }[];
+		if (!server) return [] as ToolRow[];
 		const seen = new Set<string>();
-		const rows: { key: string; tool: ServerTool; enabled: boolean }[] = [];
+		const rows: ToolRow[] = [];
 		for (const tool of server.tools) {
 			const key = tool.upstream_name ?? tool.name;
 			seen.add(key);
-			rows.push({ key, tool, enabled: !effectiveDisabled.has(key) });
+			rows.push({ key, tool, enabled: !effectiveDisabled.has(key), discovered: true });
 		}
 		const undiscovered = new Set([
 			...baseDisabled,
@@ -226,7 +242,12 @@
 		for (const key of [...undiscovered].sort()) {
 			if (seen.has(key)) continue;
 			// Hidden (or a stale override key): synthesize a minimal row so it stays editable.
-			rows.push({ key, tool: { name: key, description: '' }, enabled: !effectiveDisabled.has(key) });
+			rows.push({
+				key,
+				tool: { name: key, description: '' },
+				enabled: !effectiveDisabled.has(key),
+				discovered: false
+			});
 		}
 		return rows;
 	});
@@ -246,10 +267,9 @@
 	// hidden or stale key can't be confirmed to exist upstream at all; guessing there
 	// produced false collisions that stuck Apply off on unrelated edits.
 	const collidingNames = $derived.by(() => {
-		const discovered = new Set((server?.tools ?? []).map((t) => t.upstream_name ?? t.name));
 		const counts = new Map<string, number>();
-		for (const { key, enabled } of toolRows) {
-			if (!enabled || !discovered.has(key)) continue; // hidden or unconfirmed: claims nothing
+		for (const { key, enabled, discovered } of toolRows) {
+			if (!enabled || !discovered) continue; // hidden or unconfirmed: claims nothing
 			const name = exposedName(key);
 			counts.set(name, (counts.get(name) ?? 0) + 1);
 		}
@@ -1115,7 +1135,7 @@
 						restart.
 					</p>
 					<ul class="flex flex-col divide-y divide-[var(--color-line)]">
-						{#each toolRows as { key, tool, enabled } (key)}
+						{#each toolRows as { key, tool, enabled, discovered } (key)}
 							{@const override = effectiveOverrides[key] ?? {}}
 							{@const renamedTo = override.name?.trim() ?? ''}
 							{@const changed =
@@ -1217,7 +1237,11 @@
 										</div>
 									{/if}
 
-									{#if enabled}
+									<!-- Playground only for a tool that's actually there: a row synthesized
+									     from a stale override key (or from a hidden tool staged back on but
+									     not yet re-discovered) has no tool behind it, so every call would
+									     come back as an unknown tool. -->
+									{#if enabled && discovered}
 										<div class="mt-1">
 											<ToolRunner
 												serverId={server.id}

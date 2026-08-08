@@ -7,7 +7,7 @@ from typing import Literal, Optional
 
 from typing import Union
 
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr, model_serializer
 
 # The auth providers a server may select. Constrained here so a malformed value
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
@@ -54,6 +54,23 @@ class ToolOverride(BaseModel):
     name: Optional[StrictStr] = None
     # Replace the tool's description — the text the model actually reads.
     description: Optional[StrictStr] = None
+
+    @model_serializer
+    def _sparse(self) -> dict[str, str]:
+        """Serialize only the fields that are actually set.
+
+        Storage is sparse — the normalizer drops blank and absent fields — so an override
+        of one field is stored as ``{"name": …}``. Without this, coercing that back through
+        this model would materialize the other field and echo it as an explicit
+        ``"description": null``, which is neither what's stored nor what the SPA's
+        ``string | undefined`` contract describes. One rule, on the model that defines the
+        shape, so every surface that dumps it (the detail response, the write path's
+        ``model_dump()``) agrees with what the normalizer would store."""
+        return {
+            field: value
+            for field, value in (("name", self.name), ("description", self.description))
+            if value is not None
+        }
 
 
 class ServerSummary(BaseModel):

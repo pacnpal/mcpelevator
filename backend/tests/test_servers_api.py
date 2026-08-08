@@ -141,6 +141,39 @@ def test_tool_overrides_api_round_trip():
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
+def test_tool_overrides_echo_only_the_fields_that_are_set():
+    """An override of ONE field must not come back carrying an explicit null for the other.
+
+    Storage is sparse (the normalizer drops blank/absent fields), so materializing the
+    missing field on the way out would describe a shape that was never stored, and one the
+    SPA's `name?: string` contract doesn't have — an absent name would read as the string
+    `null` rather than "keep the upstream's"."""
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "Sparse",
+                "runner": "command",
+                "command": "/bin/true",
+                "tool_overrides": {
+                    "renamed": {"name": "run_report"},
+                    "redescribed": {"description": "Runs it."},
+                },
+            },
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["tool_overrides"] == {
+                "renamed": {"name": "run_report"},
+                "redescribed": {"description": "Runs it."},
+            }
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
 def test_enabled_create_returns_queued_without_stale_runtime(monkeypatch):
     async def parked_reconciler(self):
         await asyncio.Event().wait()
