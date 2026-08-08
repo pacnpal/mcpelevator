@@ -118,6 +118,17 @@ def test_tool_overrides_api_round_trip():
             )
             assert rejected.status_code == 400, rejected.text
 
+            # A typo'd member must NOT be silently dropped. This has to be asserted at
+            # the HTTP boundary: pydantic strips unknown fields before the service
+            # normalizer runs, so the normalizer's own check can't cover API traffic.
+            typo = c.patch(
+                f"/api/servers/{server_id}",
+                json={"tool_overrides": {"do_thing": {"desc": "typo"}}},
+                headers=LOOPBACK,
+            )
+            assert typo.status_code == 422, typo.text
+            assert "desc" in typo.text
+
             patched = c.patch(
                 f"/api/servers/{server_id}",
                 json={"tool_overrides": {}},

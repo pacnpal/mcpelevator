@@ -7,7 +7,7 @@ from typing import Literal, Optional
 
 from typing import Union
 
-from pydantic import BaseModel, StrictBool, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr
 
 # The auth providers a server may select. Constrained here so a malformed value
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
@@ -40,7 +40,14 @@ class StartupStatus(BaseModel):
 class ToolOverride(BaseModel):
     """The operator's relabelling of ONE upstream tool (issue #112). Both fields are
     optional and independent: an unset (or blank) field keeps what the upstream declares.
-    Keyed by the upstream tool name wherever this appears."""
+    Keyed by the upstream tool name wherever this appears.
+
+    Extras are FORBIDDEN. Pydantic's default silently drops an unknown member, and it does
+    so BEFORE the request reaches the service normalizer — so without this, a typo'd field
+    ("desc") would round-trip as a saved override that does nothing, and the normalizer's
+    own unknown-field check (which still guards the non-API callers) could never fire."""
+
+    model_config = ConfigDict(extra="forbid")
 
     # Replace the tool's name. Validated server-side (<=64 chars of [A-Za-z0-9_.-]) because
     # the name has to survive as a REST path segment and a model-facing function name.
