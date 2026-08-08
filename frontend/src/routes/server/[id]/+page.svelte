@@ -88,7 +88,9 @@
 	const priorityLogs = $derived(activeStartup || terminalFailure);
 
 	async function runPrimaryAction() {
-		if (!server || busy) return;
+		// Not while a tool Apply is in flight: its PATCH restarts the bridge, so a stop or
+		// retry raced against it would compete with that restart.
+		if (!server || busy || applyingTools) return;
 		busy = true;
 		// Capture the id this action targets. Clone reuses this component (same-route
 		// nav), so if the route changes mid-flight the resolved summary belongs to the
@@ -196,29 +198,22 @@
 		}
 	});
 
-	// What the bridge is CURRENTLY serving each renamed tool as → its upstream name. Built
-	// from the persisted overrides (not the staged ones) because that's what produced the
-	// names in `server.tools`.
-	const discoveredNameToUpstream = $derived.by(() => {
-		const map = new Map<string, string>();
-		for (const [upstream, override] of Object.entries(baseOverrides)) {
-			if (override.name) map.set(override.name, upstream);
-		}
-		return map;
-	});
-
 	// One row per known tool, keyed by its UPSTREAM name: the discovered tools (in discovery
-	// order, mapped back through any persisted rename) plus any name that is only known from
-	// the row — disabled, or overridden but not currently discovered — appended, sorted.
-	// `enabled`/`override` reflect the STAGED state, so the row shows where the operator has
-	// set things, while `tool` stays the live discovered definition (description, schema,
-	// playground) as clients currently see it.
+	// order) plus any name that is only known from the row — disabled, or overridden but not
+	// currently discovered — appended, sorted. `enabled`/`override` reflect the STAGED state,
+	// so the row shows where the operator has set things, while `tool` stays the live
+	// discovered definition (description, schema, playground) as clients currently see it.
+	//
+	// Identity comes from `tool.upstream_name`, which the bridge stamps on a renamed tool —
+	// NOT from reversing the rename map. An exposed name isn't unique: a stale override key
+	// whose target happens to match a real upstream tool would re-identify that tool, and
+	// the operator's edits would then be staged against the wrong one.
 	const toolRows = $derived.by(() => {
 		if (!server) return [] as { key: string; tool: ServerTool; enabled: boolean }[];
 		const seen = new Set<string>();
 		const rows: { key: string; tool: ServerTool; enabled: boolean }[] = [];
 		for (const tool of server.tools) {
-			const key = discoveredNameToUpstream.get(tool.name) ?? tool.name;
+			const key = tool.upstream_name ?? tool.name;
 			seen.add(key);
 			rows.push({ key, tool, enabled: !effectiveDisabled.has(key) });
 		}
@@ -494,7 +489,8 @@
 	}
 
 	async function doDelete() {
-		if (!server || deleting) return;
+		// Not while a tool Apply is in flight — the PATCH would land on a deleted server.
+		if (!server || deleting || applyingTools) return;
 		deleting = true;
 		try {
 			await deleteServer(server.id);
@@ -665,7 +661,7 @@
 				<button
 					type="button"
 					onclick={runPrimaryAction}
-					disabled={busy}
+					disabled={busy || applyingTools}
 					aria-busy={busy}
 					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
 					style={action === 'stop'
@@ -1107,7 +1103,7 @@
 								<div class="flex min-w-0 flex-1 flex-col gap-0.5" class:opacity-50={!enabled}>
 									<span class="flex flex-wrap items-center gap-1.5">
 										<span class="font-mono text-xs font-medium text-[var(--color-ink)]">
-											{renamedTo || tool.name}
+											{renamedTo || key}
 										</span>
 										{#if renamedTo && renamedTo !== key}
 											<span
@@ -1320,7 +1316,8 @@
 					<button
 						type="button"
 						onclick={() => (confirmDelete = true)}
-						class="shrink-0 rounded-lg border px-3.5 py-2 text-sm font-medium transition active:translate-y-px"
+						disabled={applyingTools}
+						class="shrink-0 rounded-lg border px-3.5 py-2 text-sm font-medium transition active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50"
 						style="border-color: color-mix(in oklab, var(--color-state-failed) 40%, transparent); color: var(--color-state-failed);"
 					>
 						Delete
@@ -1336,7 +1333,7 @@
 						<button
 							type="button"
 							onclick={doDelete}
-							disabled={deleting}
+							disabled={deleting || applyingTools}
 							aria-busy={deleting}
 							class="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
 							style="background-color: var(--color-state-failed);"

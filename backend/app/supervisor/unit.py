@@ -16,6 +16,7 @@ from typing import Optional
 
 from fastmcp import Client
 
+from app.bridge.host import UPSTREAM_META_KEY
 from app.config import (
     get_settings,
     is_control_plane_env_var,
@@ -51,13 +52,23 @@ def tool_summary(tool) -> dict:
 
     ``input_schema`` is the tool's full JSON input schema — the playground builds
     its argument form from it, so it rides along in the cache rather than needing
-    a live round-trip to the bridge on every page view."""
-    return {
+    a live round-trip to the bridge on every page view.
+
+    ``upstream_name`` is the tool's identity BEFORE any operator rename, stamped into
+    ``_meta`` by the bridge's tool transform (see ``bridge.host``). Absent when the tool
+    isn't renamed — then ``name`` already IS the upstream name. The UI keys its per-tool
+    rows off this, so it never has to infer identity by reversing the rename map (an
+    exposed name isn't unique, so that inference can misidentify a tool)."""
+    summary = {
         "name": tool.name,
         "description": tool.description or "",
         "input_schema": tool.inputSchema or {},
         "has_output_schema": tool.outputSchema is not None,
     }
+    upstream = (getattr(tool, "meta", None) or {}).get(UPSTREAM_META_KEY)
+    if isinstance(upstream, dict) and isinstance(upstream.get("name"), str):
+        summary["upstream_name"] = upstream["name"]
+    return summary
 
 
 class ServerUnit:

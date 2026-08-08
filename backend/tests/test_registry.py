@@ -269,10 +269,33 @@ def test_tool_overrides_no_op_entry_does_not_bounce_bridge(session):
 
 def test_tool_overrides_reject_unusable_rename(session):
     """A rename target has to survive as a REST path segment and a model-facing
-    function name, so the shape is validated on the way in."""
-    for bad in ("has space", "has/slash", "x" * 65, "emoji✨"):
+    function name, so the shape is validated on the way in. `.` and `..` match the
+    charset but are dot-segments: a client resolves `/rest/.` away before sending, so
+    the tool would be advertised at a path that can't reach it."""
+    for bad in ("has space", "has/slash", "x" * 65, "emoji✨", ".", ".."):
         with pytest.raises(ValueError):
             _mk(session, tool_overrides={"t": {"name": bad}})
+    # A dot inside a name is still fine — only the bare dot-segments are refused.
+    assert _mk(session, tool_overrides={"t": {"name": "v1.search"}}).tool_overrides == {
+        "t": {"name": "v1.search"}
+    }
+
+
+def test_tool_overrides_reject_duplicate_keys_after_trimming(session):
+    """Two keys that trim to the same tool would make the stored policy depend on
+    request order — the one thing normalization promises it doesn't."""
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={" t ": {"name": "a"}, "t": {"name": "b"}})
+    # Caught even when the earlier entry normalizes away to nothing.
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={" t ": {"name": "  "}, "t": {"name": "b"}})
+
+
+def test_tool_overrides_reject_unknown_fields(session):
+    """A typo'd member ("desc") must not be silently dropped — that reads as a saved
+    override that does nothing."""
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={"t": {"desc": "oops"}})
 
 
 def test_tool_overrides_reject_colliding_renames(session):

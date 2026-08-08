@@ -9,8 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from app.bridge.host import UPSTREAM_META_KEY
 from app.db.models import Server
-from app.supervisor.unit import ServerUnit
+from app.supervisor.unit import ServerUnit, tool_summary
 
 
 FIXTURE = Path(__file__).with_name("stdio_server_fixture.py")
@@ -323,3 +324,27 @@ def test_per_tool_policy_reaches_the_bridge_payload(tmp_path):
     }
     # The payload is handed to the bridge as JSON — it must round-trip as-is.
     assert json.loads(json.dumps(payload))["tool_overrides"] == payload["tool_overrides"]
+
+
+def test_tool_summary_lifts_the_upstream_name_out_of_meta():
+    """A renamed tool's cached entry carries `upstream_name` so the UI has a stable
+    identity for it; an un-renamed tool carries none (its `name` IS the upstream name)."""
+    renamed = SimpleNamespace(
+        name="run_report",
+        description="Runs it.",
+        inputSchema={},
+        outputSchema=None,
+        meta={UPSTREAM_META_KEY: {"name": "do_thing"}},
+    )
+    plain = SimpleNamespace(
+        name="echo", description="", inputSchema={}, outputSchema=None, meta=None
+    )
+
+    assert tool_summary(renamed)["upstream_name"] == "do_thing"
+    assert "upstream_name" not in tool_summary(plain)
+    # A malformed marker (a foreign server setting the same key) is ignored, not trusted.
+    bogus = SimpleNamespace(
+        name="x", description="", inputSchema={}, outputSchema=None,
+        meta={UPSTREAM_META_KEY: "not-an-object"},
+    )
+    assert "upstream_name" not in tool_summary(bogus)

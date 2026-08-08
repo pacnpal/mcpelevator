@@ -1583,19 +1583,40 @@ def normalize_tool_overrides(value: Any) -> dict[str, dict[str, str]]:
     a tool that isn't itself overridden can't be caught here (the upstream tool list isn't
     known at write time, and is stale or absent while the server is stopped), so the UI
     warns against the live list instead.
+
+    The 64-char cap is on the tool name itself. Group exposure namespaces it further
+    (``<slug>_<tool>``), which can push a long name past a provider's function-name limit —
+    but that's a property of group namespacing that applies equally to un-renamed upstream
+    names, so it isn't charged to renaming here; renaming is in fact the tool an operator
+    has for SHORTENING such a name.
     """
     if value is None:
         return {}
     if not isinstance(value, dict):
         raise ValueError("tool_overrides must be a map of tool name -> override")
     overrides: dict[str, dict[str, str]] = {}
+    seen_tools: set[str] = set()  # every normalized key, incl. ones that normalize away
     renamed_to: dict[str, str] = {}  # new name -> the upstream tool claiming it
     for key, override in value.items():
         if not isinstance(key, str) or not key.strip():
             raise ValueError("tool_overrides keys must be non-empty tool names")
         tool = key.strip()
+        if tool in seen_tools:
+            # Two keys that trim to the same tool (" x " and "x"): silently keeping the
+            # last would make the stored policy depend on request order, which is exactly
+            # what this function promises it doesn't. Tracked separately from `overrides`,
+            # which only holds entries that survived normalization.
+            raise ValueError(f"duplicate tool_overrides entry for {tool!r}")
+        seen_tools.add(tool)
         if not isinstance(override, dict):
             raise ValueError(f"tool_overrides[{tool!r}] must be an override object")
+        unknown = set(override) - {"name", "description"}
+        if unknown:
+            # Silently dropping an unknown member would turn a typo ("desc") into an
+            # override that appears saved and does nothing.
+            raise ValueError(
+                f"tool_overrides[{tool!r}] has unknown field(s): {', '.join(sorted(unknown))}"
+            )
         entry: dict[str, str] = {}
         for field_name in ("name", "description"):
             field = override.get(field_name)
@@ -1607,7 +1628,10 @@ def normalize_tool_overrides(value: Any) -> dict[str, dict[str, str]]:
                 entry[field_name] = field.strip()
         name = entry.get("name")
         if name is not None:
-            if not _TOOL_NAME_RE.match(name):
+            # `.` and `..` match the charset but are dot-segments: a client resolves
+            # `/rest/.` away before the request is sent, so the tool would be advertised
+            # at a REST path that can't reach it.
+            if name in {".", ".."} or not _TOOL_NAME_RE.match(name):
                 raise ValueError(
                     f"invalid tool name {name!r}: use up to 64 letters, digits, '_', '.' or '-'"
                 )

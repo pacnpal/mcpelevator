@@ -253,6 +253,14 @@ def _build_oauth_auth(oauth: dict):
     return provider
 
 
+# `_meta` namespace under which a renamed tool carries its upstream name. PUBLIC: it's a
+# contract between this bridge and the control plane's discovery probe
+# (supervisor.unit.tool_summary), which reads it back so a rename never costs the UI the
+# tool's stable identity. Namespaced to keep it clear of the upstream server's own meta
+# and FastMCP's.
+UPSTREAM_META_KEY = "io.mcpelevator/upstream"
+
+
 def _tool_transform(spec: dict) -> ToolTransform | None:
     """The single place per-tool policy is applied to what this bridge serves.
 
@@ -293,6 +301,14 @@ def _tool_transform(spec: dict) -> ToolTransform | None:
         # `enabled` only when explicitly provided, and an unset name/description means
         # "keep the upstream's".
         fields: dict = {k: override[k] for k in ("name", "description") if override.get(k)}
+        if fields.get("name"):
+            # Stamp the upstream name into the tool's `_meta` so identity survives the
+            # rename. The control plane caches it (see supervisor.unit.tool_summary) and the
+            # UI keys its rows off it — inferring identity by reversing the rename map is
+            # lossy, because an exposed name is not unique: a stale override key whose
+            # target later matches a real upstream tool would silently re-identify that
+            # tool, and edits would then be staged against the wrong one.
+            fields["meta"] = {UPSTREAM_META_KEY: {"name": tool}}
         if tool in disabled:
             # Hiding wins over renaming: a tool that's both is simply gone, under either name.
             fields["enabled"] = False

@@ -38,7 +38,11 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   (`_tool_transform`), so hiding, renaming, and re-describing all reach every surface at once
   (MCP, REST, and the group hub, which all resolve tools through this proxy): a hidden tool is
   dropped from `tools/list` and refused on call, and a renamed one answers to its new name only.
-  Both are part of `config_hash`, so a change restarts the bridge.
+  A renamed tool carries its pre-rename name in `_meta` under `UPSTREAM_META_KEY` — a contract
+  between the bridge and the discovery probe (`supervisor.unit.tool_summary`), which lifts it to
+  `upstream_name` so the UI keys per-tool state off a stable identity instead of reversing the
+  rename map (an exposed name isn't unique). Both are part of `config_hash`, so a change
+  restarts the bridge.
 - **Upstream OAuth** (`auth/oauth_store.py`, `auth/oauth_flow.py`): a `remote` server can
   authenticate to its upstream via OAuth instead of static `env` headers. The interactive
   authorization-code grant (DCR + PKCE) runs in the control plane (`/api/servers/{id}/oauth/authorize`

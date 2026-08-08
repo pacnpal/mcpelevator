@@ -72,6 +72,11 @@ export interface ServerTool {
 	 * tools declare one so models can better understand results.
 	 * Absent on tool lists cached before this field existed. */
 	has_output_schema?: boolean;
+	/** The tool's identity BEFORE any operator rename (`tool_overrides`), stamped by the
+	 * bridge and read back by the discovery probe. Absent unless the tool is renamed —
+	 * then `name` already is the upstream name. Always key per-tool UI state off
+	 * `upstream_name ?? name`: an exposed name is not a stable identity. */
+	upstream_name?: string;
 }
 
 /** Result of POST /api/servers/{id}/tools/{name}/call (the tool playground).

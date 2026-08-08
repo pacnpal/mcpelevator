@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, sentinel
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import FastMCPTransport
+from fastmcp.exceptions import ToolError
 from mcp.server.session import ServerSession
 from mcp.types import Root
 
@@ -250,7 +251,7 @@ async def test_disabled_tool_refused_on_call():
     client holding a stale list can't still invoke it."""
     proxy = _proxy_with_disabled(["secret"])
     async with Client(proxy) as client:
-        with pytest.raises(Exception):  # noqa: PT011 — client surfaces a ToolError/McpError
+        with pytest.raises(ToolError, match="Unknown tool"):
             await client.call_tool("secret", {})
         # A non-disabled tool still works end to end.
         result = await client.call_tool("add", {"a": 2, "b": 3})
@@ -328,7 +329,7 @@ async def test_renamed_tool_stops_answering_to_its_upstream_name():
     from every surface, exactly as if the server itself had been rebuilt."""
     proxy = _proxy_with(tool_overrides={"add": {"name": "sum_numbers"}})
     async with Client(proxy) as client:
-        with pytest.raises(Exception, match="add"):  # noqa: PT011 — ToolError/McpError
+        with pytest.raises(ToolError, match="Unknown tool"):
             await client.call_tool("add", {"a": 1, "b": 2})
 
 
@@ -343,7 +344,7 @@ async def test_hiding_wins_over_renaming():
         names = {t.name for t in await client.list_tools()}
         assert names == {"add", "echo"}
         for name in ("secret", "internal"):
-            with pytest.raises(Exception):  # noqa: PT011 — ToolError/McpError
+            with pytest.raises(ToolError, match="Unknown tool"):
                 await client.call_tool(name, {})
 
 
@@ -369,3 +370,29 @@ async def test_overrides_reach_the_rest_surface():
     response = await openapi.endpoint(MagicMock())
     document = json.loads(response.body)
     assert set(document["paths"]) == {"/rest/sum_numbers", "/rest/echo"}
+
+
+@pytest.mark.asyncio
+async def test_renamed_tool_carries_its_upstream_name_in_meta():
+    """A rename must not cost the tool its identity. The bridge stamps the upstream name
+    into `_meta`, which the control plane's probe caches (supervisor.unit.tool_summary) so
+    the UI can key its per-tool rows off something stable. Inferring identity by reversing
+    the rename map instead would misidentify a tool whenever an exposed name isn't unique
+    (a stale override key whose target later matches a real upstream tool)."""
+    proxy = _proxy_with(tool_overrides={"add": {"name": "sum_numbers"}})
+    async with Client(proxy) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+
+    assert tools["sum_numbers"].meta[host.UPSTREAM_META_KEY] == {"name": "add"}
+    # A tool that ISN'T renamed carries no such marker — its name already is the upstream
+    # name, and stamping every tool would bloat every listing.
+    assert host.UPSTREAM_META_KEY not in (tools["echo"].meta or {})
+
+
+@pytest.mark.asyncio
+async def test_description_only_override_leaves_identity_alone():
+    """Only a rename needs the identity marker; re-describing doesn't move the name."""
+    proxy = _proxy_with(tool_overrides={"add": {"description": "Better."}})
+    async with Client(proxy) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    assert host.UPSTREAM_META_KEY not in (tools["add"].meta or {})
