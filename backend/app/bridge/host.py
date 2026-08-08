@@ -296,7 +296,7 @@ class _ToolTransform(ToolTransform):
       only this transform can ever put it there.
     """
 
-    # Client-visible fields FastMCP's transform nulls out. Deliberately excludes its
+    # Client-visible fields FastMCP's transform NULLS OUT. Deliberately excludes its
     # internals (`fn`, `return_type`, `run_in_thread`), which belong to the wrapper.
     _CARRIED_FIELDS = ("icons", "execution")
 
@@ -334,6 +334,13 @@ class _ToolTransform(ToolTransform):
             value = getattr(source, field, None)
             if value is not None and getattr(transformed, field, None) is None:
                 update[field] = value
+        # The input schema is REBUILT rather than nulled, and the rebuild isn't faithful: an
+        # open-ended `{"type": "object", "additionalProperties": true}` comes back as empty
+        # `properties` with `additionalProperties: false`, so a tool taking dynamic keys
+        # becomes uncallable with its real arguments after a description-only edit. The
+        # operator changed the labels; the contract is the upstream's to declare.
+        if source.parameters != transformed.parameters:
+            update["parameters"] = source.parameters
         return transformed.model_copy(update=update) if update else transformed
 
     def _hides(self, name: str) -> bool:

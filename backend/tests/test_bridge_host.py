@@ -562,3 +562,25 @@ async def test_stale_rename_onto_a_hidden_name_does_not_leak_it():
         assert {t.name for t in await client.list_tools()} == {"add", "echo"}
         with pytest.raises(ToolError, match="Unknown tool"):
             await client.call_tool("secret", {})
+
+
+@pytest.mark.asyncio
+async def test_override_preserves_an_open_ended_input_schema():
+    """The transform REBUILDS the input schema, and the rebuild isn't faithful: an
+    open-ended `additionalProperties: true` comes back as empty `properties` with
+    `additionalProperties: false`, so a tool taking dynamic keys becomes uncallable with
+    its real arguments after a description-only edit. The operator changed the labels; the
+    input contract belongs to the upstream."""
+    open_ended = {"type": "object", "additionalProperties": True}
+    tool = _tool_with(parameters=open_ended)
+
+    for policy in ({"description": "D."}, {"name": "renamed"}):
+        with patch.object(
+            host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+        ):
+            proxy = host.build_proxy(
+                {"command": "x", "name": "t", "tool_overrides": {"tasky": policy}}
+            )
+        async with Client(proxy) as client:
+            served = (await client.list_tools())[0]
+        assert served.inputSchema == open_ended, policy

@@ -271,7 +271,12 @@
 
 	function setOverridePending(key: string, field: keyof ToolOverride, value: string) {
 		if (!server || toolEditsBlocked) return;
-		const next: Record<string, ToolOverride> = {};
+		// Null-prototype: a tool named `__proto__` is a legal upstream name, and assigning it
+		// into an ordinary object hits the prototype setter instead of creating an own
+		// property — the entry would vanish from the staged map and from the PATCH body,
+		// silently dropping that tool's override (and any existing one, since the map is
+		// replaced wholesale).
+		const next: Record<string, ToolOverride> = Object.create(null);
 		for (const [k, v] of Object.entries(pendingOverrides ?? baseOverrides)) next[k] = { ...v };
 		const entry = { ...(next[key] ?? {}), [field]: value };
 		// Drop blank fields (and an entry with nothing left) so the staged map matches what

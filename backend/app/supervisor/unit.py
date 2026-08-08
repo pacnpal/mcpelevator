@@ -34,7 +34,10 @@ from app.supervisor.logbuffer import LogBuffer
 # the one place the spec is serialized — turns that into a legible failure naming the cause,
 # and covers EVERY contributor to the payload (env, setup_script, tool_overrides, args),
 # not only the ones with their own caps.
-_BRIDGE_SPEC_MAX_BYTES = 128 * 1024
+# The kernel's limit covers the WHOLE entry — "MCPE_BRIDGE_SPEC=" plus the value plus a
+# terminating NUL — so the value itself has to fit under it with that overhead reserved.
+_BRIDGE_SPEC_ENV_KEY = "MCPE_BRIDGE_SPEC"
+_BRIDGE_SPEC_MAX_BYTES = 128 * 1024 - len(_BRIDGE_SPEC_ENV_KEY) - 2
 
 _BACKOFF_SECONDS = (2.0, 4.0, 8.0, 16.0)
 _READINESS_RETRY_SECONDS = 2.0
@@ -503,7 +506,7 @@ class ServerUnit:
             )
         return {
             **inherited,
-            "MCPE_BRIDGE_SPEC": spec,
+            _BRIDGE_SPEC_ENV_KEY: spec,
             "MCPE_BRIDGE_HOST": self.host,
             "MCPE_BRIDGE_PORT": str(self.port),
             "MCPE_DATA_DIR": str(settings.data_dir.resolve()),
