@@ -2389,6 +2389,24 @@ def test_tool_overrides_reject_an_oversized_description(session):
     assert _mk(session, tool_overrides={"t": {"description": "x" * 4096}}).tool_overrides
 
 
+def test_tool_overrides_reject_an_oversized_map(session):
+    """The per-field cap doesn't bound the map: enough maximum-length descriptions — or one
+    absurd key — reach the same exec limit by accumulation. The total is what ships."""
+    with pytest.raises(ValueError):
+        _mk(
+            session,
+            tool_overrides={f"tool_{i}": {"description": "x" * 4096} for i in range(40)},
+        )
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={"k" * 200_000: {"description": "ok"}})
+    # A realistically-sized policy across many tools is unaffected.
+    realistic = {
+        f"tool_{i}": {"name": f"renamed_{i}", "description": "A clear description."}
+        for i in range(60)
+    }
+    assert len(_mk(session, tool_overrides=realistic).tool_overrides) == 60
+
+
 def test_tool_overrides_ignore_a_hidden_tools_rename_in_collision_checks(session):
     """A hidden tool exposes no name, so its own rename never applies — it can neither
     claim a target nor collide with one. Keeping a hidden tool's saved labels must not

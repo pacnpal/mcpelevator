@@ -7,6 +7,7 @@ Sits above the repo: generates identity (id/slug), computes the idempotency
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -1573,6 +1574,12 @@ _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 # model's context anyway, which is the opposite of what this feature is for.
 _TOOL_DESCRIPTION_MAX = 4096
 
+# ...and a ceiling on the WHOLE map, because the per-field cap alone doesn't bound it:
+# enough maximum-length descriptions (or one absurd upstream-name key) reach the same exec
+# limit by accumulation. One invariant covers entry count, key length and value length at
+# once. Half the typical 128 KiB limit, leaving room for the rest of the spec.
+_TOOL_OVERRIDES_MAX_BYTES = 64 * 1024
+
 
 def normalize_tool_overrides(
     value: Any, disabled: Any = ()
@@ -1679,7 +1686,15 @@ def normalize_tool_overrides(
     for name, tool in renamed_to.items():
         if name != tool and name in overrides and name not in hidden:
             raise ValueError(f"renaming {tool!r} to {name!r} would collide with that tool")
-    return {tool: overrides[tool] for tool in sorted(overrides)}
+    result = {tool: overrides[tool] for tool in sorted(overrides)}
+    # Bound what actually ships to the bridge, not just its parts.
+    size = len(json.dumps(result, separators=(",", ":")).encode())
+    if size > _TOOL_OVERRIDES_MAX_BYTES:
+        raise ValueError(
+            f"tool_overrides is too large ({size} bytes; "
+            f"max {_TOOL_OVERRIDES_MAX_BYTES})"
+        )
+    return result
 
 
 def _normalize_setup_script(runner: str, setup_script: str) -> str:
