@@ -307,11 +307,20 @@
 			// (trim, drop blanks, sort), so the staged map goes over as-is.
 			await updateServer(requestedId, { disabled_tools, tool_overrides });
 			if (requestedId !== id) return; // navigated away mid-flight
-			pendingDisabled = null; // persisted — base now matches
+			mutationRevision += 1;
+			// Refresh through a DIRECT fetch, not load(): load() early-returns when a
+			// background poll is already in flight for this id, and that poll's response is
+			// then dropped by the revision guard — leaving `base*` stale until the next tick.
+			// Staging another edit in that window would build the whole-map PATCH from the old
+			// base and could delete the policy just saved. The PATCH response can't stand in
+			// for this: it's a summary and carries neither map.
+			const fresh = await getServer(requestedId);
+			if (requestedId !== id) return;
+			server = fresh;
+			// Cleared only once `base*` really is what was saved.
+			pendingDisabled = null;
 			pendingOverrides = null;
 			editingTool = null;
-			mutationRevision += 1;
-			await load(true); // reconcile the discovered tool list after the restart
 		} catch (err) {
 			if (requestedId === id) flashToast(errorMessage(err));
 		} finally {
