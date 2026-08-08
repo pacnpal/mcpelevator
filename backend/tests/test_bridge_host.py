@@ -453,3 +453,53 @@ async def test_stale_rename_does_not_strand_a_real_tool_of_that_name():
     async with Client(proxy) as client:
         assert {t.name for t in await client.list_tools()} == {"add", "secret", "echo"}
         assert (await client.call_tool("echo", {"s": "hi"})).data == "hi"
+
+
+@pytest.mark.asyncio
+async def test_override_preserves_upstream_icons():
+    """`icons` is one more field FastMCP's transform nulls out (see _CARRIED_FIELDS) —
+    an operator rewording a description must not strip the tool's icon."""
+    tool = _tool_with(icons=[{"src": "https://example.test/i.png", "mimeType": "image/png"}])
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy(
+            {"command": "x", "name": "t", "tool_overrides": {"tasky": {"description": "D."}}}
+        )
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert str(served.icons[0].src) == "https://example.test/i.png"
+
+
+@pytest.mark.asyncio
+async def test_rename_onto_a_live_tool_goes_inert_instead_of_shadowing():
+    """A rename must never take a name another live tool already answers to. Applying it
+    would misroute BOTH tools — calls to the target would reach the renamed tool, and the
+    native one would become unreachable. The UI can't be the only guard: it compares
+    against the tool list as it was BEFORE the change, so an override written straight to
+    the API (or an upstream that later adds a tool of that name) lands here anyway."""
+    proxy = _proxy_with(tool_overrides={"add": {"name": "echo"}})
+    async with Client(proxy) as client:
+        assert {t.name for t in await client.list_tools()} == {"add", "secret", "echo"}
+        # Each name still reaches the tool that actually owns it.
+        assert (await client.call_tool("echo", {"s": "hi"})).data == "hi"
+        assert (await client.call_tool("add", {"a": 1, "b": 2})).data == 3
+
+
+@pytest.mark.asyncio
+async def test_upstream_cannot_forge_the_identity_marker():
+    """UPSTREAM_META_KEY asserts "the elevator renamed this tool". An upstream that sets it
+    would hand the UI a false identity to key per-tool policy off — the operator would
+    disable one row while a different tool stayed exposed. It's stripped from every upstream
+    tool, so only this bridge can put it there."""
+    tool = _tool_with(meta={"vendor": "keep", host.UPSTREAM_META_KEY: {"name": "impersonated"}})
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy(
+            {"command": "x", "name": "t", "tool_overrides": {"tasky": {"description": "D."}}}
+        )
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert host.UPSTREAM_META_KEY not in served.meta
+    assert served.meta["vendor"] == "keep"  # the rest of the upstream's meta is untouched

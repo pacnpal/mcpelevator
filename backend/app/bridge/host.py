@@ -262,63 +262,114 @@ UPSTREAM_META_KEY = "io.mcpelevator/upstream"
 
 
 class _ToolTransform(ToolTransform):
-    """FastMCP's ``ToolTransform`` with three gaps closed. Elevation must be faithful: an
-    operator relabelling a tool is changing its NAME and DESCRIPTION, nothing else.
+    """FastMCP's ``ToolTransform`` with the gaps that matter to elevation closed.
 
-    1. **Upstream ``_meta`` is preserved.** ``ToolTransformConfig.meta`` REPLACES rather than
-       merges, so stamping our identity marker (see ``_tool_transform``) would otherwise
-       drop the upstream's own meta — vendor extensions and client presentation hints — from
-       every renamed tool. We merge, with our namespaced key winning only itself.
+    Elevation must be faithful: an operator relabelling a tool is changing its NAME and
+    DESCRIPTION, and nothing else may move as a side effect.
 
-    2. **``execution`` survives.** ``TransformedTool.from_tool`` doesn't copy it (FastMCP
-       3.4.4), so an upstream tool declaring MCP task support (``taskSupport: required``)
-       would lose that declaration through ANY override — including a description-only edit
-       — and clients would then issue an ordinary call the tool rejects.
+    * **The upstream definition survives.** ``TransformedTool.from_tool`` (FastMCP 3.4.4)
+      rebuilds the tool and drops the client-visible fields in ``_CARRIED_FIELDS`` — an
+      upstream ``icons`` would vanish, and an ``execution`` declaring MCP task support
+      (``taskSupport: required``) would too, so clients would issue an ordinary call the
+      tool rejects — through even a description-only edit. ``ToolTransformConfig.meta``
+      likewise REPLACES rather than merges, which would evict the upstream's own ``_meta``
+      (vendor extensions, presentation hints) from every renamed tool.
 
-    3. **A stale rename doesn't strand a real tool.** ``get_tool`` reverse-maps the requested
-       name to the rename's source; when that source is gone upstream it returned ``None``,
-       so an override left over from a removed tool made a REAL upstream tool of the same
-       name uncallable — while ``tools/list`` still advertised it (``list_tools`` iterates
-       actual tools, so it never consults the dangling entry). Now an unresolvable rename
-       yields the name back to whoever actually owns it, which is what "a stale override key
-       is a no-op" has to mean.
+    * **A rename never takes a name that's already taken.** FastMCP maps the target name
+      back to the rename's source unconditionally. That silently misroutes in both
+      directions: with a live tool of the target's name, the rename shadows it (calls to it
+      reach the wrong tool); with the source GONE upstream, the target resolves to nothing,
+      so a real tool is advertised by ``tools/list`` and then refused on call. Neither is
+      reachable through the UI's own collision check, which only sees the tool list as it
+      was BEFORE the change — an override written straight to the API, or an upstream that
+      later adds a tool of that name, lands in exactly this state. So the rule is enforced
+      here, against the live list: a rename applies only when nothing else answers to its
+      target, and otherwise goes inert, leaving both tools reachable under their own names
+      (the UI still flags the collision so the operator can resolve it).
+
+    * **Identity can't be spoofed.** ``UPSTREAM_META_KEY`` means "the elevator renamed this
+      tool, and here is its real name". An upstream that sets that key itself would hand the
+      UI a false identity to key policy off — the operator would disable one row and a
+      different tool would stay exposed. The key is stripped from every upstream tool, so
+      only this transform can ever put it there.
     """
 
+    # Client-visible fields FastMCP's transform nulls out. Deliberately excludes its
+    # internals (`fn`, `return_type`, `run_in_thread`), which belong to the wrapper.
+    _CARRIED_FIELDS = ("icons", "execution")
+
     @staticmethod
-    def _restore(source, transformed):
-        """Carry over the parts of the upstream definition the transform drops (1 and 2)."""
+    def _scrub(tool):
+        """Drop our reserved identity key from an upstream tool (see the class docstring)."""
+        meta = tool.meta or {}
+        if UPSTREAM_META_KEY not in meta:
+            return tool
+        return tool.model_copy(update={"meta": {k: v for k, v in meta.items() if k != UPSTREAM_META_KEY}})
+
+    @classmethod
+    def _restore(cls, source, transformed):
+        """Carry the parts of the upstream definition the transform dropped."""
         update = {}
         merged = {**(source.meta or {}), **(transformed.meta or {})}
         if merged != (transformed.meta or {}):
             update["meta"] = merged
-        if source.execution is not None and transformed.execution is None:
-            update["execution"] = source.execution
+        for field in cls._CARRIED_FIELDS:
+            value = getattr(source, field, None)
+            if value is not None and getattr(transformed, field, None) is None:
+                update[field] = value
         return transformed.model_copy(update=update) if update else transformed
 
+    def _renames_to(self, name):
+        """The name this tool would be renamed to, or None if it isn't renamed."""
+        config = self._transforms.get(name)
+        target = config.name if config is not None else None
+        return target if target and target != name else None
+
     async def list_tools(self, tools):
-        # super() returns one entry per input tool, in order, so the pairing is positional.
-        transformed = await super().list_tools(tools)
-        return [
-            self._restore(source, tool) if tool is not source else tool
-            for source, tool in zip(tools, transformed)
-        ]
+        sources = [self._scrub(tool) for tool in tools]
+        live = {tool.name for tool in sources}
+        result = []
+        for source in sources:
+            config = self._transforms.get(source.name)
+            if config is None:
+                result.append(source)
+                continue
+            target = self._renames_to(source.name)
+            if target is not None and target in live:
+                result.append(source)  # rename refused: the name is already taken
+                continue
+            result.append(self._restore(source, config.apply(source)))
+        return result
 
     async def get_tool(self, name, call_next, *, version=None):
+        # Whoever natively carries this name wins it — that settles both misrouting cases.
+        direct = await call_next(name, version=version)
         original_name = self._name_reverse.get(name, name)
-        source = await call_next(original_name, version=version)
-        if source is None:
-            # (3) The transform claims this name for a rename whose source isn't there.
-            # Let the name resolve to the tool that actually carries it, if any.
-            if original_name != name:
-                return await call_next(name, version=version)
-            return None
-        if original_name in self._transforms:
+
+        if original_name != name:  # `name` is some tool's rename target
+            if direct is not None:
+                return self._scrub(direct)
+            source = await call_next(original_name, version=version)
+            if source is None:
+                return None  # the rename's source is gone and nothing else owns the name
+            source = self._scrub(source)
             transformed = self._transforms[original_name].apply(source)
-            # A renamed tool answers to its new name only.
-            if transformed.name != name:
-                return None
-            return self._restore(source, transformed)
-        return source if source.name == name else None
+            return self._restore(source, transformed) if transformed.name == name else None
+
+        if direct is None:
+            return None
+        source = self._scrub(direct)
+        config = self._transforms.get(name)
+        if config is None:
+            return source
+        target = self._renames_to(name)
+        if target is not None:
+            # Renamed away, so this name is dead — unless the rename was refused, in which
+            # case the tool keeps serving under its own name.
+            taken = await call_next(target, version=version) is not None
+            return source if taken else None
+        transformed = config.apply(source)
+        return self._restore(source, transformed) if transformed.name == name else None
 
 
 def _tool_transform(spec: dict) -> ToolTransform | None:

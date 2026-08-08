@@ -58,7 +58,9 @@ def tool_summary(tool) -> dict:
     ``_meta`` by the bridge's tool transform (see ``bridge.host``). Absent when the tool
     isn't renamed — then ``name`` already IS the upstream name. The UI keys its per-tool
     rows off this, so it never has to infer identity by reversing the rename map (an
-    exposed name isn't unique, so that inference can misidentify a tool)."""
+    exposed name isn't unique, so that inference can misidentify a tool). Trustworthy
+    because the bridge strips the key from every upstream tool before stamping its own —
+    an upstream can't forge an identity the UI would then key policy off."""
     summary = {
         "name": tool.name,
         "description": tool.description or "",
