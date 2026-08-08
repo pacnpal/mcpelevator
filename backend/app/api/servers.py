@@ -249,6 +249,7 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         oauth_status=_oauth_status(server),
         idle_timeout_s=server.idle_timeout_s,
         disabled_tools=list(server.disabled_tools or []),
+        tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         config_hash=server.config_hash,
         source=server.source,
         mcpb_exportable=mcpb.exportable(server),

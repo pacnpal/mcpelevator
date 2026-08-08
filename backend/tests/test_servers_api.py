@@ -84,6 +84,52 @@ def test_disabled_tools_api_round_trip():
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
+def test_tool_overrides_api_round_trip():
+    """tool_overrides is accepted on create, normalized, echoed on GET, replaceable via
+    PATCH ({} restores the upstream labels), and an unusable rename is a 400."""
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "Relabelled",
+                "runner": "command",
+                "command": "/bin/true",
+                "tool_overrides": {
+                    " do_thing ": {"name": "run_report", "description": " Runs it. "},
+                    "other": {"description": ""},
+                },
+            },
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.status_code == 200
+            # "other" had nothing left after trimming, so it isn't stored at all.
+            assert detail.json()["tool_overrides"] == {
+                "do_thing": {"name": "run_report", "description": "Runs it."}
+            }
+
+            rejected = c.patch(
+                f"/api/servers/{server_id}",
+                json={"tool_overrides": {"do_thing": {"name": "not a valid name"}}},
+                headers=LOOPBACK,
+            )
+            assert rejected.status_code == 400, rejected.text
+
+            patched = c.patch(
+                f"/api/servers/{server_id}",
+                json={"tool_overrides": {}},
+                headers=LOOPBACK,
+            )
+            assert patched.status_code == 200, patched.text
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["tool_overrides"] == {}
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
 def test_enabled_create_returns_queued_without_stale_runtime(monkeypatch):
     async def parked_reconciler(self):
         await asyncio.Event().wait()

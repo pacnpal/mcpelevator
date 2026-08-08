@@ -37,6 +37,18 @@ class StartupStatus(BaseModel):
     message: Optional[str] = None
 
 
+class ToolOverride(BaseModel):
+    """The operator's relabelling of ONE upstream tool (issue #112). Both fields are
+    optional and independent: an unset (or blank) field keeps what the upstream declares.
+    Keyed by the upstream tool name wherever this appears."""
+
+    # Replace the tool's name. Validated server-side (<=64 chars of [A-Za-z0-9_.-]) because
+    # the name has to survive as a REST path segment and a model-facing function name.
+    name: Optional[StrictStr] = None
+    # Replace the tool's description — the text the model actually reads.
+    description: Optional[StrictStr] = None
+
+
 class ServerSummary(BaseModel):
     id: str
     slug: str
@@ -111,6 +123,8 @@ class ServerDetail(ServerSummary):
     idle_timeout_s: Optional[int] = None
     # Upstream tool names hidden from every exposed surface. Empty = expose all (default).
     disabled_tools: list[str] = []
+    # Upstream tool name -> replacement name/description. Empty = serve tools as declared.
+    tool_overrides: dict[str, ToolOverride] = {}
     config_hash: str = ""
     source: str = "manual"
     # Whether GET /servers/{id}/mcpb would produce a bundle (app.mcpb.exportable);
@@ -136,6 +150,8 @@ class ServerCreate(BaseModel):
     # Upstream tool names to hide from every exposed surface (empty = expose all).
     # Normalized (trimmed, deduped, sorted) server-side.
     disabled_tools: list[StrictStr] = []
+    # Upstream tool name -> replacement name/description (empty = serve as declared).
+    tool_overrides: dict[StrictStr, ToolOverride] = {}
     auth_provider: AuthProvider = "inherit"
     # Upstream OAuth (remote runner only; forced off elsewhere server-side).
     oauth: bool = False
@@ -169,6 +185,9 @@ class ServerUpdate(BaseModel):
     rest_openapi: Optional[bool] = None
     # Replace the whole hide list; [] re-exposes every tool. Omitted (null) = unchanged.
     disabled_tools: Optional[list[StrictStr]] = None
+    # Replace the whole override map; {} restores every tool's upstream name/description.
+    # Omitted (null) = unchanged. A per-tool merge would give no way to clear one entry.
+    tool_overrides: Optional[dict[StrictStr, ToolOverride]] = None
     auth_provider: Optional[AuthProvider] = None
     # StrictBool (unlike mcp_http/rest_openapi above): oauth gates a security-sensitive
     # upstream-auth mode, so a truthy-coerced "yes"/1 must never silently flip it on — the

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import sys
@@ -303,3 +304,22 @@ async def test_exit_after_stable_run_waits_before_fresh_activation(tmp_path, mon
         assert "bridge exited" in (unit.last_error or "")
     finally:
         await unit.stop()
+
+
+def test_per_tool_policy_reaches_the_bridge_payload(tmp_path):
+    """The one seam nothing else covers: a Server row's per-tool policy has to survive
+    `build_spec` -> ProcessSpec -> the JSON the bridge process actually reads. Every hop
+    is a plain copy, so a drop anywhere would leave the registry AND bridge tests green
+    while hiding and renaming silently did nothing in production."""
+    server = _server(tmp_path, setup_script="")
+    server.disabled_tools = ["secret"]
+    server.tool_overrides = {"do_thing": {"name": "run_report", "description": "Runs it."}}
+
+    payload = ServerUnit(server)._bridge_payload()
+
+    assert payload["disabled_tools"] == ["secret"]
+    assert payload["tool_overrides"] == {
+        "do_thing": {"name": "run_report", "description": "Runs it."}
+    }
+    # The payload is handed to the bridge as JSON — it must round-trip as-is.
+    assert json.loads(json.dumps(payload))["tool_overrides"] == payload["tool_overrides"]

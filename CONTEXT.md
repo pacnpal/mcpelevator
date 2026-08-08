@@ -29,6 +29,10 @@ _Avoid_: Setup commands, pre-start hook
 An upstream tool the operator has hidden from a Server (by name, in the Server's `disabled_tools`). The bridge drops it from every exposed surface — MCP `tools/list`, the REST/OpenAPI routes, and any group — and refuses it if called, so it's indistinguishable from a tool that was never registered. Part of the launch spec: changing the set restarts the bridge.
 _Avoid_: Removed tool, deleted tool
 
+**Tool override**:
+The operator's replacement name and/or description for one upstream tool, keyed by the tool's upstream name in the Server's `tool_overrides`. Applied by the same bridge transform as a Disabled tool, so it reaches every exposed surface: clients discover only the operator's labels, and a renamed tool answers to its new name only. Fixes a tool whose own wording a model handles badly without rebuilding the upstream server. Part of the launch spec: changing it restarts the bridge.
+_Avoid_: Alias, tool rewrite, tool transformation
+
 **Idle quiescence**:
 The supervisor stopping an enabled Server's bridge after its idle window passes with no authenticated proxy traffic. The Server's observed state is `idle`: still desired, deliberately not running, and wakeable.
 _Avoid_: Sleep, suspend, pause

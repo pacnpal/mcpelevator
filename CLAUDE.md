@@ -33,10 +33,12 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   fault-isolated with a real PID and logs. When the server's `rest_openapi` exposure is on, the
   same bridge also serves each tool as plain REST (`/rest/<tool>` + a generated
   `/rest/openapi.json`), reached through the same `/s/<slug>/` proxy path and auth. A server's
-  `disabled_tools` (names) installs a FastMCP middleware in the bridge that drops those tools from
-  `tools/list` and refuses them on call, so the filter covers every surface at once (MCP, REST, and
-  the group hub, which all resolve tools through this proxy); it's part of `config_hash`, so a
-  change restarts the bridge.
+  Per-tool policy — `disabled_tools` (names to hide) and `tool_overrides` (upstream name ->
+  replacement name/description) — is applied by ONE FastMCP `ToolTransform` in the bridge
+  (`_tool_transform`), so hiding, renaming, and re-describing all reach every surface at once
+  (MCP, REST, and the group hub, which all resolve tools through this proxy): a hidden tool is
+  dropped from `tools/list` and refused on call, and a renamed one answers to its new name only.
+  Both are part of `config_hash`, so a change restarts the bridge.
 - **Upstream OAuth** (`auth/oauth_store.py`, `auth/oauth_flow.py`): a `remote` server can
   authenticate to its upstream via OAuth instead of static `env` headers. The interactive
   authorization-code grant (DCR + PKCE) runs in the control plane (`/api/servers/{id}/oauth/authorize`

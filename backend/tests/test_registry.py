@@ -214,6 +214,103 @@ def test_disabled_tools_survive_clone(session):
     assert clone.disabled_tools == ["secret"]
 
 
+# --- tool overrides (issue #112) ----------------------------------------------
+
+
+def test_tool_overrides_normalized_on_create(session):
+    """Fields are trimmed, blank fields dropped, entries with nothing left removed,
+    and keys sorted — so the stored value is exactly what will be applied."""
+    a = _mk(
+        session,
+        tool_overrides={
+            " z_tool ": {"name": " renamed ", "description": "  "},
+            "a_tool": {"description": " Does the thing. "},
+            "noop_tool": {"name": "", "description": ""},
+        },
+    )
+    assert a.tool_overrides == {
+        "a_tool": {"description": "Does the thing."},
+        "z_tool": {"name": "renamed"},
+    }
+
+
+def test_tool_overrides_default_empty(session):
+    """No overrides = serve every tool exactly as the upstream declares it."""
+    assert _mk(session).tool_overrides == {}
+
+
+def test_tool_overrides_change_bounces_bridge(session):
+    """Overrides are applied inside the bridge, so a change MUST move the config_hash
+    (the reconciler restarts the bridge to re-apply them)."""
+    a = _mk(session)
+    before = a.config_hash
+    service.update_server(session, a.id, {"tool_overrides": {"t": {"name": "better"}}})
+    assert repo.get_server(session, a.id).config_hash != before
+
+
+def test_tool_overrides_hash_is_order_independent(session):
+    """Re-submitting the same overrides in a different key order must NOT bounce the
+    bridge (idempotency anchor, same contract as the hide list)."""
+    a = _mk(session, tool_overrides={"a": {"name": "x"}, "b": {"name": "y"}})
+    before = a.config_hash
+    service.update_server(
+        session, a.id, {"tool_overrides": {"b": {"name": "y"}, "a": {"name": "x"}}}
+    )
+    assert repo.get_server(session, a.id).config_hash == before
+
+
+def test_tool_overrides_no_op_entry_does_not_bounce_bridge(session):
+    """An entry that normalizes away (all fields blank) is not a config change."""
+    a = _mk(session)
+    before = a.config_hash
+    service.update_server(session, a.id, {"tool_overrides": {"t": {"name": "  "}}})
+    assert repo.get_server(session, a.id).config_hash == before
+
+
+def test_tool_overrides_reject_unusable_rename(session):
+    """A rename target has to survive as a REST path segment and a model-facing
+    function name, so the shape is validated on the way in."""
+    for bad in ("has space", "has/slash", "x" * 65, "emoji✨"):
+        with pytest.raises(ValueError):
+            _mk(session, tool_overrides={"t": {"name": bad}})
+
+
+def test_tool_overrides_reject_colliding_renames(session):
+    """Two tools renamed to the same name would silently shadow each other upstream —
+    one of them would simply stop working — so the write is refused."""
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={"a": {"name": "same"}, "b": {"name": "same"}})
+
+
+def test_tool_overrides_reject_rename_onto_another_overridden_tool(session):
+    """Renaming onto a tool that's known to exist (it's overridden too) is the same
+    collision, caught regardless of key order."""
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={"a": {"name": "b"}, "b": {"description": "kept"}})
+
+
+def test_tool_overrides_allow_swapping_a_renamed_name(session):
+    """But renaming ONTO a name another tool is renaming AWAY from is fine — nothing
+    ends up sharing a name."""
+    a = _mk(session, tool_overrides={"a": {"name": "b"}, "b": {"name": "c"}})
+    assert a.tool_overrides == {"a": {"name": "b"}, "b": {"name": "c"}}
+
+
+def test_tool_overrides_reject_malformed_shapes(session):
+    for bad in ({"t": "just a string"}, {"": {"name": "x"}}, {"t": {"name": 5}}, ["a"]):
+        with pytest.raises(ValueError):
+            _mk(session, tool_overrides=bad)
+
+
+def test_tool_overrides_survive_clone(session):
+    a = _mk(session, tool_overrides={"t": {"name": "better", "description": "Clear."}})
+    clone = service.clone_server(session, a.id)
+    assert clone.tool_overrides == {"t": {"name": "better", "description": "Clear."}}
+    # A deep copy: editing the clone must not reach back into the source row.
+    clone.tool_overrides["t"]["name"] = "changed"
+    assert a.tool_overrides["t"]["name"] == "better"
+
+
 def test_remote_server_canonicalizes_and_validates(session):
     s = service.create_server(
         session,

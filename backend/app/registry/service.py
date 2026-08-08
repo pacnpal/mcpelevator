@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import shlex
 import tempfile
@@ -1301,10 +1302,12 @@ def _hash_payload(server: Server) -> dict[str, Any]:
         "setup_script": server.setup_script or "",
         "mcp_http": server.mcp_http,
         "rest_openapi": server.rest_openapi,
-        # The hide list is applied inside the bridge (a FastMCP middleware), so it's part
-        # of the launch spec — a change must restart the bridge to re-apply it. Normalized
-        # (sorted, deduped) so reordering the same set doesn't perturb the hash.
+        # Per-tool policy (hidden tools, renames, descriptions) is applied inside the bridge
+        # as one FastMCP transform, so it's part of the launch spec — a change must restart
+        # the bridge to re-apply it. Normalized (sorted, deduped) so re-submitting the same
+        # policy in a different order doesn't perturb the hash.
         "disabled_tools": normalize_disabled_tools(server.disabled_tools),
+        "tool_overrides": normalize_tool_overrides(server.tool_overrides),
         # OAuth config drives how the bridge authenticates upstream, so it IS part
         # of the launch spec — a change must restart the bridge. (The tokens live in
         # a file store, not the row, so *authenticating* leaves the hash untouched.)
@@ -1555,6 +1558,78 @@ def normalize_disabled_tools(value: Any) -> list[str]:
     return sorted(names)
 
 
+# A renamed tool has to be addressable everywhere the name travels: an MCP tool name, a
+# REST path segment (``/rest/<tool>``), a group-hub namespaced name (``<slug>_<tool>``), and
+# a function name in the model's tool list — where mainstream providers cap at 64 chars and
+# this character class. Renaming is normally used to SHORTEN an unwieldy name anyway.
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def normalize_tool_overrides(value: Any) -> dict[str, dict[str, str]]:
+    """Canonicalize the per-server tool overrides (issue #112): a map of UPSTREAM tool name
+    -> ``{"name": …, "description": …}``, either field optional.
+
+    Keyed by the upstream name because that's the stable identity — the operator is
+    relabelling a tool, not defining a new one, so an override survives being re-renamed
+    and a rename never orphans its own description.
+
+    Entries are trimmed, empty fields dropped, no-op entries (nothing left to apply)
+    removed, and keys SORTED, so the stored value — and thus ``config_hash`` — depends only
+    on what will actually be applied: re-submitting the same overrides in a different order
+    must not bounce the bridge. ``None`` (a pre-field row, or a PATCH that omits it) reads
+    as ``{}`` = serve every tool exactly as the upstream declares it.
+
+    Rename targets are validated for shape and for collisions WITH EACH OTHER; a rename onto
+    a tool that isn't itself overridden can't be caught here (the upstream tool list isn't
+    known at write time, and is stale or absent while the server is stopped), so the UI
+    warns against the live list instead.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("tool_overrides must be a map of tool name -> override")
+    overrides: dict[str, dict[str, str]] = {}
+    renamed_to: dict[str, str] = {}  # new name -> the upstream tool claiming it
+    for key, override in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("tool_overrides keys must be non-empty tool names")
+        tool = key.strip()
+        if not isinstance(override, dict):
+            raise ValueError(f"tool_overrides[{tool!r}] must be an override object")
+        entry: dict[str, str] = {}
+        for field_name in ("name", "description"):
+            field = override.get(field_name)
+            if field is None:
+                continue
+            if not isinstance(field, str):
+                raise ValueError(f"tool_overrides[{tool!r}].{field_name} must be a string")
+            if field.strip():
+                entry[field_name] = field.strip()
+        name = entry.get("name")
+        if name is not None:
+            if not _TOOL_NAME_RE.match(name):
+                raise ValueError(
+                    f"invalid tool name {name!r}: use up to 64 letters, digits, '_', '.' or '-'"
+                )
+            if name in renamed_to:
+                raise ValueError(
+                    f"tools {renamed_to[name]!r} and {tool!r} are both renamed to {name!r}"
+                )
+            renamed_to[name] = tool
+        # Nothing left after trimming = no override at all. Dropping it keeps a cleared
+        # field out of the row (and out of the hash) instead of storing an empty shell.
+        if entry:
+            overrides[tool] = entry
+    # A rename must not land on another OVERRIDDEN tool's upstream name — that tool exists
+    # (it's being overridden) and would be shadowed. Checked after the pass so it holds
+    # regardless of key order.
+    for name, tool in renamed_to.items():
+        other = overrides.get(name)
+        if name != tool and other is not None and "name" not in other:
+            raise ValueError(f"renaming {tool!r} to {name!r} would collide with that tool")
+    return {tool: overrides[tool] for tool in sorted(overrides)}
+
+
 def _normalize_setup_script(runner: str, setup_script: str) -> str:
     if not setup_script.strip():
         return ""
@@ -1580,6 +1655,7 @@ def create_server(
     mcp_http: bool = True,
     rest_openapi: bool = False,
     disabled_tools: Optional[list[str]] = None,
+    tool_overrides: Optional[dict[str, dict[str, str]]] = None,
     auth_provider: str = "inherit",
     oauth: bool = False,
     oauth_scopes: str = "",
@@ -1630,6 +1706,7 @@ def create_server(
     run_args = normalize_run_args(runner, run_args)
     idle_timeout_s = normalize_idle_timeout(idle_timeout_s)
     disabled_tools = normalize_disabled_tools(disabled_tools)
+    tool_overrides = normalize_tool_overrides(tool_overrides)
 
     server = Server(
         id=new_id(),
@@ -1645,6 +1722,7 @@ def create_server(
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
         disabled_tools=disabled_tools,
+        tool_overrides=tool_overrides,
         auth_provider=auth_provider,
         oauth=oauth,
         oauth_scopes=oauth_scopes,
@@ -1674,6 +1752,7 @@ _MUTABLE_FIELDS = {
     "mcp_http",
     "rest_openapi",
     "disabled_tools",
+    "tool_overrides",
     "auth_provider",
     "oauth",
     "oauth_scopes",
@@ -1780,6 +1859,7 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         server.run_args = normalize_run_args(server.runner, server.run_args)
         server.idle_timeout_s = normalize_idle_timeout(server.idle_timeout_s)
         server.disabled_tools = normalize_disabled_tools(server.disabled_tools)
+        server.tool_overrides = normalize_tool_overrides(server.tool_overrides)
     except ValueError:
         session.rollback()
         raise
@@ -1821,6 +1901,7 @@ def clone_server(
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,
         disabled_tools=list(src.disabled_tools or []),
+        tool_overrides={k: dict(v) for k, v in (src.tool_overrides or {}).items()},
         auth_provider=src.auth_provider,
         oauth=bool(src.oauth),
         oauth_scopes=src.oauth_scopes or "",

@@ -90,6 +90,15 @@ class Server(SQLModel, table=True):
     # Nullable: rows predating the column hold NULL, read as [].
     disabled_tools: Optional[list] = Field(default=None, sa_column=Column(JSON))
 
+    # JSON object of UPSTREAM tool name -> {"name": …, "description": …} (either optional):
+    # the operator's relabelling of a tool whose own name/description a model handles badly
+    # and which they can't fix upstream (a closed-source endpoint). Applied by the same
+    # bridge transform as `disabled_tools`, so it reaches every surface, and keyed by the
+    # upstream name so re-renaming or clearing a rename never orphans the entry. A renamed
+    # tool answers to its NEW name only. Part of the launch spec (config_hash), so a change
+    # restarts the bridge. Nullable: rows predating the column hold NULL, read as {}.
+    tool_overrides: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+
     # exposure (folded 1:1)
     mcp_http: bool = True
     rest_openapi: bool = False

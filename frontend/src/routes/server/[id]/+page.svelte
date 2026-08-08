@@ -23,7 +23,7 @@
 		primaryServerAction,
 		startupPhaseLabel
 	} from '$lib/startup';
-	import type { ServerDetail, ServerTool } from '$lib/types';
+	import type { ServerDetail, ServerTool, ToolOverride } from '$lib/types';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
@@ -136,26 +136,51 @@
 		}
 	}
 
-	// Per-tool enable/disable (issue #105). The disabled set lives on the server row
-	// (`disabled_tools`); the bridge hides those tools from every surface. A hidden tool
-	// drops out of discovery, so it's absent from `server.tools` — the row list below
-	// unions the discovered tools with the disabled names so a hidden tool stays visible
-	// (and re-enableable) here.
-	// Tool hide list, staged as a bulk edit. `base` is what's persisted on the server;
-	// `pendingDisabled` holds the operator's unsaved switch flips (null when in sync). One
-	// **Apply** sends a single PATCH → one bridge restart for the whole batch, which also
-	// removes the concurrent-PATCH race a per-toggle apply had (only ever one write).
+	// Per-tool policy: hiding (issue #105) and relabelling (issue #112). Both live on the
+	// server row — `disabled_tools` and `tool_overrides` — and the bridge applies them to
+	// every surface at once. Both are staged here as ONE bulk edit: `base*` is what's
+	// persisted, `pending*` holds the operator's unsaved changes (null when in sync), and a
+	// single **Apply** sends one PATCH → one bridge restart for the whole batch. That also
+	// removes the concurrent-PATCH race a per-change apply had (only ever one write).
+	//
+	// A hidden tool drops out of discovery, and a renamed one is discovered under its NEW
+	// name, so `server.tools` alone can't drive this list: rows are keyed by the UPSTREAM
+	// name and reconciled with the discovered list in `toolRows`.
 	const baseDisabled = $derived(new Set(server?.disabled_tools ?? []));
 	let pendingDisabled = $state<Set<string> | null>(null);
 	const effectiveDisabled = $derived(pendingDisabled ?? baseDisabled);
+
+	const baseOverrides = $derived(server?.tool_overrides ?? {});
+	let pendingOverrides = $state<Record<string, ToolOverride> | null>(null);
+	const effectiveOverrides = $derived(pendingOverrides ?? baseOverrides);
+
 	let applyingTools = $state(false); // Apply PATCH + reload in flight
+	let editingTool = $state<string | null>(null); // upstream name whose label form is open
 
 	function setsEqual(a: Set<string>, b: Set<string>): boolean {
 		return a.size === b.size && [...a].every((x) => b.has(x));
 	}
 
+	// Compare a label field the way the backend normalizes it: trimmed, with blank and
+	// absent treated alike — so clearing a field the server never had isn't a "change".
+	function sameLabel(a: string | undefined, b: string | undefined): boolean {
+		return (a ?? '').trim() === (b ?? '').trim();
+	}
+
+	function overridesEqual(
+		a: Record<string, ToolOverride>,
+		b: Record<string, ToolOverride>
+	): boolean {
+		const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+		return [...keys].every(
+			(k) =>
+				sameLabel(a[k]?.name, b[k]?.name) && sameLabel(a[k]?.description, b[k]?.description)
+		);
+	}
+
 	const toolChangesDirty = $derived(
-		pendingDisabled !== null && !setsEqual(pendingDisabled, baseDisabled)
+		(pendingDisabled !== null && !setsEqual(pendingDisabled, baseDisabled)) ||
+			(pendingOverrides !== null && !overridesEqual(pendingOverrides, baseOverrides))
 	);
 
 	// Drop staged edits when the viewed server changes (this component is reused across
@@ -166,55 +191,118 @@
 		if (sid !== stagedForServerId) {
 			stagedForServerId = sid;
 			pendingDisabled = null;
+			pendingOverrides = null;
+			editingTool = null;
 		}
 	});
 
-	// One row per known tool: the discovered ones (in discovery order) plus any name that is
-	// disabled (persisted OR staged) but no longer discovered (appended, sorted). `enabled`
-	// reflects the STAGED state so the switch shows where the operator has set it.
-	const toolRows = $derived.by(() => {
-		if (!server) return [] as { tool: ServerTool; enabled: boolean }[];
-		const seen = new Set<string>();
-		const rows: { tool: ServerTool; enabled: boolean }[] = [];
-		for (const tool of server.tools) {
-			seen.add(tool.name);
-			rows.push({ tool, enabled: !effectiveDisabled.has(tool.name) });
+	// What the bridge is CURRENTLY serving each renamed tool as → its upstream name. Built
+	// from the persisted overrides (not the staged ones) because that's what produced the
+	// names in `server.tools`.
+	const discoveredNameToUpstream = $derived.by(() => {
+		const map = new Map<string, string>();
+		for (const [upstream, override] of Object.entries(baseOverrides)) {
+			if (override.name) map.set(override.name, upstream);
 		}
-		const undiscovered = new Set([...baseDisabled, ...(pendingDisabled ?? [])]);
-		for (const name of [...undiscovered].sort()) {
-			if (seen.has(name)) continue;
-			// Disabled and no longer discovered: synthesize a minimal row so it can be re-enabled.
-			rows.push({ tool: { name, description: '' }, enabled: !effectiveDisabled.has(name) });
+		return map;
+	});
+
+	// One row per known tool, keyed by its UPSTREAM name: the discovered tools (in discovery
+	// order, mapped back through any persisted rename) plus any name that is only known from
+	// the row — disabled, or overridden but not currently discovered — appended, sorted.
+	// `enabled`/`override` reflect the STAGED state, so the row shows where the operator has
+	// set things, while `tool` stays the live discovered definition (description, schema,
+	// playground) as clients currently see it.
+	const toolRows = $derived.by(() => {
+		if (!server) return [] as { key: string; tool: ServerTool; enabled: boolean }[];
+		const seen = new Set<string>();
+		const rows: { key: string; tool: ServerTool; enabled: boolean }[] = [];
+		for (const tool of server.tools) {
+			const key = discoveredNameToUpstream.get(tool.name) ?? tool.name;
+			seen.add(key);
+			rows.push({ key, tool, enabled: !effectiveDisabled.has(key) });
+		}
+		const undiscovered = new Set([
+			...baseDisabled,
+			...(pendingDisabled ?? []),
+			...Object.keys(baseOverrides),
+			...Object.keys(pendingOverrides ?? {})
+		]);
+		for (const key of [...undiscovered].sort()) {
+			if (seen.has(key)) continue;
+			// Hidden (or a stale override key): synthesize a minimal row so it stays editable.
+			rows.push({ key, tool: { name: key, description: '' }, enabled: !effectiveDisabled.has(key) });
 		}
 		return rows;
 	});
 
-	// Local-only switch flip: stage the change, don't touch the server until Apply. Skip
-	// while an Apply or a lifecycle op (start/stop/delete/clone) is in flight.
-	function toggleToolPending(name: string, enable: boolean) {
-		if (!server || applyingTools || busy || deleting || cloning) return;
+	// The name each row would be served as once applied. A rename that lands on a name
+	// another exposed tool already uses would silently shadow it upstream — one of the two
+	// would stop working — and the backend can't catch that (it doesn't know the live tool
+	// list), so block Apply here, where the discovered names are known.
+	function exposedName(key: string): string {
+		return effectiveOverrides[key]?.name?.trim() || key;
+	}
+
+	const collidingNames = $derived.by(() => {
+		const counts = new Map<string, number>();
+		for (const { key, enabled } of toolRows) {
+			if (!enabled) continue; // a hidden tool occupies no name
+			const name = exposedName(key);
+			counts.set(name, (counts.get(name) ?? 0) + 1);
+		}
+		return new Set([...counts].filter(([, n]) => n > 1).map(([name]) => name));
+	});
+
+	// Local-only edits: stage the change, don't touch the server until Apply. Skipped while
+	// an Apply or a lifecycle op (start/stop/delete/clone) is in flight.
+	const toolEditsBlocked = $derived(applyingTools || busy || deleting || cloning);
+
+	function toggleToolPending(key: string, enable: boolean) {
+		if (!server || toolEditsBlocked) return;
 		const next = new Set(pendingDisabled ?? baseDisabled);
-		if (enable) next.delete(name);
-		else next.add(name);
+		if (enable) next.delete(key);
+		else next.add(key);
 		// Back in sync with the server → clear the staged set so background polls flow through.
 		pendingDisabled = setsEqual(next, baseDisabled) ? null : next;
 	}
 
+	function setOverridePending(key: string, field: keyof ToolOverride, value: string) {
+		if (!server || toolEditsBlocked) return;
+		const next: Record<string, ToolOverride> = {};
+		for (const [k, v] of Object.entries(pendingOverrides ?? baseOverrides)) next[k] = { ...v };
+		const entry = { ...(next[key] ?? {}), [field]: value };
+		// Drop blank fields (and an entry with nothing left) so the staged map matches what
+		// the backend would store — otherwise clearing a field would read as a pending change.
+		if (!value.trim()) delete entry[field];
+		if (Object.keys(entry).length > 0) next[key] = entry;
+		else delete next[key];
+		pendingOverrides = overridesEqual(next, baseOverrides) ? null : next;
+	}
+
 	function revertToolChanges() {
-		if (!applyingTools) pendingDisabled = null;
+		if (applyingTools) return;
+		pendingDisabled = null;
+		pendingOverrides = null;
+		editingTool = null;
 	}
 
 	async function applyToolChanges() {
-		if (!server || !toolChangesDirty || applyingTools || busy || deleting || cloning) return;
+		if (!server || !toolChangesDirty || toolEditsBlocked || collidingNames.size > 0) return;
 		const requestedId = id;
-		const next = [...(pendingDisabled ?? baseDisabled)].sort();
+		const disabled_tools = [...(pendingDisabled ?? baseDisabled)].sort();
+		const tool_overrides = pendingOverrides ?? baseOverrides;
 		applyingTools = true;
 		// Bump now so an in-flight background poll can't resolve and clobber the staged state.
 		mutationRevision += 1;
 		try {
-			await updateServer(requestedId, { disabled_tools: next });
+			// One PATCH for the whole batch → one bridge restart. The backend normalizes
+			// (trim, drop blanks, sort), so the staged map goes over as-is.
+			await updateServer(requestedId, { disabled_tools, tool_overrides });
 			if (requestedId !== id) return; // navigated away mid-flight
 			pendingDisabled = null; // persisted — base now matches
+			pendingOverrides = null;
+			editingTool = null;
 			mutationRevision += 1;
 			await load(true); // reconcile the discovered tool list after the restart
 		} catch (err) {
@@ -222,7 +310,7 @@
 		} finally {
 			// Clear unconditionally (like busy/cloning): if the operator navigated to another
 			// server mid-apply, the id guard would otherwise leave this true and freeze the
-			// new view's switches + Apply. The route-change effect only resets pendingDisabled.
+			// new view's controls + Apply. The route-change effect only resets the staged state.
 			applyingTools = false;
 		}
 	}
@@ -1002,18 +1090,33 @@
 				{:else}
 					<p class="text-xs text-[var(--color-ink-dim)]">
 						Toggle tools off to hide them from clients (MCP, REST, and groups); hidden tools
-						are also refused if called. Changes are staged — click <strong>Apply</strong> to
-						save them in one restart.
+						are also refused if called. <strong>Rename</strong> a tool or rewrite its
+						description when the upstream's wording trips up models — clients see only your
+						version. Changes are staged — click <strong>Apply</strong> to save them in one
+						restart.
 					</p>
 					<ul class="flex flex-col divide-y divide-[var(--color-line)]">
-						{#each toolRows as { tool, enabled } (tool.name)}
-							{@const changed = baseDisabled.has(tool.name) === enabled}
+						{#each toolRows as { key, tool, enabled } (key)}
+							{@const override = effectiveOverrides[key] ?? {}}
+							{@const renamedTo = override.name?.trim() ?? ''}
+							{@const changed =
+								baseDisabled.has(key) === enabled ||
+								!sameLabel(override.name, baseOverrides[key]?.name) ||
+								!sameLabel(override.description, baseOverrides[key]?.description)}
 							<li class="flex items-start justify-between gap-3 py-2 first:pt-0 last:pb-0">
-								<div class="flex min-w-0 flex-col gap-0.5" class:opacity-50={!enabled}>
+								<div class="flex min-w-0 flex-1 flex-col gap-0.5" class:opacity-50={!enabled}>
 									<span class="flex flex-wrap items-center gap-1.5">
 										<span class="font-mono text-xs font-medium text-[var(--color-ink)]">
-											{tool.name}
+											{renamedTo || tool.name}
 										</span>
+										{#if renamedTo && renamedTo !== key}
+											<span
+												class="font-mono text-[11px] text-[var(--color-ink-dim)]"
+												title={`Upstream name: ${key}`}
+											>
+												was {key}
+											</span>
+										{/if}
 										{#if !enabled}
 											<span
 												class="rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-dim)]"
@@ -1028,6 +1131,15 @@
 												unsaved
 											</span>
 										{/if}
+										{#if enabled && collidingNames.has(exposedName(key))}
+											<span
+												class="rounded-md border px-1.5 py-0.5 text-[11px] font-medium"
+												style="border-color: var(--color-state-failed); color: var(--color-state-failed);"
+												title="Another exposed tool already uses this name — one of them would shadow the other."
+											>
+												name taken
+											</span>
+										{/if}
 										{#if enabled && tool.has_output_schema === false}
 											<!-- Mirrors the hint MCP clients show for schema-less tools. The
 											     schema lives in the upstream server's tool definition and is
@@ -1040,11 +1152,52 @@
 											</span>
 										{/if}
 									</span>
-									{#if tool.description}
+									{#if override.description || tool.description}
 										<span class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
-											{tool.description}
+											{override.description || tool.description}
 										</span>
 									{/if}
+
+									{#if editingTool === key}
+										<!-- Label editor. Both fields are optional and independent: clearing one
+										     restores what the upstream declares for it. -->
+										<div class="mt-1.5 flex flex-col gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] p-3">
+											<label class="flex flex-col gap-1">
+												<span class="text-[11px] font-medium text-[var(--color-ink-muted)]">
+													Name
+												</span>
+												<input
+													type="text"
+													value={override.name ?? ''}
+													placeholder={key}
+													spellcheck="false"
+													disabled={toolEditsBlocked}
+													oninput={(e) =>
+														setOverridePending(key, 'name', e.currentTarget.value)}
+													class="rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] px-2 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
+												/>
+											</label>
+											<label class="flex flex-col gap-1">
+												<span class="text-[11px] font-medium text-[var(--color-ink-muted)]">
+													Description
+												</span>
+												<textarea
+													rows="3"
+													value={override.description ?? ''}
+													placeholder={tool.description || "The upstream's description"}
+													disabled={toolEditsBlocked}
+													oninput={(e) =>
+														setOverridePending(key, 'description', e.currentTarget.value)}
+													class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] px-2 py-1.5 text-xs leading-relaxed text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
+												></textarea>
+											</label>
+											<p class="text-[11px] text-[var(--color-ink-dim)]">
+												Leave a field empty to keep the upstream's. A renamed tool answers to
+												its new name only — clients using the old one must be updated.
+											</p>
+										</div>
+									{/if}
+
 									{#if enabled}
 										<div class="mt-1">
 											<ToolRunner
@@ -1055,24 +1208,52 @@
 										</div>
 									{/if}
 								</div>
-								<button
-									type="button"
-									role="switch"
-									aria-checked={enabled}
-									aria-label={`${enabled ? 'Disable' : 'Enable'} ${tool.name}`}
-									title={enabled ? 'Exposed — click to hide from clients' : 'Hidden — click to expose'}
-									disabled={busy || deleting || cloning || applyingTools}
-									onclick={() => toggleToolPending(tool.name, !enabled)}
-									class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 {enabled
-										? 'bg-[var(--color-accent)]'
-										: 'bg-[var(--color-line)]'}"
-								>
-									<span
-										class="inline-block size-4 rounded-full bg-white shadow-sm transition {enabled
-											? 'translate-x-[18px]'
-											: 'translate-x-0.5'}"
-									></span>
-								</button>
+								<div class="flex shrink-0 items-center gap-1.5">
+									<button
+										type="button"
+										aria-expanded={editingTool === key}
+										aria-label={`Edit labels for ${key}`}
+										title="Rename this tool or rewrite its description"
+										disabled={toolEditsBlocked}
+										onclick={() => (editingTool = editingTool === key ? null : key)}
+										class="rounded-md border border-[var(--color-line)] p-1.5 text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50 {editingTool ===
+										key
+											? 'border-[var(--color-accent)] text-[var(--color-accent)]'
+											: ''}"
+									>
+										<svg
+											class="size-3.5"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											aria-hidden="true"
+										>
+											<path d="M12 20h9" />
+											<path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+										</svg>
+									</button>
+									<button
+										type="button"
+										role="switch"
+										aria-checked={enabled}
+										aria-label={`${enabled ? 'Disable' : 'Enable'} ${key}`}
+										title={enabled ? 'Exposed — click to hide from clients' : 'Hidden — click to expose'}
+										disabled={toolEditsBlocked}
+										onclick={() => toggleToolPending(key, !enabled)}
+										class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 {enabled
+											? 'bg-[var(--color-accent)]'
+											: 'bg-[var(--color-line)]'}"
+									>
+										<span
+											class="inline-block size-4 rounded-full bg-white shadow-sm transition {enabled
+												? 'translate-x-[18px]'
+												: 'translate-x-0.5'}"
+										></span>
+									</button>
+								</div>
 							</li>
 						{/each}
 					</ul>
@@ -1081,7 +1262,14 @@
 							class="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[var(--color-accent)] bg-[var(--color-surface-2)] px-4 py-3"
 						>
 							<p class="text-xs text-[var(--color-ink-dim)]">
-								Unsaved tool changes. Applying restarts the server once.
+								{#if collidingNames.size > 0}
+									<span style="color: var(--color-state-failed);">
+										Two exposed tools would share the same name — rename or hide one before
+										applying.
+									</span>
+								{:else}
+									Unsaved tool changes. Applying restarts the server once.
+								{/if}
 							</p>
 							<div class="flex items-center gap-2">
 								<button
@@ -1095,7 +1283,7 @@
 								<button
 									type="button"
 									onclick={applyToolChanges}
-									disabled={applyingTools || busy || deleting || cloning}
+									disabled={toolEditsBlocked || collidingNames.size > 0}
 									class="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
 								>
 									{applyingTools ? 'Applying…' : 'Apply changes'}

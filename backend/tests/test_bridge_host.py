@@ -10,6 +10,7 @@ to an empty list instead of surfacing that error.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch, sentinel
 
 import pytest
@@ -194,7 +195,10 @@ def test_bridge_never_forwards_caller_headers_to_remote_upstream():
     assert transport.forward_incoming_headers is False
 
 
-# --- disabled-tools filtering (issue #105) ------------------------------------
+# --- per-tool policy: hiding (issue #105) + overrides (issue #112) ------------
+#
+# Both ride ONE FastMCP transform built by host._tool_transform, so these tests assert
+# the behaviour clients see rather than the mechanism that produces it.
 
 
 def _upstream_three_tools() -> FastMCP:
@@ -218,11 +222,17 @@ def _upstream_three_tools() -> FastMCP:
     return upstream
 
 
-def _proxy_with_disabled(disabled: list[str]) -> FastMCP:
+def _proxy_with(**policy) -> FastMCP:
+    """A bridge proxy over the three-tool upstream, carrying a per-tool policy
+    (``disabled_tools`` and/or ``tool_overrides``)."""
     with patch.object(
         host, "_build_transport", return_value=FastMCPTransport(_upstream_three_tools())
     ):
-        return host.build_proxy({"command": "ignored", "name": "t", "disabled_tools": disabled})
+        return host.build_proxy({"command": "ignored", "name": "t", **policy})
+
+
+def _proxy_with_disabled(disabled: list[str]) -> FastMCP:
+    return _proxy_with(disabled_tools=disabled)
 
 
 @pytest.mark.asyncio
@@ -256,25 +266,106 @@ async def test_no_disabled_tools_installs_no_filter():
     assert names == {"add", "secret", "echo"}
 
 
-def test_build_proxy_skips_middleware_when_no_disabled_tools():
-    """The middleware is only added when there's something to hide, so an unfiltered
-    server pays nothing. Asserted against the sentinel proxy so add_middleware would
+def test_build_proxy_skips_transform_when_no_tool_policy():
+    """The transform is only added when there's something to apply, so an unmodified
+    server pays nothing. Asserted against the sentinel proxy so add_transform would
     raise if it were called."""
     with (
         patch.object(host, "ProxyClient", autospec=True),
         patch.object(host, "create_proxy", return_value=sentinel.proxy),
     ):
-        # sentinel.proxy has no add_middleware — a call would AttributeError.
+        # sentinel.proxy has no add_transform — a call would AttributeError.
         assert host.build_proxy({"command": "echo", "name": "t"}) is sentinel.proxy
+    # An override map whose entries are all empty is likewise nothing to apply.
+    assert host._tool_transform({"tool_overrides": {"add": {}}}) is None
 
 
-def test_build_proxy_installs_middleware_when_disabled_tools_present():
-    proxy = MagicMock()
-    with (
-        patch.object(host, "ProxyClient", autospec=True),
-        patch.object(host, "create_proxy", return_value=proxy),
-    ):
-        host.build_proxy({"command": "echo", "name": "t", "disabled_tools": ["secret"]})
-    assert proxy.add_middleware.call_count == 1
-    mw = proxy.add_middleware.call_args.args[0]
-    assert isinstance(mw, host.DisabledToolsMiddleware)
+def test_build_proxy_installs_transform_when_tool_policy_present():
+    for policy in ({"disabled_tools": ["secret"]}, {"tool_overrides": {"add": {"name": "sum"}}}):
+        proxy = MagicMock()
+        with (
+            patch.object(host, "ProxyClient", autospec=True),
+            patch.object(host, "create_proxy", return_value=proxy),
+        ):
+            host.build_proxy({"command": "echo", "name": "t", **policy})
+        assert proxy.add_transform.call_count == 1
+        assert isinstance(proxy.add_transform.call_args.args[0], host.ToolTransform)
+
+
+@pytest.mark.asyncio
+async def test_tool_override_renames_and_redescribes():
+    """The operator's replacement name/description is what clients discover — and the
+    tool is callable under the new name, with the upstream's behaviour intact."""
+    proxy = _proxy_with(
+        tool_overrides={"add": {"name": "sum_numbers", "description": "Adds two numbers."}}
+    )
+    async with Client(proxy) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+        assert set(tools) == {"sum_numbers", "secret", "echo"}
+        assert tools["sum_numbers"].description == "Adds two numbers."
+        # The input schema still comes from upstream — only the labels change.
+        assert set(tools["sum_numbers"].inputSchema["properties"]) == {"a", "b"}
+        result = await client.call_tool("sum_numbers", {"a": 2, "b": 3})
+    assert result.data == 5
+
+
+@pytest.mark.asyncio
+async def test_tool_override_fields_are_independent():
+    """Overriding only the description keeps the upstream name (and vice versa), so an
+    operator can fix one without restating the other."""
+    proxy = _proxy_with(
+        tool_overrides={"add": {"description": "Better."}, "echo": {"name": "repeat"}}
+    )
+    async with Client(proxy) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    assert tools["add"].description == "Better."  # renamed nothing
+    assert tools["repeat"].description == "Echo the input."  # kept upstream's description
+
+
+@pytest.mark.asyncio
+async def test_renamed_tool_stops_answering_to_its_upstream_name():
+    """A rename replaces the name rather than aliasing it — the upstream name is gone
+    from every surface, exactly as if the server itself had been rebuilt."""
+    proxy = _proxy_with(tool_overrides={"add": {"name": "sum_numbers"}})
+    async with Client(proxy) as client:
+        with pytest.raises(Exception, match="add"):  # noqa: PT011 — ToolError/McpError
+            await client.call_tool("add", {"a": 1, "b": 2})
+
+
+@pytest.mark.asyncio
+async def test_hiding_wins_over_renaming():
+    """A tool that's both disabled and renamed is simply gone — under either name — so
+    the two controls can't combine into an exposed tool."""
+    proxy = _proxy_with(
+        disabled_tools=["secret"], tool_overrides={"secret": {"name": "internal"}}
+    )
+    async with Client(proxy) as client:
+        names = {t.name for t in await client.list_tools()}
+        assert names == {"add", "echo"}
+        for name in ("secret", "internal"):
+            with pytest.raises(Exception):  # noqa: PT011 — ToolError/McpError
+                await client.call_tool(name, {})
+
+
+@pytest.mark.asyncio
+async def test_override_for_unknown_tool_is_a_no_op():
+    """A stale key — a tool the upstream no longer exposes — must not break the bridge;
+    the operator's other tools keep working while they clean it up."""
+    proxy = _proxy_with(tool_overrides={"ghost": {"name": "casper"}})
+    async with Client(proxy) as client:
+        names = {t.name for t in await client.list_tools()}
+    assert names == {"add", "secret", "echo"}
+
+
+@pytest.mark.asyncio
+async def test_overrides_reach_the_rest_surface():
+    """The REST surface generates its routes and OpenAPI from the same tool list, so a
+    renamed tool is served at its NEW path — one policy, every surface."""
+    proxy = _proxy_with(
+        disabled_tools=["secret"], tool_overrides={"add": {"name": "sum_numbers"}}
+    )
+    routes = host.build_rest_routes(proxy, {"name": "t"})
+    openapi = next(r for r in routes if r.path == "/rest/openapi.json")
+    response = await openapi.endpoint(MagicMock())
+    document = json.loads(response.body)
+    assert set(document["paths"]) == {"/rest/sum_numbers", "/rest/echo"}

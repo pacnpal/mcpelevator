@@ -301,6 +301,9 @@ class ServerUnit:
             "minimal_env": self.spec.minimal_env,
             "oauth": self.spec.oauth,
             "disabled_tools": list(self.spec.disabled_tools or []),
+            "tool_overrides": {
+                k: dict(v) for k, v in (self.spec.tool_overrides or {}).items()
+            },
             "name": self.name,
             **self.exposure,
         }
