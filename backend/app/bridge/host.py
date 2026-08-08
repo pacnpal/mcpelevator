@@ -368,26 +368,8 @@ class _ToolTransform(ToolTransform):
             result.append(self._apply(source, config, rename=target not in taken))
         return result
 
-    async def get_tool(self, name, call_next, *, version=None):
-        # Whoever natively answers to this name wins it — that settles both misrouting
-        # cases (a rename shadowing a live tool, and a stale rename stranding one).
-        direct = await call_next(name, version=version)
-        held = direct is not None and not self._hides(name)
-        original_name = self._name_reverse.get(name, name)
-
-        if original_name != name:  # `name` is some tool's rename target
-            if held:
-                return self._scrub(direct)  # taken: the rename doesn't apply
-            source = await call_next(original_name, version=version)
-            if source is None:
-                # The rename's source is gone; fall back to whatever carries the name.
-                return self._scrub(direct) if direct is not None else None
-            source = self._scrub(source)
-            transformed = self._apply(source, self._transforms[original_name], rename=True)
-            return transformed if transformed.name == name else None
-
-        if direct is None:
-            return None
+    async def _resolve_native(self, direct, name, call_next, version):
+        """Resolve ``name`` as the tool that natively carries it, under its OWN policy."""
         source = self._scrub(direct)
         config = self._transforms.get(name)
         if config is None:
@@ -401,6 +383,33 @@ class _ToolTransform(ToolTransform):
             # but the rest of its policy (hiding, description) still applies.
             return self._apply(source, config, rename=False)
         return self._apply(source, config, rename=True)
+
+    async def get_tool(self, name, call_next, *, version=None):
+        # Whoever natively answers to this name wins it — that settles the misrouting
+        # cases (a rename shadowing a live tool, and a stale rename stranding one).
+        direct = await call_next(name, version=version)
+        original_name = self._name_reverse.get(name, name)
+
+        if original_name != name:  # `name` is some tool's rename target
+            if direct is None or self._hides(name):
+                # The name is free (or its owner is hidden), so the rename may take it —
+                # provided its source is actually there.
+                source = await call_next(original_name, version=version)
+                if source is not None:
+                    source = self._scrub(source)
+                    transformed = self._apply(
+                        source, self._transforms[original_name], rename=True
+                    )
+                    return transformed if transformed.name == name else None
+                if direct is None:
+                    return None
+                # Stale rename. The name reverts to the tool that carries it — under that
+                # tool's own policy, so a HIDDEN one stays refused rather than leaking.
+            else:
+                pass  # taken by a live tool: the rename doesn't apply
+        elif direct is None:
+            return None
+        return await self._resolve_native(direct, name, call_next, version)
 
 
 def _tool_transform(spec: dict) -> ToolTransform:

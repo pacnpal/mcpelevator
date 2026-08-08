@@ -2367,3 +2367,23 @@ def test_auth_provider_change_does_not_restart(session):
     # but a launch-affecting change still does
     service.update_server(session, srv.id, {"args": ["-y", "z"]})
     assert repo.get_server(session, srv.id).config_hash != before
+
+
+def test_tool_overrides_allow_rename_onto_a_hidden_tool_that_keeps_labels(session):
+    """A hidden tool exposes no name even when it keeps labels of its own, so it holds none
+    against a rename — an operator shouldn't have to delete its saved description first."""
+    a = _mk(
+        session,
+        disabled_tools=["b"],
+        tool_overrides={"a": {"name": "b"}, "b": {"description": "kept for later"}},
+    )
+    assert a.tool_overrides == {"a": {"name": "b"}, "b": {"description": "kept for later"}}
+
+
+def test_tool_overrides_reject_an_oversized_description(session):
+    """The whole launch spec rides in ONE environment variable to the bridge; past the
+    kernel's per-string exec limit the process can't start, taking the server offline."""
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={"t": {"description": "x" * 4097}})
+    # The cap is generous enough for any real description.
+    assert _mk(session, tool_overrides={"t": {"description": "x" * 4096}}).tool_overrides

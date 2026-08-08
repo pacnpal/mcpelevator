@@ -548,3 +548,17 @@ async def test_identity_marker_is_scrubbed_without_any_policy():
         served = (await client.list_tools())[0]
     assert host.UPSTREAM_META_KEY not in served.meta
     assert served.meta["keep"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_rename_onto_a_hidden_name_does_not_leak_it():
+    """A stale rename whose target is a HIDDEN tool must not hand that tool back. The name
+    reverts to whoever carries it — under that tool's own policy — so "hidden tools are
+    refused on call" still holds for a client that guesses the name."""
+    proxy = _proxy_with(
+        disabled_tools=["secret"], tool_overrides={"ghost": {"name": "secret"}}
+    )
+    async with Client(proxy) as client:
+        assert {t.name for t in await client.list_tools()} == {"add", "echo"}
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("secret", {})

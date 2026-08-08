@@ -1307,7 +1307,9 @@ def _hash_payload(server: Server) -> dict[str, Any]:
         # the bridge to re-apply it. Normalized (sorted, deduped) so re-submitting the same
         # policy in a different order doesn't perturb the hash.
         "disabled_tools": normalize_disabled_tools(server.disabled_tools),
-        "tool_overrides": normalize_tool_overrides(server.tool_overrides),
+        "tool_overrides": normalize_tool_overrides(
+            server.tool_overrides, server.disabled_tools or []
+        ),
         # OAuth config drives how the bridge authenticates upstream, so it IS part
         # of the launch spec — a change must restart the bridge. (The tokens live in
         # a file store, not the row, so *authenticating* leaves the hash untouched.)
@@ -1564,8 +1566,17 @@ def normalize_disabled_tools(value: Any) -> list[str]:
 # this character class. Renaming is normally used to SHORTEN an unwieldy name anyway.
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
+# A replacement description is prose a model reads on every tools/list, and the whole
+# launch spec (this map included) is handed to the bridge in ONE environment variable —
+# past the kernel's per-string exec limit the process can't start at all, which would take
+# an enabled server offline. Generous for any real description; a novel here would blow the
+# model's context anyway, which is the opposite of what this feature is for.
+_TOOL_DESCRIPTION_MAX = 4096
 
-def normalize_tool_overrides(value: Any) -> dict[str, dict[str, str]]:
+
+def normalize_tool_overrides(
+    value: Any, disabled: Any = ()
+) -> dict[str, dict[str, str]]:
     """Canonicalize the per-server tool overrides (issue #112): a map of UPSTREAM tool name
     -> ``{"name": …, "description": …}``, either field optional.
 
@@ -1624,8 +1635,14 @@ def normalize_tool_overrides(value: Any) -> dict[str, dict[str, str]]:
                 continue
             if not isinstance(field, str):
                 raise ValueError(f"tool_overrides[{tool!r}].{field_name} must be a string")
-            if field.strip():
-                entry[field_name] = field.strip()
+            field = field.strip()
+            if field_name == "description" and len(field) > _TOOL_DESCRIPTION_MAX:
+                raise ValueError(
+                    f"tool_overrides[{tool!r}].description is too long "
+                    f"(max {_TOOL_DESCRIPTION_MAX} characters)"
+                )
+            if field:
+                entry[field_name] = field
         name = entry.get("name")
         if name is not None:
             # `.` and `..` match the charset but are dot-segments: a client resolves
@@ -1648,11 +1665,15 @@ def normalize_tool_overrides(value: Any) -> dict[str, dict[str, str]]:
     # (it's being overridden), so the bridge refuses the rename rather than shadow it — and
     # a policy the bridge silently won't apply is worse than a clear error here. This
     # includes chains (`a`->`b` while `b`->`c`): the bridge decides occupancy from the LIVE
-    # upstream names, where `b` is still `b`, so the chain would no-op. Renaming onto a
-    # HIDDEN tool's name is fine and not caught here — a hidden tool exposes no name, so it
-    # holds none against a rename (the bridge applies that combination).
+    # upstream names, where `b` is still `b`, so the chain would no-op.
+    #
+    # A HIDDEN tool is exempt: it exposes no name, so it holds none against a rename, and
+    # the bridge applies that combination. It stays exempt even when it keeps labels of its
+    # own — an operator shouldn't have to delete a hidden tool's saved description to rename
+    # something onto its freed name.
+    hidden = set(normalize_disabled_tools(list(disabled)))
     for name, tool in renamed_to.items():
-        if name != tool and name in overrides:
+        if name != tool and name in overrides and name not in hidden:
             raise ValueError(f"renaming {tool!r} to {name!r} would collide with that tool")
     return {tool: overrides[tool] for tool in sorted(overrides)}
 
@@ -1733,7 +1754,7 @@ def create_server(
     run_args = normalize_run_args(runner, run_args)
     idle_timeout_s = normalize_idle_timeout(idle_timeout_s)
     disabled_tools = normalize_disabled_tools(disabled_tools)
-    tool_overrides = normalize_tool_overrides(tool_overrides)
+    tool_overrides = normalize_tool_overrides(tool_overrides, disabled_tools)
 
     server = Server(
         id=new_id(),
@@ -1886,7 +1907,9 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         server.run_args = normalize_run_args(server.runner, server.run_args)
         server.idle_timeout_s = normalize_idle_timeout(server.idle_timeout_s)
         server.disabled_tools = normalize_disabled_tools(server.disabled_tools)
-        server.tool_overrides = normalize_tool_overrides(server.tool_overrides)
+        server.tool_overrides = normalize_tool_overrides(
+            server.tool_overrides, server.disabled_tools or []
+        )
     except ValueError:
         session.rollback()
         raise
