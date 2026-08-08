@@ -348,3 +348,21 @@ def test_tool_summary_lifts_the_upstream_name_out_of_meta():
         meta={UPSTREAM_META_KEY: "not-an-object"},
     )
     assert "upstream_name" not in tool_summary(bogus)
+
+
+def test_oversized_launch_spec_fails_legibly(tmp_path):
+    """The spec goes to the bridge in one environment variable, and Linux caps a single
+    exec string at 128 KiB. Without this check the activation dies on an opaque E2BIG and
+    retries itself offline; the operator gets a message naming the cause instead. Covers
+    every contributor to the payload, including the ones with no cap of their own."""
+    server = _server(tmp_path, setup_script="")
+    server.env = {"HUGE": "x" * (129 * 1024)}  # no per-field cap of its own
+    unit = ServerUnit(server)
+    unit.port = 12345
+
+    try:
+        unit._bridge_env(unit._bridge_payload())
+    except Exception as exc:
+        assert "too large" in str(exc)
+    else:
+        raise AssertionError("an oversized spec must not reach create_subprocess_exec")

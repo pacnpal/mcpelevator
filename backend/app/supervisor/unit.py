@@ -28,6 +28,14 @@ from app.runners.docker import DOCKER_BIN, server_label
 from app.supervisor.logbuffer import LogBuffer
 
 
+# The launch spec travels to the bridge in ONE environment variable, and Linux caps a
+# single exec string at 128 KiB (MAX_ARG_STRLEN). Past that, create_subprocess_exec raises
+# E2BIG and the activation just fails its retries with an opaque OS error. Checking here —
+# the one place the spec is serialized — turns that into a legible failure naming the cause,
+# and covers EVERY contributor to the payload (env, setup_script, tool_overrides, args),
+# not only the ones with their own caps.
+_BRIDGE_SPEC_MAX_BYTES = 128 * 1024
+
 _BACKOFF_SECONDS = (2.0, 4.0, 8.0, 16.0)
 _READINESS_RETRY_SECONDS = 2.0
 
@@ -486,9 +494,16 @@ class ServerUnit:
         # child's own env being scrubbed. (The control-plane process's own /proc still exposes an
         # operator-supplied admin token — a same-UID limitation; see docs/security.md.)
         inherited = {k: v for k, v in os.environ.items() if not is_control_plane_secret_env_var(k)}
+        spec = json.dumps(payload)
+        if len(spec.encode()) > _BRIDGE_SPEC_MAX_BYTES:
+            raise _AttemptFailed(
+                f"launch spec is too large to pass to the bridge "
+                f"({len(spec.encode())} bytes; max {_BRIDGE_SPEC_MAX_BYTES}) — "
+                f"shorten the server's env, setup script, or tool overrides"
+            )
         return {
             **inherited,
-            "MCPE_BRIDGE_SPEC": json.dumps(payload),
+            "MCPE_BRIDGE_SPEC": spec,
             "MCPE_BRIDGE_HOST": self.host,
             "MCPE_BRIDGE_PORT": str(self.port),
             "MCPE_DATA_DIR": str(settings.data_dir.resolve()),

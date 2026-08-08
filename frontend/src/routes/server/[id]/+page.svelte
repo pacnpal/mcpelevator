@@ -239,23 +239,17 @@
 		return effectiveOverrides[key]?.name?.trim() || key;
 	}
 
-	// Which rows correspond to a tool the upstream actually has: the discovered ones, plus
-	// the persisted-disabled ones (hidden, so absent from discovery, but really there).
-	const knownTools = $derived(
-		new Set([
-			...(server?.tools ?? []).map((t) => t.upstream_name ?? t.name),
-			...baseDisabled
-		])
-	);
-
+	// Names two exposed tools would both answer to. ADVISORY only: the bridge decides name
+	// ownership against the live tool list and refuses a rename onto a name already taken,
+	// so a collision costs that rename, not the tool — nothing to protect the operator from
+	// by blocking the write. It's counted over DISCOVERED tools only, since a row for a
+	// hidden or stale key can't be confirmed to exist upstream at all; guessing there
+	// produced false collisions that stuck Apply off on unrelated edits.
 	const collidingNames = $derived.by(() => {
+		const discovered = new Set((server?.tools ?? []).map((t) => t.upstream_name ?? t.name));
 		const counts = new Map<string, number>();
 		for (const { key, enabled } of toolRows) {
-			if (!enabled) continue; // a hidden tool occupies no name
-			// A stale override key — one whose tool the upstream no longer exposes — claims
-			// nothing: the bridge refuses a rename whose source isn't there. Counting it
-			// would block Apply on unrelated edits until the operator cleaned it up.
-			if (!knownTools.has(key)) continue;
+			if (!enabled || !discovered.has(key)) continue; // hidden or unconfirmed: claims nothing
 			const name = exposedName(key);
 			counts.set(name, (counts.get(name) ?? 0) + 1);
 		}
@@ -296,7 +290,7 @@
 	}
 
 	async function applyToolChanges() {
-		if (!server || !toolChangesDirty || toolEditsBlocked || collidingNames.size > 0) return;
+		if (!server || !toolChangesDirty || toolEditsBlocked) return;
 		const requestedId = id;
 		const disabled_tools = [...(pendingDisabled ?? baseDisabled)].sort();
 		const tool_overrides = pendingOverrides ?? baseOverrides;
@@ -1146,7 +1140,7 @@
 											<span
 												class="rounded-md border px-1.5 py-0.5 text-[11px] font-medium"
 												style="border-color: var(--color-state-failed); color: var(--color-state-failed);"
-												title="Another exposed tool already uses this name — one of them would shadow the other."
+												title="Another exposed tool already answers to this name, so this rename won't be applied."
 											>
 												name taken
 											</span>
@@ -1275,8 +1269,8 @@
 							<p class="text-xs text-[var(--color-ink-dim)]">
 								{#if collidingNames.size > 0}
 									<span style="color: var(--color-state-failed);">
-										Two exposed tools would share the same name — rename or hide one before
-										applying.
+										Two exposed tools would share the same name — the second rename won't be
+										applied until you change it.
 									</span>
 								{:else}
 									Unsaved tool changes. Applying restarts the server once.
@@ -1294,7 +1288,7 @@
 								<button
 									type="button"
 									onclick={applyToolChanges}
-									disabled={toolEditsBlocked || collidingNames.size > 0}
+									disabled={toolEditsBlocked}
 									class="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
 								>
 									{applyingTools ? 'Applying…' : 'Apply changes'}
