@@ -239,10 +239,23 @@
 		return effectiveOverrides[key]?.name?.trim() || key;
 	}
 
+	// Which rows correspond to a tool the upstream actually has: the discovered ones, plus
+	// the persisted-disabled ones (hidden, so absent from discovery, but really there).
+	const knownTools = $derived(
+		new Set([
+			...(server?.tools ?? []).map((t) => t.upstream_name ?? t.name),
+			...baseDisabled
+		])
+	);
+
 	const collidingNames = $derived.by(() => {
 		const counts = new Map<string, number>();
 		for (const { key, enabled } of toolRows) {
 			if (!enabled) continue; // a hidden tool occupies no name
+			// A stale override key — one whose tool the upstream no longer exposes — claims
+			// nothing: the bridge refuses a rename whose source isn't there. Counting it
+			// would block Apply on unrelated edits until the operator cleaned it up.
+			if (!knownTools.has(key)) continue;
 			const name = exposedName(key);
 			counts.set(name, (counts.get(name) ?? 0) + 1);
 		}
@@ -457,7 +470,9 @@
 	});
 
 	async function doDisconnect() {
-		if (!server || oauthBusy) return;
+		// Disconnecting restarts the server, so it must not race an in-flight tool Apply
+		// (which triggers its own restart) — same reason start/stop/retry/delete are guarded.
+		if (!server || oauthBusy || applyingTools) return;
 		oauthBusy = true;
 		try {
 			const updated = await disconnectOauth(server.id);
@@ -867,7 +882,7 @@
 							<button
 								type="button"
 								onclick={doDisconnect}
-								disabled={oauthBusy}
+								disabled={oauthBusy || applyingTools}
 								class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
 							>
 								Disconnect

@@ -73,9 +73,10 @@ export interface ServerTool {
 	 * Absent on tool lists cached before this field existed. */
 	has_output_schema?: boolean;
 	/** The tool's identity BEFORE any operator rename (`tool_overrides`), stamped by the
-	 * bridge and read back by the discovery probe. Absent unless the tool is renamed —
-	 * then `name` already is the upstream name. Always key per-tool UI state off
-	 * `upstream_name ?? name`: an exposed name is not a stable identity. */
+	 * bridge and read back by the discovery probe. Present only on a renamed tool, where
+	 * `name` is the EXPOSED (renamed) value; absent otherwise, where `name` is already the
+	 * upstream one. Always key per-tool UI state off `upstream_name ?? name` — an exposed
+	 * name is not a stable identity. */
 	upstream_name?: string;
 }
 

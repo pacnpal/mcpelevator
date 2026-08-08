@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
@@ -39,6 +40,7 @@ from fastmcp.server import create_proxy
 from fastmcp.server.dependencies import get_context
 from fastmcp.server.providers.proxy import ProxyClient
 from fastmcp.server.transforms import ToolTransform
+from fastmcp.tools.tool import Tool
 from fastmcp.tools.tool_transform import ToolTransformConfig
 from mcp.types import ClientCapabilities, Root, RootsCapability
 
@@ -298,7 +300,7 @@ class _ToolTransform(ToolTransform):
     # internals (`fn`, `return_type`, `run_in_thread`), which belong to the wrapper.
     _CARRIED_FIELDS = ("icons", "execution")
 
-    def __init__(self, transforms):
+    def __init__(self, transforms: dict[str, ToolTransformConfig]) -> None:
         # Own the reverse map rather than inheriting it: a HIDDEN tool exposes no name, so
         # it must not reserve one. FastMCP's constructor reserves a target for every entry
         # and raises on a duplicate, which made "hide `b`, rename `a` to `b`" — a
@@ -312,7 +314,7 @@ class _ToolTransform(ToolTransform):
             self._name_reverse[config.name or source] = source
 
     @staticmethod
-    def _scrub(tool):
+    def _scrub(tool: Tool) -> Tool:
         """Drop our reserved identity key from an upstream tool (see the class docstring)."""
         meta = tool.meta or {}
         if UPSTREAM_META_KEY not in meta:
@@ -322,7 +324,7 @@ class _ToolTransform(ToolTransform):
         )
 
     @classmethod
-    def _restore(cls, source, transformed):
+    def _restore(cls, source: Tool, transformed: Tool) -> Tool:
         """Carry the parts of the upstream definition the transform dropped."""
         update = {}
         merged = {**(source.meta or {}), **(transformed.meta or {})}
@@ -334,17 +336,17 @@ class _ToolTransform(ToolTransform):
                 update[field] = value
         return transformed.model_copy(update=update) if update else transformed
 
-    def _hides(self, name):
+    def _hides(self, name: str) -> bool:
         config = self._transforms.get(name)
         return config is not None and not config.enabled
 
-    def _renames_to(self, name):
+    def _renames_to(self, name: str) -> str | None:
         """The name this tool would be renamed to, or None if it isn't renamed."""
         config = self._transforms.get(name)
         target = config.name if config is not None else None
         return target if target and target != name else None
 
-    def _apply(self, source, config, *, rename):
+    def _apply(self, source: Tool, config: ToolTransformConfig, *, rename: bool) -> Tool:
         """Apply ``config`` to ``source``; ``rename=False`` drops just the rename, keeping
         the rest of the policy. Refusing a rename must never also un-hide a tool or discard
         its description override."""
@@ -354,7 +356,7 @@ class _ToolTransform(ToolTransform):
             config = ToolTransformConfig(**fields)
         return self._restore(source, config.apply(source))
 
-    async def list_tools(self, tools):
+    async def list_tools(self, tools: Sequence[Tool]) -> Sequence[Tool]:
         sources = [self._scrub(tool) for tool in tools]
         # A hidden tool answers to no name, so it doesn't hold one against a rename.
         taken = {tool.name for tool in sources if not self._hides(tool.name)}
@@ -368,7 +370,9 @@ class _ToolTransform(ToolTransform):
             result.append(self._apply(source, config, rename=target not in taken))
         return result
 
-    async def _resolve_native(self, direct, name, call_next, version):
+    async def _resolve_native(
+        self, direct: Tool, name: str, call_next, version
+    ) -> Tool | None:
         """Resolve ``name`` as the tool that natively carries it, under its OWN policy."""
         source = self._scrub(direct)
         config = self._transforms.get(name)
@@ -384,7 +388,7 @@ class _ToolTransform(ToolTransform):
             return self._apply(source, config, rename=False)
         return self._apply(source, config, rename=True)
 
-    async def get_tool(self, name, call_next, *, version=None):
+    async def get_tool(self, name: str, call_next, *, version=None) -> Tool | None:
         # Whoever natively answers to this name wins it — that settles the misrouting
         # cases (a rename shadowing a live tool, and a stale rename stranding one).
         direct = await call_next(name, version=version)
