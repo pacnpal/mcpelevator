@@ -302,12 +302,20 @@ class _ToolTransform(ToolTransform):
         # and raises on a duplicate, which made "hide `b`, rename `a` to `b`" — a
         # combination the UI and API both accept — a ValueError at proxy build, i.e. a
         # bridge that crash-loops and takes the server offline.
+        #
+        # Only REAL renames are recorded. Mapping an un-renamed tool to itself (FastMCP
+        # does this) is not merely redundant: a key that carries labels but no rename would
+        # overwrite an earlier entry claiming the same name, and since entries arrive
+        # sorted, `a`->`x` alongside a description-only `x` lost its mapping. `list_tools`
+        # would still advertise the renamed `x` while `get_tool("x")` looked for a native
+        # `x` that doesn't exist — advertised and uncallable, the exact split this class
+        # exists to prevent.
         self._transforms = transforms
         self._name_reverse = {}
         for source, config in transforms.items():
-            if not config.enabled:
+            if not config.enabled or not config.name or config.name == source:
                 continue
-            self._name_reverse[config.name or source] = source
+            self._name_reverse[config.name] = source
 
     @staticmethod
     def _scrub(tool: Tool) -> Tool:

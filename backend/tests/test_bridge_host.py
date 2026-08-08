@@ -522,6 +522,23 @@ async def test_hiding_a_tool_frees_its_name_for_a_rename():
 
 
 @pytest.mark.asyncio
+async def test_a_labels_only_key_does_not_swallow_a_rename_onto_its_name():
+    """A rename onto a name held only by a STALE override key must still resolve.
+
+    Both halves of this policy are accepted by the write path: `add` -> `zz` is a rename
+    onto a free name, and the `zz` entry is a description for a tool that isn't there right
+    now (keys are allowed to go stale). The two entries meet in the reverse map, where an
+    un-renamed key used to claim its own name — and since entries arrive sorted, `zz`
+    overwrote the mapping `zz` -> `add` written a moment earlier. tools/list still
+    advertised the renamed `zz` while a call on it went looking for a native `zz`, leaving
+    the tool listed and uncallable."""
+    proxy = _proxy_with(tool_overrides={"add": {"name": "zz"}, "zz": {"description": "stale"}})
+    async with Client(proxy) as client:
+        assert {t.name for t in await client.list_tools()} == {"zz", "secret", "echo"}
+        assert (await client.call_tool("zz", {"a": 1, "b": 2})).data == 3
+
+
+@pytest.mark.asyncio
 async def test_refusing_a_rename_does_not_unhide_the_tool():
     """Hiding wins over renaming — including when the rename is refused because its target
     is taken. Dropping the whole config in that branch would expose a tool the operator
