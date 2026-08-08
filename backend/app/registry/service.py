@@ -22,10 +22,12 @@ from urllib.parse import urlsplit
 
 from sqlmodel import Session
 
+from app.bridge.spec import BRIDGE_SPEC_MAX_BYTES, bridge_payload, oversize, serialize
 from app.config import get_settings
 from app.db import repo
 from app.db.models import RUNNERS, Server
 from app.registry import settings as runtime_settings
+from app.runners import build_spec
 from app.runners import remote as remote_runner
 from app.runners.docker import (
     DOCKER_RUN_VALUE_FLAGS,
@@ -1713,6 +1715,27 @@ def _normalize_setup_script(runner: str, setup_script: str) -> str:
     return setup_script
 
 
+def _require_launchable_spec(server: Server) -> None:
+    """Refuse a config the bridge could never be exec'd with.
+
+    The whole launch spec goes to the bridge in one environment variable; past the kernel's
+    per-string limit the process can't start at all. Checking only at start time would be
+    too late: the reconciler stops the healthy bridge BEFORE starting its replacement, so an
+    accepted-but-unlaunchable config takes the endpoint offline and stays persisted until
+    someone edits it back. Refusing the write turns that outage into a 400. Uses the same
+    payload builder the supervisor does, so the two can't drift."""
+    payload = bridge_payload(
+        build_spec(server), server.name, mcp_http=server.mcp_http, rest_openapi=server.rest_openapi
+    )
+    size = oversize(serialize(payload))
+    if size is not None:
+        raise ValueError(
+            f"this configuration is too large to launch "
+            f"({size} bytes; max {BRIDGE_SPEC_MAX_BYTES}) — "
+            f"shorten the env, setup script, or tool overrides"
+        )
+
+
 @_serialized_write
 def create_server(
     session: Session,
@@ -1935,6 +1958,7 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         server.tool_overrides = normalize_tool_overrides(
             server.tool_overrides, server.disabled_tools or []
         )
+        _require_launchable_spec(server)
     except ValueError:
         session.rollback()
         raise

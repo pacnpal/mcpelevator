@@ -2424,3 +2424,19 @@ def test_tool_overrides_ignore_a_hidden_tools_rename_in_collision_checks(session
     # With both exposed it's a genuine conflict again.
     with pytest.raises(ValueError):
         _mk(session, tool_overrides={"a": {"name": "x"}, "b": {"name": "x"}})
+
+
+def test_update_refuses_a_config_too_large_to_launch(session):
+    """The launch spec goes to the bridge in one environment variable, and past the
+    kernel's per-string limit the process can't start at all. Catching that only at start
+    time is too late: the reconciler stops the healthy bridge BEFORE starting its
+    replacement, so an accepted-but-unlaunchable config takes the endpoint offline and
+    stays persisted. Refusing the write keeps the running server running."""
+    a = _mk(session)
+    before = a.config_hash
+    with pytest.raises(ValueError, match="too large to launch"):
+        service.update_server(session, a.id, {"env": {"HUGE": "x" * (129 * 1024)}})
+    # The rejected write left nothing behind.
+    reloaded = repo.get_server(session, a.id)
+    assert reloaded.config_hash == before
+    assert reloaded.env == {}

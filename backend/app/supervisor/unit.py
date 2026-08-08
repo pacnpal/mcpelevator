@@ -17,6 +17,13 @@ from typing import Optional
 from fastmcp import Client
 
 from app.bridge.host import UPSTREAM_META_KEY
+from app.bridge.spec import (
+    BRIDGE_SPEC_ENV_KEY,
+    BRIDGE_SPEC_MAX_BYTES,
+    bridge_payload,
+    oversize,
+    serialize,
+)
 from app.config import (
     get_settings,
     is_control_plane_env_var,
@@ -27,17 +34,6 @@ from app.runners import build_spec
 from app.runners.docker import DOCKER_BIN, server_label
 from app.supervisor.logbuffer import LogBuffer
 
-
-# The launch spec travels to the bridge in ONE environment variable, and Linux caps a
-# single exec string at 128 KiB (MAX_ARG_STRLEN). Past that, create_subprocess_exec raises
-# E2BIG and the activation just fails its retries with an opaque OS error. Checking here —
-# the one place the spec is serialized — turns that into a legible failure naming the cause,
-# and covers EVERY contributor to the payload (env, setup_script, tool_overrides, args),
-# not only the ones with their own caps.
-# The kernel's limit covers the WHOLE entry — "MCPE_BRIDGE_SPEC=" plus the value plus a
-# terminating NUL — so the value itself has to fit under it with that overhead reserved.
-_BRIDGE_SPEC_ENV_KEY = "MCPE_BRIDGE_SPEC"
-_BRIDGE_SPEC_MAX_BYTES = 128 * 1024 - len(_BRIDGE_SPEC_ENV_KEY) - 2
 
 _BACKOFF_SECONDS = (2.0, 4.0, 8.0, 16.0)
 _READINESS_RETRY_SECONDS = 2.0
@@ -316,21 +312,7 @@ class ServerUnit:
         self._log_task = asyncio.create_task(self._pump_stream(self.proc.stdout))
 
     def _bridge_payload(self) -> dict:
-        return {
-            "command": self.spec.command,
-            "args": self.spec.args,
-            "env": self.spec.env,
-            "cwd": self.spec.cwd,
-            "transport": self.spec.transport,
-            "minimal_env": self.spec.minimal_env,
-            "oauth": self.spec.oauth,
-            "disabled_tools": list(self.spec.disabled_tools or []),
-            "tool_overrides": {
-                k: dict(v) for k, v in (self.spec.tool_overrides or {}).items()
-            },
-            "name": self.name,
-            **self.exposure,
-        }
+        return bridge_payload(self.spec, self.name, **self.exposure)
 
     async def _await_ready(self, attempt: int, max_attempts: int) -> None:
         settings = get_settings()
@@ -497,16 +479,19 @@ class ServerUnit:
         # child's own env being scrubbed. (The control-plane process's own /proc still exposes an
         # operator-supplied admin token — a same-UID limitation; see docs/security.md.)
         inherited = {k: v for k, v in os.environ.items() if not is_control_plane_secret_env_var(k)}
-        spec = json.dumps(payload)
-        if len(spec.encode()) > _BRIDGE_SPEC_MAX_BYTES:
+        spec = serialize(payload)
+        # The registry refuses an oversized spec at write time; this is the backstop for a
+        # row that predates that check or grew through a path that skipped it.
+        size = oversize(spec)
+        if size is not None:
             raise _AttemptFailed(
                 f"launch spec is too large to pass to the bridge "
-                f"({len(spec.encode())} bytes; max {_BRIDGE_SPEC_MAX_BYTES}) — "
+                f"({size} bytes; max {BRIDGE_SPEC_MAX_BYTES}) — "
                 f"shorten the server's env, setup script, or tool overrides"
             )
         return {
             **inherited,
-            _BRIDGE_SPEC_ENV_KEY: spec,
+            BRIDGE_SPEC_ENV_KEY: spec,
             "MCPE_BRIDGE_HOST": self.host,
             "MCPE_BRIDGE_PORT": str(self.port),
             "MCPE_DATA_DIR": str(settings.data_dir.resolve()),
