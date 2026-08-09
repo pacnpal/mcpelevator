@@ -31,12 +31,16 @@ def pin_insert_index(command: str, args: list[str]) -> Optional[int]:
     the original failure (and its hint) in place, while a wrong pin breaks or
     silently misdirects the launch."""
     base = command.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
-    if base not in ("uv", "uv.exe"):
+    if base in ("uvx", "uvx.exe"):
         return 0
-    if args[:2] == ["tool", "run"]:
-        return 2
-    if args[:1] == ["run"]:
-        return 1
+    if base in ("uv", "uv.exe"):
+        if args[:2] == ["tool", "run"]:
+            return 2
+        if args[:1] == ["run"]:
+            return 1
+        return None
+    # An uvx-classified row can carry any executable (Advanced raw config, API);
+    # only the uv/uvx launchers are known to accept --with at all.
     return None
 
 

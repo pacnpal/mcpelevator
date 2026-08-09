@@ -88,6 +88,9 @@ def test_uvx_without_pin_mcp1_stays_passthrough():
         ),
         # No run subcommand: nowhere the pin is valid — argv left untouched.
         ("uv", ["tool", "install", "pkg"], ["tool", "install", "pkg"]),
+        # Only the uv/uvx launchers accept --with; any other executable on an
+        # uvx-classified row (Advanced raw config / API) is left untouched.
+        ("python", ["server.py"], ["server.py"]),
         ("uvx", ["pkg"], ["--with", "mcp<2", "pkg"]),
     ],
 )

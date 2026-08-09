@@ -153,6 +153,11 @@ def test_pin_mcp1_is_refused_where_placement_is_uncertain(session):
     with pytest.raises(ValueError, match="cannot be placed"):
         service.update_server(session, imported.id, {"pin_mcp1": True})
 
+    # A non-uv/uvx executable on an uvx-classified row can't take --with at all.
+    with pytest.raises(ValueError, match="cannot be placed"):
+        _mk(session, name="Raw", runner="uvx", command="python",
+            args=["server.py"], pin_mcp1=True)
+
     # Leading-subcommand uv shapes remain pinnable.
     ok = _mk(session, name="Lead", runner="uvx", command="uv",
              args=["tool", "run", "pkg"], pin_mcp1=True)

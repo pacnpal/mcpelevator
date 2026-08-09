@@ -270,9 +270,12 @@
 
 	const resolvedArgs = $derived(splitLines(argsText));
 
-	// Quote a preview token only if it contains whitespace (shared by both previews below).
+	// Quote a preview token when a POSIX shell would misparse it bare — whitespace
+	// or any character outside the shlex-style safe set (e.g. the `<` in "mcp<2"
+	// is an input redirection unquoted). Shared by both previews below, so copied
+	// commands reproduce the real argv.
 	function quoteIfNeeded(p: string): string {
-		return /\s/.test(p) ? `"${p}"` : p;
+		return /^[A-Za-z0-9_@%+=:,./-]+$/.test(p) ? p : `"${p}"`;
 	}
 
 	// The pin is injected by the backend at launch, not stored in args — mirror
@@ -283,9 +286,13 @@
 	// other uv shape gets no pin at all rather than a guessed placement.
 	function pinInsertIndex(cmd: string, args: string[]): number | null {
 		const base = cmd.trim().replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
-		if (base !== 'uv' && base !== 'uv.exe') return 0;
-		if (args[0] === 'tool' && args[1] === 'run') return 2;
-		if (args[0] === 'run') return 1;
+		if (base === 'uvx' || base === 'uvx.exe') return 0;
+		if (base === 'uv' || base === 'uv.exe') {
+			if (args[0] === 'tool' && args[1] === 'run') return 2;
+			if (args[0] === 'run') return 1;
+			return null;
+		}
+		// Only the uv/uvx launchers are known to accept --with at all.
 		return null;
 	}
 	const previewArgs = $derived.by(() => {
