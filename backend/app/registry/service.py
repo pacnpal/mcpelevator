@@ -29,6 +29,7 @@ from app.db.models import RUNNERS, Server
 from app.registry import settings as runtime_settings
 from app.runners import build_spec
 from app.runners import remote as remote_runner
+from app.runners.uvx import pin_insert_index
 from app.runners.docker import (
     DOCKER_RUN_VALUE_FLAGS,
     is_forbidden_container_env,
@@ -1333,6 +1334,22 @@ def _hash_payload(server: Server) -> dict[str, Any]:
     }
 
 
+def _require_pinnable_uvx(command: str, args) -> None:
+    """Refuse the mcp<2 pin where its placement in the argv is not certain.
+
+    Enabling the toggle on a shape the runner can't safely pin (a ``uv`` launch
+    with leading global options, or no run subcommand) would silently launch the
+    original unpinned argv — the operator flips the recommended fix and nothing
+    changes. Fail the save with the workable alternatives instead."""
+    if pin_insert_index(command, list(args or [])) is None:
+        raise ValueError(
+            'the "Pin mcp SDK < 2" toggle cannot be placed in this uv invocation — '
+            'rewrite the command as "uvx <package>", or lead the arguments with '
+            '"tool run"/"run" (uv global options before the subcommand are not '
+            'supported), or add --with "mcp<2" to the arguments yourself'
+        )
+
+
 def compute_hash(server: Server) -> str:
     return config_hash(_hash_payload(server), salt=_config_hash_salt())
 
@@ -1812,8 +1829,12 @@ def create_server(
     # Extra `docker run` options: validated for docker, forced empty elsewhere.
     run_args = normalize_run_args(runner, run_args)
     # The mcp<2 compatibility pin is a uvx launch-argv concern; forced off for every
-    # other runner (after the docker reclassify above) so a conversion can't carry it.
+    # other runner (after the docker reclassify above) so a conversion can't carry it,
+    # and refused outright where the pin has no certain placement — a toggle that
+    # silently no-ops would send the operator in circles.
     pin_mcp1 = bool(pin_mcp1) and runner == "uvx"
+    if pin_mcp1:
+        _require_pinnable_uvx(command, args)
     idle_timeout_s = normalize_idle_timeout(idle_timeout_s)
     disabled_tools = normalize_disabled_tools(disabled_tools)
     tool_overrides = normalize_tool_overrides(tool_overrides, disabled_tools)
@@ -1972,8 +1993,11 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     # commits this session later.
     try:
         server.run_args = normalize_run_args(server.runner, server.run_args)
-        # uvx-only, matching create: forced off on conversion away from uvx.
+        # uvx-only, matching create: forced off on conversion away from uvx, and
+        # refused where the pin has no certain placement in the launch argv.
         server.pin_mcp1 = bool(server.pin_mcp1) and server.runner == "uvx"
+        if server.pin_mcp1:
+            _require_pinnable_uvx(server.command, server.args)
         server.idle_timeout_s = normalize_idle_timeout(server.idle_timeout_s)
         server.disabled_tools = normalize_disabled_tools(server.disabled_tools)
         server.tool_overrides = normalize_tool_overrides(

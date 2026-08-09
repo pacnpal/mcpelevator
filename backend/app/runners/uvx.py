@@ -14,19 +14,22 @@ from app.runners.base import ProcessSpec, passthrough, register
 PIN_MCP1_ARGS = ["--with", "mcp<2"]
 
 
-def _pin_insert_index(command: str, args: list[str]) -> Optional[int]:
+def pin_insert_index(command: str, args: list[str]) -> Optional[int]:
     """Where the pin belongs in ``args``, or ``None`` when placement is not certain.
 
     ``uvx`` takes ``--with`` as a leading option. This runner also covers imported
     configs launched via ``uv`` (``registry.service._infer_runner``), where
     ``--with`` is only valid AFTER the run subcommand — so the pin is injected
     only when that subcommand LEADS the args (``uv tool run …`` / ``uv run …``),
-    the shapes real imports take. Anything else is left unpinned: with leading
-    global options, telling an option operand from the subcommand (both can be
-    the bare word ``run``) requires uv's full option grammar, and scanning deeper
-    can land the pin inside a child command's own argv — a wrong pin breaks or
-    silently misdirects the launch, while no pin at worst leaves the original
-    failure (and its hint) in place."""
+    the shapes real imports take. Anything else has no certain placement: with
+    leading global options, telling an option operand from the subcommand (both
+    can be the bare word ``run``) requires uv's full option grammar, and scanning
+    deeper can land the pin inside a child command's own argv. The service
+    REFUSES to enable the pin for such shapes (``registry.service``), so the
+    operator learns the limitation at save time; the ``None``-guard in ``build``
+    backstops any legacy row that predates that check — no pin at worst leaves
+    the original failure (and its hint) in place, while a wrong pin breaks or
+    silently misdirects the launch."""
     base = command.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
     if base not in ("uv", "uv.exe"):
         return 0
@@ -43,7 +46,7 @@ def build(server: Server) -> ProcessSpec:
     if server.pin_mcp1:
         # Injected here, not into the stored args: the row keeps exactly what the
         # operator wrote, so the UI's friendly fields (args[0] = package) round-trip.
-        at = _pin_insert_index(spec.command, spec.args)
+        at = pin_insert_index(spec.command, spec.args)
         if at is not None:
             spec = replace(spec, args=[*spec.args[:at], *PIN_MCP1_ARGS, *spec.args[at:]])
     return spec

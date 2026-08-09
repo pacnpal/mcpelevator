@@ -69,6 +69,27 @@ def test_signature_only_counts_toward_the_phase_that_emitted_it():
     assert startup_hint(lines, "uvx") is not None
 
 
+def test_signature_from_an_earlier_attempt_is_not_final_evidence():
+    # Attempt 1 died on the import break, but the FINAL attempt failed for some
+    # other reason — the hint must describe what actually killed the activation.
+    lines = [
+        "[mcpelevator] attempt 1/2: bridge",
+        _MCP2_TRACEBACK_LINE,
+        "[mcpelevator] attempt 2/2: bridge",
+        "[mcpelevator] attempt 2/2: readiness",
+        "something unrelated crashed",
+    ]
+    assert startup_hint(lines, "uvx") is None
+    # When the final attempt DOES carry the signature, the hint fires.
+    lines = [
+        "[mcpelevator] attempt 1/2: bridge",
+        "transient network error",
+        "[mcpelevator] attempt 2/2: bridge",
+        _MCP2_TRACEBACK_LINE,
+    ]
+    assert startup_hint(lines, "uvx") is not None
+
+
 def test_unrecognized_failures_produce_no_hint():
     lines = [
         "Traceback (most recent call last):",

@@ -140,6 +140,25 @@ def test_pin_mcp1_is_uvx_only_and_part_of_the_hash(session):
     assert clone.config_hash == pinned.config_hash
 
 
+def test_pin_mcp1_is_refused_where_placement_is_uncertain(session):
+    # A uv launch with leading global options has no certain pin placement: the
+    # save must fail with guidance, not store a toggle that silently no-ops.
+    with pytest.raises(ValueError, match="cannot be placed"):
+        _mk(session, name="Srv", runner="uvx", command="uv",
+            args=["--directory", "/srv", "tool", "run", "pkg"], pin_mcp1=True)
+
+    # Same on edit: enabling the pin on an unpinnable stored shape is refused.
+    imported = _mk(session, name="Imported", runner="uvx", command="uv",
+                   args=["--directory", "/srv", "tool", "run", "pkg"])
+    with pytest.raises(ValueError, match="cannot be placed"):
+        service.update_server(session, imported.id, {"pin_mcp1": True})
+
+    # Leading-subcommand uv shapes remain pinnable.
+    ok = _mk(session, name="Lead", runner="uvx", command="uv",
+             args=["tool", "run", "pkg"], pin_mcp1=True)
+    assert ok.pin_mcp1 is True
+
+
 def test_setup_script_round_trips_hashes_and_clones(session):
     script = "printf 'installing\\n'\nmkdir -p .cache/setup\n"
     server = _mk(session, setup_script=script)

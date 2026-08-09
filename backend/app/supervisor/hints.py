@@ -72,7 +72,9 @@ _TAIL_LINES = 400
 # shared log so a signature is only credited to the phase that emitted it — a
 # setup script that PRINTS the traceback but succeeds must not put a launch-argv
 # remedy on an unrelated later failure, and vice versa.
-_PHASE_MARKER = re.compile(r"^\[mcpelevator\] attempt \d+/\d+: (setup|bridge|readiness)\b")
+_PHASE_MARKER = re.compile(
+    r"^\[mcpelevator\] attempt (\d+)/\d+: (setup|bridge|readiness)\b"
+)
 
 
 def startup_hint(
@@ -80,19 +82,27 @@ def startup_hint(
 ) -> Optional[str]:
     """Recommendation for a terminally failed activation, from its log tail.
 
-    ``setup_failed`` marks a failure in the setup-script phase, whose environment
-    is separate from the launch argv — remedies differ, and only log lines from
-    the matching phase count as evidence. Lines with no preceding marker (a tail
-    truncated mid-section, or logs from outside a phase) default to the launch
-    side, so the setup remedy always rests on an explicit setup section. Returns
-    ``None`` when nothing recognizable matched — the common case."""
+    Only the FINAL attempt's lines count as evidence: an earlier retry may have
+    failed on the signature while the terminal failure is something else — the
+    hint must describe what actually killed the activation. ``setup_failed``
+    marks a failure in the setup-script phase, whose environment is separate
+    from the launch argv — remedies differ, and only log lines from the matching
+    phase count. Lines with no preceding marker (a tail truncated mid-section,
+    or logs from outside a phase) default to the launch side, so the setup
+    remedy always rests on an explicit setup section. Returns ``None`` when
+    nothing recognizable matched — the common case."""
     wanted = "setup" if setup_failed else "launch"
     phase = "launch"
+    latest_attempt: Optional[int] = None
     relevant: list[str] = []
     for line in list(lines)[-_TAIL_LINES:]:
         marker = _PHASE_MARKER.match(line)
         if marker:
-            phase = "setup" if marker.group(1) == "setup" else "launch"
+            attempt = int(marker.group(1))
+            if latest_attempt is None or attempt > latest_attempt:
+                latest_attempt = attempt
+                relevant.clear()
+            phase = "setup" if marker.group(2) == "setup" else "launch"
             continue
         if phase == wanted:
             relevant.append(line)
