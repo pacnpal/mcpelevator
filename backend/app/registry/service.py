@@ -2088,7 +2088,10 @@ def delete_server(session: Session, server_id: str) -> bool:
 # Node/Python launchers we recognize so the runner badge is meaningful. Anything
 # else is stored as a generic `command` (still launched verbatim).
 _NPX_LAUNCHERS = {"npx", "npx.cmd", "bunx", "pnpm", "node"}
-_UVX_LAUNCHERS = {"uvx", "uv"}
+# .exe basenames included so a Claude-Desktop-on-Windows config imports as the
+# uvx runner (and gets the pin_mcp1 toggle) — _launcher_basename normalizes the
+# path but keeps the suffix, mirroring npx.cmd in _NPX_LAUNCHERS.
+_UVX_LAUNCHERS = {"uvx", "uv", "uvx.exe", "uv.exe"}
 
 
 def _infer_runner(command: str) -> str:

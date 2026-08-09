@@ -35,6 +35,18 @@ def test_mcp2_import_break_on_an_unpinnable_uvx_shape_recommends_the_manual_pin(
     assert '--with "mcp<2"' in hint
 
 
+def test_mcp2_import_break_on_a_non_uv_executable_recommends_an_env_pin():
+    # An arbitrary executable on a uvx-classified row takes neither the toggle
+    # nor any --with argv advice — only its own Python environment can pin.
+    hint = startup_hint(
+        [_MCP2_TRACEBACK_LINE], "uvx", command="python", args=["server.py"]
+    )
+    assert hint is not None
+    assert "Pin mcp SDK < 2" not in hint
+    assert "--with" not in hint
+    assert "environment" in hint
+
+
 def test_mcp2_import_break_on_docker_recommends_an_image_remedy():
     # Only the image controls the container's packages — an env/argv pin can't.
     hint = startup_hint([_MCP2_TRACEBACK_LINE], "docker")

@@ -110,6 +110,14 @@ def test_config_hash_changes_on_edit(session):
     assert after != before
 
 
+def test_windows_uv_launchers_infer_the_uvx_runner():
+    # A Claude-Desktop-on-Windows config launches via uvx.exe / uv.exe (often as
+    # an absolute Windows path); it must import as the uvx runner so the
+    # pin_mcp1 toggle exists for it.
+    assert service._infer_runner("uvx.exe") == "uvx"
+    assert service._infer_runner("C:\\Users\\me\\.local\\bin\\uv.exe") == "uvx"
+
+
 def test_pin_mcp1_is_uvx_only_and_part_of_the_hash(session):
     # Forced off for a non-uvx runner at create.
     npx = _mk(session, pin_mcp1=True)

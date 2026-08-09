@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from typing import Callable, Iterable, Optional, Sequence
 
-from app.runners.uvx import pin_insert_index
+from app.runners.uvx import is_uv_launcher, pin_insert_index
 
 # The mcp 2.0 Python SDK import break, matched by known removed-symbol/module
 # pairs — NOT any ImportError under ``mcp.*``, which would also catch a server
@@ -52,11 +52,19 @@ def _mcp2_hint(runner: str, setup_failed: bool, command: str, args: Sequence[str
                 f"{cause}. Enable the server's \"Pin mcp SDK < 2\" compatibility "
                 "toggle (Edit server) to hold the 1.x line until upstream ships a fix"
             )
+        if is_uv_launcher(command):
+            # An unpinnable uv SHAPE: the argv can be rearranged to take the pin.
+            return (
+                f"{cause}. This launch command's shape can't take the automatic pin — "
+                "add --with \"mcp<2\" after the run subcommand in the server's "
+                "arguments, or rewrite the command as \"uvx <package>\", until "
+                "upstream ships a fix"
+            )
+        # An arbitrary executable on a uvx-classified row: no uv/uvx argv advice
+        # applies — only the environment that executable runs in can hold the pin.
         return (
-            f"{cause}. This launch command's shape can't take the automatic pin — "
-            "add --with \"mcp<2\" after the run subcommand in the server's "
-            "arguments, or rewrite the command as \"uvx <package>\", until "
-            "upstream ships a fix"
+            f"{cause}. Pin mcp<2 in the Python environment this command runs in "
+            "until upstream ships a fix"
         )
     if runner == "docker":
         # Only the image selects what's installed inside the container; a host-side

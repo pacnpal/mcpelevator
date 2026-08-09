@@ -14,6 +14,19 @@ from app.runners.base import ProcessSpec, passthrough, register
 PIN_MCP1_ARGS = ["--with", "mcp<2"]
 
 
+def _launcher_base(command: str) -> str:
+    return command.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def is_uv_launcher(command: str) -> bool:
+    """Whether the command is the uv/uvx launcher itself (any path, ``.exe`` or
+    not) — the only executables that can accept the pin's ``--with`` at all.
+    Distinguishes an unpinnable uv SHAPE (fixable by rearranging the argv) from
+    an arbitrary executable on a uvx-classified row (where argv advice is wrong
+    and only the executable's own Python environment can hold the pin)."""
+    return _launcher_base(command) in ("uvx", "uvx.exe", "uv", "uv.exe")
+
+
 def pin_insert_index(command: str, args: list[str]) -> Optional[int]:
     """Where the pin belongs in ``args``, or ``None`` when placement is not certain.
 
@@ -30,7 +43,7 @@ def pin_insert_index(command: str, args: list[str]) -> Optional[int]:
     backstops any legacy row that predates that check — no pin at worst leaves
     the original failure (and its hint) in place, while a wrong pin breaks or
     silently misdirects the launch."""
-    base = command.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
+    base = _launcher_base(command)
     if base in ("uvx", "uvx.exe"):
         return 0
     if base in ("uv", "uv.exe"):
