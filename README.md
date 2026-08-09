@@ -28,7 +28,7 @@ A reconciler converges running processes to the desired state in SQLite (Kuberne
 
 Add a server, press start, copy the URL. The dashboard supervises each one — live state, per-server errors, and a copy menu for the endpoint.
 
-![Servers dashboard — Memory and Time running, Filesystem and a remote proxy failed with inline errors, one stopped, each with runner badge and copy/start/stop controls](docs/screenshots/servers.png)
+![Servers dashboard — Memory, Filesystem, Time and a remote proxy running, one stopped, each with runner badge and copy/start/stop controls](docs/screenshots/servers.png)
 
 <table>
   <tr>

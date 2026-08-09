@@ -7,12 +7,12 @@
 # Shots with a `height:` are clipped to that viewport; shots without one capture
 # the full page. `--retina` doubles every dimension for crisp 2x output.
 
-# Dashboard — the hero shot: running / failed / stopped servers with live state.
+# Dashboard — the hero shot: running / stopped servers with live state.
 - output: docs/screenshots/servers.png
   url: http://localhost:8080/
   width: 1440
   wait_for: |
-    document.body.innerText.includes('Upstream Weather') &&
+    document.body.innerText.includes('HF.co') &&
     !document.body.innerText.includes('Starting')
   wait: 500
 
@@ -78,6 +78,6 @@
   url: http://localhost:8080/
   width: 390
   wait_for: |
-    document.body.innerText.includes('Upstream Weather') &&
+    document.body.innerText.includes('HF.co') &&
     !document.body.innerText.includes('Starting')
   wait: 500
