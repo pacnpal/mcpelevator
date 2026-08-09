@@ -34,10 +34,39 @@ def test_mcp2_import_break_on_other_runners_recommends_an_env_pin():
 def test_mcp2_import_break_during_setup_targets_the_setup_script():
     # The setup script runs in its own shell: a uvx launch-argv pin can't reach
     # it, so even a uvx server must get the setup-side remedy for this phase.
-    hint = startup_hint([_MCP2_TRACEBACK_LINE], "uvx", setup_failed=True)
+    hint = startup_hint(
+        ["[mcpelevator] attempt 1/1: setup", _MCP2_TRACEBACK_LINE],
+        "uvx",
+        setup_failed=True,
+    )
     assert hint is not None
     assert "setup script" in hint
     assert "toggle" not in hint
+
+
+def test_signature_only_counts_toward_the_phase_that_emitted_it():
+    # A setup script that PRINTS the traceback but succeeds, followed by an
+    # unrelated launch failure: the launch-side scan must not credit the
+    # setup-emitted line (the toggle can't change the setup shell — and the
+    # terminal failure isn't this signature at all).
+    lines = [
+        "[mcpelevator] attempt 1/1: setup",
+        _MCP2_TRACEBACK_LINE,
+        "[mcpelevator] attempt 1/1: bridge",
+        "[mcpelevator] attempt 1/1: readiness",
+        "something unrelated crashed",
+    ]
+    assert startup_hint(lines, "uvx") is None
+    # And the mirror: a bridge-emitted signature is not setup evidence.
+    lines = [
+        "[mcpelevator] attempt 1/1: setup",
+        "setup output",
+        "[mcpelevator] attempt 1/1: bridge",
+        _MCP2_TRACEBACK_LINE,
+    ]
+    assert startup_hint(lines, "uvx", setup_failed=True) is None
+    # The same bridge-emitted signature IS launch evidence.
+    assert startup_hint(lines, "uvx") is not None
 
 
 def test_unrecognized_failures_produce_no_hint():

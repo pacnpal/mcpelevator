@@ -58,6 +58,23 @@ def test_uvx_without_pin_mcp1_stays_passthrough():
     assert build_spec(s).args == ["mcp-server-time"]
 
 
+@pytest.mark.parametrize(
+    ("command", "args", "expected"),
+    [
+        # A `uv` launcher (imported configs classify it as the uvx runner) only
+        # accepts --with AFTER the subcommand words; leading placement is a
+        # launcher parse error.
+        ("uv", ["tool", "run", "pkg"], ["tool", "run", "--with", "mcp<2", "pkg"]),
+        ("uv", ["run", "pkg"], ["run", "--with", "mcp<2", "pkg"]),
+        ("/usr/local/bin/uv", ["tool", "run", "pkg"], ["tool", "run", "--with", "mcp<2", "pkg"]),
+        ("uvx", ["pkg"], ["--with", "mcp<2", "pkg"]),
+    ],
+)
+def test_uvx_pin_mcp1_places_the_pin_after_uv_subcommands(command, args, expected):
+    s = _server(runner="uvx", command=command, args=args, pin_mcp1=True)
+    assert build_spec(s).args == expected
+
+
 def test_docker_runner_builds_hardened_spec():
     s = _server(
         runner="docker",

@@ -67,6 +67,13 @@ _SIGNATURES: list[tuple[re.Pattern[str], Callable[[str, bool], str]]] = [
 # bounded tail keeps the scan cheap even against a full 2000-line buffer.
 _TAIL_LINES = 400
 
+# The unit's own phase markers (``ServerUnit`` logs one before each phase's
+# output: "[mcpelevator] attempt N/M: setup|bridge|readiness"). They section the
+# shared log so a signature is only credited to the phase that emitted it — a
+# setup script that PRINTS the traceback but succeeds must not put a launch-argv
+# remedy on an unrelated later failure, and vice versa.
+_PHASE_MARKER = re.compile(r"^\[mcpelevator\] attempt \d+/\d+: (setup|bridge|readiness)\b")
+
 
 def startup_hint(
     lines: Iterable[str], runner: str, *, setup_failed: bool = False
@@ -74,10 +81,22 @@ def startup_hint(
     """Recommendation for a terminally failed activation, from its log tail.
 
     ``setup_failed`` marks a failure in the setup-script phase, whose environment
-    is separate from the launch argv — remedies differ. Returns ``None`` when
-    nothing recognizable matched — the common case."""
-    tail = list(lines)[-_TAIL_LINES:]
+    is separate from the launch argv — remedies differ, and only log lines from
+    the matching phase count as evidence. Lines with no preceding marker (a tail
+    truncated mid-section, or logs from outside a phase) default to the launch
+    side, so the setup remedy always rests on an explicit setup section. Returns
+    ``None`` when nothing recognizable matched — the common case."""
+    wanted = "setup" if setup_failed else "launch"
+    phase = "launch"
+    relevant: list[str] = []
+    for line in list(lines)[-_TAIL_LINES:]:
+        marker = _PHASE_MARKER.match(line)
+        if marker:
+            phase = "setup" if marker.group(1) == "setup" else "launch"
+            continue
+        if phase == wanted:
+            relevant.append(line)
     for pattern, hint in _SIGNATURES:
-        if any(pattern.search(line) for line in tail):
+        if any(pattern.search(line) for line in relevant):
             return hint(runner, setup_failed)
     return None
