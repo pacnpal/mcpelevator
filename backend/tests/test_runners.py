@@ -74,6 +74,13 @@ def test_uvx_without_pin_mcp1_stays_passthrough():
             ["--directory", "/srv", "tool", "run", "pkg"],
             ["--directory", "/srv", "tool", "run", "--with", "mcp<2", "pkg"],
         ),
+        # A global option's operand may be the bare word "run"; the `tool run`
+        # pair (scanned first) still wins over that lone token.
+        (
+            "uv",
+            ["--allow-insecure-host", "run", "tool", "run", "pkg"],
+            ["--allow-insecure-host", "run", "tool", "run", "--with", "mcp<2", "pkg"],
+        ),
         # No run subcommand: nowhere the pin is valid — argv left untouched.
         ("uv", ["tool", "install", "pkg"], ["tool", "install", "pkg"]),
         ("uvx", ["pkg"], ["--with", "mcp<2", "pkg"]),

@@ -28,9 +28,17 @@ def _pin_insert_index(command: str, args: list[str]) -> Optional[int]:
     base = command.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
     if base not in ("uv", "uv.exe"):
         return 0
+    # The `tool run` pair is scanned for FIRST, across the whole argv: a global
+    # option's operand can legitimately be the bare word "run" (e.g.
+    # `uv --allow-insecure-host run tool run pkg`), and the pair is a far
+    # stronger signal than a lone token. Only when no pair exists does the first
+    # standalone "run" count. (Full uv option-grammar parsing is deliberately
+    # out of scope — an operand literally named "run" before a bare `run`
+    # subcommand stays ambiguous and lands on the operand; accepted.)
     for i, arg in enumerate(args):
         if arg == "tool" and i + 1 < len(args) and args[i + 1] == "run":
             return i + 2
+    for i, arg in enumerate(args):
         if arg == "run":
             return i + 1
     return None

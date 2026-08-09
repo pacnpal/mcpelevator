@@ -276,10 +276,26 @@
 	}
 
 	// The pin is injected by the backend at launch, not stored in args — mirror
-	// that here so "Will run" shows the real argv.
-	const previewArgs = $derived(
-		runner === 'uvx' && pinMcp1 ? ['--with', 'mcp<2', ...resolvedArgs] : resolvedArgs
-	);
+	// that here so "Will run" shows the real argv. This mirrors the backend's
+	// insertion rules (runners/uvx.py _pin_insert_index): plain uvx takes --with
+	// leading, but an imported server may keep command "uv", where the pin is
+	// only valid after the located `tool run` / `run` subcommand — and a uv
+	// invocation with no run subcommand gets no pin at all.
+	function pinInsertIndex(cmd: string, args: string[]): number | null {
+		const base = cmd.trim().replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+		if (base !== 'uv' && base !== 'uv.exe') return 0;
+		for (let i = 0; i + 1 < args.length; i++) {
+			if (args[i] === 'tool' && args[i + 1] === 'run') return i + 2;
+		}
+		const run = args.indexOf('run');
+		return run === -1 ? null : run + 1;
+	}
+	const previewArgs = $derived.by(() => {
+		if (runner !== 'uvx' || !pinMcp1) return resolvedArgs;
+		const at = pinInsertIndex(command, resolvedArgs);
+		if (at === null) return resolvedArgs;
+		return [...resolvedArgs.slice(0, at), '--with', 'mcp<2', ...resolvedArgs.slice(at)];
+	});
 	const previewCommand = $derived(
 		[command, ...previewArgs].filter((p) => p.length > 0).map(quoteIfNeeded).join(' ')
 	);
