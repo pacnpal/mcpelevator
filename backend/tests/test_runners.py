@@ -67,6 +67,15 @@ def test_uvx_without_pin_mcp1_stays_passthrough():
         ("uv", ["tool", "run", "pkg"], ["tool", "run", "--with", "mcp<2", "pkg"]),
         ("uv", ["run", "pkg"], ["run", "--with", "mcp<2", "pkg"]),
         ("/usr/local/bin/uv", ["tool", "run", "pkg"], ["tool", "run", "--with", "mcp<2", "pkg"]),
+        # Global options may precede the subcommand (uv [OPTIONS] <COMMAND>);
+        # the pin still lands after `tool run`.
+        (
+            "uv",
+            ["--directory", "/srv", "tool", "run", "pkg"],
+            ["--directory", "/srv", "tool", "run", "--with", "mcp<2", "pkg"],
+        ),
+        # No run subcommand: nowhere the pin is valid — argv left untouched.
+        ("uv", ["tool", "install", "pkg"], ["tool", "install", "pkg"]),
         ("uvx", ["pkg"], ["--with", "mcp<2", "pkg"]),
     ],
 )
