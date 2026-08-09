@@ -17,7 +17,9 @@ that can't work.
 from __future__ import annotations
 
 import re
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Sequence
+
+from app.runners.uvx import pin_insert_index
 
 # The mcp 2.0 Python SDK import break, matched by known removed-symbol/module
 # pairs — NOT any ImportError under ``mcp.*``, which would also catch a server
@@ -28,7 +30,7 @@ _MCP2_IMPORT = re.compile(
 )
 
 
-def _mcp2_hint(runner: str, setup_failed: bool) -> str:
+def _mcp2_hint(runner: str, setup_failed: bool, command: str, args: Sequence[str]) -> str:
     cause = (
         "the upstream server crashed importing the Python mcp SDK — "
         "it looks incompatible with the mcp 2.x line"
@@ -41,9 +43,20 @@ def _mcp2_hint(runner: str, setup_failed: bool) -> str:
             "script installs the SDK until upstream ships a fix"
         )
     if runner == "uvx":
+        # Only recommend the toggle where the service would actually accept it —
+        # the pin needs a certain placement (see registry._require_pinnable_uvx);
+        # for other shapes, point at the manual/rewrite alternatives instead of
+        # an action whose save is refused.
+        if pin_insert_index(command, list(args)) is not None:
+            return (
+                f"{cause}. Enable the server's \"Pin mcp SDK < 2\" compatibility "
+                "toggle (Edit server) to hold the 1.x line until upstream ships a fix"
+            )
         return (
-            f"{cause}. Enable the server's \"Pin mcp SDK < 2\" compatibility "
-            "toggle (Edit server) to hold the 1.x line until upstream ships a fix"
+            f"{cause}. This launch command's shape can't take the automatic pin — "
+            "add --with \"mcp<2\" after the run subcommand in the server's "
+            "arguments, or rewrite the command as \"uvx <package>\", until "
+            "upstream ships a fix"
         )
     if runner == "docker":
         # Only the image selects what's installed inside the container; a host-side
@@ -58,8 +71,10 @@ def _mcp2_hint(runner: str, setup_failed: bool) -> str:
     )
 
 
-# (signature, (runner, setup_failed) -> hint) — first match over the log tail wins.
-_SIGNATURES: list[tuple[re.Pattern[str], Callable[[str, bool], str]]] = [
+# (signature, (runner, setup_failed, command, args) -> hint) — first match over
+# the log tail wins. Hints see the launch shape so a recommendation is only ever
+# an action the operator can actually take on THIS server.
+_SIGNATURES: list[tuple[re.Pattern[str], Callable[[str, bool, str, Sequence[str]], str]]] = [
     (_MCP2_IMPORT, _mcp2_hint),
 ]
 
@@ -83,7 +98,12 @@ _PHASE_MARKER = re.compile(
 
 
 def startup_hint(
-    lines: Iterable[str], runner: str, *, setup_failed: bool = False
+    lines: Iterable[str],
+    runner: str,
+    *,
+    setup_failed: bool = False,
+    command: str = "",
+    args: Sequence[str] = (),
 ) -> Optional[str]:
     """Recommendation for a terminally failed activation, from its log tail.
 
@@ -113,5 +133,5 @@ def startup_hint(
             relevant.append(line)
     for pattern, hint in _SIGNATURES:
         if any(pattern.search(line) for line in relevant):
-            return hint(runner, setup_failed)
+            return hint(runner, setup_failed, command, args)
     return None

@@ -11,9 +11,28 @@ _MCP2_TRACEBACK_LINE = (
 
 
 def test_mcp2_import_break_on_uvx_recommends_the_pin_toggle():
-    hint = startup_hint(["[mcpelevator] attempt 1/1: readiness", _MCP2_TRACEBACK_LINE], "uvx")
+    hint = startup_hint(
+        ["[mcpelevator] attempt 1/1: readiness", _MCP2_TRACEBACK_LINE],
+        "uvx",
+        command="uvx",
+        args=["mcp-server-time"],
+    )
     assert hint is not None
     assert "Pin mcp SDK < 2" in hint
+
+
+def test_mcp2_import_break_on_an_unpinnable_uvx_shape_recommends_the_manual_pin():
+    # The service refuses the toggle for shapes with no certain pin placement —
+    # the hint must not direct the operator to an action whose save is rejected.
+    hint = startup_hint(
+        [_MCP2_TRACEBACK_LINE],
+        "uvx",
+        command="uv",
+        args=["--directory", "/srv", "tool", "run", "pkg"],
+    )
+    assert hint is not None
+    assert "Pin mcp SDK < 2" not in hint
+    assert '--with "mcp<2"' in hint
 
 
 def test_mcp2_import_break_on_docker_recommends_an_image_remedy():

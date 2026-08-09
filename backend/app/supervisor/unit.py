@@ -238,7 +238,11 @@ class ServerUnit:
         # in "starting" with its port unreleased).
         try:
             hint = startup_hint(
-                self.logs.lines, self.runner, setup_failed=failure.startswith("setup ")
+                self.logs.lines,
+                self.runner,
+                setup_failed=failure.startswith("setup "),
+                command=self.spec.command,
+                args=self.spec.args,
             )
         except Exception:
             return failure
