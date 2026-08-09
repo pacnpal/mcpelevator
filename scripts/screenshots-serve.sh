@@ -66,7 +66,10 @@ seed() { curl -fsS -X POST "${BASE}/api/servers" -H 'content-type: application/j
 # fail (bad path / unresolvable host -> Failed), and one left disabled (Stopped).
 seed '{"name":"Memory","runner":"npx","command":"npx","args":["-y","@modelcontextprotocol/server-memory"],"enabled":true}'
 seed '{"name":"Filesystem","runner":"npx","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/data"],"enabled":true}'
-seed '{"name":"Time","runner":"uvx","command":"uvx","args":["mcp-server-time"],"enabled":true}'
+# mcp-server-time declares mcp>=1.23.0, and the mcp 2.0.0 SDK moved McpError out of
+# mcp.shared.exceptions — an unconstrained uvx cold-resolve picks 2.0 and dies at import,
+# so hold the demo seed to the 1.x line until upstream ships a 2.0-compatible release.
+seed '{"name":"Time","runner":"uvx","command":"uvx","args":["--with","mcp<2","mcp-server-time"],"enabled":true}'
 seed '{"name":"Sequential Thinking","runner":"npx","command":"npx","args":["-y","@modelcontextprotocol/server-sequential-thinking"],"enabled":false}'
 seed '{"name":"Upstream Weather","runner":"remote","command":"https://weather.example.com/mcp","args":["streamable-http"],"env":{"Authorization":"Bearer demo-token"},"enabled":true}'
 
