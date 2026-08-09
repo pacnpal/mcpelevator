@@ -62,8 +62,8 @@ curl -fsS "${BASE}/api/health" >/dev/null || { echo "backend never came up" >&2;
 
 echo "==> Seeding demo servers"
 seed() { curl -fsS -X POST "${BASE}/api/servers" -H 'content-type: application/json' -d "$1" >/dev/null; }
-# A deliberate mix: two that start cleanly (running), one local + one remote that
-# fail (bad path / unresolvable host -> Failed), and one left disabled (Stopped).
+# A deliberate mix: four that start cleanly (running) — two npx, one uvx, one
+# remote — and one left disabled (Stopped).
 seed '{"name":"Memory","runner":"npx","command":"npx","args":["-y","@modelcontextprotocol/server-memory"],"enabled":true}'
 seed '{"name":"Filesystem","runner":"npx","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."],"enabled":true}'
 # mcp-server-time declares mcp>=1.23.0, and the mcp 2.0.0 SDK moved McpError out of
@@ -86,8 +86,8 @@ for _ in $(seq 1 90); do
   esac
 done
 
-# The README captions describe an exact mix ("2 of 5 running": Memory + Time up,
-# Filesystem + Upstream Weather failed, Sequential Thinking stopped). Fail loudly
+# The README captions describe an exact mix ("4 of 5 running": Memory, Filesystem,
+# Time + HF.co up, Sequential Thinking stopped). Fail loudly
 # rather than let the workflow commit a dashboard that no longer matches — e.g. a
 # broken package, or the settle loop timing out with a server still "starting".
 expect() {
