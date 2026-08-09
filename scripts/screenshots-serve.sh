@@ -98,8 +98,8 @@ expect() {
 }
 expect memory running
 expect time running
-expect filesystem failed
+expect filesystem running
 expect sequential-thinking stopped
-expect upstream-weather failed
+expect hf-co runnning
 
 echo "==> Backend ready at ${BASE} (states: ${states})"
