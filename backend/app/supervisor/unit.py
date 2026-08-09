@@ -232,10 +232,16 @@ class ServerUnit:
         # attempt may succeed and a recommendation would just be noise. Setup
         # failures carry their phase in the message (every _run_setup failure
         # string starts with "setup ") — that phase runs in its own shell, so
-        # launch-argv remedies don't apply to it.
-        hint = startup_hint(
-            self.logs.lines, self.runner, setup_failed=failure.startswith("setup ")
-        )
+        # launch-argv remedies don't apply to it. Best-effort decoration over
+        # UNTRUSTED child output: any failure here must never break failure
+        # reporting itself (an exception on this path would leave the unit stuck
+        # in "starting" with its port unreleased).
+        try:
+            hint = startup_hint(
+                self.logs.lines, self.runner, setup_failed=failure.startswith("setup ")
+            )
+        except Exception:
+            return failure
         return f"{failure} (hint: {hint})" if hint else failure
 
     async def _run_attempt(self, attempt: int, max_attempts: int) -> tuple[bool, int]:

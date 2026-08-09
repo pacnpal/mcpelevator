@@ -3,6 +3,7 @@
 	import RunnerBadge from './RunnerBadge.svelte';
 	import { getAuthStatus, getSettings } from '$lib/api';
 	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '$lib/remote';
+	import { quoteIfNeeded, withPin } from '$lib/uvxPin';
 	import type { Runner, ServerAuthProvider, ServerCreate } from '$lib/types';
 
 	type Mode = 'create' | 'edit';
@@ -270,37 +271,9 @@
 
 	const resolvedArgs = $derived(splitLines(argsText));
 
-	// Quote a preview token when a POSIX shell would misparse it bare — whitespace
-	// or any character outside the shlex-style safe set (e.g. the `<` in "mcp<2"
-	// is an input redirection unquoted). Shared by both previews below, so copied
-	// commands reproduce the real argv.
-	function quoteIfNeeded(p: string): string {
-		return /^[A-Za-z0-9_@%+=:,./-]+$/.test(p) ? p : `"${p}"`;
-	}
-
 	// The pin is injected by the backend at launch, not stored in args — mirror
-	// that here so "Will run" shows the real argv. This mirrors the backend's
-	// insertion rules (runners/uvx.py _pin_insert_index): plain uvx takes --with
-	// leading, and an imported server keeping command "uv" is pinned only when
-	// its run subcommand LEADS the args (`uv tool run …` / `uv run …`); any
-	// other uv shape gets no pin at all rather than a guessed placement.
-	function pinInsertIndex(cmd: string, args: string[]): number | null {
-		const base = cmd.trim().replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
-		if (base === 'uvx' || base === 'uvx.exe') return 0;
-		if (base === 'uv' || base === 'uv.exe') {
-			if (args[0] === 'tool' && args[1] === 'run') return 2;
-			if (args[0] === 'run') return 1;
-			return null;
-		}
-		// Only the uv/uvx launchers are known to accept --with at all.
-		return null;
-	}
-	const previewArgs = $derived.by(() => {
-		if (runner !== 'uvx' || !pinMcp1) return resolvedArgs;
-		const at = pinInsertIndex(command, resolvedArgs);
-		if (at === null) return resolvedArgs;
-		return [...resolvedArgs.slice(0, at), '--with', 'mcp<2', ...resolvedArgs.slice(at)];
-	});
+	// that here (shared $lib/uvxPin logic) so "Will run" shows the real argv.
+	const previewArgs = $derived(withPin(command, resolvedArgs, runner === 'uvx' && pinMcp1));
 	const previewCommand = $derived(
 		[command, ...previewArgs].filter((p) => p.length > 0).map(quoteIfNeeded).join(' ')
 	);

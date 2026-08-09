@@ -72,8 +72,13 @@ _TAIL_LINES = 400
 # shared log so a signature is only credited to the phase that emitted it — a
 # setup script that PRINTS the traceback but succeeds must not put a launch-argv
 # remedy on an unrelated later failure, and vice versa.
+# The attempt number is bounded (real budgets are single digits): a marker-SHAPED
+# line in untrusted child output carrying thousands of digits must fall through as
+# ordinary output, not reach ``int()`` — CPython caps int-from-str conversion, so
+# an unbounded group would raise and (via the unit's failure path) could block the
+# activation from converging to "failed".
 _PHASE_MARKER = re.compile(
-    r"^\[mcpelevator\] attempt (\d+)/\d+: (setup|bridge|readiness)\b"
+    r"^\[mcpelevator\] attempt (\d{1,9})/\d+: (setup|bridge|readiness)\b"
 )
 
 

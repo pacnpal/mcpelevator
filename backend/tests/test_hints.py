@@ -106,3 +106,16 @@ def test_unrecognized_failures_produce_no_hint():
 def test_signature_is_found_within_the_scanned_tail():
     lines = ["noise"] * 300 + [_MCP2_TRACEBACK_LINE] + ["noise"] * 50
     assert startup_hint(lines, "uvx") is not None
+
+
+def test_marker_shaped_child_output_with_huge_attempt_number_is_ignored():
+    # Child output is untrusted: a marker-SHAPED line with thousands of digits
+    # must fall through as ordinary output (never reach int(), which CPython
+    # caps for str conversion) — and must not disturb real-marker sectioning.
+    forged = f"[mcpelevator] attempt {'9' * 5000}/1: bridge"
+    lines = [
+        "[mcpelevator] attempt 1/1: bridge",
+        forged,
+        _MCP2_TRACEBACK_LINE,
+    ]
+    assert startup_hint(lines, "uvx") is not None
