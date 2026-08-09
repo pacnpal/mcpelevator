@@ -100,6 +100,6 @@ expect memory running
 expect time running
 expect filesystem running
 expect sequential-thinking stopped
-expect hf-co runnning
+expect hf-co running
 
 echo "==> Backend ready at ${BASE} (states: ${states})"
