@@ -61,3 +61,34 @@ vulnerabilities:
       upstream-built docker-ce-cli binary; fixed only in Go 1.25.12/1.26.5
       (2026-07-08), awaiting a docker-ce-cli rebuild. The docker runner is
       opt-in and disabled by default.
+
+  # Two packages VENDORED INSIDE pip in the python:3.14-slim base image
+  # (site-packages/pip/_vendor/ + the ensurepip-bundled pip wheel). Trivy reads
+  # them out of pip's _vendor/vendor.txt and reports them with no per-file
+  # package path, so these entries cannot be narrowed with `paths` — the id +
+  # expiry is as tight as the scanner allows. The "fixed" versions Trivy names
+  # exist only as standalone PyPI releases: the newest published pip (26.2.1,
+  # checked 2026-08-09) still vendors the flagged versions, so there is nothing
+  # to upgrade to — remediation is upstream pip re-vendoring (or a base-image
+  # bump that carries such a pip). The control plane itself never imports
+  # either copy: dependency management in-image is uv/uvx, and pip is kept only
+  # for MCP servers that shell out to it.
+  #
+  # Re-triage when these expire: if a pip that vendors msgpack >=1.2.1 /
+  # setuptools >=78.1.1 is out, drop the entries and bump the base image (or
+  # add `pip install -U pip` to the Dockerfile); if not, confirm and extend.
+  - id: GHSA-6v7p-g79w-8964
+    expired_at: 2026-10-13
+    statement: >-
+      msgpack 1.1.2 vendored inside pip (python:3.14-slim base); an
+      out-of-bounds read/crash on Unpacker reuse, reachable only through pip's
+      own local HTTP-cache deserialization (CacheControl), not through the
+      running control plane. Latest pip still vendors 1.1.2; no fixed pip
+      exists to install.
+  - id: CVE-2025-47273
+    expired_at: 2026-10-13
+    statement: >-
+      setuptools 70.3.0 vendored inside pip (python:3.14-slim base); the
+      path-traversal is in setuptools' easy_install-era PackageIndex, which
+      pip's vendored copy never invokes. Latest pip still vendors 70.3.0; no
+      fixed pip exists to install.
