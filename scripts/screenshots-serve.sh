@@ -71,7 +71,7 @@ seed '{"name":"Filesystem","runner":"npx","command":"npx","args":["-y","@modelco
 # so hold the demo seed to the 1.x line until upstream ships a 2.0-compatible release.
 seed '{"name":"Time","runner":"uvx","command":"uvx","args":["--with","mcp<2","mcp-server-time"],"enabled":true}'
 seed '{"name":"Sequential Thinking","runner":"npx","command":"npx","args":["-y","@modelcontextprotocol/server-sequential-thinking"],"enabled":false}'
-seed '{"name":"Upstream Weather","runner":"remote","command":"https://weather.example.com/mcp","args":["streamable-http"],"env":{"Authorization":"Bearer demo-token"},"enabled":true}'
+seed '{"name":"Upstream Weather","runner":"remote","command":"https://hf.co/mcp","args":["streamable-http"],"env":{"Authorization":"Bearer demo-token"},"enabled":true}'
 
 echo "==> Waiting for the reconciler to settle (no server left starting/stopping)"
 # npx/uvx cold-start downloads can take a while; the failing ones error fast.
