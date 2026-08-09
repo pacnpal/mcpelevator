@@ -95,6 +95,7 @@ class ServerUnit:
         self.name = server.name
         self.config_hash = server.config_hash
         self.runner = server.runner
+        self.pin_mcp1 = bool(server.pin_mcp1)
         self.spec = build_spec(server)
         self.exposure = {"mcp_http": server.mcp_http, "rest_openapi": server.rest_openapi}
 
@@ -243,6 +244,7 @@ class ServerUnit:
                 setup_failed=failure.startswith("setup "),
                 command=self.spec.command,
                 args=self.spec.args,
+                pinned=self.pin_mcp1,
             )
         except Exception:
             return failure

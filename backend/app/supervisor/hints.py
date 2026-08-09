@@ -30,7 +30,9 @@ _MCP2_IMPORT = re.compile(
 )
 
 
-def _mcp2_hint(runner: str, setup_failed: bool, command: str, args: Sequence[str]) -> str:
+def _mcp2_hint(
+    runner: str, setup_failed: bool, command: str, args: Sequence[str], pinned: bool
+) -> str:
     cause = (
         "the upstream server crashed importing the Python mcp SDK — "
         "it looks incompatible with the mcp 2.x line"
@@ -43,6 +45,16 @@ def _mcp2_hint(runner: str, setup_failed: bool, command: str, args: Sequence[str
             "script installs the SDK until upstream ships a fix"
         )
     if runner == "uvx":
+        # The toggle is already on and the import STILL failed: recommending it
+        # again is a dead end — the pin either isn't reaching the failing import
+        # (a nested resolve) or 1.x doesn't fix this package either.
+        if pinned:
+            return (
+                f'{cause}, even though the "Pin mcp SDK < 2" toggle is already on '
+                "— the pin may not reach the failing import (a nested resolve), or "
+                "the package may not work with the 1.x line either; check the logs "
+                "for the resolved mcp version and report the issue upstream"
+            )
         # Only recommend the toggle where the service would actually accept it —
         # the pin needs a certain placement (see registry._require_pinnable_uvx);
         # for other shapes, point at the manual/rewrite alternatives instead of
@@ -79,10 +91,13 @@ def _mcp2_hint(runner: str, setup_failed: bool, command: str, args: Sequence[str
     )
 
 
-# (signature, (runner, setup_failed, command, args) -> hint) — first match over
-# the log tail wins. Hints see the launch shape so a recommendation is only ever
-# an action the operator can actually take on THIS server.
-_SIGNATURES: list[tuple[re.Pattern[str], Callable[[str, bool, str, Sequence[str]], str]]] = [
+# (signature, (runner, setup_failed, command, args, pinned) -> hint) — first
+# match over the log tail wins. Hints see the launch shape and current pin state
+# so a recommendation is only ever an action the operator can actually take on
+# THIS server — never a toggle that's refused, or one that's already on.
+_SIGNATURES: list[
+    tuple[re.Pattern[str], Callable[[str, bool, str, Sequence[str], bool], str]]
+] = [
     (_MCP2_IMPORT, _mcp2_hint),
 ]
 
@@ -112,6 +127,7 @@ def startup_hint(
     setup_failed: bool = False,
     command: str = "",
     args: Sequence[str] = (),
+    pinned: bool = False,
 ) -> Optional[str]:
     """Recommendation for a terminally failed activation, from its log tail.
 
@@ -141,5 +157,5 @@ def startup_hint(
             relevant.append(line)
     for pattern, hint in _SIGNATURES:
         if any(pattern.search(line) for line in relevant):
-            return hint(runner, setup_failed, command, args)
+            return hint(runner, setup_failed, command, args, pinned)
     return None

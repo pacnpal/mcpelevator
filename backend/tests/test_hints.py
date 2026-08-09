@@ -35,6 +35,21 @@ def test_mcp2_import_break_on_an_unpinnable_uvx_shape_recommends_the_manual_pin(
     assert '--with "mcp<2"' in hint
 
 
+def test_mcp2_import_break_with_the_pin_already_on_does_not_recommend_the_toggle():
+    # The toggle is on and the import STILL failed — pointing at the toggle
+    # again is a dead end; the hint must acknowledge the pin and redirect.
+    hint = startup_hint(
+        [_MCP2_TRACEBACK_LINE],
+        "uvx",
+        command="uvx",
+        args=["--with", "mcp<2", "mcp-server-time"],
+        pinned=True,
+    )
+    assert hint is not None
+    assert "Enable the server's" not in hint
+    assert "already on" in hint
+
+
 def test_mcp2_import_break_on_a_non_uv_executable_recommends_an_env_pin():
     # An arbitrary executable on a uvx-classified row takes neither the toggle
     # nor any --with argv advice — only its own Python environment can pin.
