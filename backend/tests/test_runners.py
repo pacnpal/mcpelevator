@@ -45,6 +45,19 @@ def test_known_runners_build(runner):
     assert spec.command == "x"
 
 
+def test_uvx_pin_mcp1_injects_the_sdk_pin_before_stored_args():
+    s = _server(runner="uvx", command="uvx", args=["mcp-server-time"], pin_mcp1=True)
+    spec = build_spec(s)
+    # Injected at spec-build time only: the stored args stay what the operator wrote.
+    assert spec.args == ["--with", "mcp<2", "mcp-server-time"]
+    assert s.args == ["mcp-server-time"]
+
+
+def test_uvx_without_pin_mcp1_stays_passthrough():
+    s = _server(runner="uvx", command="uvx", args=["mcp-server-time"])
+    assert build_spec(s).args == ["mcp-server-time"]
+
+
 def test_docker_runner_builds_hardened_spec():
     s = _server(
         runner="docker",

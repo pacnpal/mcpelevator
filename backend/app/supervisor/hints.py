@@ -9,7 +9,9 @@ existing field with no schema change.
 
 Keep entries here for failures that are (a) recognizable from a log line and
 (b) fixable by the operator editing the server's config — not for bugs the
-operator can't act on.
+operator can't act on. Signatures must carry real evidence of the specific
+break: a pattern loose enough to match unrelated failures recommends a remedy
+that can't work.
 """
 
 from __future__ import annotations
@@ -17,30 +19,47 @@ from __future__ import annotations
 import re
 from typing import Callable, Iterable, Optional
 
-# The mcp 2.0 Python SDK moved/removed symbols (e.g. McpError left
-# mcp.shared.exceptions). Servers declaring an open ``mcp>=…`` constraint
-# resolve 2.x on a cold uvx run and die at import with exactly this shape.
-_MCP2_IMPORT = re.compile(r"cannot import name '[^']+' from 'mcp[.']")
+# The mcp 2.0 Python SDK import break, matched by known removed-symbol/module
+# pairs — NOT any ImportError under ``mcp.*``, which would also catch a server
+# importing a too-new symbol from an old SDK (where a downgrade cannot help) or
+# a plain typo. Extend the alternation as more removed pairs are confirmed.
+_MCP2_IMPORT = re.compile(
+    r"cannot import name '(?:McpError)' from 'mcp\.shared\.exceptions'"
+)
 
 
-def _mcp2_hint(runner: str) -> str:
+def _mcp2_hint(runner: str, setup_failed: bool) -> str:
     cause = (
         "the upstream server crashed importing the Python mcp SDK — "
         "it looks incompatible with the mcp 2.x line"
     )
+    if setup_failed:
+        # The setup script runs in its own /bin/sh with the child env; a launch-argv
+        # pin (uvx --with) can't reach it, so point at the script's own installs.
+        return (
+            f"{cause} while the setup script ran. Pin mcp<2 wherever the setup "
+            "script installs the SDK until upstream ships a fix"
+        )
     if runner == "uvx":
         return (
-            f'{cause}. Add --with "mcp<2" before the package name in the '
-            "server's arguments to pin the 1.x SDK until upstream ships a fix"
+            f"{cause}. Enable the server's \"Pin mcp SDK < 2\" compatibility "
+            "toggle (Edit server) to hold the 1.x line until upstream ships a fix"
+        )
+    if runner == "docker":
+        # Only the image selects what's installed inside the container; a host-side
+        # or env pin can't change its packages.
+        return (
+            f"{cause}. Use (or rebuild) an image that ships an mcp 1.x SDK, or one "
+            "with a server updated for 2.x"
         )
     return (
-        f"{cause}. Pin mcp<2 in the server's Python environment until "
-        "upstream ships a fix"
+        f"{cause}. Pin mcp<2 in the server's Python environment until upstream "
+        "ships a fix"
     )
 
 
-# (signature, runner -> hint) — first match over the log tail wins.
-_SIGNATURES: list[tuple[re.Pattern[str], Callable[[str], str]]] = [
+# (signature, (runner, setup_failed) -> hint) — first match over the log tail wins.
+_SIGNATURES: list[tuple[re.Pattern[str], Callable[[str, bool], str]]] = [
     (_MCP2_IMPORT, _mcp2_hint),
 ]
 
@@ -49,12 +68,16 @@ _SIGNATURES: list[tuple[re.Pattern[str], Callable[[str], str]]] = [
 _TAIL_LINES = 400
 
 
-def startup_hint(lines: Iterable[str], runner: str) -> Optional[str]:
+def startup_hint(
+    lines: Iterable[str], runner: str, *, setup_failed: bool = False
+) -> Optional[str]:
     """Recommendation for a terminally failed activation, from its log tail.
 
-    Returns ``None`` when nothing recognizable matched — the common case."""
+    ``setup_failed`` marks a failure in the setup-script phase, whose environment
+    is separate from the launch argv — remedies differ. Returns ``None`` when
+    nothing recognizable matched — the common case."""
     tail = list(lines)[-_TAIL_LINES:]
     for pattern, hint in _SIGNATURES:
         if any(pattern.search(line) for line in tail):
-            return hint(runner)
+            return hint(runner, setup_failed)
     return None

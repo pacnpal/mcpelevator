@@ -229,8 +229,13 @@ class ServerUnit:
 
     def _with_hint(self, failure: str) -> str:
         # Terminal failures only: mid-retry statuses stay raw, since the next
-        # attempt may succeed and a recommendation would just be noise.
-        hint = startup_hint(self.logs.lines, self.runner)
+        # attempt may succeed and a recommendation would just be noise. Setup
+        # failures carry their phase in the message (every _run_setup failure
+        # string starts with "setup ") — that phase runs in its own shell, so
+        # launch-argv remedies don't apply to it.
+        hint = startup_hint(
+            self.logs.lines, self.runner, setup_failed=failure.startswith("setup ")
+        )
         return f"{failure} (hint: {hint})" if hint else failure
 
     async def _run_attempt(self, attempt: int, max_attempts: int) -> tuple[bool, int]:

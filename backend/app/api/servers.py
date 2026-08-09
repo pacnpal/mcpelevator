@@ -112,17 +112,29 @@ def _visible(
     return policy.require_visible_server(principal, repo.get_server(session, server_id))
 
 
-_LAUNCH_FIELDS = {"runner", "command", "args", "run_args", "env", "cwd", "setup_script"}
+_LAUNCH_FIELDS = {
+    "runner", "command", "args", "run_args", "env", "cwd", "setup_script", "pin_mcp1",
+}
+
+
+def _row_launch_value(row: Server, key: str):
+    """A row's launch field normalized to the shape the form sends, so a legacy
+    NULL never reads as a 'change' against the form's [] / false."""
+    if key == "run_args":
+        return getattr(row, key) or []
+    if key == "pin_mcp1":
+        return bool(getattr(row, key))
+    return getattr(row, key)
 
 
 def _launch_touched(row: Server, changes: dict) -> bool:
     """Would ``changes`` alter WHAT this server executes? Compares VALUES, not key
     presence: the SPA's edit form resends the whole config, so a name-only save
-    carries unchanged launch fields and must not count. run_args is nullable in
-    storage (legacy rows hold NULL, read as []) while the form always sends a
-    list — normalized so NULL vs [] isn't a "change"."""
+    carries unchanged launch fields and must not count. run_args and pin_mcp1 are
+    nullable in storage (legacy rows hold NULL, read as [] / false) while the form
+    always sends a value — normalized so NULL vs the empty value isn't a "change"."""
     return any(
-        changes[k] != ((getattr(row, k) or []) if k == "run_args" else getattr(row, k))
+        changes[k] != _row_launch_value(row, k)
         for k in changes.keys() & _LAUNCH_FIELDS
     )
 
@@ -241,6 +253,7 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         env=server.env,
         cwd=server.cwd,
         setup_script=server.setup_script or "",
+        pin_mcp1=bool(server.pin_mcp1),
         auth_provider=server.auth_provider,
         oauth=bool(server.oauth),
         oauth_scopes=server.oauth_scopes or "",

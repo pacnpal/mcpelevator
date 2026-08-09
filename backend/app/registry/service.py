@@ -1303,6 +1303,10 @@ def _hash_payload(server: Server) -> dict[str, Any]:
         "env": server.env,
         "cwd": server.cwd,
         "setup_script": server.setup_script or "",
+        # The mcp<2 compatibility pin changes the launch argv (uvx runner), so a
+        # toggle must restart the bridge. Normalized so a pre-column row (NULL)
+        # hashes identically to False.
+        "pin_mcp1": bool(server.pin_mcp1),
         "mcp_http": server.mcp_http,
         "rest_openapi": server.rest_openapi,
         # Per-tool policy (hidden tools, renames, descriptions) is applied inside the bridge
@@ -1754,6 +1758,7 @@ def create_server(
     env: Optional[dict[str, str]] = None,
     cwd: Optional[str] = None,
     setup_script: str = "",
+    pin_mcp1: bool = False,
     mcp_http: bool = True,
     rest_openapi: bool = False,
     disabled_tools: Optional[list[str]] = None,
@@ -1806,6 +1811,9 @@ def create_server(
             _require_docker_enabled(session)
     # Extra `docker run` options: validated for docker, forced empty elsewhere.
     run_args = normalize_run_args(runner, run_args)
+    # The mcp<2 compatibility pin is a uvx launch-argv concern; forced off for every
+    # other runner (after the docker reclassify above) so a conversion can't carry it.
+    pin_mcp1 = bool(pin_mcp1) and runner == "uvx"
     idle_timeout_s = normalize_idle_timeout(idle_timeout_s)
     disabled_tools = normalize_disabled_tools(disabled_tools)
     tool_overrides = normalize_tool_overrides(tool_overrides, disabled_tools)
@@ -1821,6 +1829,7 @@ def create_server(
         env=dict(env or {}),
         cwd=cwd,
         setup_script=setup_script,
+        pin_mcp1=pin_mcp1,
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
         disabled_tools=disabled_tools,
@@ -1854,6 +1863,7 @@ _MUTABLE_FIELDS = {
     "env",
     "cwd",
     "setup_script",
+    "pin_mcp1",
     "mcp_http",
     "rest_openapi",
     "disabled_tools",
@@ -1962,6 +1972,8 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     # commits this session later.
     try:
         server.run_args = normalize_run_args(server.runner, server.run_args)
+        # uvx-only, matching create: forced off on conversion away from uvx.
+        server.pin_mcp1 = bool(server.pin_mcp1) and server.runner == "uvx"
         server.idle_timeout_s = normalize_idle_timeout(server.idle_timeout_s)
         server.disabled_tools = normalize_disabled_tools(server.disabled_tools)
         server.tool_overrides = normalize_tool_overrides(
@@ -2006,6 +2018,7 @@ def clone_server(
         env=dict(src.env or {}),
         cwd=src.cwd,
         setup_script=src.setup_script or "",
+        pin_mcp1=bool(src.pin_mcp1),
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,
         disabled_tools=list(src.disabled_tools or []),

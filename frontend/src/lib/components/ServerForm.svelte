@@ -147,6 +147,7 @@
 			transport: transport0,
 			setupScript: init.setup_script ?? '',
 			cwd: init.cwd ?? '',
+			pinMcp1: init.pin_mcp1 ?? false,
 			mcpHttp: init.mcp_http ?? true,
 			restOpenapi: init.rest_openapi ?? false,
 			// Blank = inherit the global default (null); "0" pins the server always-on.
@@ -205,6 +206,8 @@
 	let oauthRemoveSecret = $state(false);
 
 	let cwd = $state(seed.cwd);
+	// uvx only: launch with the Python mcp SDK pinned <2 (compatibility escape hatch).
+	let pinMcp1 = $state(seed.pinMcp1);
 	let mcpHttp = $state(seed.mcpHttp);
 	let restOpenapi = $state(seed.restOpenapi);
 	let idleTimeoutText = $state(seed.idleTimeoutText);
@@ -272,8 +275,13 @@
 		return /\s/.test(p) ? `"${p}"` : p;
 	}
 
+	// The pin is injected by the backend at launch, not stored in args — mirror
+	// that here so "Will run" shows the real argv.
+	const previewArgs = $derived(
+		runner === 'uvx' && pinMcp1 ? ['--with', 'mcp<2', ...resolvedArgs] : resolvedArgs
+	);
 	const previewCommand = $derived(
-		[command, ...resolvedArgs].filter((p) => p.length > 0).map(quoteIfNeeded).join(' ')
+		[command, ...previewArgs].filter((p) => p.length > 0).map(quoteIfNeeded).join(' ')
 	);
 
 	const isRemote = $derived(runner === 'remote');
@@ -414,6 +422,9 @@
 			setup_script: setupScript.trim() ? setupScript : '',
 			env: buildEnv(),
 			cwd: isRemote || isDocker ? null : cwd.trim() ? cwd.trim() : null,
+			// uvx only; the backend forces it off elsewhere, but keep the payload
+			// honest so a runner switch clears it client-side too.
+			pin_mcp1: runner === 'uvx' && pinMcp1,
 			mcp_http: mcpHttp,
 			rest_openapi: restOpenapi,
 			idle_timeout_s: idleTimeoutText.trim() === '' ? null : Number(idleTimeoutText.trim()),
@@ -585,6 +596,35 @@
 				placeholder="--port&#10;8000"
 				class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 			></textarea>
+			{#if runner === 'uvx'}
+				<!-- Compatibility escape hatch: hold the Python mcp SDK on 1.x for
+				     packages the 2.x line broke. Injected at launch, not into args. -->
+				<label
+					class="mt-1 flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
+				>
+					<span class="flex flex-col gap-0.5">
+						<span class="text-sm font-medium text-[var(--color-ink)]">
+							Pin mcp SDK &lt; 2 <span class="font-normal text-[var(--color-ink-dim)]">(compatibility)</span>
+						</span>
+						<span class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+							Launch with <code class="font-mono text-[var(--color-ink-muted)]">--with "mcp&lt;2"</code>
+							so the package resolves the 1.x Python mcp SDK. Turn this on if the server
+							fails at startup with an mcp import error (the failure message will suggest
+							it); turn it off once the package supports mcp 2.x.
+						</span>
+					</span>
+					<input type="checkbox" bind:checked={pinMcp1} class="peer sr-only" />
+					<span
+						class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
+						style="background-color: {pinMcp1 ? '' : 'var(--color-line-strong)'};"
+					>
+						<span
+							class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
+							style={pinMcp1 ? 'transform: translateX(16px);' : ''}
+						></span>
+					</span>
+				</label>
+			{/if}
 		</div>
 	{:else if isRemote}
 		<!-- runner === remote: an already-remote MCP URL we proxy. command = URL,

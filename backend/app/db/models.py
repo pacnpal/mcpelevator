@@ -99,6 +99,15 @@ class Server(SQLModel, table=True):
     # restarts the bridge. Nullable: rows predating the column hold NULL, read as {}.
     tool_overrides: Optional[dict] = Field(default=None, sa_column=Column(JSON))
 
+    # uvx runner only: launch with the Python mcp SDK held below 2.0
+    # (``uvx --with "mcp<2" <package>``) — a compatibility escape hatch for servers
+    # that haven't caught up with the SDK's 2.x line. The runner injects the pin at
+    # spec-build time, so the stored ``args`` stay exactly what the operator wrote
+    # (and the friendly editor fields keep round-tripping). Part of config_hash (it
+    # changes the launch argv), so toggling restarts the bridge. Forced False for
+    # every other runner at the service boundary.
+    pin_mcp1: bool = False
+
     # exposure (folded 1:1)
     mcp_http: bool = True
     rest_openapi: bool = False
