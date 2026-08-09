@@ -67,19 +67,24 @@ def test_uvx_without_pin_mcp1_stays_passthrough():
         ("uv", ["tool", "run", "pkg"], ["tool", "run", "--with", "mcp<2", "pkg"]),
         ("uv", ["run", "pkg"], ["run", "--with", "mcp<2", "pkg"]),
         ("/usr/local/bin/uv", ["tool", "run", "pkg"], ["tool", "run", "--with", "mcp<2", "pkg"]),
-        # Global options may precede the subcommand (uv [OPTIONS] <COMMAND>);
-        # the pin still lands after `tool run`.
+        # A bare-run child command may itself contain "tool run" tokens; the pin
+        # follows the LEADING subcommand, never a deeper match in the child argv.
+        (
+            "uv",
+            ["run", "python", "tool", "run"],
+            ["run", "--with", "mcp<2", "python", "tool", "run"],
+        ),
+        # Leading global options make the subcommand position ambiguous (an
+        # option operand can be the bare word "run"): no pin rather than a guess.
         (
             "uv",
             ["--directory", "/srv", "tool", "run", "pkg"],
-            ["--directory", "/srv", "tool", "run", "--with", "mcp<2", "pkg"],
+            ["--directory", "/srv", "tool", "run", "pkg"],
         ),
-        # A global option's operand may be the bare word "run"; the `tool run`
-        # pair (scanned first) still wins over that lone token.
         (
             "uv",
             ["--allow-insecure-host", "run", "tool", "run", "pkg"],
-            ["--allow-insecure-host", "run", "tool", "run", "--with", "mcp<2", "pkg"],
+            ["--allow-insecure-host", "run", "tool", "run", "pkg"],
         ),
         # No run subcommand: nowhere the pin is valid — argv left untouched.
         ("uv", ["tool", "install", "pkg"], ["tool", "install", "pkg"]),
