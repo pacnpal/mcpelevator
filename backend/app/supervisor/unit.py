@@ -32,6 +32,7 @@ from app.config import (
 from app.db.models import Server, utcnow
 from app.runners import build_spec
 from app.runners.docker import DOCKER_BIN, server_label
+from app.supervisor.hints import startup_hint
 from app.supervisor.logbuffer import LogBuffer
 
 
@@ -94,6 +95,7 @@ class ServerUnit:
         self.name = server.name
         self.config_hash = server.config_hash
         self.runner = server.runner
+        self.pin_mcp1 = bool(server.pin_mcp1)
         self.spec = build_spec(server)
         self.exposure = {"mcp_http": server.mcp_http, "rest_openapi": server.rest_openapi}
 
@@ -195,11 +197,11 @@ class ServerUnit:
                     if self._stopping:
                         return
                     if attempt >= max_attempts:
-                        self.last_error = last_failure
+                        self.last_error = self._with_hint(last_failure)
                         self.startup_status = None
                         self._release_port()
                         self._set_state("failed")
-                        self.logs.append(f"[mcpelevator] activation failed: {last_failure}")
+                        self.logs.append(f"[mcpelevator] activation failed: {self.last_error}")
                         return
                     delay = _BACKOFF_SECONDS[min(attempt - 1, len(_BACKOFF_SECONDS) - 1)]
                     self._set_state("starting")
@@ -221,10 +223,32 @@ class ServerUnit:
         except Exception as exc:
             await self._cleanup_attempt()
             if not self._stopping:
-                self.last_error = str(exc)[:300] or last_failure
+                self.last_error = self._with_hint(str(exc)[:300] or last_failure)
                 self.startup_status = None
                 self._release_port()
                 self._set_state("failed")
+
+    def _with_hint(self, failure: str) -> str:
+        # Terminal failures only: mid-retry statuses stay raw, since the next
+        # attempt may succeed and a recommendation would just be noise. Setup
+        # failures carry their phase in the message (every _run_setup failure
+        # string starts with "setup ") — that phase runs in its own shell, so
+        # launch-argv remedies don't apply to it. Best-effort decoration over
+        # UNTRUSTED child output: any failure here must never break failure
+        # reporting itself (an exception on this path would leave the unit stuck
+        # in "starting" with its port unreleased).
+        try:
+            hint = startup_hint(
+                self.logs.lines,
+                self.runner,
+                setup_failed=failure.startswith("setup "),
+                command=self.spec.command,
+                args=self.spec.args,
+                pinned=self.pin_mcp1,
+            )
+        except Exception:
+            return failure
+        return f"{failure} (hint: {hint})" if hint else failure
 
     async def _run_attempt(self, attempt: int, max_attempts: int) -> tuple[bool, int]:
         self.last_error = None

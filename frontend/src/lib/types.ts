@@ -115,6 +115,8 @@ export interface ServerDetail extends ServerSummary {
 	setup_script: string;
 	env: Record<string, string>;
 	cwd: string | null;
+	/** uvx runner only: the mcp<2 SDK compatibility pin. Always false elsewhere. */
+	pin_mcp1: boolean;
 	auth_provider: ServerAuthProvider;
 	/** Remote runner: authenticate to the upstream via OAuth instead of static headers. */
 	oauth: boolean;
@@ -168,6 +170,10 @@ export interface ServerCreate {
 	setup_script?: string;
 	env: Record<string, string>;
 	cwd?: string | null;
+	/** uvx runner only: launch with the Python mcp SDK pinned below 2.0
+	 * (`uvx --with "mcp<2" …`) for servers not yet compatible with the 2.x line.
+	 * Forced false for every other runner server-side. */
+	pin_mcp1?: boolean;
 	mcp_http?: boolean;
 	rest_openapi?: boolean;
 	auth_provider?: ServerAuthProvider;

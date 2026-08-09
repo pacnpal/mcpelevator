@@ -45,6 +45,60 @@ def test_known_runners_build(runner):
     assert spec.command == "x"
 
 
+def test_uvx_pin_mcp1_injects_the_sdk_pin_before_stored_args():
+    s = _server(runner="uvx", command="uvx", args=["mcp-server-time"], pin_mcp1=True)
+    spec = build_spec(s)
+    # Injected at spec-build time only: the stored args stay what the operator wrote.
+    assert spec.args == ["--with", "mcp<2", "mcp-server-time"]
+    assert s.args == ["mcp-server-time"]
+
+
+def test_uvx_without_pin_mcp1_stays_passthrough():
+    s = _server(runner="uvx", command="uvx", args=["mcp-server-time"])
+    assert build_spec(s).args == ["mcp-server-time"]
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "expected"),
+    [
+        # A `uv` launcher (imported configs classify it as the uvx runner) only
+        # accepts --with AFTER the subcommand words; leading placement is a
+        # launcher parse error.
+        ("uv", ["tool", "run", "pkg"], ["tool", "run", "--with", "mcp<2", "pkg"]),
+        ("uv", ["run", "pkg"], ["run", "--with", "mcp<2", "pkg"]),
+        ("/usr/local/bin/uv", ["tool", "run", "pkg"], ["tool", "run", "--with", "mcp<2", "pkg"]),
+        # A bare-run child command may itself contain "tool run" tokens; the pin
+        # follows the LEADING subcommand, never a deeper match in the child argv.
+        (
+            "uv",
+            ["run", "python", "tool", "run"],
+            ["run", "--with", "mcp<2", "python", "tool", "run"],
+        ),
+        # Leading global options make the subcommand position ambiguous (an
+        # option operand can be the bare word "run"): no pin rather than a guess.
+        (
+            "uv",
+            ["--directory", "/srv", "tool", "run", "pkg"],
+            ["--directory", "/srv", "tool", "run", "pkg"],
+        ),
+        (
+            "uv",
+            ["--allow-insecure-host", "run", "tool", "run", "pkg"],
+            ["--allow-insecure-host", "run", "tool", "run", "pkg"],
+        ),
+        # No run subcommand: nowhere the pin is valid — argv left untouched.
+        ("uv", ["tool", "install", "pkg"], ["tool", "install", "pkg"]),
+        # Only the uv/uvx launchers accept --with; any other executable on an
+        # uvx-classified row (Advanced raw config / API) is left untouched.
+        ("python", ["server.py"], ["server.py"]),
+        ("uvx", ["pkg"], ["--with", "mcp<2", "pkg"]),
+    ],
+)
+def test_uvx_pin_mcp1_places_the_pin_after_uv_subcommands(command, args, expected):
+    s = _server(runner="uvx", command=command, args=args, pin_mcp1=True)
+    assert build_spec(s).args == expected
+
+
 def test_docker_runner_builds_hardened_spec():
     s = _server(
         runner="docker",

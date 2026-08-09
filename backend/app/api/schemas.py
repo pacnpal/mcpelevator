@@ -135,6 +135,8 @@ class ServerDetail(ServerSummary):
     env: dict[str, str] = {}
     cwd: Optional[str] = None
     setup_script: str = ""
+    # uvx runner only: the mcp<2 SDK compatibility pin. Always false elsewhere.
+    pin_mcp1: bool = False
     auth_provider: str = "inherit"
     oauth: bool = False
     oauth_scopes: str = ""
@@ -169,6 +171,10 @@ class ServerCreate(BaseModel):
     env: dict[str, str] = {}
     cwd: Optional[str] = None
     setup_script: str = ""
+    # uvx runner only: launch with the Python mcp SDK pinned below 2.0
+    # (`uvx --with "mcp<2" …`) for servers not yet compatible with the 2.x line.
+    # Forced false for every other runner server-side.
+    pin_mcp1: bool = False
     mcp_http: bool = True
     rest_openapi: bool = False
     # Upstream tool names to hide from every exposed surface (empty = expose all).
@@ -205,6 +211,8 @@ class ServerUpdate(BaseModel):
     env: Optional[dict[str, str]] = None
     cwd: Optional[str] = None
     setup_script: Optional[str] = None
+    # uvx runner only: the mcp<2 SDK compatibility pin. Omitted (null) = unchanged.
+    pin_mcp1: Optional[bool] = None
     mcp_http: Optional[bool] = None
     rest_openapi: Optional[bool] = None
     # Replace the whole hide list; [] re-exposes every tool. Omitted (null) = unchanged.

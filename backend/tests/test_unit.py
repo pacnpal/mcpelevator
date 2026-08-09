@@ -164,6 +164,35 @@ async def test_setup_failure_retries_then_becomes_terminal(tmp_path, monkeypatch
     assert released == [port]
 
 
+async def test_terminal_failure_with_known_signature_carries_a_hint(tmp_path, monkeypatch):
+    # A child that dies with the mcp 2.x import break leaves its traceback in the
+    # activation logs; the terminal last_error must carry the actionable hint —
+    # and a SETUP-phase failure must get the setup-side remedy (its shell is
+    # beyond any launch-argv pin), not a runner-argv one.
+    from app.supervisor import unit as unit_module
+
+    monkeypatch.setattr(
+        unit_module, "get_settings", lambda: _settings(tmp_path, restart_budget=1)
+    )
+    server = _server(
+        tmp_path,
+        setup_script=(
+            "printf \"ImportError: cannot import name 'McpError' "
+            "from 'mcp.shared.exceptions'\\n\"\n"
+            "exit 1\n"
+        ),
+    )
+    unit = ServerUnit(server)
+
+    await unit.start(_port())
+    await _wait_for(lambda: unit.state == "failed")
+
+    assert "setup exited with code 1" in (unit.last_error or "")
+    assert "(hint:" in (unit.last_error or "")
+    assert "setup script" in (unit.last_error or "")
+    await unit.stop()
+
+
 async def test_setup_timeout_prevents_bridge_launch(tmp_path, monkeypatch):
     from app.supervisor import unit as unit_module
 

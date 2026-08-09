@@ -57,6 +57,7 @@
 					setup_script: server.setup_script,
 					env: server.env,
 					cwd: server.cwd,
+					pin_mcp1: server.pin_mcp1,
 					mcp_http: server.transports.mcp_http,
 					rest_openapi: server.transports.rest_openapi,
 					auth_provider: server.auth_provider,

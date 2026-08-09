@@ -30,6 +30,7 @@
 	import StatePill from '$lib/components/StatePill.svelte';
 	import ToolRunner from '$lib/components/ToolRunner.svelte';
 	import { flashToast } from '$lib/toast.svelte';
+	import { quoteIfNeeded, withPin } from '$lib/uvxPin';
 
 	type LoadState = 'loading' | 'ready' | 'error';
 
@@ -598,25 +599,35 @@
 	// The summary's resolved auth stays current through the existing server poll.
 	const effectiveAuth = $derived(server?.auth ?? null);
 
-	// Render the stored command + args as a single shell-ish line, quoting any
-	// token that contains whitespace so the spacing reads correctly. For a docker
-	// server the stored shape is (image, container args, run options) and the backend
-	// synthesizes the real `docker run …` — mirror it honestly (hardening flags elided
-	// as […], env passed by NAME only, run options before `--` + image).
+	// Render the EFFECTIVE launch command as a single shell-ish line, quoting any
+	// token a shell would misparse bare so a copied line reproduces the real argv.
+	// For a docker server the stored shape is (image, container args, run options)
+	// and the backend synthesizes the real `docker run …` — mirror it honestly
+	// (hardening flags elided as […], env passed by NAME only, run options before
+	// `--` + image). For a uvx server with the mcp<2 compatibility pin on, the
+	// runner injects the pin at launch without touching stored args — mirror that
+	// too (shared $lib/uvxPin logic) so the card never shows an unpinned command
+	// that would reproduce the failure the pin fixes.
 	const commandLine = $derived.by(() => {
-		const quote = (p: string) => (/\s/.test(p) ? `"${p}"` : p);
 		if (server?.runner === 'docker') {
 			return [
 				'docker run -i --rm --init […]',
-				...Object.keys(server.env ?? {}).flatMap((k) => ['-e', k]).map(quote),
-				...(server.run_args ?? []).map(quote),
+				...Object.keys(server.env ?? {}).flatMap((k) => ['-e', k]).map(quoteIfNeeded),
+				...(server.run_args ?? []).map(quoteIfNeeded),
 				'--',
-				...[server.command, ...(server.args ?? [])].filter((p) => p.length > 0).map(quote)
+				...[server.command, ...(server.args ?? [])]
+					.filter((p) => p.length > 0)
+					.map(quoteIfNeeded)
 			].join(' ');
 		}
-		return [server?.command ?? '', ...(server?.args ?? [])]
+		const args = withPin(
+			server?.command ?? '',
+			server?.args ?? [],
+			server?.runner === 'uvx' && !!server?.pin_mcp1
+		);
+		return [server?.command ?? '', ...args]
 			.filter((p) => p.length > 0)
-			.map(quote)
+			.map(quoteIfNeeded)
 			.join(' ');
 	});
 

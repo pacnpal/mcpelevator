@@ -29,6 +29,7 @@ from app.db.models import RUNNERS, Server
 from app.registry import settings as runtime_settings
 from app.runners import build_spec
 from app.runners import remote as remote_runner
+from app.runners.uvx import pin_insert_index
 from app.runners.docker import (
     DOCKER_RUN_VALUE_FLAGS,
     is_forbidden_container_env,
@@ -1303,6 +1304,10 @@ def _hash_payload(server: Server) -> dict[str, Any]:
         "env": server.env,
         "cwd": server.cwd,
         "setup_script": server.setup_script or "",
+        # The mcp<2 compatibility pin changes the launch argv (uvx runner), so a
+        # toggle must restart the bridge. Normalized so a pre-column row (NULL)
+        # hashes identically to False.
+        "pin_mcp1": bool(server.pin_mcp1),
         "mcp_http": server.mcp_http,
         "rest_openapi": server.rest_openapi,
         # Per-tool policy (hidden tools, renames, descriptions) is applied inside the bridge
@@ -1327,6 +1332,22 @@ def _hash_payload(server: Server) -> dict[str, Any]:
         # auth_provider is intentionally excluded: it's enforced at the proxy
         # per-request, so changing it must NOT restart the bridge process.
     }
+
+
+def _require_pinnable_uvx(command: str, args) -> None:
+    """Refuse the mcp<2 pin where its placement in the argv is not certain.
+
+    Enabling the toggle on a shape the runner can't safely pin (a ``uv`` launch
+    with leading global options, or no run subcommand) would silently launch the
+    original unpinned argv — the operator flips the recommended fix and nothing
+    changes. Fail the save with the workable alternatives instead."""
+    if pin_insert_index(command, list(args or [])) is None:
+        raise ValueError(
+            'the "Pin mcp SDK < 2" toggle cannot be placed in this uv invocation — '
+            'rewrite the command as "uvx <package>", or lead the arguments with '
+            '"tool run"/"run" (uv global options before the subcommand are not '
+            'supported), or add --with "mcp<2" to the arguments yourself'
+        )
 
 
 def compute_hash(server: Server) -> str:
@@ -1754,6 +1775,7 @@ def create_server(
     env: Optional[dict[str, str]] = None,
     cwd: Optional[str] = None,
     setup_script: str = "",
+    pin_mcp1: bool = False,
     mcp_http: bool = True,
     rest_openapi: bool = False,
     disabled_tools: Optional[list[str]] = None,
@@ -1806,6 +1828,13 @@ def create_server(
             _require_docker_enabled(session)
     # Extra `docker run` options: validated for docker, forced empty elsewhere.
     run_args = normalize_run_args(runner, run_args)
+    # The mcp<2 compatibility pin is a uvx launch-argv concern; forced off for every
+    # other runner (after the docker reclassify above) so a conversion can't carry it,
+    # and refused outright where the pin has no certain placement — a toggle that
+    # silently no-ops would send the operator in circles.
+    pin_mcp1 = bool(pin_mcp1) and runner == "uvx"
+    if pin_mcp1:
+        _require_pinnable_uvx(command, args)
     idle_timeout_s = normalize_idle_timeout(idle_timeout_s)
     disabled_tools = normalize_disabled_tools(disabled_tools)
     tool_overrides = normalize_tool_overrides(tool_overrides, disabled_tools)
@@ -1821,6 +1850,7 @@ def create_server(
         env=dict(env or {}),
         cwd=cwd,
         setup_script=setup_script,
+        pin_mcp1=pin_mcp1,
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
         disabled_tools=disabled_tools,
@@ -1854,6 +1884,7 @@ _MUTABLE_FIELDS = {
     "env",
     "cwd",
     "setup_script",
+    "pin_mcp1",
     "mcp_http",
     "rest_openapi",
     "disabled_tools",
@@ -1962,6 +1993,11 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     # commits this session later.
     try:
         server.run_args = normalize_run_args(server.runner, server.run_args)
+        # uvx-only, matching create: forced off on conversion away from uvx, and
+        # refused where the pin has no certain placement in the launch argv.
+        server.pin_mcp1 = bool(server.pin_mcp1) and server.runner == "uvx"
+        if server.pin_mcp1:
+            _require_pinnable_uvx(server.command, server.args)
         server.idle_timeout_s = normalize_idle_timeout(server.idle_timeout_s)
         server.disabled_tools = normalize_disabled_tools(server.disabled_tools)
         server.tool_overrides = normalize_tool_overrides(
@@ -2006,6 +2042,7 @@ def clone_server(
         env=dict(src.env or {}),
         cwd=src.cwd,
         setup_script=src.setup_script or "",
+        pin_mcp1=bool(src.pin_mcp1),
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,
         disabled_tools=list(src.disabled_tools or []),
@@ -2051,7 +2088,10 @@ def delete_server(session: Session, server_id: str) -> bool:
 # Node/Python launchers we recognize so the runner badge is meaningful. Anything
 # else is stored as a generic `command` (still launched verbatim).
 _NPX_LAUNCHERS = {"npx", "npx.cmd", "bunx", "pnpm", "node"}
-_UVX_LAUNCHERS = {"uvx", "uv"}
+# .exe basenames included so a Claude-Desktop-on-Windows config imports as the
+# uvx runner (and gets the pin_mcp1 toggle) — _launcher_basename normalizes the
+# path but keeps the suffix, mirroring npx.cmd in _NPX_LAUNCHERS.
+_UVX_LAUNCHERS = {"uvx", "uv", "uvx.exe", "uv.exe"}
 
 
 def _infer_runner(command: str) -> str:
