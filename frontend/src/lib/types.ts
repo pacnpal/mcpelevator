@@ -72,6 +72,12 @@ export interface ServerTool {
 	 * tools declare one so models can better understand results.
 	 * Absent on tool lists cached before this field existed. */
 	has_output_schema?: boolean;
+	/** The tool's identity BEFORE any operator rename (`tool_overrides`), stamped by the
+	 * bridge and read back by the discovery probe. Present only on a renamed tool, where
+	 * `name` is the EXPOSED (renamed) value; absent otherwise, where `name` is already the
+	 * upstream one. Always key per-tool UI state off `upstream_name ?? name` — an exposed
+	 * name is not a stable identity. */
+	upstream_name?: string;
 }
 
 /** Result of POST /api/servers/{id}/tools/{name}/call (the tool playground).
@@ -129,9 +135,23 @@ export interface ServerDetail extends ServerSummary {
 	 * longer appears in `tools` (it drops out of discovery), so the UI unions this
 	 * list back in to keep it togglable. */
 	disabled_tools: string[];
+	/** Upstream tool name -> replacement name/description. Empty = every tool is served
+	 * as the upstream declares it. Because `tools` holds what clients actually see, a
+	 * renamed tool is discovered under its NEW name — the UI maps it back through here. */
+	tool_overrides: Record<string, ToolOverride>;
 	config_hash: string;
 	source: string;
 	tools: ServerTool[];
+}
+
+/**
+ * The operator's relabelling of one upstream tool (issue #112), keyed by the tool's
+ * UPSTREAM name. Both fields are optional and independent — an unset field keeps what
+ * the upstream declares. A renamed tool answers to its new name only.
+ */
+export interface ToolOverride {
+	name?: string;
+	description?: string;
 }
 
 // Request body for POST /api/servers. PATCH accepts any subset of these
@@ -160,6 +180,9 @@ export interface ServerCreate {
 	idle_timeout_s?: number | null;
 	/** Upstream tool names to hide from every exposed surface. [] re-exposes all. */
 	disabled_tools?: string[];
+	/** Upstream tool name -> replacement name/description. Replaces the whole map;
+	 * {} restores every tool's upstream labels. */
+	tool_overrides?: Record<string, ToolOverride>;
 	enabled?: boolean;
 	/** Provenance. Only a `catalog:<id>` value is honored server-side (a registry install). */
 	source?: string | null;

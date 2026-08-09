@@ -7,7 +7,7 @@ from typing import Literal, Optional
 
 from typing import Union
 
-from pydantic import BaseModel, StrictBool, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr, model_serializer
 
 # The auth providers a server may select. Constrained here so a malformed value
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
@@ -35,6 +35,42 @@ class StartupStatus(BaseModel):
     deadline_at: Optional[datetime] = None
     next_retry_at: Optional[datetime] = None
     message: Optional[str] = None
+
+
+class ToolOverride(BaseModel):
+    """The operator's relabelling of ONE upstream tool (issue #112). Both fields are
+    optional and independent: an unset (or blank) field keeps what the upstream declares.
+    Keyed by the upstream tool name wherever this appears.
+
+    Extras are FORBIDDEN. Pydantic's default silently drops an unknown member, and it does
+    so BEFORE the request reaches the service normalizer — so without this, a typo'd field
+    ("desc") would round-trip as a saved override that does nothing, and the normalizer's
+    own unknown-field check (which still guards the non-API callers) could never fire."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Replace the tool's name. Validated server-side (<=64 chars of [A-Za-z0-9_.-]) because
+    # the name has to survive as a REST path segment and a model-facing function name.
+    name: Optional[StrictStr] = None
+    # Replace the tool's description — the text the model actually reads.
+    description: Optional[StrictStr] = None
+
+    @model_serializer
+    def _sparse(self) -> dict[str, str]:
+        """Serialize only the fields that are actually set.
+
+        Storage is sparse — the normalizer drops blank and absent fields — so an override
+        of one field is stored as ``{"name": …}``. Without this, coercing that back through
+        this model would materialize the other field and echo it as an explicit
+        ``"description": null``, which is neither what's stored nor what the SPA's
+        ``string | undefined`` contract describes. One rule, on the model that defines the
+        shape, so every surface that dumps it (the detail response, the write path's
+        ``model_dump()``) agrees with what the normalizer would store."""
+        return {
+            field: value
+            for field, value in (("name", self.name), ("description", self.description))
+            if value is not None
+        }
 
 
 class ServerSummary(BaseModel):
@@ -111,6 +147,8 @@ class ServerDetail(ServerSummary):
     idle_timeout_s: Optional[int] = None
     # Upstream tool names hidden from every exposed surface. Empty = expose all (default).
     disabled_tools: list[str] = []
+    # Upstream tool name -> replacement name/description. Empty = serve tools as declared.
+    tool_overrides: dict[str, ToolOverride] = {}
     config_hash: str = ""
     source: str = "manual"
     # Whether GET /servers/{id}/mcpb would produce a bundle (app.mcpb.exportable);
@@ -136,6 +174,8 @@ class ServerCreate(BaseModel):
     # Upstream tool names to hide from every exposed surface (empty = expose all).
     # Normalized (trimmed, deduped, sorted) server-side.
     disabled_tools: list[StrictStr] = []
+    # Upstream tool name -> replacement name/description (empty = serve as declared).
+    tool_overrides: dict[StrictStr, ToolOverride] = {}
     auth_provider: AuthProvider = "inherit"
     # Upstream OAuth (remote runner only; forced off elsewhere server-side).
     oauth: bool = False
@@ -169,6 +209,9 @@ class ServerUpdate(BaseModel):
     rest_openapi: Optional[bool] = None
     # Replace the whole hide list; [] re-exposes every tool. Omitted (null) = unchanged.
     disabled_tools: Optional[list[StrictStr]] = None
+    # Replace the whole override map; {} restores every tool's upstream name/description.
+    # Omitted (null) = unchanged. A per-tool merge would give no way to clear one entry.
+    tool_overrides: Optional[dict[StrictStr, ToolOverride]] = None
     auth_provider: Optional[AuthProvider] = None
     # StrictBool (unlike mcp_http/rest_openapi above): oauth gates a security-sensitive
     # upstream-auth mode, so a truthy-coerced "yes"/1 must never silently flip it on — the

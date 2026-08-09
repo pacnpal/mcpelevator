@@ -178,9 +178,12 @@ def test_unknown_runner_rejected(session):
 
 
 def test_disabled_tools_normalized_on_create(session):
-    """The hide list is trimmed, de-duplicated, and sorted on the way in."""
+    """The hide list is de-duplicated and sorted on the way in — but names are kept
+    EXACTLY. An MCP tool name is an unconstrained string, so one may legitimately carry
+    surrounding whitespace; trimming would rewrite the identity and the bridge would never
+    match the real tool, so hiding it would silently do nothing."""
     a = _mk(session, disabled_tools=["  b ", "a", "b", "", "a"])
-    assert a.disabled_tools == ["a", "b"]
+    assert a.disabled_tools == ["  b ", "a", "b"]
 
 
 def test_disabled_tools_default_empty(session):
@@ -212,6 +215,158 @@ def test_disabled_tools_survive_clone(session):
     a = _mk(session, disabled_tools=["secret"])
     clone = service.clone_server(session, a.id)
     assert clone.disabled_tools == ["secret"]
+
+
+# --- tool overrides (issue #112) ----------------------------------------------
+
+
+def test_tool_overrides_normalized_on_create(session):
+    """Fields are trimmed, blank fields dropped, entries with nothing left removed,
+    and keys sorted — so the stored value is exactly what will be applied."""
+    a = _mk(
+        session,
+        tool_overrides={
+            " z_tool ": {"name": " renamed ", "description": "  "},
+            "a_tool": {"description": " Does the thing. "},
+            "noop_tool": {"name": "", "description": ""},
+        },
+    )
+    # Values are trimmed (operator prose); the KEY is kept exactly (upstream identity).
+    assert a.tool_overrides == {
+        " z_tool ": {"name": "renamed"},
+        "a_tool": {"description": "Does the thing."},
+    }
+
+
+def test_tool_overrides_default_empty(session):
+    """No overrides = serve every tool exactly as the upstream declares it."""
+    assert _mk(session).tool_overrides == {}
+
+
+def test_tool_overrides_change_bounces_bridge(session):
+    """Overrides are applied inside the bridge, so a change MUST move the config_hash
+    (the reconciler restarts the bridge to re-apply them)."""
+    a = _mk(session)
+    before = a.config_hash
+    service.update_server(session, a.id, {"tool_overrides": {"t": {"name": "better"}}})
+    assert repo.get_server(session, a.id).config_hash != before
+
+
+def test_tool_overrides_hash_is_order_independent(session):
+    """Re-submitting the same overrides in a different key order must NOT bounce the
+    bridge (idempotency anchor, same contract as the hide list)."""
+    a = _mk(session, tool_overrides={"a": {"name": "x"}, "b": {"name": "y"}})
+    before = a.config_hash
+    service.update_server(
+        session, a.id, {"tool_overrides": {"b": {"name": "y"}, "a": {"name": "x"}}}
+    )
+    assert repo.get_server(session, a.id).config_hash == before
+
+
+def test_tool_overrides_no_op_entry_does_not_bounce_bridge(session):
+    """An entry that normalizes away (all fields blank) is not a config change."""
+    a = _mk(session)
+    before = a.config_hash
+    service.update_server(session, a.id, {"tool_overrides": {"t": {"name": "  "}}})
+    assert repo.get_server(session, a.id).config_hash == before
+
+
+def test_tool_overrides_reject_unusable_rename(session):
+    """A rename target has to survive as a REST path segment and a model-facing
+    function name, so the shape is validated on the way in. `.` and `..` match the
+    charset but are dot-segments: a client resolves `/rest/.` away before sending, so
+    the tool would be advertised at a path that can't reach it."""
+    for bad in ("has space", "has/slash", "x" * 65, "emoji✨", ".", ".."):
+        with pytest.raises(ValueError):
+            _mk(session, tool_overrides={"t": {"name": bad}})
+    # A dot inside a name is still fine — only the bare dot-segments are refused.
+    assert _mk(session, tool_overrides={"t": {"name": "v1.search"}}).tool_overrides == {
+        "t": {"name": "v1.search"}
+    }
+
+
+def test_tool_overrides_keep_distinct_keys_distinct(session):
+    """`" t "` and `"t"` are different upstream tools, and each keeps its own entry —
+    an override must reach the tool the operator actually named."""
+    a = _mk(session, tool_overrides={" t ": {"name": "a"}, "t": {"name": "b"}})
+    assert a.tool_overrides == {" t ": {"name": "a"}, "t": {"name": "b"}}
+
+
+def test_tool_overrides_drop_a_self_rename(session):
+    """Renaming a tool to the name it already has is not a rename, so it's canonicalized
+    away — exactly equivalent to leaving the field blank. Storing it would hash into the
+    launch spec and bounce the bridge to apply nothing (the transform treats a same-name
+    rename as no rename), and a stale one would hold its own name (see below)."""
+    a = _mk(session, tool_overrides={"t": {"name": "t"}})
+    assert a.tool_overrides == {}
+    # The entry's OTHER field survives — only the no-op rename is dropped.
+    b = _mk(session, tool_overrides={"t": {"name": "t", "description": "kept"}})
+    assert b.tool_overrides == {"t": {"description": "kept"}}
+
+
+def test_tool_overrides_allow_rename_onto_a_self_renamed_key(session):
+    """A self-rename claims no name, so it can't block an unrelated tool from taking it.
+    Left in place it would look like a live tool named `b` renaming to `b` and refuse
+    `a`->`b` as a duplicate target — even though `b` may not exist upstream at all."""
+    a = _mk(session, tool_overrides={"a": {"name": "b"}, "b": {"name": "b"}})
+    assert a.tool_overrides == {"a": {"name": "b"}}
+
+
+def test_tool_overrides_reject_unknown_fields(session):
+    """A typo'd member ("desc") must not be silently dropped — that reads as a saved
+    override that does nothing."""
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={"t": {"desc": "oops"}})
+
+
+def test_tool_overrides_reject_colliding_renames(session):
+    """Two tools renamed to the same name would silently shadow each other upstream —
+    one of them would simply stop working — so the write is refused."""
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={"a": {"name": "same"}, "b": {"name": "same"}})
+
+
+def test_tool_overrides_allow_rename_onto_a_labels_only_override_key(session):
+    """An override key is NOT evidence its tool still exists — keys are explicitly allowed
+    to go stale — so a key carrying only labels doesn't hold its name against a rename.
+    The bridge decides occupancy from the live list and refuses the rename if the tool is
+    really there; refusing here would force an operator to discard a temporarily-absent
+    tool's saved policy just to use an otherwise free name. Only a key that is itself
+    RENAMING contests the name (see the chain test below)."""
+    a = _mk(session, tool_overrides={"a": {"name": "b"}, "b": {"description": "kept"}})
+    assert a.tool_overrides == {"a": {"name": "b"}, "b": {"description": "kept"}}
+
+
+def test_tool_overrides_reject_rename_chains(session):
+    """A chain (`a`->`b` while `b`->`c`) is refused too. The bridge decides whether a
+    rename target is free from the LIVE upstream names — where `b` is still `b` — so it
+    would refuse `a`->`b` and the chain would silently do nothing. Better a clear error
+    here than a stored policy that never applies."""
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={"a": {"name": "b"}, "b": {"name": "c"}})
+
+
+def test_tool_overrides_allow_rename_onto_a_hidden_tools_name(session):
+    """Hiding a tool frees its name: a hidden tool exposes none, so another tool may take
+    it. The bridge applies exactly this combination."""
+    a = _mk(session, disabled_tools=["b"], tool_overrides={"a": {"name": "b"}})
+    assert a.tool_overrides == {"a": {"name": "b"}}
+    assert a.disabled_tools == ["b"]
+
+
+def test_tool_overrides_reject_malformed_shapes(session):
+    for bad in ({"t": "just a string"}, {"": {"name": "x"}}, {"t": {"name": 5}}, ["a"]):
+        with pytest.raises(ValueError):
+            _mk(session, tool_overrides=bad)
+
+
+def test_tool_overrides_survive_clone(session):
+    a = _mk(session, tool_overrides={"t": {"name": "better", "description": "Clear."}})
+    clone = service.clone_server(session, a.id)
+    assert clone.tool_overrides == {"t": {"name": "better", "description": "Clear."}}
+    # A deep copy: editing the clone must not reach back into the source row.
+    clone.tool_overrides["t"]["name"] = "changed"
+    assert a.tool_overrides["t"]["name"] == "better"
 
 
 def test_remote_server_canonicalizes_and_validates(session):
@@ -2237,3 +2392,80 @@ def test_auth_provider_change_does_not_restart(session):
     # but a launch-affecting change still does
     service.update_server(session, srv.id, {"args": ["-y", "z"]})
     assert repo.get_server(session, srv.id).config_hash != before
+
+
+def test_tool_overrides_allow_rename_onto_a_hidden_tool_that_keeps_labels(session):
+    """A hidden tool exposes no name even when it keeps labels of its own, so it holds none
+    against a rename — an operator shouldn't have to delete its saved description first."""
+    a = _mk(
+        session,
+        disabled_tools=["b"],
+        tool_overrides={"a": {"name": "b"}, "b": {"description": "kept for later"}},
+    )
+    assert a.tool_overrides == {"a": {"name": "b"}, "b": {"description": "kept for later"}}
+
+
+def test_tool_overrides_reject_an_oversized_description(session):
+    """The whole launch spec rides in ONE environment variable to the bridge; past the
+    kernel's per-string exec limit the process can't start, taking the server offline."""
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides={"t": {"description": "x" * 4097}})
+    # The cap is generous enough for any real description.
+    assert _mk(session, tool_overrides={"t": {"description": "x" * 4096}}).tool_overrides
+
+
+def test_tool_overrides_reject_an_oversized_map(session):
+    """The per-field cap doesn't bound the map: enough maximum-length descriptions — or one
+    absurd key — reach the same exec limit by accumulation. The total is what ships."""
+    with pytest.raises(ValueError, match="too large"):
+        _mk(
+            session,
+            tool_overrides={f"tool_{i}": {"description": "x" * 4096} for i in range(40)},
+        )
+    with pytest.raises(ValueError, match="too large"):
+        _mk(session, tool_overrides={"k" * 200_000: {"description": "ok"}})
+    # A realistically-sized policy across many tools is unaffected.
+    realistic = {
+        f"tool_{i}": {"name": f"renamed_{i}", "description": "A clear description."}
+        for i in range(60)
+    }
+    assert len(_mk(session, tool_overrides=realistic).tool_overrides) == 60
+
+
+def test_tool_overrides_ignore_a_hidden_tools_rename_in_collision_checks(session):
+    """A hidden tool exposes no name, so its own rename never applies — it can neither
+    claim a target nor collide with one. Keeping a hidden tool's saved labels must not
+    block an unrelated rename; the bridge skips disabled configs when reserving names."""
+    a = _mk(
+        session,
+        disabled_tools=["a"],
+        tool_overrides={"a": {"name": "x"}, "b": {"name": "x"}},
+    )
+    assert a.tool_overrides == {"a": {"name": "x"}, "b": {"name": "x"}}
+    # With both exposed it's a genuine conflict again.
+    with pytest.raises(ValueError, match="both renamed to"):
+        _mk(session, tool_overrides={"a": {"name": "x"}, "b": {"name": "x"}})
+
+
+def test_update_refuses_a_config_too_large_to_launch(session):
+    """The launch spec goes to the bridge in one environment variable, and past the
+    kernel's per-string limit the process can't start at all. Catching that only at start
+    time is too late: the reconciler stops the healthy bridge BEFORE starting its
+    replacement, so an accepted-but-unlaunchable config takes the endpoint offline and
+    stays persisted. Refusing the write keeps the running server running."""
+    a = _mk(session)
+    before = a.config_hash
+    with pytest.raises(ValueError, match="too large to launch"):
+        service.update_server(session, a.id, {"env": {"HUGE": "x" * (129 * 1024)}})
+    # The rejected write left nothing behind.
+    reloaded = repo.get_server(session, a.id)
+    assert reloaded.config_hash == before
+    assert reloaded.env == {}
+
+
+def test_create_refuses_a_config_too_large_to_launch(session):
+    """The same gate as update: individually valid inputs can still assemble into a spec
+    the bridge can't be exec'd with. Creating such a server would leave a row that fails
+    activation the moment it's enabled."""
+    with pytest.raises(ValueError, match="too large to launch"):
+        _mk(session, env={"HUGE": "x" * (129 * 1024)})

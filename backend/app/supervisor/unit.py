@@ -16,6 +16,14 @@ from typing import Optional
 
 from fastmcp import Client
 
+from app.bridge.host import UPSTREAM_META_KEY
+from app.bridge.spec import (
+    BRIDGE_SPEC_ENV_KEY,
+    BRIDGE_SPEC_MAX_BYTES,
+    bridge_payload,
+    oversize,
+    serialize,
+)
 from app.config import (
     get_settings,
     is_control_plane_env_var,
@@ -51,13 +59,25 @@ def tool_summary(tool) -> dict:
 
     ``input_schema`` is the tool's full JSON input schema — the playground builds
     its argument form from it, so it rides along in the cache rather than needing
-    a live round-trip to the bridge on every page view."""
-    return {
+    a live round-trip to the bridge on every page view.
+
+    ``upstream_name`` is the tool's identity BEFORE any operator rename, stamped into
+    ``_meta`` by the bridge's tool transform (see ``bridge.host``). Absent when the tool
+    isn't renamed — then ``name`` already IS the upstream name. The UI keys its per-tool
+    rows off this, so it never has to infer identity by reversing the rename map (an
+    exposed name isn't unique, so that inference can misidentify a tool). Trustworthy
+    because the bridge strips the key from every upstream tool before stamping its own —
+    an upstream can't forge an identity the UI would then key policy off."""
+    summary = {
         "name": tool.name,
         "description": tool.description or "",
         "input_schema": tool.inputSchema or {},
         "has_output_schema": tool.outputSchema is not None,
     }
+    upstream = (getattr(tool, "meta", None) or {}).get(UPSTREAM_META_KEY)
+    if isinstance(upstream, dict) and isinstance(upstream.get("name"), str):
+        summary["upstream_name"] = upstream["name"]
+    return summary
 
 
 class ServerUnit:
@@ -292,18 +312,7 @@ class ServerUnit:
         self._log_task = asyncio.create_task(self._pump_stream(self.proc.stdout))
 
     def _bridge_payload(self) -> dict:
-        return {
-            "command": self.spec.command,
-            "args": self.spec.args,
-            "env": self.spec.env,
-            "cwd": self.spec.cwd,
-            "transport": self.spec.transport,
-            "minimal_env": self.spec.minimal_env,
-            "oauth": self.spec.oauth,
-            "disabled_tools": list(self.spec.disabled_tools or []),
-            "name": self.name,
-            **self.exposure,
-        }
+        return bridge_payload(self.spec, self.name, **self.exposure)
 
     async def _await_ready(self, attempt: int, max_attempts: int) -> None:
         settings = get_settings()
@@ -470,9 +479,19 @@ class ServerUnit:
         # child's own env being scrubbed. (The control-plane process's own /proc still exposes an
         # operator-supplied admin token — a same-UID limitation; see docs/security.md.)
         inherited = {k: v for k, v in os.environ.items() if not is_control_plane_secret_env_var(k)}
+        spec = serialize(payload)
+        # The registry refuses an oversized spec at write time; this is the backstop for a
+        # row that predates that check or grew through a path that skipped it.
+        size = oversize(spec)
+        if size is not None:
+            raise _AttemptFailed(
+                f"launch spec is too large to pass to the bridge "
+                f"({size} bytes; max {BRIDGE_SPEC_MAX_BYTES}) — "
+                f"shorten the server's env, setup script, or tool overrides"
+            )
         return {
             **inherited,
-            "MCPE_BRIDGE_SPEC": json.dumps(payload),
+            BRIDGE_SPEC_ENV_KEY: spec,
             "MCPE_BRIDGE_HOST": self.host,
             "MCPE_BRIDGE_PORT": str(self.port),
             "MCPE_DATA_DIR": str(settings.data_dir.resolve()),

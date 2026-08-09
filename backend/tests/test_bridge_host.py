@@ -10,11 +10,14 @@ to an empty list instead of surfacing that error.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch, sentinel
 
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import FastMCPTransport
+from fastmcp.exceptions import ToolError
+from fastmcp.tools.tool import Tool as FastMCPTool
 from mcp.server.session import ServerSession
 from mcp.types import Root
 
@@ -86,13 +89,14 @@ def test_build_proxy_installs_custom_roots_handler():
     hand that client to create_proxy. Asserting the wiring (not just the return
     type) catches regressions that drop the custom handler or revert to the
     deprecated FastMCP.as_proxy path."""
+    proxy = MagicMock()
     with (
         patch.object(host, "ProxyClient", autospec=True) as proxy_client_cls,
-        patch.object(host, "create_proxy", return_value=sentinel.proxy) as create_proxy_mock,
+        patch.object(host, "create_proxy", return_value=proxy) as create_proxy_mock,
     ):
         result = host.build_proxy({"command": "echo", "args": ["hi"], "name": "t"})
 
-    assert result is sentinel.proxy
+    assert result is proxy
     assert proxy_client_cls.call_args.kwargs["roots"] is host._forward_roots
     create_proxy_mock.assert_called_once_with(proxy_client_cls.return_value, name="t")
 
@@ -194,7 +198,10 @@ def test_bridge_never_forwards_caller_headers_to_remote_upstream():
     assert transport.forward_incoming_headers is False
 
 
-# --- disabled-tools filtering (issue #105) ------------------------------------
+# --- per-tool policy: hiding (issue #105) + overrides (issue #112) ------------
+#
+# Both ride ONE FastMCP transform built by host._tool_transform, so these tests assert
+# the behaviour clients see rather than the mechanism that produces it.
 
 
 def _upstream_three_tools() -> FastMCP:
@@ -218,11 +225,17 @@ def _upstream_three_tools() -> FastMCP:
     return upstream
 
 
-def _proxy_with_disabled(disabled: list[str]) -> FastMCP:
+def _proxy_with(**policy) -> FastMCP:
+    """A bridge proxy over the three-tool upstream, carrying a per-tool policy
+    (``disabled_tools`` and/or ``tool_overrides``)."""
     with patch.object(
         host, "_build_transport", return_value=FastMCPTransport(_upstream_three_tools())
     ):
-        return host.build_proxy({"command": "ignored", "name": "t", "disabled_tools": disabled})
+        return host.build_proxy({"command": "ignored", "name": "t", **policy})
+
+
+def _proxy_with_disabled(disabled: list[str]) -> FastMCP:
+    return _proxy_with(disabled_tools=disabled)
 
 
 @pytest.mark.asyncio
@@ -240,7 +253,7 @@ async def test_disabled_tool_refused_on_call():
     client holding a stale list can't still invoke it."""
     proxy = _proxy_with_disabled(["secret"])
     async with Client(proxy) as client:
-        with pytest.raises(Exception):  # noqa: PT011 — client surfaces a ToolError/McpError
+        with pytest.raises(ToolError, match="Unknown tool"):
             await client.call_tool("secret", {})
         # A non-disabled tool still works end to end.
         result = await client.call_tool("add", {"a": 2, "b": 3})
@@ -256,25 +269,365 @@ async def test_no_disabled_tools_installs_no_filter():
     assert names == {"add", "secret", "echo"}
 
 
-def test_build_proxy_skips_middleware_when_no_disabled_tools():
-    """The middleware is only added when there's something to hide, so an unfiltered
-    server pays nothing. Asserted against the sentinel proxy so add_middleware would
-    raise if it were called."""
-    with (
-        patch.object(host, "ProxyClient", autospec=True),
-        patch.object(host, "create_proxy", return_value=sentinel.proxy),
-    ):
-        # sentinel.proxy has no add_middleware — a call would AttributeError.
-        assert host.build_proxy({"command": "echo", "name": "t"}) is sentinel.proxy
-
-
-def test_build_proxy_installs_middleware_when_disabled_tools_present():
+def test_build_proxy_always_installs_the_transform():
+    """Installed even with no policy: it also strips our reserved identity key from
+    upstream tools, and a server can forge that key whether or not a policy is set."""
     proxy = MagicMock()
     with (
         patch.object(host, "ProxyClient", autospec=True),
         patch.object(host, "create_proxy", return_value=proxy),
     ):
-        host.build_proxy({"command": "echo", "name": "t", "disabled_tools": ["secret"]})
-    assert proxy.add_middleware.call_count == 1
-    mw = proxy.add_middleware.call_args.args[0]
-    assert isinstance(mw, host.DisabledToolsMiddleware)
+        host.build_proxy({"command": "echo", "name": "t"})
+    assert proxy.add_transform.call_count == 1
+    assert isinstance(proxy.add_transform.call_args.args[0], host.ToolTransform)
+    # An override map whose entries are all empty applies nothing.
+    assert host._tool_transform({"tool_overrides": {"add": {}}})._transforms == {}
+
+
+def test_build_proxy_installs_transform_when_tool_policy_present():
+    for policy in ({"disabled_tools": ["secret"]}, {"tool_overrides": {"add": {"name": "sum"}}}):
+        proxy = MagicMock()
+        with (
+            patch.object(host, "ProxyClient", autospec=True),
+            patch.object(host, "create_proxy", return_value=proxy),
+        ):
+            host.build_proxy({"command": "echo", "name": "t", **policy})
+        assert proxy.add_transform.call_count == 1
+        assert isinstance(proxy.add_transform.call_args.args[0], host.ToolTransform)
+
+
+@pytest.mark.asyncio
+async def test_tool_override_renames_and_redescribes():
+    """The operator's replacement name/description is what clients discover — and the
+    tool is callable under the new name, with the upstream's behaviour intact."""
+    proxy = _proxy_with(
+        tool_overrides={"add": {"name": "sum_numbers", "description": "Adds two numbers."}}
+    )
+    async with Client(proxy) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+        assert set(tools) == {"sum_numbers", "secret", "echo"}
+        assert tools["sum_numbers"].description == "Adds two numbers."
+        # The input schema still comes from upstream — only the labels change.
+        assert set(tools["sum_numbers"].inputSchema["properties"]) == {"a", "b"}
+        result = await client.call_tool("sum_numbers", {"a": 2, "b": 3})
+    assert result.data == 5
+
+
+@pytest.mark.asyncio
+async def test_tool_override_fields_are_independent():
+    """Overriding only the description keeps the upstream name (and vice versa), so an
+    operator can fix one without restating the other."""
+    proxy = _proxy_with(
+        tool_overrides={"add": {"description": "Better."}, "echo": {"name": "repeat"}}
+    )
+    async with Client(proxy) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    assert tools["add"].description == "Better."  # renamed nothing
+    assert tools["repeat"].description == "Echo the input."  # kept upstream's description
+
+
+@pytest.mark.asyncio
+async def test_renamed_tool_stops_answering_to_its_upstream_name():
+    """A rename replaces the name rather than aliasing it — the upstream name is gone
+    from every surface, exactly as if the server itself had been rebuilt."""
+    proxy = _proxy_with(tool_overrides={"add": {"name": "sum_numbers"}})
+    async with Client(proxy) as client:
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("add", {"a": 1, "b": 2})
+
+
+@pytest.mark.asyncio
+async def test_hiding_wins_over_renaming():
+    """A tool that's both disabled and renamed is simply gone — under either name — so
+    the two controls can't combine into an exposed tool."""
+    proxy = _proxy_with(
+        disabled_tools=["secret"], tool_overrides={"secret": {"name": "internal"}}
+    )
+    async with Client(proxy) as client:
+        names = {t.name for t in await client.list_tools()}
+        assert names == {"add", "echo"}
+        for name in ("secret", "internal"):
+            with pytest.raises(ToolError, match="Unknown tool"):
+                await client.call_tool(name, {})
+
+
+@pytest.mark.asyncio
+async def test_override_for_unknown_tool_is_a_no_op():
+    """A stale key — a tool the upstream no longer exposes — must not break the bridge;
+    the operator's other tools keep working while they clean it up."""
+    proxy = _proxy_with(tool_overrides={"ghost": {"name": "casper"}})
+    async with Client(proxy) as client:
+        names = {t.name for t in await client.list_tools()}
+    assert names == {"add", "secret", "echo"}
+
+
+@pytest.mark.asyncio
+async def test_overrides_reach_the_rest_surface():
+    """The REST surface generates its routes and OpenAPI from the same tool list, so a
+    renamed tool is served at its NEW path — one policy, every surface."""
+    proxy = _proxy_with(
+        disabled_tools=["secret"], tool_overrides={"add": {"name": "sum_numbers"}}
+    )
+    routes = host.build_rest_routes(proxy, {"name": "t"})
+    openapi = next(r for r in routes if r.path == "/rest/openapi.json")
+    response = await openapi.endpoint(MagicMock())
+    document = json.loads(response.body)
+    assert set(document["paths"]) == {"/rest/sum_numbers", "/rest/echo"}
+
+
+@pytest.mark.asyncio
+async def test_renamed_tool_carries_its_upstream_name_in_meta():
+    """A rename must not cost the tool its identity. The bridge stamps the upstream name
+    into `_meta`, which the control plane's probe caches (supervisor.unit.tool_summary) so
+    the UI can key its per-tool rows off something stable. Inferring identity by reversing
+    the rename map instead would misidentify a tool whenever an exposed name isn't unique
+    (a stale override key whose target later matches a real upstream tool)."""
+    proxy = _proxy_with(tool_overrides={"add": {"name": "sum_numbers"}})
+    async with Client(proxy) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+
+    assert tools["sum_numbers"].meta[host.UPSTREAM_META_KEY] == {"name": "add"}
+    # A tool that ISN'T renamed carries no such marker — its name already is the upstream
+    # name, and stamping every tool would bloat every listing.
+    assert host.UPSTREAM_META_KEY not in (tools["echo"].meta or {})
+
+
+@pytest.mark.asyncio
+async def test_description_only_override_leaves_identity_alone():
+    """Only a rename needs the identity marker; re-describing doesn't move the name."""
+    proxy = _proxy_with(tool_overrides={"add": {"description": "Better."}})
+    async with Client(proxy) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    assert host.UPSTREAM_META_KEY not in (tools["add"].meta or {})
+
+
+# --- fidelity: an override changes the LABELS, nothing else ---------------------
+
+
+def _tool_with(**fields):
+    """An upstream tool carrying fields FastMCP's transform is known to drop."""
+
+    def fn(x: int) -> int:
+        """Upstream tool."""
+        return x
+
+    return FastMCPTool.from_function(fn, name="tasky").model_copy(update=fields)
+
+
+def _upstream_with_tool(tool) -> FastMCP:
+    upstream = FastMCP("upstream")
+    upstream.add_tool(tool)
+    return upstream
+
+
+@pytest.mark.asyncio
+async def test_override_preserves_upstream_meta_and_execution():
+    """Relabelling must not silently rewrite the rest of the tool definition.
+
+    Two things FastMCP's own transform drops: ``ToolTransformConfig.meta`` REPLACES the
+    upstream's `_meta` (so our identity marker would evict vendor extensions and client
+    presentation hints), and ``from_tool`` doesn't copy ``execution`` (so a tool declaring
+    MCP task support would lose ``taskSupport`` — and clients would then make an ordinary
+    call it rejects — through even a description-only edit)."""
+    tool = _tool_with(meta={"vendor": {"hint": "keep-me"}}, execution={"taskSupport": "required"})
+
+    for policy in ({"description": "Desc only."}, {"name": "renamed"}):
+        with patch.object(
+            host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+        ):
+            proxy = host.build_proxy(
+                {"command": "x", "name": "t", "tool_overrides": {"tasky": policy}}
+            )
+        async with Client(proxy) as client:
+            served = (await client.list_tools())[0]
+
+        assert served.meta["vendor"] == {"hint": "keep-me"}, policy
+        assert served.execution.taskSupport == "required", policy
+
+
+@pytest.mark.asyncio
+async def test_stale_rename_does_not_strand_a_real_tool_of_that_name():
+    """A leftover override for a tool the upstream dropped must not reserve its target
+    name. FastMCP reverse-maps a call on that name to the vanished source and answers
+    "Unknown tool" — while tools/list still advertises the REAL tool of that name, which
+    is then listed but uncallable. The name belongs to whoever actually carries it."""
+    proxy = _proxy_with(tool_overrides={"ghost": {"name": "echo"}})
+    async with Client(proxy) as client:
+        assert {t.name for t in await client.list_tools()} == {"add", "secret", "echo"}
+        assert (await client.call_tool("echo", {"s": "hi"})).data == "hi"
+
+
+@pytest.mark.asyncio
+async def test_override_preserves_upstream_icons():
+    """`icons` is one more field FastMCP's transform nulls out (see _CARRIED_FIELDS) —
+    an operator rewording a description must not strip the tool's icon."""
+    tool = _tool_with(icons=[{"src": "https://example.test/i.png", "mimeType": "image/png"}])
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy(
+            {"command": "x", "name": "t", "tool_overrides": {"tasky": {"description": "D."}}}
+        )
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert str(served.icons[0].src) == "https://example.test/i.png"
+
+
+@pytest.mark.asyncio
+async def test_rename_onto_a_live_tool_goes_inert_instead_of_shadowing():
+    """A rename must never take a name another live tool already answers to. Applying it
+    would misroute BOTH tools — calls to the target would reach the renamed tool, and the
+    native one would become unreachable. The UI can't be the only guard: it compares
+    against the tool list as it was BEFORE the change, so an override written straight to
+    the API (or an upstream that later adds a tool of that name) lands here anyway."""
+    proxy = _proxy_with(tool_overrides={"add": {"name": "echo"}})
+    async with Client(proxy) as client:
+        assert {t.name for t in await client.list_tools()} == {"add", "secret", "echo"}
+        # Each name still reaches the tool that actually owns it.
+        assert (await client.call_tool("echo", {"s": "hi"})).data == "hi"
+        assert (await client.call_tool("add", {"a": 1, "b": 2})).data == 3
+
+
+@pytest.mark.asyncio
+async def test_upstream_cannot_forge_the_identity_marker():
+    """UPSTREAM_META_KEY asserts "the elevator renamed this tool". An upstream that sets it
+    would hand the UI a false identity to key per-tool policy off — the operator would
+    disable one row while a different tool stayed exposed. It's stripped from every upstream
+    tool, so only this bridge can put it there."""
+    tool = _tool_with(meta={"vendor": "keep", host.UPSTREAM_META_KEY: {"name": "impersonated"}})
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy(
+            {"command": "x", "name": "t", "tool_overrides": {"tasky": {"description": "D."}}}
+        )
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert host.UPSTREAM_META_KEY not in served.meta
+    assert served.meta["vendor"] == "keep"  # the rest of the upstream's meta is untouched
+
+
+@pytest.mark.asyncio
+async def test_hiding_a_tool_frees_its_name_for_a_rename():
+    """A hidden tool exposes no name, so another tool may take it. FastMCP's own transform
+    reserves a target for EVERY entry and raises on a duplicate — which made this
+    combination (accepted by both the UI and the API) a ValueError at proxy build, i.e. a
+    bridge that crash-loops and takes the server offline."""
+    proxy = _proxy_with(disabled_tools=["echo"], tool_overrides={"add": {"name": "echo"}})
+    async with Client(proxy) as client:
+        assert {t.name for t in await client.list_tools()} == {"echo", "secret"}
+        assert (await client.call_tool("echo", {"a": 1, "b": 2})).data == 3  # renamed add
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("add", {"a": 1, "b": 2})
+
+
+@pytest.mark.asyncio
+async def test_a_labels_only_key_does_not_swallow_a_rename_onto_its_name():
+    """A rename onto a name held only by a STALE override key must still resolve.
+
+    Both halves of this policy are accepted by the write path: `add` -> `zz` is a rename
+    onto a free name, and the `zz` entry is a description for a tool that isn't there right
+    now (keys are allowed to go stale). The two entries meet in the reverse map, where an
+    un-renamed key used to claim its own name — and since entries arrive sorted, `zz`
+    overwrote the mapping `zz` -> `add` written a moment earlier. tools/list still
+    advertised the renamed `zz` while a call on it went looking for a native `zz`, leaving
+    the tool listed and uncallable."""
+    proxy = _proxy_with(tool_overrides={"add": {"name": "zz"}, "zz": {"description": "stale"}})
+    async with Client(proxy) as client:
+        assert {t.name for t in await client.list_tools()} == {"zz", "secret", "echo"}
+        assert (await client.call_tool("zz", {"a": 1, "b": 2})).data == 3
+
+
+@pytest.mark.asyncio
+async def test_refusing_a_rename_does_not_unhide_the_tool():
+    """Hiding wins over renaming — including when the rename is refused because its target
+    is taken. Dropping the whole config in that branch would expose a tool the operator
+    disabled."""
+    proxy = _proxy_with(disabled_tools=["add"], tool_overrides={"add": {"name": "echo"}})
+    async with Client(proxy) as client:
+        names = {t.name for t in await client.list_tools()}
+        assert "add" not in names and "echo" in names
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("add", {"a": 1, "b": 2})
+        assert (await client.call_tool("echo", {"s": "hi"})).data == "hi"  # native echo
+
+
+@pytest.mark.asyncio
+async def test_identity_marker_is_scrubbed_without_any_policy():
+    """The scrub can't be conditional on a policy: an upstream can forge the reserved key
+    whether or not the operator has configured anything for that server."""
+    tool = _tool_with(meta={"keep": 1, host.UPSTREAM_META_KEY: {"name": "forged"}})
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t"})  # no overrides at all
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert host.UPSTREAM_META_KEY not in served.meta
+    assert served.meta["keep"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_rename_onto_a_hidden_name_does_not_leak_it():
+    """A stale rename whose target is a HIDDEN tool must not hand that tool back. The name
+    reverts to whoever carries it — under that tool's own policy — so "hidden tools are
+    refused on call" still holds for a client that guesses the name."""
+    proxy = _proxy_with(
+        disabled_tools=["secret"], tool_overrides={"ghost": {"name": "secret"}}
+    )
+    async with Client(proxy) as client:
+        assert {t.name for t in await client.list_tools()} == {"add", "echo"}
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("secret", {})
+
+
+@pytest.mark.asyncio
+async def test_override_preserves_an_open_ended_input_schema():
+    """The transform REBUILDS the input schema, and the rebuild isn't faithful: an
+    open-ended `additionalProperties: true` comes back as empty `properties` with
+    `additionalProperties: false`, so a tool taking dynamic keys becomes uncallable with
+    its real arguments after a description-only edit. The operator changed the labels; the
+    input contract belongs to the upstream."""
+    open_ended = {"type": "object", "additionalProperties": True}
+    tool = _tool_with(parameters=open_ended)
+
+    for policy in ({"description": "D."}, {"name": "renamed"}):
+        with patch.object(
+            host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+        ):
+            proxy = host.build_proxy(
+                {"command": "x", "name": "t", "tool_overrides": {"tasky": policy}}
+            )
+        async with Client(proxy) as client:
+            served = (await client.list_tools())[0]
+        assert served.inputSchema == open_ended, policy
+
+
+@pytest.mark.asyncio
+async def test_override_keeps_a_dynamic_schema_tool_callable():
+    """The advertised schema surviving isn't enough — the tool has to still WORK. FastMCP's
+    transform derives its forwarding closure from the schema it rebuilds, so a tool with an
+    open-ended schema rejected every argument it was handed (valid ones included) after a
+    description-only edit. Relabelling copies the source tool instead of rebuilding it, so
+    dispatch stays the upstream's."""
+    upstream = FastMCP("upstream")
+
+    def dyn(a: int) -> dict:
+        """Dynamic."""
+        return {"a": a}
+
+    upstream.add_tool(
+        FastMCPTool.from_function(dyn, name="dyn").model_copy(
+            update={"parameters": {"type": "object", "additionalProperties": True}}
+        )
+    )
+
+    for policy, exposed in (({"description": "D."}, "dyn"), ({"name": "renamed"}, "renamed")):
+        with patch.object(host, "_build_transport", return_value=FastMCPTransport(upstream)):
+            proxy = host.build_proxy(
+                {"command": "x", "name": "t", "tool_overrides": {"dyn": policy}}
+            )
+        async with Client(proxy) as client:
+            result = await client.call_tool(exposed, {"a": 7}, raise_on_error=False)
+        assert result.is_error is False, policy
+        assert result.structured_content == {"a": 7}, policy

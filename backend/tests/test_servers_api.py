@@ -52,8 +52,8 @@ def test_setup_script_api_round_trip_and_runner_validation():
 
 
 def test_disabled_tools_api_round_trip():
-    """disabled_tools is accepted on create, normalized (trimmed/deduped/sorted),
-    echoed on GET, and replaceable via PATCH ([] re-exposes everything)."""
+    """disabled_tools is accepted on create, normalized (deduped/sorted — names kept
+    exactly), echoed on GET, and replaceable via PATCH ([] re-exposes everything)."""
     with TestClient(app) as c:
         created = c.post(
             "/api/servers",
@@ -61,7 +61,10 @@ def test_disabled_tools_api_round_trip():
                 "name": "Hidden",
                 "runner": "command",
                 "command": "/bin/true",
-                "disabled_tools": ["  z_tool ", "a_tool", "a_tool"],
+                # " a_tool " is a DIFFERENT tool from "a_tool": the name is the upstream's
+                # identity, so it has to cross the HTTP boundary untouched or the hide
+                # would be written against a tool that doesn't exist.
+                "disabled_tools": ["z_tool", "a_tool", "a_tool", " a_tool "],
             },
             headers=LOOPBACK,
         )
@@ -70,7 +73,7 @@ def test_disabled_tools_api_round_trip():
         try:
             detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
             assert detail.status_code == 200
-            assert detail.json()["disabled_tools"] == ["a_tool", "z_tool"]
+            assert detail.json()["disabled_tools"] == [" a_tool ", "a_tool", "z_tool"]
 
             patched = c.patch(
                 f"/api/servers/{server_id}",
@@ -80,6 +83,96 @@ def test_disabled_tools_api_round_trip():
             assert patched.status_code == 200, patched.text
             detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
             assert detail.json()["disabled_tools"] == []
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_tool_overrides_api_round_trip():
+    """tool_overrides is accepted on create, normalized, echoed on GET, replaceable via
+    PATCH ({} restores the upstream labels), and an unusable rename is a 400."""
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "Relabelled",
+                "runner": "command",
+                "command": "/bin/true",
+                "tool_overrides": {
+                    "do_thing": {"name": "run_report", "description": " Runs it. "},
+                    "other": {"description": ""},
+                },
+            },
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.status_code == 200
+            # "other" had nothing left after trimming, so it isn't stored at all.
+            assert detail.json()["tool_overrides"] == {
+                "do_thing": {"name": "run_report", "description": "Runs it."}
+            }
+
+            rejected = c.patch(
+                f"/api/servers/{server_id}",
+                json={"tool_overrides": {"do_thing": {"name": "not a valid name"}}},
+                headers=LOOPBACK,
+            )
+            assert rejected.status_code == 400, rejected.text
+
+            # A typo'd member must NOT be silently dropped. This has to be asserted at
+            # the HTTP boundary: pydantic strips unknown fields before the service
+            # normalizer runs, so the normalizer's own check can't cover API traffic.
+            typo = c.patch(
+                f"/api/servers/{server_id}",
+                json={"tool_overrides": {"do_thing": {"desc": "typo"}}},
+                headers=LOOPBACK,
+            )
+            assert typo.status_code == 422, typo.text
+            assert "desc" in typo.text
+
+            patched = c.patch(
+                f"/api/servers/{server_id}",
+                json={"tool_overrides": {}},
+                headers=LOOPBACK,
+            )
+            assert patched.status_code == 200, patched.text
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["tool_overrides"] == {}
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_tool_overrides_echo_only_the_fields_that_are_set():
+    """An override of ONE field must not come back carrying an explicit null for the other.
+
+    Storage is sparse (the normalizer drops blank/absent fields), so materializing the
+    missing field on the way out would describe a shape that was never stored, and one the
+    SPA's `name?: string` contract doesn't have — an absent name would read as the string
+    `null` rather than "keep the upstream's"."""
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "Sparse",
+                "runner": "command",
+                "command": "/bin/true",
+                "tool_overrides": {
+                    "renamed": {"name": "run_report"},
+                    "redescribed": {"description": "Runs it."},
+                },
+            },
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["tool_overrides"] == {
+                "renamed": {"name": "run_report"},
+                "redescribed": {"description": "Runs it."},
+            }
         finally:
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 

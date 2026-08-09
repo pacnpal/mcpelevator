@@ -7,8 +7,10 @@ Sits above the repo: generates identity (id/slug), computes the idempotency
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import tempfile
@@ -20,10 +22,12 @@ from urllib.parse import urlsplit
 
 from sqlmodel import Session
 
+from app.bridge.spec import BRIDGE_SPEC_MAX_BYTES, bridge_payload, oversize, serialize
 from app.config import get_settings
 from app.db import repo
 from app.db.models import RUNNERS, Server
 from app.registry import settings as runtime_settings
+from app.runners import build_spec
 from app.runners import remote as remote_runner
 from app.runners.docker import (
     DOCKER_RUN_VALUE_FLAGS,
@@ -1301,10 +1305,14 @@ def _hash_payload(server: Server) -> dict[str, Any]:
         "setup_script": server.setup_script or "",
         "mcp_http": server.mcp_http,
         "rest_openapi": server.rest_openapi,
-        # The hide list is applied inside the bridge (a FastMCP middleware), so it's part
-        # of the launch spec — a change must restart the bridge to re-apply it. Normalized
-        # (sorted, deduped) so reordering the same set doesn't perturb the hash.
+        # Per-tool policy (hidden tools, renames, descriptions) is applied inside the bridge
+        # as one FastMCP transform, so it's part of the launch spec — a change must restart
+        # the bridge to re-apply it. Normalized (sorted, deduped) so re-submitting the same
+        # policy in a different order doesn't perturb the hash.
         "disabled_tools": normalize_disabled_tools(server.disabled_tools),
+        "tool_overrides": normalize_tool_overrides(
+            server.tool_overrides, server.disabled_tools or []
+        ),
         # OAuth config drives how the bridge authenticates upstream, so it IS part
         # of the launch spec — a change must restart the bridge. (The tokens live in
         # a file store, not the row, so *authenticating* leaves the hash untouched.)
@@ -1537,10 +1545,16 @@ def normalize_idle_timeout(value: Any) -> Optional[int]:
 
 
 def normalize_disabled_tools(value: Any) -> list[str]:
-    """Canonicalize the per-server hide list: a list of non-empty tool-name strings,
-    trimmed, de-duplicated, and SORTED so the stored value (and thus config_hash) is
-    order-independent — reordering the same set must not bounce the bridge. ``None``
-    (a pre-field row, or a PATCH that omits it) reads as ``[]`` = expose everything."""
+    """Canonicalize the per-server hide list: non-empty tool names, de-duplicated and
+    SORTED so the stored value (and thus config_hash) is order-independent — reordering the
+    same set must not bounce the bridge. ``None`` (a pre-field row, or a PATCH that omits
+    it) reads as ``[]`` = expose everything.
+
+    Names are kept EXACTLY as given. An MCP tool name is an unconstrained string, so one
+    may legitimately carry surrounding whitespace — and such a name is precisely the sort an
+    operator reaches for this feature to deal with. Trimming it here would rewrite the
+    identity, the bridge would never match the real tool, and hiding it would silently do
+    nothing. Same rule as ``normalize_tool_overrides`` keys, which must agree with these."""
     if value is None:
         return []
     if not isinstance(value, list):
@@ -1549,10 +1563,152 @@ def normalize_disabled_tools(value: Any) -> list[str]:
     for item in value:
         if not isinstance(item, str):
             raise ValueError("disabled_tools must be a list of tool names")
-        name = item.strip()
-        if name and name not in names:
-            names.append(name)
+        if item and item not in names:
+            names.append(item)
     return sorted(names)
+
+
+# A renamed tool has to be addressable everywhere the name travels: an MCP tool name, a
+# REST path segment (``/rest/<tool>``), a group-hub namespaced name (``<slug>_<tool>``), and
+# a function name in the model's tool list — where mainstream providers cap at 64 chars and
+# this character class. Renaming is normally used to SHORTEN an unwieldy name anyway.
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+# A replacement description is prose a model reads on every tools/list, and the whole
+# launch spec (this map included) is handed to the bridge in ONE environment variable —
+# past the kernel's per-string exec limit the process can't start at all, which would take
+# an enabled server offline. Generous for any real description; a novel here would blow the
+# model's context anyway, which is the opposite of what this feature is for.
+_TOOL_DESCRIPTION_MAX = 4096
+
+# ...and a ceiling on the WHOLE map, because the per-field cap alone doesn't bound it:
+# enough maximum-length descriptions (or one absurd upstream-name key) reach the same exec
+# limit by accumulation. One invariant covers entry count, key length and value length at
+# once. Half the typical 128 KiB limit, leaving room for the rest of the spec.
+_TOOL_OVERRIDES_MAX_BYTES = 64 * 1024
+
+
+def normalize_tool_overrides(
+    value: Any, disabled: Any = ()
+) -> dict[str, dict[str, str]]:
+    """Canonicalize the per-server tool overrides (issue #112): a map of UPSTREAM tool name
+    -> ``{"name": …, "description": …}``, either field optional.
+
+    Keyed by the upstream name because that's the stable identity — the operator is
+    relabelling a tool, not defining a new one, so an override survives being re-renamed
+    and a rename never orphans its own description.
+
+    Entries are trimmed, empty fields dropped, no-op entries (nothing left to apply)
+    removed, and keys SORTED, so the stored value — and thus ``config_hash`` — depends only
+    on what will actually be applied: re-submitting the same overrides in a different order
+    must not bounce the bridge. ``None`` (a pre-field row, or a PATCH that omits it) reads
+    as ``{}`` = serve every tool exactly as the upstream declares it.
+
+    Rename targets are validated for shape and for collisions WITH EACH OTHER; a rename onto
+    a tool that isn't itself overridden can't be caught here (the upstream tool list isn't
+    known at write time, and is stale or absent while the server is stopped), so the UI
+    warns against the live list instead.
+
+    The 64-char cap is on the tool name itself. Group exposure namespaces it further
+    (``<slug>_<tool>``), which can push a long name past a provider's function-name limit —
+    but that's a property of group namespacing that applies equally to un-renamed upstream
+    names, so it isn't charged to renaming here; renaming is in fact the tool an operator
+    has for SHORTENING such a name.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("tool_overrides must be a map of tool name -> override")
+    overrides: dict[str, dict[str, str]] = {}
+    # A HIDDEN tool exposes no name, so its own rename never applies: it neither claims a
+    # target nor collides with anything. Keeping a hidden tool's saved labels must not block
+    # an unrelated rename (the bridge skips disabled configs when reserving names).
+    hidden = set(normalize_disabled_tools(list(disabled)))
+    renamed_to: dict[str, str] = {}  # new name -> the EXPOSED upstream tool claiming it
+    for key, override in value.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError("tool_overrides keys must be non-empty tool names")
+        # The key is the upstream tool's IDENTITY, kept exactly as given — see
+        # normalize_disabled_tools. (Distinct keys can't collide, so there's nothing to
+        # de-duplicate; only the VALUES below are operator prose worth trimming.)
+        tool = key
+        if not isinstance(override, dict):
+            raise ValueError(f"tool_overrides[{tool!r}] must be an override object")
+        unknown = set(override) - {"name", "description"}
+        if unknown:
+            # Silently dropping an unknown member would turn a typo ("desc") into an
+            # override that appears saved and does nothing.
+            raise ValueError(
+                f"tool_overrides[{tool!r}] has unknown field(s): {', '.join(sorted(unknown))}"
+            )
+        entry: dict[str, str] = {}
+        for field_name in ("name", "description"):
+            field = override.get(field_name)
+            if field is None:
+                continue
+            if not isinstance(field, str):
+                raise ValueError(f"tool_overrides[{tool!r}].{field_name} must be a string")
+            field = field.strip()
+            if field_name == "description" and len(field) > _TOOL_DESCRIPTION_MAX:
+                raise ValueError(
+                    f"tool_overrides[{tool!r}].description is too long "
+                    f"(max {_TOOL_DESCRIPTION_MAX} characters)"
+                )
+            if field:
+                entry[field_name] = field
+        # Renaming a tool to the name it already has is not a rename. Canonicalize it away
+        # so it's exactly equivalent to leaving the field blank: otherwise it would be
+        # stored and hashed (restarting the bridge to apply nothing), and — once its tool
+        # went stale — would hold its own name against an unrelated tool renaming onto it.
+        if entry.get("name") == tool:
+            del entry["name"]
+        name = entry.get("name")
+        if name is not None:
+            # `.` and `..` match the charset but are dot-segments: a client resolves
+            # `/rest/.` away before the request is sent, so the tool would be advertised
+            # at a REST path that can't reach it.
+            if name in {".", ".."} or not _TOOL_NAME_RE.match(name):
+                raise ValueError(
+                    f"invalid tool name {name!r}: use up to 64 letters, digits, '_', '.' or '-'"
+                )
+            if tool not in hidden:
+                if name in renamed_to:
+                    raise ValueError(
+                        f"tools {renamed_to[name]!r} and {tool!r} are both renamed to {name!r}"
+                    )
+                renamed_to[name] = tool
+        # Nothing left after trimming = no override at all. Dropping it keeps a cleared
+        # field out of the row (and out of the hash) instead of storing an empty shell.
+        if entry:
+            overrides[tool] = entry
+    # A rename must not land on another OVERRIDDEN tool's upstream name. That tool exists
+    # (it's being overridden), so the bridge refuses the rename rather than shadow it — and
+    # a policy the bridge silently won't apply is worse than a clear error here. This
+    # includes chains (`a`->`b` while `b`->`c`): the bridge decides occupancy from the LIVE
+    # upstream names, where `b` is still `b`, so the chain would no-op.
+    #
+    # A HIDDEN tool is exempt: it exposes no name, so it holds none against a rename, and
+    # the bridge applies that combination. It stays exempt even when it keeps labels of its
+    # own — an operator shouldn't have to delete a hidden tool's saved description to rename
+    # something onto its freed name.
+    for name, tool in renamed_to.items():
+        # Only a tool that is EXPOSED and being RENAMED contests a name here. A key with
+        # labels but no rename is not evidence its tool still exists — override keys are
+        # explicitly allowed to go stale — and the bridge decides occupancy from the live
+        # list anyway, so refusing on that basis would force an operator to discard a
+        # temporarily-absent tool's saved policy to use an otherwise free name.
+        other = overrides.get(name)
+        if other is not None and "name" in other and name not in hidden:
+            raise ValueError(f"renaming {tool!r} to {name!r} would collide with that tool")
+    result = {tool: overrides[tool] for tool in sorted(overrides)}
+    # Bound what actually ships to the bridge, not just its parts.
+    size = len(json.dumps(result, separators=(",", ":")).encode())
+    if size > _TOOL_OVERRIDES_MAX_BYTES:
+        raise ValueError(
+            f"tool_overrides is too large ({size} bytes; "
+            f"max {_TOOL_OVERRIDES_MAX_BYTES})"
+        )
+    return result
 
 
 def _normalize_setup_script(runner: str, setup_script: str) -> str:
@@ -1563,6 +1719,27 @@ def _normalize_setup_script(runner: str, setup_script: str) -> str:
     if runner not in _LOCAL_EXEC_RUNNERS:
         raise ValueError("Setup scripts are supported only by the npx, uvx, and command local runners.")
     return setup_script
+
+
+def _require_launchable_spec(server: Server) -> None:
+    """Refuse a config the bridge could never be exec'd with.
+
+    The whole launch spec goes to the bridge in one environment variable; past the kernel's
+    per-string limit the process can't start at all. Checking only at start time would be
+    too late: the reconciler stops the healthy bridge BEFORE starting its replacement, so an
+    accepted-but-unlaunchable config takes the endpoint offline and stays persisted until
+    someone edits it back. Refusing the write turns that outage into a 400. Uses the same
+    payload builder the supervisor does, so the two can't drift."""
+    payload = bridge_payload(
+        build_spec(server), server.name, mcp_http=server.mcp_http, rest_openapi=server.rest_openapi
+    )
+    size = oversize(serialize(payload))
+    if size is not None:
+        raise ValueError(
+            f"this configuration is too large to launch "
+            f"({size} bytes; max {BRIDGE_SPEC_MAX_BYTES}) — "
+            f"shorten the env, setup script, or tool overrides"
+        )
 
 
 @_serialized_write
@@ -1580,6 +1757,7 @@ def create_server(
     mcp_http: bool = True,
     rest_openapi: bool = False,
     disabled_tools: Optional[list[str]] = None,
+    tool_overrides: Optional[dict[str, dict[str, str]]] = None,
     auth_provider: str = "inherit",
     oauth: bool = False,
     oauth_scopes: str = "",
@@ -1630,6 +1808,7 @@ def create_server(
     run_args = normalize_run_args(runner, run_args)
     idle_timeout_s = normalize_idle_timeout(idle_timeout_s)
     disabled_tools = normalize_disabled_tools(disabled_tools)
+    tool_overrides = normalize_tool_overrides(tool_overrides, disabled_tools)
 
     server = Server(
         id=new_id(),
@@ -1645,6 +1824,7 @@ def create_server(
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
         disabled_tools=disabled_tools,
+        tool_overrides=tool_overrides,
         auth_provider=auth_provider,
         oauth=oauth,
         oauth_scopes=oauth_scopes,
@@ -1659,6 +1839,9 @@ def create_server(
         owner_id=owner_id,
     )
     server.config_hash = compute_hash(server)
+    # Same gate as update_server: a config the bridge could never be exec'd with is
+    # refused here rather than deterministically failing activation later.
+    _require_launchable_spec(server)
     return repo.create_server(session, server)
 
 
@@ -1674,6 +1857,7 @@ _MUTABLE_FIELDS = {
     "mcp_http",
     "rest_openapi",
     "disabled_tools",
+    "tool_overrides",
     "auth_provider",
     "oauth",
     "oauth_scopes",
@@ -1780,6 +1964,10 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         server.run_args = normalize_run_args(server.runner, server.run_args)
         server.idle_timeout_s = normalize_idle_timeout(server.idle_timeout_s)
         server.disabled_tools = normalize_disabled_tools(server.disabled_tools)
+        server.tool_overrides = normalize_tool_overrides(
+            server.tool_overrides, server.disabled_tools or []
+        )
+        _require_launchable_spec(server)
     except ValueError:
         session.rollback()
         raise
@@ -1821,6 +2009,7 @@ def clone_server(
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,
         disabled_tools=list(src.disabled_tools or []),
+        tool_overrides={k: dict(v) for k, v in (src.tool_overrides or {}).items()},
         auth_provider=src.auth_provider,
         oauth=bool(src.oauth),
         oauth_scopes=src.oauth_scopes or "",

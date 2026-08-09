@@ -32,14 +32,16 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
-from fastmcp.exceptions import NotFoundError
 from fastmcp.server import create_proxy
 from fastmcp.server.dependencies import get_context
-from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.providers.proxy import ProxyClient
+from fastmcp.server.transforms import ToolTransform
+from fastmcp.tools.tool import Tool
+from fastmcp.tools.tool_transform import ToolTransformConfig
 from mcp.types import ClientCapabilities, Root, RootsCapability
 
 
@@ -253,43 +255,227 @@ def _build_oauth_auth(oauth: dict):
     return provider
 
 
-class DisabledToolsMiddleware(Middleware):
-    """Hides a configured set of upstream tools from every surface this bridge serves.
+# `_meta` namespace under which a renamed tool carries its upstream name. PUBLIC: it's a
+# contract between this bridge and the control plane's discovery probe
+# (supervisor.unit.tool_summary), which reads it back so a rename never costs the UI the
+# tool's stable identity. Namespaced to keep it clear of the upstream server's own meta
+# and FastMCP's.
+UPSTREAM_META_KEY = "io.mcpelevator/upstream"
 
-    The operator disables individual tools (issue #105 — a passthrough server often
-    ships internal-only tools that just waste the model's context). Filtering here, in
-    the bridge, covers all three exposed surfaces at once because they all resolve tools
-    through this same FastMCP instance: the Streamable-HTTP ``tools/list`` + ``tools/call``,
-    the REST/OpenAPI routes (which call ``list_tools`` over an in-memory client), and the
-    group hub (which proxies this bridge's ``/mcp`` over HTTP).
 
-    Two hooks, so hiding a tool also disables it:
+class _ToolTransform(ToolTransform):
+    """FastMCP's ``ToolTransform`` with the gaps that matter to elevation closed.
 
-    * ``on_list_tools`` drops the disabled tools from what any client discovers.
-    * ``on_call_tool`` refuses a disabled tool with ``NotFoundError`` — the same error a
-      genuinely unknown tool raises — so a client holding a stale list can't still call it.
+    Elevation must be faithful: an operator relabelling a tool is changing its NAME and
+    DESCRIPTION, and nothing else may move as a side effect.
 
-    The list is applied by NAME. It's part of the launch spec (``config_hash``), so a change
-    restarts the bridge and this middleware is rebuilt from the new set — the control plane's
-    tool-discovery probe then caches only the surviving tools, and the UI re-adds the disabled
-    names (which it holds in the DB row) so they stay togglable.
+    * **The upstream definition survives.** ``TransformedTool.from_tool`` (FastMCP 3.4.4)
+      rebuilds the tool and drops the client-visible fields in ``_CARRIED_FIELDS`` — an
+      upstream ``icons`` would vanish, and an ``execution`` declaring MCP task support
+      (``taskSupport: required``) would too, so clients would issue an ordinary call the
+      tool rejects — through even a description-only edit. ``ToolTransformConfig.meta``
+      likewise REPLACES rather than merges, which would evict the upstream's own ``_meta``
+      (vendor extensions, presentation hints) from every renamed tool.
+
+    * **A rename never takes a name that's already taken.** FastMCP maps the target name
+      back to the rename's source unconditionally. That silently misroutes in both
+      directions: with a live tool of the target's name, the rename shadows it (calls to it
+      reach the wrong tool); with the source GONE upstream, the target resolves to nothing,
+      so a real tool is advertised by ``tools/list`` and then refused on call. Neither is
+      reachable through the UI's own collision check, which only sees the tool list as it
+      was BEFORE the change — an override written straight to the API, or an upstream that
+      later adds a tool of that name, lands in exactly this state. So the rule is enforced
+      here, against the live list: a rename applies only when nothing else answers to its
+      target, and otherwise goes inert, leaving both tools reachable under their own names
+      (the UI still flags the collision so the operator can resolve it).
+
+    * **Identity can't be spoofed.** ``UPSTREAM_META_KEY`` means "the elevator renamed this
+      tool, and here is its real name". An upstream that sets that key itself would hand the
+      UI a false identity to key policy off — the operator would disable one row and a
+      different tool would stay exposed. The key is stripped from every upstream tool, so
+      only this transform can ever put it there.
     """
 
-    def __init__(self, disabled: list[str]):
-        self._disabled = frozenset(disabled)
+    def __init__(self, transforms: dict[str, ToolTransformConfig]) -> None:
+        # Own the reverse map rather than inheriting it: a HIDDEN tool exposes no name, so
+        # it must not reserve one. FastMCP's constructor reserves a target for every entry
+        # and raises on a duplicate, which made "hide `b`, rename `a` to `b`" — a
+        # combination the UI and API both accept — a ValueError at proxy build, i.e. a
+        # bridge that crash-loops and takes the server offline.
+        #
+        # Only REAL renames are recorded. Mapping an un-renamed tool to itself (FastMCP
+        # does this) is not merely redundant: a key that carries labels but no rename would
+        # overwrite an earlier entry claiming the same name, and since entries arrive
+        # sorted, `a`->`x` alongside a description-only `x` lost its mapping. `list_tools`
+        # would still advertise the renamed `x` while `get_tool("x")` looked for a native
+        # `x` that doesn't exist — advertised and uncallable, the exact split this class
+        # exists to prevent.
+        self._transforms = transforms
+        self._name_reverse = {}
+        for source, config in transforms.items():
+            if not config.enabled or not config.name or config.name == source:
+                continue
+            self._name_reverse[config.name] = source
 
-    async def on_list_tools(self, context: MiddlewareContext, call_next):
-        tools = await call_next(context)
-        if not self._disabled:
-            return tools
-        return [tool for tool in tools if tool.name not in self._disabled]
+    @staticmethod
+    def _scrub(tool: Tool) -> Tool:
+        """Drop our reserved identity key from an upstream tool (see the class docstring)."""
+        meta = tool.meta or {}
+        if UPSTREAM_META_KEY not in meta:
+            return tool
+        return tool.model_copy(
+            update={"meta": {k: v for k, v in meta.items() if k != UPSTREAM_META_KEY}}
+        )
 
-    async def on_call_tool(self, context: MiddlewareContext, call_next):
-        if context.message.name in self._disabled:
-            # Mirror the "unknown tool" path exactly: a hidden tool must be
-            # indistinguishable from one that was never registered.
-            raise NotFoundError(f"Unknown tool: {context.message.name}")
-        return await call_next(context)
+    def _hides(self, name: str) -> bool:
+        config = self._transforms.get(name)
+        return config is not None and not config.enabled
+
+    def _renames_to(self, name: str) -> str | None:
+        """The name this tool would be renamed to, or None if it isn't renamed."""
+        config = self._transforms.get(name)
+        target = config.name if config is not None else None
+        return target if target and target != name else None
+
+    def _apply(self, source: Tool, config: ToolTransformConfig, *, rename: bool) -> Tool:
+        """Relabel ``source`` in place of transforming it.
+
+        ``ToolTransformConfig.apply`` REBUILDS the tool, and the rebuild isn't faithful: it
+        drops ``icons`` and ``execution``, replaces rather than merges ``_meta``, and — worst
+        — regenerates the input schema and the forwarding closure from it, so a tool with an
+        open-ended schema ends up rejecting every argument it is handed, valid ones included.
+        None of that machinery is needed here: this transform never rewrites arguments, only
+        labels. Copying the source tool with new labels keeps its schema, its metadata and
+        its dispatch exactly as the upstream declared them, by construction rather than by
+        restoring fields one at a time as they're discovered missing.
+        """
+        update: dict = {}
+        if rename and config.name:
+            update["name"] = config.name
+            # Carry the pre-rename identity (see the class docstring).
+            update["meta"] = {**(source.meta or {}), UPSTREAM_META_KEY: {"name": source.name}}
+        if config.description:
+            update["description"] = config.description
+        return source.model_copy(update=update) if update else source
+
+    async def list_tools(self, tools: Sequence[Tool]) -> Sequence[Tool]:
+        sources = [self._scrub(tool) for tool in tools]
+        # A hidden tool answers to no name, so it doesn't hold one against a rename.
+        taken = {tool.name for tool in sources if not self._hides(tool.name)}
+        result = []
+        for source in sources:
+            if self._hides(source.name):
+                continue  # hidden: absent from discovery
+            config = self._transforms.get(source.name)
+            if config is None:
+                result.append(source)
+                continue
+            target = self._renames_to(source.name)
+            result.append(self._apply(source, config, rename=target is not None and target not in taken))
+        return result
+
+    async def _resolve_native(
+        self, direct: Tool, name: str, call_next, version
+    ) -> Tool | None:
+        """Resolve ``name`` as the tool that natively carries it, under its OWN policy."""
+        if self._hides(name):
+            return None  # hidden tools are refused, not just unlisted
+        source = self._scrub(direct)
+        config = self._transforms.get(name)
+        if config is None:
+            return source
+        target = self._renames_to(name)
+        if target is not None:
+            other = await call_next(target, version=version)
+            if other is None or self._hides(target):
+                return None  # renamed away: this name is dead
+            # Rename refused because the target is taken — the tool keeps its own name,
+            # but the rest of its policy (hiding, description) still applies.
+            return self._apply(source, config, rename=False)
+        return self._apply(source, config, rename=True)
+
+    async def get_tool(self, name: str, call_next, *, version=None) -> Tool | None:
+        # Whoever natively answers to this name wins it — that settles the misrouting
+        # cases (a rename shadowing a live tool, and a stale rename stranding one).
+        direct = await call_next(name, version=version)
+        original_name = self._name_reverse.get(name, name)
+
+        if original_name != name:  # `name` is some tool's rename target
+            if direct is None or self._hides(name):
+                # The name is free (or its owner is hidden), so the rename may take it —
+                # provided its source is actually there.
+                source = await call_next(original_name, version=version)
+                if source is not None:
+                    return self._apply(
+                        self._scrub(source), self._transforms[original_name], rename=True
+                    )
+                if direct is None:
+                    return None
+                # Stale rename. The name reverts to the tool that carries it — under that
+                # tool's own policy, so a HIDDEN one stays refused rather than leaking.
+            else:
+                pass  # taken by a live tool: the rename doesn't apply
+        elif direct is None:
+            return None
+        return await self._resolve_native(direct, name, call_next, version)
+
+
+def _tool_transform(spec: dict) -> ToolTransform:
+    """The single place per-tool policy is applied to what this bridge serves.
+
+    Two operator controls, one mechanism:
+
+    * ``disabled_tools`` (issue #105) — names hidden from clients, because a passthrough
+      server often ships internal-only tools that just waste the model's context.
+    * ``tool_overrides`` (issue #112) — a rename and/or a replacement description, keyed by
+      the UPSTREAM tool name, because a server the operator can't rebuild (a closed-source
+      paid endpoint, say) may expose names and descriptions models handle badly.
+
+    Both ride FastMCP's own ``ToolTransform`` rather than hand-rolled middleware, so the
+    library owns the semantics: a disabled tool drops out of ``tools/list`` AND is refused on
+    call with the same ``Unknown tool`` error an unregistered one raises (so a client holding
+    a stale list can't still invoke it), and a renamed tool answers to its NEW name only —
+    the upstream name stops resolving, exactly as if the server had been rebuilt.
+
+    Applying it here covers all three exposed surfaces at once, because they all resolve
+    tools through this same FastMCP instance: the Streamable-HTTP ``tools/list`` +
+    ``tools/call``, the REST/OpenAPI routes (which list tools over an in-memory client, so
+    the routes themselves are generated from the overridden names), and the group hub
+    (which proxies this bridge's ``/mcp`` over HTTP).
+
+    Both are part of the launch spec (``config_hash``), so a change restarts the bridge and
+    rebuilds this transform — the control plane's tool-discovery probe then caches exactly
+    what clients see, and the UI maps those names back to their upstream keys via the same
+    overrides it holds in the DB row.
+
+    Always returns a transform, even with an empty policy: ``_ToolTransform`` also strips our
+    reserved identity key from upstream tools, and a server can forge that key whether or not
+    anyone has set a policy on it. A key naming a tool the upstream doesn't (or no longer)
+    exposes is a no-op — including when its rename target matches a real upstream tool.
+    """
+    disabled = set(spec.get("disabled_tools") or [])
+    overrides: dict = spec.get("tool_overrides") or {}
+    configs: dict[str, ToolTransformConfig] = {}
+    for tool in sorted(disabled | set(overrides)):
+        override = overrides.get(tool) or {}
+        # Only pass fields the operator actually set: ToolTransformConfig applies
+        # `enabled` only when explicitly provided, and an unset name/description means
+        # "keep the upstream's".
+        fields: dict = {k: override[k] for k in ("name", "description") if override.get(k)}
+        if fields.get("name"):
+            # Stamp the upstream name into the tool's `_meta` so identity survives the
+            # rename. The control plane caches it (see supervisor.unit.tool_summary) and the
+            # UI keys its rows off it — inferring identity by reversing the rename map is
+            # lossy, because an exposed name is not unique: a stale override key whose
+            # target later matches a real upstream tool would silently re-identify that
+            # tool, and edits would then be staged against the wrong one.
+            fields["meta"] = {UPSTREAM_META_KEY: {"name": tool}}
+        if tool in disabled:
+            # Hiding wins over renaming: a tool that's both is simply gone, under either name.
+            fields["enabled"] = False
+        if fields:
+            configs[tool] = ToolTransformConfig(**fields)
+    return _ToolTransform(configs)
 
 
 def _build_transport(spec: dict):
@@ -339,11 +525,13 @@ def build_proxy(spec: dict) -> FastMCP:
     # the fresh-session-per-request isolation — keeps FastMCP's proxy defaults.
     client = ProxyClient(transport, roots=_forward_roots)
     proxy = create_proxy(client, name=spec.get("name") or "mcpelevator-proxy")
-    # Hide operator-disabled tools from every surface (MCP list/call, REST, group hub) —
-    # they all resolve tools through this proxy. See DisabledToolsMiddleware.
-    disabled = spec.get("disabled_tools") or []
-    if disabled:
-        proxy.add_middleware(DisabledToolsMiddleware(disabled))
+    # Apply the operator's per-tool policy (hidden tools, renames, descriptions) to every
+    # surface (MCP list/call, REST, group hub) — they all resolve tools through this
+    # proxy. See _tool_transform.
+    # Always installed, even with no policy configured: besides applying the operator's
+    # overrides, the transform strips our reserved identity key from upstream tools, and a
+    # server can forge that key whether or not anyone has set a policy on it.
+    proxy.add_transform(_tool_transform(spec))
     # The outer proxy already authenticated the caller. Forwarding its headers from
     # this bridge to a remote MCP server would disclose bearer/OAuth credentials to
     # that upstream. Static headers and upstream OAuth live on the transport itself.

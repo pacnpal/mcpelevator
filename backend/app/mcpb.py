@@ -29,9 +29,10 @@ def manifest(server: Server) -> dict:
     exporting those would hand out a bundle that can't reproduce the server.
     ``env`` is embedded verbatim — the download is control-plane-gated, and the
     same principal already reads those values on the server detail endpoint.
-    ``disabled_tools`` is deliberately NOT enforced: it filters the elevator's
-    exposed surfaces, and the downloader is the operator who set that policy —
-    a local run is their own machine, outside the elevator's enforcement.
+    The per-tool policy (``disabled_tools``, ``tool_overrides``) is deliberately
+    NOT carried: it shapes the elevator's exposed surfaces, and the downloader is
+    the operator who set that policy — a local run is their own machine, talking
+    to the upstream server directly, outside the elevator's enforcement.
     """
     spec = build_spec(server)
     if spec.transport != "stdio":

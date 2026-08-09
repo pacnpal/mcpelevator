@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import sys
@@ -8,8 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from app.bridge.host import UPSTREAM_META_KEY
 from app.db.models import Server
-from app.supervisor.unit import ServerUnit
+from app.supervisor.unit import ServerUnit, _AttemptFailed, tool_summary
 
 
 FIXTURE = Path(__file__).with_name("stdio_server_fixture.py")
@@ -303,3 +307,61 @@ async def test_exit_after_stable_run_waits_before_fresh_activation(tmp_path, mon
         assert "bridge exited" in (unit.last_error or "")
     finally:
         await unit.stop()
+
+
+def test_per_tool_policy_reaches_the_bridge_payload(tmp_path):
+    """The one seam nothing else covers: a Server row's per-tool policy has to survive
+    `build_spec` -> ProcessSpec -> the JSON the bridge process actually reads. Every hop
+    is a plain copy, so a drop anywhere would leave the registry AND bridge tests green
+    while hiding and renaming silently did nothing in production."""
+    server = _server(tmp_path, setup_script="")
+    server.disabled_tools = ["secret"]
+    server.tool_overrides = {"do_thing": {"name": "run_report", "description": "Runs it."}}
+
+    payload = ServerUnit(server)._bridge_payload()
+
+    assert payload["disabled_tools"] == ["secret"]
+    assert payload["tool_overrides"] == {
+        "do_thing": {"name": "run_report", "description": "Runs it."}
+    }
+    # The payload is handed to the bridge as JSON — it must round-trip as-is.
+    assert json.loads(json.dumps(payload))["tool_overrides"] == payload["tool_overrides"]
+
+
+def test_tool_summary_lifts_the_upstream_name_out_of_meta():
+    """A renamed tool's cached entry carries `upstream_name` so the UI has a stable
+    identity for it; an un-renamed tool carries none (its `name` IS the upstream name)."""
+    renamed = SimpleNamespace(
+        name="run_report",
+        description="Runs it.",
+        inputSchema={},
+        outputSchema=None,
+        meta={UPSTREAM_META_KEY: {"name": "do_thing"}},
+    )
+    plain = SimpleNamespace(
+        name="echo", description="", inputSchema={}, outputSchema=None, meta=None
+    )
+
+    assert tool_summary(renamed)["upstream_name"] == "do_thing"
+    assert "upstream_name" not in tool_summary(plain)
+    # A malformed marker (a foreign server setting the same key) is ignored, not trusted.
+    bogus = SimpleNamespace(
+        name="x", description="", inputSchema={}, outputSchema=None,
+        meta={UPSTREAM_META_KEY: "not-an-object"},
+    )
+    assert "upstream_name" not in tool_summary(bogus)
+
+
+def test_oversized_launch_spec_fails_legibly(tmp_path):
+    """The spec goes to the bridge in one environment variable, and Linux caps a single
+    exec string at 128 KiB. Without this check the activation dies on an opaque E2BIG and
+    retries itself offline; the operator gets a message naming the cause instead. Covers
+    every contributor to the payload, including the ones with no cap of their own."""
+    server = _server(tmp_path, setup_script="")
+    server.env = {"HUGE": "x" * (129 * 1024)}  # no per-field cap of its own
+    unit = ServerUnit(server)
+    unit.port = 12345
+
+    # An oversized spec must not reach create_subprocess_exec.
+    with pytest.raises(_AttemptFailed, match="too large"):
+        unit._bridge_env(unit._bridge_payload())

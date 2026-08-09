@@ -364,4 +364,5 @@ def build(server: Server) -> ProcessSpec:
         cwd=None,
         minimal_env=True,
         disabled_tools=list(server.disabled_tools or []),
+        tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
     )
