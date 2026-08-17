@@ -1762,6 +1762,59 @@ def test_log_safe_blocks_log_injection_and_bounds_length():
     assert "leaked" not in oauth_flow.log_safe('{"client_secret": "leaked"}')
 
 
+async def test_drive_warning_cannot_emit_a_client_secret(monkeypatch, caplog):
+    # End-to-end proof at the exact sink CodeQL flags (py/clear-text-logging-sensitive-
+    # data on _drive's WARNING): drive a failure whose exception text embeds a real
+    # client_secret the way the SDK does — OAuthRegistrationError carries the raw
+    # registration body — and assert the secret reaches neither the log record nor the
+    # operator-facing error. The static alert cannot see through re.sub; this can.
+    import logging
+
+    from mcp.client.auth import OAuthRegistrationError
+
+    leaked = "SUPER-SECRET-CLIENT-VALUE"
+
+    class _RegistrationEchoesSecret(_FakeAsyncClient):
+        def stream(self, _method, _url, **_kwargs):
+            class _Ctx:
+                async def __aenter__(_self):
+                    raise OAuthRegistrationError(
+                        f'Registration failed: 201 {{"client_id": "cid", "client_secret": "{leaked}"}}'
+                    )
+
+                async def __aexit__(_self, *exc):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _RegistrationEchoesSecret)
+
+    class _Srv:
+        id = "srv-secret-never-logged-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = leaked  # the sensitive source the query traces
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        with caplog.at_level(logging.WARNING, logger="app.auth.oauth_flow"):
+            with pytest.raises(oauth_flow.OAuthBeginError) as excinfo:
+                await oauth_flow.begin_authorization(
+                    _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+                )
+        logged = " ".join(rec.getMessage() for rec in caplog.records)
+        assert leaked not in logged, logged  # the WARNING sink
+        assert leaked not in str(excinfo.value)  # the 502 detail the SPA renders
+        assert "<redacted>" in logged  # ...and the failure is still diagnosable
+        assert "Registration failed: 201" in logged
+    finally:
+        store.clear()
+
+
 def test_redaction_stays_linear_on_pathological_input():
     # The scrubbers run over text a remote party controls, so their patterns must not
     # backtrack polynomially (CodeQL py/polynomial-redos): the separator's whitespace
