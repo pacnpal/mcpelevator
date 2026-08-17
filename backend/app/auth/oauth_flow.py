@@ -385,6 +385,67 @@ def _client_metadata_url(callback_url: str) -> Optional[str]:
     return callback_url.removesuffix(suffix) + "/api/oauth/client-metadata.json"
 
 
+# Budget for the CIMD self-probe below. Providers fetch the document with a short
+# server-side timeout themselves, so a document that takes longer than this is as
+# good as unreachable for CIMD purposes anyway.
+_CIMD_PROBE_TIMEOUT = 8.0
+
+
+async def _fetch_client_metadata(url: str) -> httpx.Response:
+    """One unauthenticated GET of our own client-metadata URL — no cookies, no bearer,
+    no redirects — exactly the fetch a CIMD-supporting authorization server performs."""
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(_CIMD_PROBE_TIMEOUT), follow_redirects=False
+    ) as client:
+        return await client.get(url, headers={"Accept": "application/json"})
+
+
+async def _reachable_client_metadata_url(callback_url: str) -> Optional[str]:
+    """The CIMD URL to hand the provider, or ``None`` to fall back to DCR.
+
+    ``_client_metadata_url`` decides eligibility (https base, expected path); this adds
+    a self-probe of the document as the authorization server would fetch it. An https
+    base alone doesn't prove the document is PUBLICLY fetchable: an instance behind an
+    auth-gating proxy (Cloudflare Access, an oauth2-proxy, HTTP basic auth) serves it
+    fine to the operator's signed-in browser while answering the provider's
+    unauthenticated server-side fetch with a 401/403 or a login redirect — and that
+    failure surfaces only AFTER the browser has been sent to the provider, as an opaque
+    "client metadata unavailable" page there. Withholding the URL keeps the sign-in on
+    Dynamic Client Registration, which needs no inbound fetch at all.
+
+    Only a DEFINITIVE bad answer — an HTTP response that isn't the public document with
+    the matching ``client_id`` — withholds the offer. A transport error proves nothing:
+    plenty of deployments can't hairpin their own public hostname from inside the
+    container while the provider reaches it fine, so the offer stands in that case."""
+    url = _client_metadata_url(callback_url)
+    if url is None:
+        return None
+    try:
+        response = await _fetch_client_metadata(url)
+    except Exception as exc:  # noqa: BLE001 — transport-level failure: not evidence
+        logger.debug("CIMD self-probe of %s errored (%s); offering the URL anyway", url, exc)
+        return url
+    document = None
+    if response.status_code == 200:
+        try:
+            document = response.json()
+        except ValueError:
+            document = None
+    if isinstance(document, dict) and document.get("client_id") == url:
+        return url
+    logger.warning(
+        "the client-metadata document at %s is not publicly fetchable as-is "
+        "(HTTP %s%s) — likely an auth-gating proxy (e.g. Cloudflare Access) in front of "
+        "this instance. Falling back to Dynamic Client Registration for this sign-in; "
+        "to use URL-based client ids, exempt /api/oauth/client-metadata.json from the "
+        "gate (the document is public by design and carries no secrets).",
+        url,
+        response.status_code,
+        "" if response.status_code != 200 else ", body is not this instance's document",
+    )
+    return None
+
+
 def _extract_state(url: str) -> Optional[str]:
     try:
         values = parse_qs(urlparse(url).query).get("state")
@@ -656,6 +717,16 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         scope=server.oauth_scopes or None,
     )
 
+    # URL-based client id (CIMD): the SDK only consumes it when the provider advertises
+    # support AND no client is seeded, so DCR/static-client behavior is unchanged
+    # everywhere else. The self-probe (with its up-to-8s worst case) runs only when the
+    # URL could actually be used — a seeded client bypasses CIMD, so pass the raw
+    # derived value there and skip the probe.
+    if seed_client_info is None:
+        client_metadata_url = await _reachable_client_metadata_url(callback_url)
+    else:
+        client_metadata_url = _client_metadata_url(callback_url)
+
     async def redirect_handler(authorization_url: str) -> None:
         authorization_url = _repair_authorization_url(authorization_url)
         authorization_url = _ensure_consent_prompt(authorization_url)
@@ -683,9 +754,7 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         callback_handler=callback_handler,
         timeout=_FLOW_TIMEOUT,
         operator_scopes=server.oauth_scopes or None,
-        # URL-based client id (CIMD): used by the SDK only when the provider advertises
-        # support, so DCR/static-client behavior is unchanged everywhere else.
-        client_metadata_url=_client_metadata_url(callback_url),
+        client_metadata_url=client_metadata_url,
     )
 
     _PENDING[pending.id] = pending

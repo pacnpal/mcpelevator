@@ -406,6 +406,150 @@ async def test_begin_offers_cimd_url_only_for_https_callback(monkeypatch):
         store.clear()
 
 
+def _spy_provider(monkeypatch) -> dict:
+    """Patch in a provider subclass that records its kwargs; returns the capture dict."""
+    captured: dict = {}
+    real_provider = oauth_flow._ScopedOAuthClientProvider
+
+    class _Spy(real_provider):
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(oauth_flow, "_ScopedOAuthClientProvider", _Spy)
+    return captured
+
+
+async def test_begin_skips_cimd_url_when_document_gated(monkeypatch):
+    # An https base is NOT enough — the document must be publicly fetchable. Behind an
+    # auth-gating proxy (e.g. Cloudflare Access) the operator's signed-in browser gets the
+    # document but the provider's unauthenticated server-side fetch gets a 401, failing the
+    # authorization only AFTER the browser was sent away ("client metadata unavailable").
+    # The self-probe sees that same 401 and the flow falls back to DCR (no URL offered).
+    # A 200 whose body isn't this instance's document (wrong client_id — a login page or a
+    # misconfigured base) is just as definitive.
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    captured = _spy_provider(monkeypatch)
+    probe = {"response": httpx.Response(401)}
+
+    async def _probe(_url):
+        return probe["response"]
+
+    monkeypatch.setattr(oauth_flow, "_fetch_client_metadata", _probe)
+
+    class _Srv:
+        id = "srv-cimd-gated-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        assert captured["client_metadata_url"] is None
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+
+        captured.clear()
+        probe["response"] = httpx.Response(200, json={"client_id": "https://elsewhere.example"})
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        assert captured["client_metadata_url"] is None
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c2")
+    finally:
+        store.clear()
+
+
+async def test_begin_offers_cimd_url_on_probe_success_or_transport_error(monkeypatch):
+    # A 200 with this instance's own document keeps the offer. So does a TRANSPORT error:
+    # a container that can't hairpin its own public hostname proves nothing about what the
+    # provider can reach, so the probe only withholds on a definitive bad HTTP answer.
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    captured = _spy_provider(monkeypatch)
+    url = "https://mcp.example/api/oauth/client-metadata.json"
+    probe = {"response": httpx.Response(200, json={"client_id": url})}
+
+    async def _probe(_url):
+        if isinstance(probe["response"], Exception):
+            raise probe["response"]
+        return probe["response"]
+
+    monkeypatch.setattr(oauth_flow, "_fetch_client_metadata", _probe)
+
+    class _Srv:
+        id = "srv-cimd-probe-ok-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        assert captured["client_metadata_url"] == url
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+
+        captured.clear()
+        probe["response"] = httpx.ConnectError("no hairpin route to own public host")
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        assert captured["client_metadata_url"] == url
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c2")
+    finally:
+        store.clear()
+
+
+async def test_begin_skips_cimd_probe_for_static_client(monkeypatch):
+    # A static (pre-registered) client bypasses CIMD entirely in the SDK, so the flow must
+    # not spend a self-probe round-trip on it — the raw derived URL is passed through
+    # unprobed, preserving prior behavior.
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    captured = _spy_provider(monkeypatch)
+    probed = {"count": 0}
+
+    async def _probe(_url):
+        probed["count"] += 1
+        return httpx.Response(401)
+
+    monkeypatch.setattr(oauth_flow, "_fetch_client_metadata", _probe)
+
+    class _Srv:
+        id = "srv-cimd-static-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = "static-cid"
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        assert (
+            captured["client_metadata_url"]
+            == "https://mcp.example/api/oauth/client-metadata.json"
+        )
+        assert probed["count"] == 0  # a 401-answering probe would have withheld the URL
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+    finally:
+        store.clear()
+
+
 async def test_drive_cancels_done_future_on_pre_url_failure(monkeypatch):
     # Regression: when the flow fails BEFORE handing back an authorization URL, done_future is
     # never awaited by anyone (complete_authorization only runs after the browser returns). It

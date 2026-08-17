@@ -49,8 +49,10 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   → public `/api/oauth/callback`, anchored on the OAuth `state`) using the MCP SDK's
   `OAuthClientProvider`. Client identity is provider-adaptive: a static client id/secret when
   set, else the instance's CIMD client-metadata document (public
-  `/api/oauth/client-metadata.json`, offered only from an https base) where the provider
-  advertises URL-based client ids, else DCR; tokens land in a `0600` file store
+  `/api/oauth/client-metadata.json`, offered only from an https base whose document a
+  self-probe confirms is publicly fetchable — an auth-gating proxy such as Cloudflare
+  Access in front of the instance 401s the provider's server-side fetch, so the flow
+  falls back instead) where the provider advertises URL-based client ids, else DCR; tokens land in a `0600` file store
   (`<data_dir>/oauth/<id>.json`) shared
   with the bridge, which reads them and auto-refreshes. Tokens live off the DB, so authenticating
   never re-hashes the row or bounces the bridge.
