@@ -191,6 +191,10 @@ _AUTH_KEY_RE = re.compile(
 )
 _BARE_TERMINATORS = " \t\r\n,&)}]"
 _CONTAINER_CLOSERS = {"[": "]", "{": "}"}
+# Python string/bytes literal prefixes (b, r, u, f and the two-letter combinations). Only
+# treated as a prefix when a quote actually follows, so an ordinary value that merely
+# starts with one of these letters is still a bare token.
+_REPR_PREFIXES = "bBrRuUfF"
 
 
 def _value_end(text: str, start: int, *, to_end_of_line: bool) -> int:
@@ -206,6 +210,16 @@ def _value_end(text: str, start: int, *, to_end_of_line: bool) -> int:
     n = len(text)
     if start >= n:
         return start
+    # A Python str/bytes REPR is a quoted value wearing a prefix. Pydantic renders a
+    # rejected raw body as ``input_value=b'{"access_token": "SUPER SECRET"}'``, and
+    # reading the ``b`` as the first character of a bare token stopped the value at the
+    # first space inside it — masking ``b'{"access_token"`` and leaving the credential
+    # after it in the clear. Skip the prefix and let the quote be the opener.
+    prefix = 0
+    while prefix < 2 and start + prefix < n and text[start + prefix] in _REPR_PREFIXES:
+        prefix += 1
+    if prefix and start + prefix < n and text[start + prefix] in "\"'":
+        return _value_end(text, start + prefix, to_end_of_line=to_end_of_line)
     opener = text[start]
     if opener in "\"'":
         i = start + 1

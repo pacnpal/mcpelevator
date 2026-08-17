@@ -2254,6 +2254,22 @@ def test_log_safe_blocks_log_injection_and_bounds_length():
     # the clear beside a mask claiming otherwise. Matching by type means a mismatch is
     # malformed text — which is precisely when we can't know where the value ends — so it
     # consumes the rest, exactly like an unterminated opener.
+    # Pydantic renders a rejected RAW body as `input_value=b'...'`, and a repr prefix is
+    # not the first character of a bare token — reading it that way stopped the value at
+    # the first space INSIDE the quoted body, masking `b'{"access_token"` and leaving the
+    # credential after it in the clear. This is the shape a provider produces by
+    # returning malformed token/registration JSON, which is exactly when these sinks run.
+    for prefixed in (
+        "input_value=b'{\"access_token\" : \"SUPER SECRET\"}', input_type=bytes",
+        'input_value=rb"SUPER SECRET", input_type=bytes',
+        "input_value=b'unterminated SUPER SECRET",
+    ):
+        out = oauth_flow.redact_secrets(prefixed)
+        assert "SUPER" not in out and "SECRET" not in out, (prefixed, out)
+    # ...but a bare value that merely STARTS with one of those letters is still bare, so
+    # the neighbouring diagnostics keep their own boundaries.
+    assert oauth_flow.redact_secrets("refresh_token=b1234 next=ok").endswith(" next=ok")
+
     for malformed in (
         "access_token=[SUPER}SECRET]",
         "access_token={SUPER]SECRET}",
