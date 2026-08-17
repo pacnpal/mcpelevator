@@ -143,11 +143,18 @@ async def oauth_callback(
         # cannot forge one, so it can never write its own text into the log. Even when
         # correlated the text is sanitized and bounded (``log_safe``) — the upstream is
         # trusted to be the upstream, not to be well-behaved.
-        if state and oauth_flow.pending_server_id(state) is not None:
+        denied_server = oauth_flow.pending_server_id(state) if state else None
+        if denied_server is not None:
             logger.warning(
                 "OAuth callback returned an error: %s",
                 oauth_flow.log_safe(error_description or error),
             )
+            # A denial ENDS this sign-in, so retire the flow rather than leaving it
+            # parked: otherwise its task sits out the full browser window and then logs
+            # a second, misleading "timed out" for a failure already reported here — and
+            # the state stays live, so the same callback can be replayed to re-emit
+            # operator-level records.
+            oauth_flow.cancel_pending(denied_server)
         else:
             # INFO, not WARNING: nothing correlates this to a sign-in we started, so it
             # is indistinguishable from a scanner hitting a public URL. Emitting an
@@ -208,7 +215,10 @@ async def oauth_callback(
         if stopped:
             sup.nudge()
         return _oauth_error(_REASON_TOKEN_REFUSED)
-    except oauth_flow.OAuthPromotionBlocked as exc:
+    except (oauth_flow.OAuthPromotionBlocked, oauth_flow.OAuthFlowCancelled) as exc:
+        # Same remedy either way — the configuration this sign-in belonged to is gone, so
+        # start again. Cancelled flows land here promptly instead of burning the callback
+        # budget and reporting a timeout they didn't have.
         logger.warning("OAuth grant discarded: %s", oauth_flow.log_safe(exc))
         if stopped:
             sup.nudge()

@@ -112,7 +112,17 @@ _SECRET_KEYS = (
 # credential in the clear next to a "<redacted>" that claims otherwise. The alternatives
 # inside each quoted form are mutually exclusive on their first character (escape vs not),
 # so the nested quantifier cannot backtrack ambiguously.
-_QUOTED_VALUE = r"\"(?P<dq>(?:\\.|[^\"\\])*+)\"|'(?P<sq>(?:\\.|[^'\\])*+)'"
+# The last two alternatives cover an UNTERMINATED opening quote, which a provider's
+# malformed JSON produces (and pydantic echoes verbatim in its validation errors): with
+# only the complete forms, the bare branch would take over and stop at the first space,
+# turning ``{"access_token": "alpha beta gamma`` into ``<redacted> beta gamma``. An
+# opening quote with no partner means "the rest of this line is the value".
+_QUOTED_VALUE = (
+    r"\"(?P<dq>(?:\\.|[^\"\\])*+)\""
+    r"|'(?P<sq>(?:\\.|[^'\\])*+)'"
+    r"|\"(?P<dq_open>[^\r\n]*)"
+    r"|'(?P<sq_open>[^\r\n]*)"
+)
 # The optional quote after the key is what lets one pattern match JSON
 # (``"client_secret": "x"``) as well as query and form shapes (``client_secret=x``).
 #
@@ -147,6 +157,12 @@ def _mask(match: "re.Match[str]") -> str:
         return f'{key}{sep}"<redacted>"'
     if match.group("sq") is not None:
         return f"{key}{sep}'<redacted>'"
+    # Unterminated: keep the lone opening quote so the text still reads as the malformed
+    # thing it was, rather than implying a well-formed value we invented.
+    if match.group("dq_open") is not None:
+        return f'{key}{sep}"<redacted>'
+    if match.group("sq_open") is not None:
+        return f"{key}{sep}'<redacted>"
     return f"{key}{sep}<redacted>"
 
 
@@ -173,7 +189,11 @@ def redact_secrets(value: object) -> str:
 # control characters would let externally-supplied text forge additional log lines
 # (CWE-117), and an unbounded body would drown the record it belongs to.
 _LOG_TEXT_LIMIT = 500
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+# C0 controls and DEL, plus the Unicode separators NEL / LINE / PARAGRAPH: Python's own
+# ``str.splitlines`` and plenty of line-oriented log tooling break on those too, so
+# leaving them through would let provider text split one record into apparent forged
+# ones — the very thing this pass exists to prevent.
+_CONTROL_CHARS = re.compile("[\x00-\x1f\x7f\x85\u2028\u2029]")
 
 
 def log_safe(value: object, *, limit: int = _LOG_TEXT_LIMIT) -> str:
@@ -202,6 +222,14 @@ class OAuthGrantRejected(RuntimeError):
     ``resource`` mismatch, which is a configuration problem on this server rather than a
     transport or protocol fault. Typed so the callback can say which of the two happened
     instead of labelling every post-redirect failure the same way."""
+
+
+class OAuthFlowCancelled(RuntimeError):
+    """The flow was cancelled from outside while its callback was already waiting — a
+    config edit, ownership transfer, disconnect, delete, or a newer Authenticate click.
+    Typed so the waiter fails FAST and accurately: without it, cancelling the driving
+    task leaves ``done_future`` unresolved, the callback burns its full budget, and the
+    operator is told the exchange "timed out" when it was deliberately superseded."""
 
 
 class OAuthPromotionBlocked(RuntimeError):
@@ -415,11 +443,28 @@ def _forget(pending: _Pending) -> None:
         pending.task.cancel()
 
 
+def _abort(pending: _Pending, why: str) -> None:
+    """Forget a flow that something EXTERNAL ended, waking anyone parked on it.
+
+    ``_forget`` alone cancels the driving task, which never resolves ``done_future`` —
+    so a callback already waiting there would sit for its full budget and then report a
+    timeout for what was actually a deliberate cancellation. The exception is set only
+    when the callback has actually arrived (``callback_event``): with no one to retrieve
+    it, a future's exception surfaces as a spurious "never retrieved" at collection, so
+    an unattended flow is cancelled silently instead."""
+    if not pending.done_future.done():
+        if pending.callback_event.is_set():
+            pending.done_future.set_exception(OAuthFlowCancelled(why))
+        else:
+            pending.done_future.cancel()
+    _forget(pending)
+
+
 def _reap_stale() -> None:
     now = time.monotonic()
     for pending in list(_PENDING.values()):
         if now - pending.created_at > _FLOW_TIMEOUT:
-            _forget(pending)
+            _abort(pending, "the sign-in window expired before it completed")
 
 
 def _cancel_existing(server_id: str) -> None:
@@ -427,7 +472,10 @@ def _cancel_existing(server_id: str) -> None:
     the first (its state/PKCE would otherwise dangle until it reaps)."""
     for pending in list(_PENDING.values()):
         if pending.server_id == server_id:
-            _forget(pending)
+            _abort(
+                pending,
+                "the sign-in was superseded or its server's OAuth configuration changed",
+            )
 
 
 def pending_server_id(state: str) -> Optional[str]:

@@ -1671,6 +1671,88 @@ async def test_unexpected_callback_failure_does_not_log_a_raw_traceback(monkeypa
     assert "traceback:" in caplog.text and "OSError" in caplog.text
 
 
+async def test_cancelled_flow_wakes_the_waiting_callback_promptly(monkeypatch):
+    # Cancelling a flow (config edit, ownership transfer, disconnect, delete, or a newer
+    # Authenticate click) cancels the driving task, which never resolves done_future. A
+    # callback already parked there would burn its full 90s budget and then report
+    # "timed_out" for what was a deliberate cancellation — so cancellation now wakes the
+    # waiter with an accurate, typed error instead.
+    import asyncio
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+
+    class _Srv:
+        id = "srv-cancel-wakes-waiter-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+        )
+        pending = next(p for p in oauth_flow._PENDING.values() if p.server_id == _Srv.id)
+        # Park a waiter as the callback does, then cancel the flow out from under it.
+        pending.callback_event.set()
+        waiter = asyncio.ensure_future(
+            asyncio.wait_for(asyncio.shield(pending.done_future), timeout=90.0)
+        )
+        await asyncio.sleep(0)
+        oauth_flow.cancel_pending(_Srv.id)
+        # Promptly — not after the 90s budget — and with the reason it actually had.
+        with pytest.raises(oauth_flow.OAuthFlowCancelled):
+            await asyncio.wait_for(waiter, timeout=5.0)
+    finally:
+        store.clear()
+
+
+async def test_provider_denial_retires_the_pending_flow(monkeypatch):
+    # A denial ends the sign-in, so the flow must not stay parked: otherwise its task sits
+    # out the full browser window and logs a second, misleading timeout, and the still-live
+    # state can be replayed to re-emit operator-level records.
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+
+    class _Srv:
+        id = "srv-denial-retires-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+        )
+        state = _FakeAsyncClient.STATE
+        assert oauth_flow.pending_server_id(state) == _Srv.id
+
+        # Drop the fake client before the app starts: its lifespan builds a real
+        # httpx.AsyncClient, and the stand-in has no aclose().
+        monkeypatch.undo()
+        with TestClient(app) as c:
+            r = c.get(
+                "/api/oauth/callback",
+                params={"error": "access_denied", "state": state},
+                headers=LOOPBACK,
+                follow_redirects=False,
+            )
+        assert r.headers["location"] == "/?oauth=error&reason=provider_denied"
+        # The flow is gone, so a replay of the same state can't re-trigger the branch.
+        assert oauth_flow.pending_server_id(state) is None
+        assert all(p.server_id != _Srv.id for p in oauth_flow._PENDING.values())
+    finally:
+        store.clear()
+
+
 def test_callback_for_vanished_server_redirects_with_server_deleted(monkeypatch):
     # The grant completed but the row is gone (deleted between promotion and this read):
     # its own code, and no crash on the missing server.
@@ -1799,6 +1881,27 @@ def test_log_safe_blocks_log_injection_and_bounds_length():
     # credential long enough to straddle one would be split exactly the same way.
     straddling = '{"client_secret": "' + "s3cret " * 12_000 + 'tail"}'
     assert "s3cret" not in oauth_flow.log_safe(straddling)
+
+    # Malformed provider JSON (echoed verbatim in pydantic validation errors) can leave a
+    # quote unterminated. The bare branch would then stop at the first space and expose
+    # the tail — an opening quote with no partner means "the rest of the line".
+    for malformed in (
+        '{"access_token": "alpha beta gamma',
+        "{'client_secret': 'alpha beta gamma",
+        '{"refresh_token": "alpha beta\n"next_key": 1}',
+    ):
+        out = oauth_flow.redact_secrets(malformed)
+        assert "beta" not in out, out
+        assert "gamma" not in out, out
+    # ...but a well-formed neighbour on the NEXT line is still readable.
+    assert "next_key" in oauth_flow.redact_secrets('{"refresh_token": "alpha beta\n"next_key": 1}')
+
+    # Unicode line separators break records for str.splitlines() and line-oriented log
+    # tooling just like \n does, so they are folded too.
+    for sep in ("\x85", "\u2028", "\u2029"):
+        folded = oauth_flow.log_safe(f"denied{sep}WARNING:forged record")
+        assert sep not in folded, repr(folded)
+        assert "denied WARNING:forged record" in folded
 
     # JSON permits arbitrary whitespace around the separator: a provider writing five
     # spaces must not sail past the redaction (a fixed bound would be linear but wrong).
