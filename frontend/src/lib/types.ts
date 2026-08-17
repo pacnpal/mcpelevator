@@ -343,6 +343,11 @@ export type ServerAuthProvider = 'inherit' | 'none' | 'bearer' | 'oauth';
  * `always` requires one even on loopback. */
 export type ControlPlaneAuth = 'auto' | 'always';
 
+/** How upstream-OAuth sign-ins identify this instance when no static client id is
+ * set: 'auto' self-probes the CIMD client-metadata document and falls back to DCR
+ * when it isn't publicly fetchable; 'cimd' / 'dcr' pin the choice, probe-free. */
+export type UpstreamOauthClientMode = 'auto' | 'cimd' | 'dcr';
+
 /** Shape of GET/PATCH /api/settings. */
 export interface SettingsInfo {
 	bind_mode: BindMode;
@@ -368,6 +373,8 @@ export interface SettingsInfo {
 	oauth_scopes: string[];
 	/** Default idle quiescence in seconds for servers set to inherit (0 = off). */
 	idle_timeout_s: number;
+	/** Upstream-OAuth client identity: probed CIMD with DCR fallback, or an explicit pick. */
+	upstream_oauth_client_mode: UpstreamOauthClientMode;
 }
 
 /** A group's members: the wildcard "*" (every registered server, present and

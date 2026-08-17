@@ -66,6 +66,17 @@ DEFAULTS: dict[str, Any] = {
     # (state "idle") and the proxy restarts it on the next request. 0 (the default)
     # disables idling, so existing installs keep today's always-running behavior.
     "idle_timeout_s": 0,
+    # --- upstream oauth (this instance as an OAuth CLIENT of remote servers) ---
+    # How sign-ins to a remote server identify this instance to the provider when no
+    # static client id is configured. 'auto' (the default) self-probes the CIMD
+    # client-metadata document and offers the URL-based client id only when the
+    # document is confirmed publicly fetchable, falling back to Dynamic Client
+    # Registration otherwise. The probe can be wrong in both directions (it errs
+    # toward offering on transport errors; a middlebox could feed it a bad answer
+    # while the provider fetches fine), so the operator can override it explicitly:
+    # 'dcr' never offers the URL client id, 'cimd' always offers it, probe-free.
+    # A per-server static client id bypasses all three.
+    "upstream_oauth_client_mode": "auto",  # 'auto' | 'cimd' | 'dcr'
 }
 
 
@@ -76,6 +87,7 @@ def read_all(session: Session) -> dict[str, Any]:
 _MODES = {"local", "expose"}
 _PROVIDERS = {"none", "bearer", "oauth"}
 _CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
+_UPSTREAM_OAUTH_CLIENT_MODES = {"auto", "cimd", "dcr"}
 
 
 # Group names are the routing key in /g/<name>/mcp, so they must be URL-safe: lowercase
@@ -197,6 +209,8 @@ def write(
             value = deduped
         if key == "oauth_accept_bearer" and not isinstance(value, bool):
             raise ValueError(f"invalid oauth_accept_bearer: {value!r}")
+        if key == "upstream_oauth_client_mode" and value not in _UPSTREAM_OAUTH_CLIENT_MODES:
+            raise ValueError(f"invalid upstream_oauth_client_mode: {value!r}")
         if key == "idle_timeout_s":
             # bool is an int subclass — reject it explicitly so `true` can't store as 1.
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -250,6 +264,14 @@ def oauth_scopes(session: Session) -> list[str]:
 
 def oauth_accept_bearer(session: Session) -> bool:
     return repo.setting_get(session, "oauth_accept_bearer", DEFAULTS["oauth_accept_bearer"])
+
+
+def upstream_oauth_client_mode(session: Session) -> str:
+    """How upstream-OAuth sign-ins identify this instance: 'auto' (probe, offer CIMD
+    when confirmed, else DCR), 'cimd' (always offer, probe-free), 'dcr' (never offer)."""
+    return repo.setting_get(
+        session, "upstream_oauth_client_mode", DEFAULTS["upstream_oauth_client_mode"]
+    )
 
 
 def allow_private_lan(session: Session) -> bool:

@@ -262,6 +262,11 @@ class ImportResult(BaseModel):
 
 ControlPlaneAuthMode = Literal["auto", "always"]
 
+# How upstream-OAuth sign-ins identify this instance when no static client id is set:
+# 'auto' self-probes the CIMD document and falls back to DCR when it's gated; 'cimd'
+# and 'dcr' make the choice explicit, probe-free (see registry.settings DEFAULTS).
+UpstreamOauthClientMode = Literal["auto", "cimd", "dcr"]
+
 
 class TokenCreate(BaseModel):
     name: str
@@ -301,6 +306,7 @@ class SettingsInfo(BaseModel):
     oauth_scopes: list[str] = []
     # Default idle quiescence for servers whose idle_timeout_s is unset (0 = off).
     idle_timeout_s: int = 0
+    upstream_oauth_client_mode: UpstreamOauthClientMode = "auto"
 
 
 class SettingsUpdate(BaseModel):
@@ -323,6 +329,7 @@ class SettingsUpdate(BaseModel):
     # Global default for idle quiescence in seconds (0 disables it). StrictInt so
     # a JSON `true` can't lax-coerce to a 1-second shutdown.
     idle_timeout_s: Optional[StrictInt] = None
+    upstream_oauth_client_mode: Optional[UpstreamOauthClientMode] = None
 
 
 # ---- Groups (the /g/<name> registry) ----------------------------------------

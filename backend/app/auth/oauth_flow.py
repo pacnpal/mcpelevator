@@ -410,23 +410,38 @@ async def _fetch_client_metadata(url: str) -> httpx.Response:
             async with client.stream(
                 "GET", url, headers={"Accept": "application/json"}
             ) as response:
-                chunks: list[bytes] = []
-                size = 0
+                # Slice each chunk to the remaining budget BEFORE retaining it:
+                # aiter_bytes yields DECODED data, so a small compressed body can
+                # expand into one chunk far larger than the cap — appending it whole
+                # and checking after would keep the oversized chunk in memory.
+                body = bytearray()
                 async for chunk in response.aiter_bytes():
-                    chunks.append(chunk)
-                    size += len(chunk)
-                    if size > _CIMD_PROBE_MAX_BYTES:
+                    body.extend(chunk[: _CIMD_PROBE_MAX_BYTES + 1 - len(body)])
+                    if len(body) > _CIMD_PROBE_MAX_BYTES:
                         break
-                return httpx.Response(response.status_code, content=b"".join(chunks))
+                return httpx.Response(response.status_code, content=bytes(body))
 
     return await asyncio.wait_for(_get(), timeout=_CIMD_PROBE_TIMEOUT)
 
 
-async def _reachable_client_metadata_url(callback_url: str) -> Optional[str]:
-    """The CIMD URL to hand the provider, or ``None`` to fall back to DCR.
+# Conclusive probe verdicts, cached per URL for a few minutes: every server on an
+# instance shares ONE metadata URL, so authenticating several servers (or re-auths
+# after token expiry) shouldn't re-pay the probe round-trip each time. Inconclusive
+# answers (transport errors, transient statuses) are never cached — the offer stands
+# and the next sign-in probes again.
+_PROBE_TTL = 300.0
+_PROBE_CACHE: dict[str, tuple[Optional[str], float]] = {}
+# Statuses that prove nothing about gating: the endpoint (or its fronting proxy) is
+# rate-limiting or transiently failing, and the provider's own fetch moments later
+# may well succeed. Everything else non-200 — 401/403, login redirects, 404 — is the
+# stable shape of an auth gate or a broken path, which withholds the offer.
+_PROBE_TRANSIENT_STATUSES = {408, 429}
 
-    ``_client_metadata_url`` decides eligibility (https base, expected path); this adds
-    a self-probe of the document as the authorization server would fetch it. An https
+
+async def _reachable_client_metadata_url(url: str) -> Optional[str]:
+    """``url`` back to offer it as the CIMD client id, or ``None`` to fall back to DCR.
+
+    A self-probe of the document as the authorization server would fetch it. An https
     base alone doesn't prove the document is PUBLICLY fetchable: an instance behind an
     auth-gating proxy (Cloudflare Access, an oauth2-proxy, HTTP basic auth) serves it
     fine to the operator's signed-in browser while answering the provider's
@@ -435,37 +450,72 @@ async def _reachable_client_metadata_url(callback_url: str) -> Optional[str]:
     "client metadata unavailable" page there. Withholding the URL keeps the sign-in on
     Dynamic Client Registration, which needs no inbound fetch at all.
 
-    Only a DEFINITIVE bad answer — an HTTP response that isn't the public document with
-    the matching ``client_id`` — withholds the offer. A transport error proves nothing:
-    plenty of deployments can't hairpin their own public hostname from inside the
-    container while the provider reaches it fine, so the offer stands in that case."""
-    url = _client_metadata_url(callback_url)
-    if url is None:
-        return None
+    Only a DEFINITIVE bad answer — an HTTP response in the stable shape of a gate or a
+    body that isn't the public document with the matching ``client_id`` — withholds the
+    offer. Inconclusive evidence keeps it: a transport error proves nothing (plenty of
+    deployments can't hairpin their own public hostname from inside the container while
+    the provider reaches it fine), and neither does a transient status (429/5xx/408)."""
+    cached = _PROBE_CACHE.get(url)
+    if cached is not None and time.monotonic() < cached[1]:
+        return cached[0]
     try:
         response = await _fetch_client_metadata(url)
     except Exception as exc:  # noqa: BLE001 — transport-level failure: not evidence
         logger.debug("CIMD self-probe of %s errored (%s); offering the URL anyway", url, exc)
         return url
+    status = response.status_code
+    if status in _PROBE_TRANSIENT_STATUSES or status >= 500:
+        logger.debug(
+            "CIMD self-probe of %s got transient HTTP %s; offering the URL anyway", url, status
+        )
+        return url
     document = None
-    if response.status_code == 200:
+    if status == 200:
         try:
             document = response.json()
         except ValueError:
             document = None
-    if isinstance(document, dict) and document.get("client_id") == url:
+    verdict = url if isinstance(document, dict) and document.get("client_id") == url else None
+    if verdict is None:
+        logger.warning(
+            "the client-metadata document at %s is not publicly fetchable as-is "
+            "(HTTP %s%s) — likely an auth-gating proxy (e.g. Cloudflare Access) in front of "
+            "this instance. Falling back to Dynamic Client Registration for this sign-in; "
+            "to use URL-based client ids, exempt /api/oauth/client-metadata.json from the "
+            "gate (the document is public by design and carries no secrets), or set the "
+            "'Upstream OAuth client identity' setting to make the choice explicit.",
+            url,
+            status,
+            "" if status != 200 else ", body is not this instance's document",
+        )
+    _PROBE_CACHE[url] = (verdict, time.monotonic() + _PROBE_TTL)
+    return verdict
+
+
+def _upstream_client_mode() -> str:
+    """The ``upstream_oauth_client_mode`` runtime setting, read on a fresh session."""
+    from sqlmodel import Session
+
+    from app.db import get_engine
+    from app.registry import settings as runtime_settings
+
+    with Session(get_engine()) as session:
+        return runtime_settings.upstream_oauth_client_mode(session)
+
+
+async def _decide_client_metadata_url(callback_url: str) -> Optional[str]:
+    """What to hand the provider as ``client_metadata_url`` for an UNSEEDED flow,
+    honouring the operator's ``upstream_oauth_client_mode``: ``dcr`` never offers the
+    URL client id, ``cimd`` always offers the derived URL probe-free (the operator
+    knows their document is reachable even if this container can't see it), and
+    ``auto`` (default) offers it only when the self-probe confirms it's fetchable."""
+    mode = _upstream_client_mode()
+    if mode == "dcr":
+        return None
+    url = _client_metadata_url(callback_url)
+    if url is None or mode == "cimd":
         return url
-    logger.warning(
-        "the client-metadata document at %s is not publicly fetchable as-is "
-        "(HTTP %s%s) — likely an auth-gating proxy (e.g. Cloudflare Access) in front of "
-        "this instance. Falling back to Dynamic Client Registration for this sign-in; "
-        "to use URL-based client ids, exempt /api/oauth/client-metadata.json from the "
-        "gate (the document is public by design and carries no secrets).",
-        url,
-        response.status_code,
-        "" if response.status_code != 200 else ", body is not this instance's document",
-    )
-    return None
+    return await _reachable_client_metadata_url(url)
 
 
 def _extract_state(url: str) -> Optional[str]:
@@ -764,7 +814,7 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     # above so a failed begin doesn't leave a dangling pending until the reaper.
     try:
         if seed_client_info is None:
-            client_metadata_url = await _reachable_client_metadata_url(callback_url)
+            client_metadata_url = await _decide_client_metadata_url(callback_url)
         else:
             client_metadata_url = _client_metadata_url(callback_url)
     except BaseException:
