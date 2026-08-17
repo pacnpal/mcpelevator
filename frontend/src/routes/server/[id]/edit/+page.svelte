@@ -64,7 +64,8 @@
 					idle_timeout_s: server.idle_timeout_s,
 					oauth: server.oauth,
 					oauth_scopes: server.oauth_scopes,
-					oauth_client_id: server.oauth_client_id
+					oauth_client_id: server.oauth_client_id,
+					oauth_client_mode: server.oauth_client_mode
 					// oauth_client_secret is write-only (never returned); see oauthHasSecret below.
 				}
 			: null

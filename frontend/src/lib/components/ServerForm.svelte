@@ -4,7 +4,7 @@
 	import { getAuthStatus, getSettings } from '$lib/api';
 	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '$lib/remote';
 	import { quoteIfNeeded, withPin } from '$lib/uvxPin';
-	import type { Runner, ServerAuthProvider, ServerCreate } from '$lib/types';
+	import type { Runner, ServerAuthProvider, ServerCreate, ServerOauthClientMode } from '$lib/types';
 
 	type Mode = 'create' | 'edit';
 
@@ -162,6 +162,7 @@
 			oauthScopes: init.oauth_scopes ?? '',
 			oauthClientId: init.oauth_client_id ?? '',
 			oauthClientSecret: init.oauth_client_secret ?? '',
+			oauthClientMode: init.oauth_client_mode ?? 'inherit',
 			envRows: envToRows(init.env)
 		};
 	});
@@ -199,6 +200,9 @@
 	let oauthScopes = $state(seed.oauthScopes);
 	let oauthClientId = $state(seed.oauthClientId);
 	let oauthClientSecret = $state(seed.oauthClientSecret);
+	// Client identity for sign-ins: inherit the instance-wide setting, or pin
+	// auto/CIMD/DCR for this server. Moot when a static client id is set.
+	let oauthClientMode = $state<ServerOauthClientMode>(seed.oauthClientMode);
 	// Open the client-credentials disclosure when there's already an id or a stored secret.
 	// Initial capture only (uncontrolled form), so untrack the prop read.
 	let oauthClientOpen = $state(untrack(() => !!seed.oauthClientId || oauthHasSecret));
@@ -428,7 +432,8 @@
 			oauth: isRemote && oauth,
 			oauth_scopes: isRemote && oauth ? oauthScopes.trim() : '',
 			oauth_client_id: isRemote && oauth ? oauthClientId.trim() || null : null,
-			oauth_client_secret: oauthSecretPayload()
+			oauth_client_secret: oauthSecretPayload(),
+			oauth_client_mode: isRemote && oauth ? oauthClientMode : 'inherit'
 		};
 		if (mode === 'create') payload.enabled = startAfter;
 		// Only send a slug when it's actually a rename, so an unchanged edit doesn't
@@ -790,6 +795,24 @@
 								<p class="text-xs text-[var(--color-ink-dim)]">
 									Leave blank to register automatically (Dynamic Client Registration). Fill these
 									in only if the provider issued you a pre-registered client.
+								</p>
+								<label class="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+									<span class="shrink-0 font-medium">Client identity</span>
+									<select
+										bind:value={oauthClientMode}
+										aria-label="OAuth client identity mode"
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-2 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+									>
+										<option value="inherit">inherit (Settings)</option>
+										<option value="auto">auto — probe, fall back to DCR</option>
+										<option value="cimd">CIMD — always offer the URL client id</option>
+										<option value="dcr">DCR — always register a client</option>
+									</select>
+								</label>
+								<p class="text-xs text-[var(--color-ink-dim)]">
+									How the sign-in identifies this instance when no client ID is set above.
+									<span class="font-mono">inherit</span> follows the instance-wide choice on the
+									Settings page; pick one here to override it for this server only.
 								</p>
 								{#if mode === 'edit' && oauthHasSecret}
 									<label class="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">

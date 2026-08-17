@@ -123,6 +123,13 @@ class Server(SQLModel, table=True):
     oauth_scopes: str = ""  # space-separated scopes to request (empty = server default)
     oauth_client_id: Optional[str] = None
     oauth_client_secret: Optional[str] = None
+    # How the sign-in identifies this instance to the provider when no static client
+    # id is set: 'inherit' defers to the `upstream_oauth_client_mode` runtime setting;
+    # 'auto'/'cimd'/'dcr' pin it for this server (see auth.oauth_flow). Control-plane
+    # sign-in concern only — outside config_hash, changing it never bounces the bridge,
+    # and (unlike a client id/upstream change) it never invalidates stored tokens.
+    # Rows migrated by ADD COLUMN default to '' — read as 'inherit'.
+    oauth_client_mode: str = "inherit"  # inherit | auto | cimd | dcr
 
     # Idle quiescence: seconds of no proxy traffic before the supervisor stops the
     # bridge (state "idle") and the proxy restarts it on the next request. NULL =

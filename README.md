@@ -253,6 +253,20 @@ A `remote` server authenticates **to the upstream** one of two ways:
   sign-in picks whichever the provider supports: static client if you set one,
   else CIMD where advertised, else Dynamic Client Registration.
 
+  CIMD only works when the provider can actually **fetch** that document —
+  server-side and unauthenticated. Before offering it, the sign-in self-probes the
+  URL the same way; if the document is definitively gated (an auth-gating proxy such
+  as **Cloudflare Access** or an oauth2-proxy in front of the instance answers the
+  anonymous fetch with a 401 or a login redirect), the sign-in silently falls back
+  to Dynamic Client Registration and keeps working. You can also pin the choice in
+  **Settings → Upstream OAuth client identity**: `auto` (the probed default),
+  `CIMD` (always offer the URL client id — for deployments whose document is public
+  even though the probe can't confirm it from inside the container), or `DCR`
+  (never offer it) — and override that per server via **Client identity** in the
+  server's OAuth client-credentials section (`inherit` follows the Settings choice).
+  To use CIMD behind such a gate instead, exempt `/api/oauth/client-metadata.json`
+  from it — the document is public by design and carries no secrets.
+
   Scopes are **discovered automatically** at sign-in (RFC 9728 / RFC 8414 / OIDC
   well-known metadata), so `oauth_scopes` is usually unnecessary — leave it blank.
   mcpelevator also requests the **`offline_access`** scope by default ([SEP-2207](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2207)),

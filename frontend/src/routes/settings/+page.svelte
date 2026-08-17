@@ -28,6 +28,7 @@
 		SettingsInfo,
 		TokenCreated,
 		TokenInfo,
+		UpstreamOauthClientMode,
 		UserCredential,
 		UserInfo
 	} from '$lib/types';
@@ -307,6 +308,15 @@
 		{ value: 'auto', label: 'auto', hint: 'Required when exposed' },
 		{ value: 'always', label: 'always', hint: 'Required even on loopback' }
 	];
+	const UPSTREAM_OAUTH_CLIENT_CHOICES: {
+		value: UpstreamOauthClientMode;
+		label: string;
+		hint: string;
+	}[] = [
+		{ value: 'auto', label: 'auto', hint: 'Probe, fall back to DCR' },
+		{ value: 'cimd', label: 'CIMD', hint: 'Always offer the URL client id' },
+		{ value: 'dcr', label: 'DCR', hint: 'Always register a client' }
+	];
 
 	// Persist a settings patch (save-on-change), optimistically applying it and
 	// rolling back on failure so the controls never drift from the backend.
@@ -434,6 +444,11 @@
 			return;
 		}
 		patchSettings({ control_plane_auth: value }, 'control_plane_auth');
+	}
+
+	function setUpstreamOauthClientMode(value: UpstreamOauthClientMode) {
+		if (!settings || settings.upstream_oauth_client_mode === value) return;
+		patchSettings({ upstream_oauth_client_mode: value }, 'upstream_oauth_client_mode');
 	}
 
 	function confirmSwitchToLocal() {
@@ -1529,6 +1544,56 @@
 						Enter a whole number of seconds (0 turns idling off).
 					</p>
 				{/if}
+			</fieldset>
+
+			<!-- Upstream OAuth client identity -->
+			<fieldset class="flex flex-col gap-2 border-0 p-0">
+				<legend class="text-sm font-medium text-[var(--color-ink)]">
+					Upstream OAuth client identity
+				</legend>
+				<div class="grid grid-cols-3 gap-2">
+					{#each UPSTREAM_OAUTH_CLIENT_CHOICES as choice (choice.value)}
+						<label
+							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+							style={settings.upstream_oauth_client_mode === choice.value
+								? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+								: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+						>
+							<span class="flex items-center gap-2">
+								<input
+									type="radio"
+									name="upstream-oauth-client-mode"
+									value={choice.value}
+									checked={settings.upstream_oauth_client_mode === choice.value}
+									onchange={() => setUpstreamOauthClientMode(choice.value)}
+									disabled={savingField !== null}
+									class="sr-only"
+								/>
+								<span
+									class="font-mono text-sm font-semibold"
+									style={settings.upstream_oauth_client_mode === choice.value
+										? 'color: var(--color-accent);'
+										: 'color: var(--color-ink);'}
+								>
+									{choice.label}
+								</span>
+							</span>
+							<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+								{choice.hint}
+							</span>
+						</label>
+					{/each}
+				</div>
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					How OAuth sign-ins to a remote server identify this instance when no static client
+					id is set. <code class="font-mono">auto</code> offers the URL-based client id (CIMD)
+					only after confirming
+					<code class="font-mono">/api/oauth/client-metadata.json</code> is publicly fetchable,
+					falling back to Dynamic Client Registration — e.g. when an auth-gating proxy such as
+					Cloudflare Access blocks the provider's fetch. Pick
+					<code class="font-mono">CIMD</code> or <code class="font-mono">DCR</code> to skip the
+					probe and decide explicitly. A server with a static client id ignores this.
+				</p>
 			</fieldset>
 
 			<!-- Groups -->

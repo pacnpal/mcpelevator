@@ -49,6 +49,7 @@ def test_settings_defaults_and_write(session):
         "oauth_accept_bearer": False,
         "oauth_scopes": [],
         "idle_timeout_s": 0,
+        "upstream_oauth_client_mode": "auto",
     }
     runtime_settings.write(
         session,

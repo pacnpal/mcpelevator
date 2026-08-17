@@ -385,6 +385,195 @@ def _client_metadata_url(callback_url: str) -> Optional[str]:
     return callback_url.removesuffix(suffix) + "/api/oauth/client-metadata.json"
 
 
+# Budget for the CIMD self-probe below. Providers fetch the document with a short
+# server-side timeout themselves, so a document that takes longer than this is as
+# good as unreachable for CIMD purposes anyway.
+_CIMD_PROBE_TIMEOUT = 8.0
+# The real document is a small JSON object; anything past this bound is not it. A
+# truncated over-limit body fails the json parse below and reads as a definitive
+# non-document, so a misbehaving proxy can't balloon memory through the probe.
+_CIMD_PROBE_MAX_BYTES = 65536
+
+
+async def _fetch_client_metadata(url: str) -> httpx.Response:
+    """One unauthenticated GET of our own client-metadata URL — no cookies, no bearer,
+    no redirects — exactly the fetch a CIMD-supporting authorization server performs.
+    Bounded twice over: ``asyncio.wait_for`` caps the WHOLE request wall-clock (httpx
+    timeouts are per network operation, so a response trickling in under-timeout chunks
+    could otherwise hold /oauth/authorize open indefinitely), and the body read stops
+    past ``_CIMD_PROBE_MAX_BYTES``.
+
+    The wall-clock deadline shares its budget with httpx's connect timeout and can win
+    that race, so a bare deadline expiry is ambiguous. Disambiguate for the caller by
+    whether response HEADERS had arrived when it fired: before headers, re-raise as
+    ``ConnectTimeout`` — indistinguishable from a hairpin blackhole, so inconclusive —
+    and only after headers as ``TimeoutError``, an established-but-undeliverable
+    response the caller treats as disqualifying."""
+    got_headers = False
+
+    async def _get() -> httpx.Response:
+        nonlocal got_headers
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(_CIMD_PROBE_TIMEOUT), follow_redirects=False
+        ) as client:
+            # Accept-Encoding: identity + aiter_raw: the bound must hold on the bytes
+            # actually allocated. aiter_bytes DECODES each raw chunk before yielding —
+            # a small gzip body can expand ~1000x into one materialized bytes object
+            # before any slice runs — so read the raw wire bytes with no decoding and
+            # ask the server not to compress. A proxy that compresses anyway despite
+            # identity yields a body that fails the JSON parse and reads as a
+            # definitive non-document, which is the safe outcome.
+            async with client.stream(
+                "GET",
+                url,
+                headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+            ) as response:
+                got_headers = True
+                # Slice each chunk to the remaining budget BEFORE retaining it.
+                body = bytearray()
+                async for chunk in response.aiter_raw():
+                    body.extend(chunk[: _CIMD_PROBE_MAX_BYTES + 1 - len(body)])
+                    if len(body) > _CIMD_PROBE_MAX_BYTES:
+                        break
+                return httpx.Response(response.status_code, content=bytes(body))
+
+    try:
+        return await asyncio.wait_for(_get(), timeout=_CIMD_PROBE_TIMEOUT)
+    except TimeoutError:
+        if got_headers:
+            raise
+        raise httpx.ConnectTimeout(
+            f"no response headers within {_CIMD_PROBE_TIMEOUT:.0f}s"
+        ) from None
+
+
+# Conclusive probe verdicts, cached per URL for a few minutes: every server on an
+# instance shares ONE metadata URL, so authenticating several servers (or re-auths
+# after token expiry) shouldn't re-pay the probe round-trip each time. Inconclusive
+# answers (transport errors, transient statuses) are never cached — the offer stands
+# and the next sign-in probes again.
+_PROBE_TTL = 300.0
+_PROBE_CACHE: dict[str, tuple[Optional[str], float]] = {}
+# Statuses that prove nothing about gating: the endpoint (or its fronting proxy) is
+# rate-limiting or transiently failing, and the provider's own fetch moments later
+# may well succeed. Everything else non-200 — 401/403, login redirects, 404 — is the
+# stable shape of an auth gate or a broken path, which withholds the offer.
+_PROBE_TRANSIENT_STATUSES = {408, 429}
+
+
+async def _reachable_client_metadata_url(url: str) -> Optional[str]:
+    """``url`` back to offer it as the CIMD client id, or ``None`` to fall back to DCR.
+
+    A self-probe of the document as the authorization server would fetch it. An https
+    base alone doesn't prove the document is PUBLICLY fetchable: an instance behind an
+    auth-gating proxy (Cloudflare Access, an oauth2-proxy, HTTP basic auth) serves it
+    fine to the operator's signed-in browser while answering the provider's
+    unauthenticated server-side fetch with a 401/403 or a login redirect — and that
+    failure surfaces only AFTER the browser has been sent to the provider, as an opaque
+    "client metadata unavailable" page there. Withholding the URL keeps the sign-in on
+    Dynamic Client Registration, which needs no inbound fetch at all.
+
+    Only a DEFINITIVE bad answer — an HTTP response in the stable shape of a gate or a
+    body that isn't the public document with the matching ``client_id`` — withholds the
+    offer, with one addition: a connection that IS established but can't deliver the
+    document within the budget (stalled/trickling response) also withholds, uncached —
+    the provider's own server-side fetch would exhaust its deadline the same way.
+    Inconclusive evidence keeps the offer: a CONNECTION failure proves nothing (plenty
+    of deployments can't hairpin their own public hostname from inside the container
+    while the provider reaches it fine), and neither does a transient status
+    (429/5xx/408)."""
+    cached = _PROBE_CACHE.get(url)
+    if cached is not None and time.monotonic() < cached[1]:
+        return cached[0]
+    try:
+        response = await _fetch_client_metadata(url)
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        # Couldn't even open a connection from inside the container — the classic
+        # no-hairpin-route shape. Not evidence about the provider's path: offer.
+        logger.debug(
+            "CIMD self-probe of %s could not connect (%s); offering the URL anyway", url, exc
+        )
+        return url
+    except (TimeoutError, httpx.TimeoutException) as exc:
+        # The connection was established (ConnectTimeout is excluded above) but the
+        # document couldn't be delivered inside the provider-compatible budget — a
+        # stalled read or a body trickling past the wall clock. A provider's fetch
+        # would fail the same way, so withhold; possibly transient, so don't cache.
+        logger.warning(
+            "the client-metadata document at %s could not be delivered within %.0fs (%s) — "
+            "falling back to Dynamic Client Registration for this sign-in.",
+            url,
+            _CIMD_PROBE_TIMEOUT,
+            type(exc).__name__,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 — other transport-level failure: not evidence
+        logger.debug("CIMD self-probe of %s errored (%s); offering the URL anyway", url, exc)
+        return url
+    status = response.status_code
+    if status in _PROBE_TRANSIENT_STATUSES or status >= 500:
+        logger.debug(
+            "CIMD self-probe of %s got transient HTTP %s; offering the URL anyway", url, status
+        )
+        return url
+    document = None
+    if status == 200:
+        try:
+            document = response.json()
+        except ValueError:
+            document = None
+    verdict = url if isinstance(document, dict) and document.get("client_id") == url else None
+    if verdict is None:
+        logger.warning(
+            "the client-metadata document at %s is not publicly fetchable as-is "
+            "(HTTP %s%s) — likely an auth-gating proxy (e.g. Cloudflare Access) in front of "
+            "this instance. Falling back to Dynamic Client Registration for this sign-in; "
+            "to use URL-based client ids, exempt /api/oauth/client-metadata.json from the "
+            "gate (the document is public by design and carries no secrets), or set the "
+            "'Upstream OAuth client identity' setting to make the choice explicit.",
+            url,
+            status,
+            "" if status != 200 else ", body is not this instance's document",
+        )
+    _PROBE_CACHE[url] = (verdict, time.monotonic() + _PROBE_TTL)
+    return verdict
+
+
+def _upstream_client_mode() -> str:
+    """The ``upstream_oauth_client_mode`` runtime setting, read on a fresh session."""
+    from sqlmodel import Session
+
+    from app.db import get_engine
+    from app.registry import settings as runtime_settings
+
+    with Session(get_engine()) as session:
+        return runtime_settings.upstream_oauth_client_mode(session)
+
+
+def _effective_client_mode(server) -> str:
+    """The client-identity mode governing this server's sign-in: the server's own
+    ``oauth_client_mode`` when it picked one, else the instance-wide runtime setting.
+    Blank/legacy values ('' from the ADD COLUMN migration) read as inherit."""
+    mode = (getattr(server, "oauth_client_mode", "") or "").strip()
+    if mode in ("auto", "cimd", "dcr"):
+        return mode
+    return _upstream_client_mode()
+
+
+async def _decide_client_metadata_url(callback_url: str, mode: str) -> Optional[str]:
+    """What to hand the provider as ``client_metadata_url`` for an UNSEEDED flow,
+    honouring the effective client-identity mode: ``dcr`` never offers the URL client
+    id, ``cimd`` always offers the derived URL probe-free (the operator knows their
+    document is reachable even if this container can't see it), and ``auto`` (default)
+    offers it only when the self-probe confirms it's fetchable."""
+    if mode == "dcr":
+        return None
+    url = _client_metadata_url(callback_url)
+    if url is None or mode == "cimd":
+        return url
+    return await _reachable_client_metadata_url(url)
+
+
 def _extract_state(url: str) -> Optional[str]:
     try:
         values = parse_qs(urlparse(url).query).get("state")
@@ -588,6 +777,10 @@ async def begin_authorization(server, *, callback_url: str) -> str:
 
     real = ServerTokenStorage(server.id)
     redirect_uris = [AnyHttpUrl(callback_url)]
+    # The client-identity mode for this sign-in (server override, else the runtime
+    # setting) — resolved once, before any await, and used both for seed reuse below
+    # and for the CIMD offer decision. Irrelevant when a static client id is set.
+    client_mode = _effective_client_mode(server)
 
     # Seed the client info the flow will use. A static, pre-registered client (operator
     # supplied a client id) skips Dynamic Client Registration; otherwise reuse a prior DCR
@@ -614,7 +807,23 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         registered = {str(u) for u in (getattr(existing, "redirect_uris", None) or [])}
         expires_at = getattr(existing, "client_secret_expires_at", None) if existing else None
         expired = bool(expires_at) and expires_at < time.time()
-        reusable = existing is not None and callback_url in registered and not expired
+        # A stored client whose client_id IS this instance's client-metadata URL came from a
+        # prior CIMD sign-in (the SDK persists the identity it fabricates). That's not a
+        # registration — there's no quota to protect and it's recreated locally for free —
+        # so it must NOT seed the flow: seeding bypasses the SDK's CIMD/DCR decision AND the
+        # reachability probe below, resending a possibly gated URL client id forever.
+        # Symmetrically, an EXPLICIT 'cimd' mode ignores a stored DCR registration — the
+        # operator pinned the URL-based identity, and a seeded client would override it.
+        cimd_identity = existing is not None and str(existing.client_id) == _client_metadata_url(
+            callback_url
+        )
+        reusable = (
+            existing is not None
+            and not cimd_identity
+            and client_mode != "cimd"
+            and callback_url in registered
+            and not expired
+        )
         seed_client_info = existing if reusable else None
 
     # Drive the grant against an EPHEMERAL store (no tokens → the probe 401s → the browser
@@ -636,6 +845,13 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         row_existed=row_existed,
         oauth_sig=_oauth_signature_of(server),
     )
+    # Register BEFORE any further await — notably the CIMD self-probe's network
+    # round-trip below. A second Authenticate click (and the delete/reassign/
+    # config-edit cancel paths) supersede a flow by finding it here; a flow parked
+    # in a pre-registration await would be invisible to them, and two flows for one
+    # server could then both run to promotion. The pre-_drive check further down
+    # notices the supersession and refuses to start the driven flow.
+    _PENDING[pending.id] = pending
     mem = _MemoryTokenStorage(
         client_info=seed_client_info,
         persist_registration_to=persist_registration_to,
@@ -656,6 +872,25 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         scope=server.oauth_scopes or None,
     )
 
+    # URL-based client id (CIMD): the SDK only consumes it when the provider advertises
+    # support AND no client is seeded, so DCR/static-client behavior is unchanged
+    # everywhere else. The self-probe (with its up-to-8s worst case) runs only when the
+    # URL could actually be used — a seeded client bypasses CIMD, so pass the raw
+    # derived value there and skip the probe. On any raise, drop the registration made
+    # above so a failed begin doesn't leave a dangling pending until the reaper.
+    try:
+        if seed_client_info is None:
+            client_metadata_url = await _decide_client_metadata_url(callback_url, client_mode)
+        elif client_mode == "dcr":
+            # A seeded client already bypasses CIMD in the SDK, so the URL would be
+            # inert either way — but an explicit 'dcr' pick shouldn't offer it at all.
+            client_metadata_url = None
+        else:
+            client_metadata_url = _client_metadata_url(callback_url)
+    except BaseException:
+        _forget(pending)
+        raise
+
     async def redirect_handler(authorization_url: str) -> None:
         authorization_url = _repair_authorization_url(authorization_url)
         authorization_url = _ensure_consent_prompt(authorization_url)
@@ -675,20 +910,31 @@ async def begin_authorization(server, *, callback_url: str) -> str:
             raise RuntimeError("OAuth callback delivered no authorization code")
         return pending.code, pending.state
 
-    provider = _ScopedOAuthClientProvider(
-        server_url=server.command,
-        client_metadata=client_metadata,
-        storage=mem,
-        redirect_handler=redirect_handler,
-        callback_handler=callback_handler,
-        timeout=_FLOW_TIMEOUT,
-        operator_scopes=server.oauth_scopes or None,
-        # URL-based client id (CIMD): used by the SDK only when the provider advertises
-        # support, so DCR/static-client behavior is unchanged everywhere else.
-        client_metadata_url=_client_metadata_url(callback_url),
-    )
+    try:
+        provider = _ScopedOAuthClientProvider(
+            server_url=server.command,
+            client_metadata=client_metadata,
+            storage=mem,
+            redirect_handler=redirect_handler,
+            callback_handler=callback_handler,
+            timeout=_FLOW_TIMEOUT,
+            operator_scopes=server.oauth_scopes or None,
+            client_metadata_url=client_metadata_url,
+        )
+    except BaseException:
+        _forget(pending)  # same dangling-registration cleanup as the probe above
+        raise
 
-    _PENDING[pending.id] = pending
+    # Re-check the registration made before the awaits above: if it's gone, a newer
+    # Authenticate click (or a delete/config-edit) superseded this flow while it was
+    # parked in the self-probe. Refuse to start _drive — the documented invariant is
+    # ONE authorization in flight per server, and two driven flows could otherwise
+    # both promote, the loser overwriting the winner's tokens.
+    if _PENDING.get(pending.id) is not pending:
+        raise OAuthBeginError(
+            "this sign-in attempt was superseded by a newer one for the same server",
+            status_code=409,
+        )
     pending.task = asyncio.create_task(_drive(server, provider, mem, real, pending))
 
     try:
