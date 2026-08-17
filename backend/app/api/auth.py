@@ -88,7 +88,9 @@ _ERROR_REDIRECT = "/?oauth=error"
 # no-remote-input property of the redirect is preserved; the detail stays in the log.
 # Each code names only what we can actually tell apart, so none of them sends the
 # operator after the wrong thing:
-_REASON_PROVIDER_DENIED = "provider_denied"  # the AS came back with ?error=…
+_REASON_PROVIDER_DENIED = "provider_denied"  # the AS said no (access_denied)
+_REASON_PROVIDER_UNAVAILABLE = "provider_unavailable"  # the AS is down/overloaded — retry
+_REASON_PROVIDER_REJECTED = "provider_rejected_request"  # the AS refused OUR request shape
 _REASON_NO_CODE = "no_code"  # redirect carried no code/state
 _REASON_EXPIRED = "expired_or_superseded"  # unknown state: reaped, cancelled, restarted
 _REASON_EXCHANGE_FAILED = "token_exchange_failed"  # the AS refused the code (SDK OAuthTokenError)
@@ -111,6 +113,30 @@ def _oauth_redirect(path: str) -> RedirectResponse:
 def _oauth_error(reason: str) -> RedirectResponse:
     """Failure redirect carrying a coarse, self-authored reason code."""
     return _oauth_redirect(f"{_ERROR_REDIRECT}&reason={reason}")
+
+
+# RFC 6749 §4.1.2.1 error codes, grouped by what the OPERATOR should do about them. The
+# provider's code is used only to SELECT one of our literals — never echoed — so the
+# redirect keeps its no-remote-input property.
+_PROVIDER_UNAVAILABLE_ERRORS = frozenset({"server_error", "temporarily_unavailable"})
+_PROVIDER_DENIED_ERRORS = frozenset({"access_denied", "consent_required", "login_required"})
+
+
+def _provider_error_reason(error: str) -> str:
+    """Which failure the authorization server actually reported.
+
+    Calling every ``?error=`` a denial tells the operator they were refused when the
+    provider was merely down — a wrong diagnosis with a wrong remedy, in the one feature
+    whose entire purpose is naming the failure. ``temporarily_unavailable`` is not
+    hypothetical: it is what Cloudflare returns when it can't fetch a client-metadata
+    document. Anything else (invalid_request, invalid_scope, unauthorized_client, …) is
+    the provider rejecting how WE asked, which points at this server's configuration."""
+    code = error.strip().lower()
+    if code in _PROVIDER_UNAVAILABLE_ERRORS:
+        return _REASON_PROVIDER_UNAVAILABLE
+    if code in _PROVIDER_DENIED_ERRORS:
+        return _REASON_PROVIDER_DENIED
+    return _REASON_PROVIDER_REJECTED
 
 
 @router.get("/oauth/callback")
@@ -166,7 +192,10 @@ async def oauth_callback(
                 "ignoring the unsolicited callback (detail withheld: it is not tied to "
                 "any sign-in this instance started)"
             )
-        return _oauth_error(_REASON_PROVIDER_DENIED)
+        # The provider's code SELECTS one of our literals; it is never echoed, so the
+        # redirect stays free of remote input either way. Classifying the uncorrelated
+        # case too costs nothing — the answer is a literal — and keeps one code path.
+        return _oauth_error(_provider_error_reason(error))
     if not code or not state:
         # A callback carrying a VALID pending state but no code is a broken provider
         # failing a real operator's sign-in — not noise — so it earns the operator-level

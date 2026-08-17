@@ -29,6 +29,7 @@ reaper drops entries the operator never completed.
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import re
 import time
@@ -96,14 +97,24 @@ class OAuthBeginError(RuntimeError):
 # design (WARNING logs, and the 502 detail from ``_classify_begin_error``), so they are
 # scrubbed on the way out. Values are replaced, keys kept: the operator still sees the
 # shape of the failure, just not the credential.
-_SECRET_KEYS = (
+# Matched ANYWHERE in a name, not just at a word boundary: the credential families come
+# with vendor prefixes (RFC 7592's ``registration_access_token``, ``initial_access_token``,
+# and ``client_secret`` itself), and a leading ``\b`` cannot see them — ``_`` is a word
+# character, so there is no boundary before the suffix. Prefixes are always still the same
+# kind of credential, so matching the family is the safe reading.
+_SECRET_KEYS_ANYWHERE = (
     "access_token",
     "refresh_token",
     "id_token",
-    "client_secret",
+    "secret",
+    "password",
+)
+# Matched as WHOLE words only. ``code`` is the reason this split exists: allowing a prefix
+# would scrub ``status_code`` and ``error_code``, which are diagnostics rather than
+# credentials and must stay readable.
+_SECRET_KEYS_WHOLE = (
     "code_verifier",
     "code",
-    "password",
     # Pydantic renders a rejected field as ``… input_value=['SUPER-TOKEN'], input_type=list``
     # with the FIELD NAME on an earlier line, so a key/value pattern anchored on
     # ``access_token`` can't reach it — and the SDK feeds exactly this into
@@ -123,10 +134,8 @@ _SECRET_KEYS = (
 # control plane fed by a remote party. A forward scan handles every shape in one linear
 # pass, and the pattern is left doing only what patterns are good at: finding the key.
 _SEPARATOR = r"(?P<sep>[\"']?[ \t\r\n]*+[=:][ \t\r\n]*+)"
-# ``\b`` before the key means a name that merely ENDS in one of these (status_code,
-# error_code) is left alone — ``_`` is a word character, so there is no boundary there —
-# and requiring the separator right after the key spares names that merely START with one
-# (code_challenge, authorization_endpoint are not credentials and stay readable).
+# Requiring the separator right after the key is what spares names that merely START with
+# one: code_challenge and authorization_endpoint are not credentials and stay readable.
 #
 # Whitespace runs in the separator use POSSESSIVE quantifiers (``*+``, Python 3.11+),
 # which is what lets them be unbounded without being dangerous: a plain ``*`` before a
@@ -134,7 +143,14 @@ _SEPARATOR = r"(?P<sep>[\"']?[ \t\r\n]*+[=:][ \t\r\n]*+)"
 # py/polynomial-redos), while a fixed bound like ``{0,4}`` is linear but WRONG, since JSON
 # permits arbitrary whitespace and a provider writing five spaces would sail past the
 # redaction entirely.
-_SECRET_KEY_RE = re.compile(r"(?i)\b(?P<key>" + "|".join(_SECRET_KEYS) + r")" + _SEPARATOR)
+_SECRET_KEY_RE = re.compile(
+    "(?i)(?P<key>"
+    + "|".join(_SECRET_KEYS_ANYWHERE)
+    + r"|\b(?:"
+    + "|".join(_SECRET_KEYS_WHOLE)
+    + r"))"
+    + _SEPARATOR
+)
 # ``Authorization: Bearer <token>`` needs its own rule: the credential sits AFTER a scheme
 # word, so a whitespace-terminated value would redact "Bearer" and leave the token itself
 # in the clear. Its unquoted form therefore runs to end of line.
@@ -241,11 +257,19 @@ def redact_secrets(value: object) -> str:
 
 
 def _find_secret_keys(text: str):
-    """Every credential-bearing key occurrence, in positional order, from both patterns
-    (the general key list and the ``Authorization`` header, whose value shape differs)."""
-    matches = [*_SECRET_KEY_RE.finditer(text), *_AUTH_KEY_RE.finditer(text)]
-    matches.sort(key=lambda m: m.start())
-    return matches
+    """Credential-bearing key occurrences in positional order, from both patterns (the
+    general key list and the ``Authorization`` header, whose value shape differs).
+
+    Lazily merged, never materialized: this runs over provider response bodies of
+    unbounded size, and collecting every match into a list to sort it would let a body
+    densely packed with ``access_token=x`` amplify memory well beyond the response
+    itself — in the single process that also serves every other control-plane and proxy
+    request. Both iterators are already ordered, so merging them costs nothing extra."""
+    return heapq.merge(
+        _SECRET_KEY_RE.finditer(text),
+        _AUTH_KEY_RE.finditer(text),
+        key=lambda match: match.start(),
+    )
 
 
 # One log record per failure, however long or hostile the upstream text: newlines and

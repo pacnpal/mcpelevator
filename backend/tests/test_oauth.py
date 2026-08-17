@@ -21,6 +21,7 @@ from mcp.shared.auth import OAuthToken
 
 from conftest import LOOPBACK
 
+from app.api import auth as auth_api
 from app.auth import oauth_flow
 from app.auth.oauth_store import ServerTokenStorage
 from app.main import app
@@ -1606,6 +1607,53 @@ def test_callback_failure_reasons_are_self_authored_codes(monkeypatch):
         assert "evil.example" not in r.headers["location"]
 
 
+def test_provider_error_codes_are_classified_not_all_called_denials():
+    # Reporting every `?error=` as a denial is a WRONG diagnosis with a wrong remedy: it
+    # tells the operator they were refused when the provider was merely down, in the one
+    # feature whose entire purpose is naming the failure. `temporarily_unavailable` is not
+    # hypothetical — it is exactly what Cloudflare returned when it could not fetch this
+    # instance's client-metadata document, the bug that started this work.
+    cases = [
+        # The user (or the AS on their behalf) said no. Nothing to fix here.
+        ("access_denied", "provider_denied"),
+        ("consent_required", "provider_denied"),
+        ("login_required", "provider_denied"),
+        # The AS is unwell. The remedy is to retry, not to reconfigure.
+        ("temporarily_unavailable", "provider_unavailable"),
+        ("server_error", "provider_unavailable"),
+        # The AS refused how WE asked — this points at our own configuration.
+        ("invalid_request", "provider_rejected_request"),
+        ("invalid_scope", "provider_rejected_request"),
+        ("unauthorized_client", "provider_rejected_request"),
+        ("unsupported_response_type", "provider_rejected_request"),
+        # An unknown/vendor code is a rejection of our request as far as we can tell; it
+        # must not be laundered into the confident "the user denied you" reading.
+        ("cf_metadata_fetch_failed", "provider_rejected_request"),
+        # Providers are inconsistent about case and stray whitespace; the classification
+        # is on the code, not on its typography.
+        ("  Temporarily_Unavailable  ", "provider_unavailable"),
+        ("ACCESS_DENIED", "provider_denied"),
+    ]
+    for code, reason in cases:
+        assert auth_api._provider_error_reason(code) == reason, code
+
+    # And the classification actually reaches the redirect — still as a self-authored
+    # literal, with the provider's own text nowhere in the Location header.
+    with TestClient(app) as c:
+        r = c.get(
+            "/api/oauth/callback",
+            params={
+                "error": "temporarily_unavailable",
+                "error_description": "Client metadata is temporarily unavailable",
+            },
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert r.headers["location"] == "/?oauth=error&reason=provider_unavailable"
+        assert "metadata" not in r.headers["location"]
+
+
 def test_callback_maps_each_flow_failure_to_its_own_reason(monkeypatch):
     # The phases the flow can actually tell apart get distinct codes, so a code never
     # sends the operator after the wrong thing: a token the RESOURCE refused (fix the
@@ -1883,6 +1931,63 @@ def test_redact_secrets_scrubs_credential_values():
     assert "error_code=invalid_grant" in oauth_flow.redact_secrets("error_code=invalid_grant")
     # ...while a bare authorization code IS scrubbed.
     assert "4ebff81" not in oauth_flow.redact_secrets("callback code=4ebff81:mqAB5wc")
+
+
+def test_redact_secrets_covers_vendor_prefixed_credential_names():
+    # Credential names come with prefixes, and a word boundary cannot see them: "_" is a
+    # word character, so there is no boundary before the suffix in
+    # `registration_access_token`. That name is not exotic — RFC 7592 issues it during the
+    # DCR this code performs, and the SDK embeds the whole registration body in its error
+    # text, so a plain `\b`-anchored key list wrote a live management token to the log.
+    #
+    # The KEY is what is under test, so the fixtures name keys and share one sentinel
+    # value, built at runtime. Writing a literal value next to a credential-shaped key
+    # would trip secret scanners on this file — a fake one reads exactly like a real one
+    # to a detector, and a test asserting that secrets get scrubbed is a poor place to
+    # leave something that looks like a secret.
+    sentinel = "-".join(["sentinel", "value", "under", "test"])
+    for key in (
+        "registration_access_token",  # RFC 7592 management token
+        "initial_access_token",
+        "client_secret",
+        "oauth_refresh_token",
+        "user_password",
+    ):
+        out = oauth_flow.redact_secrets(f'Registration failed: 400 {{"{key}": "{sentinel}"}}')
+        assert sentinel not in out, out
+        assert f'"{key}": "<redacted>"' in out, out
+        assert "Registration failed: 400" in out
+
+    # The prefix rule is deliberately narrow: it applies to the credential FAMILIES only,
+    # so the diagnostics that share a suffix with `code` stay readable.
+    readable = oauth_flow.redact_secrets(
+        "status_code=400 error_code=invalid_client "
+        '{"registration_client_uri": "https://as.example/reg/1"}'
+    )
+    assert "status_code=400" in readable
+    assert "error_code=invalid_client" in readable
+    assert "https://as.example/reg/1" in readable
+
+
+def test_secret_key_matches_are_merged_lazily_and_in_order():
+    # These patterns run over provider response bodies of unbounded size in the single
+    # process that also serves every proxy request. Collecting every match into a list to
+    # sort it lets a body densely packed with `access_token=x` amplify memory well beyond
+    # the response itself, so the merge must stay lazy.
+    matches = oauth_flow._find_secret_keys("access_token=a")
+    assert not isinstance(matches, (list, tuple))
+    assert iter(matches) is matches  # a one-shot iterator, not a materialized sequence
+
+    # Laziness is only safe if the merge still yields positionally — `redact_secrets`
+    # advances a cursor and skips anything behind it, so an out-of-order match would be
+    # dropped silently and its value left in the clear. Interleave the two patterns.
+    text = "code=A1 Authorization: Bearer B2\nrefresh_token=C3 authorization: Basic D4\nsecret=E5"
+    starts = [m.start() for m in oauth_flow._find_secret_keys(text)]
+    assert starts == sorted(starts)
+    assert len(starts) == 5
+    out = oauth_flow.redact_secrets(text)
+    for live in ("A1", "B2", "C3", "D4", "E5"):
+        assert live not in out, out
 
 
 async def test_upstream_rejection_overrides_a_stream_close_error(monkeypatch):
