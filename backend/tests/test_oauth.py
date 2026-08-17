@@ -1618,6 +1618,10 @@ def test_callback_maps_each_flow_failure_to_its_own_reason(monkeypatch):
         (oauth_flow.OAuthPromotionBlocked("config changed mid-flow"), "config_changed"),
         (OAuthTokenError("Token exchange failed (400)"), "token_exchange_failed"),
         (TimeoutError("exchange overran"), "timed_out"),
+        # httpx has its OWN timeout hierarchy, which is not a builtin TimeoutError; an
+        # upstream that stalls is routine and must not read as "unexpected_error".
+        (httpx.ReadTimeout("token endpoint stalled"), "timed_out"),
+        (httpx.ConnectTimeout("token endpoint unreachable"), "timed_out"),
         # A persistence failure or a plain bug must NOT borrow a phase-specific code.
         (OSError("token store is read-only"), "unexpected_error"),
     ]
@@ -1670,6 +1674,16 @@ def test_redact_secrets_scrubs_credential_values():
     assert '"client_secret": "<redacted>"' in out
     assert '"client_id": "abc"' in out  # non-secret context preserved
     assert "Registration failed: 201" in out  # the diagnosable part survives
+
+    # A value is matched as a COMPLETE token: a prefix match would leave the tail of the
+    # credential visible next to a "<redacted>" claiming otherwise. Provider secrets may
+    # legally contain spaces or escaped quotes.
+    spaced = oauth_flow.redact_secrets('{"client_secret": "abc def ghi"}')
+    assert "abc" not in spaced and "ghi" not in spaced
+    assert spaced == '{"client_secret": "<redacted>"}'
+    escaped = oauth_flow.redact_secrets('{"client_secret":"abc\\"def"}')
+    assert "def" not in escaped, escaped
+    assert oauth_flow.redact_secrets("{'client_secret': 'a b'}") == "{'client_secret': '<redacted>'}"
 
     token_body = "Token exchange failed (400): access_token=AT-live&refresh_token=RT-live&scope=read"
     out = oauth_flow.redact_secrets(token_body)
@@ -1746,6 +1760,24 @@ def test_log_safe_blocks_log_injection_and_bounds_length():
     assert len(long_out) < 600 and long_out.endswith("… (truncated)")
     # Redaction still applies through log_safe.
     assert "leaked" not in oauth_flow.log_safe('{"client_secret": "leaked"}')
+
+
+def test_redaction_stays_linear_on_pathological_input():
+    # The scrubbers run over text a remote party controls, so their patterns must not
+    # backtrack polynomially (CodeQL py/polynomial-redos): the separator's whitespace
+    # runs are bounded quantifiers, and log_safe truncates BEFORE matching. The wall
+    # clock here is deliberately loose — it is a "quadratic blowup" tripwire, not a
+    # performance assertion, so it can't flake on a slow runner.
+    import time
+
+    pathological = "client_secret" + " " * 200_000 + "x"
+    start = time.perf_counter()
+    oauth_flow.redact_secrets(pathological)
+    oauth_flow.log_safe(pathological)
+    assert time.perf_counter() - start < 2.0
+
+    # Truncation before matching means length can't be the attack surface at all.
+    assert len(oauth_flow.log_safe("a" * 2_000_000)) < 600
 
 
 def test_callback_error_detail_needs_a_correlated_state(caplog):

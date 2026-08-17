@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import logging
 
+import httpx
 from fastapi import APIRouter, Depends
 from mcp.client.auth import OAuthTokenError
 from starlette.requests import Request
@@ -202,7 +203,11 @@ async def oauth_callback(
         if stopped:
             sup.nudge()
         return _oauth_error(_REASON_EXCHANGE_FAILED)
-    except (TimeoutError, asyncio.TimeoutError) as exc:
+    except (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException) as exc:
+        # httpx raises its OWN timeout hierarchy (ReadTimeout/ConnectTimeout/…), which is
+        # not a builtin TimeoutError — the flow's client has a 30s budget, so an upstream
+        # that stalls is a ROUTINE timeout and must read as one instead of falling through
+        # to "unexpected_error".
         logger.warning(
             "OAuth token exchange did not finish in time: %s", oauth_flow.log_safe(exc)
         )

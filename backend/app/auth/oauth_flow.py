@@ -112,13 +112,54 @@ _SECRET_KEYS = (
 # character, so there is no boundary there — and requiring the separator right after the
 # key spares names that merely START with one (code_challenge, authorization_endpoint are
 # not credentials and stay readable).
+# A value is matched as a COMPLETE token, not up to the first awkward character: a
+# quoted form consumes the whole string including escapes and spaces (a provider-issued
+# secret may legally contain either), and only the unquoted form is delimiter-terminated.
+# Matching a prefix is worse than not matching at all — it leaves the tail of the
+# credential in the clear next to a "<redacted>" that claims otherwise. The alternatives
+# inside each quoted form are mutually exclusive on their first character (escape vs not),
+# so the nested quantifier cannot backtrack ambiguously.
+_QUOTED_VALUE = r"\"(?P<dq>(?:\\.|[^\"\\])*)\"|'(?P<sq>(?:\\.|[^'\\])*)'"
+# key [closing-quote] ( = or : ) then the value in one of three shapes. ``\b`` before the
+# key means a name that merely ENDS in one of these (status_code, error_code) is left
+# alone — ``_`` is a word character, so there is no boundary there — and requiring the
+# separator right after the key spares names that merely START with one (code_challenge,
+# authorization_endpoint are not credentials and stay readable).
+_SEPARATOR = r"(?P<sep>[\"']?[ \t]{0,4}[=:][ \t]{0,4})"
 _SECRET_RE = re.compile(
-    r"(?i)\b(" + "|".join(_SECRET_KEYS) + r")([\"']?\s*[=:]\s*)([\"']?)([^\"'\s,&})\]]+)\3"
+    r"(?i)\b(?P<key>"
+    + "|".join(_SECRET_KEYS)
+    + r")"
+    + _SEPARATOR
+    + r"(?:"
+    + _QUOTED_VALUE
+    + r"|(?P<bare>[^\s,&})\]]+))"
 )
+
+
+def _mask(match: "re.Match[str]") -> str:
+    """Rebuild ``key<sep>`` with the value replaced, preserving the quoting style so the
+    surrounding JSON or query string still reads as the shape it was."""
+    key, sep = match.group("key"), match.group("sep")
+    if match.group("dq") is not None:
+        return f'{key}{sep}"<redacted>"'
+    if match.group("sq") is not None:
+        return f"{key}{sep}'<redacted>'"
+    return f"{key}{sep}<redacted>"
 # ``Authorization: Bearer <token>`` needs its own rule: the credential sits AFTER a scheme
 # word, so the whitespace-terminated pattern above would redact "Bearer" and leave the
 # token itself in the clear. Take everything to the closing quote or end of line.
-_AUTH_HEADER_RE = re.compile(r"(?i)\b(authorization)([\"']?\s*[=:]\s*)([\"']?)([^\"'\r\n]+)\3")
+# ``Authorization: Bearer <token>`` needs its own rule: the credential sits AFTER a scheme
+# word, so a whitespace-terminated value would redact "Bearer" and leave the token itself
+# in the clear. Its unquoted form therefore runs to end of line.
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)\b(?P<key>authorization)" + _SEPARATOR + r"(?:" + _QUOTED_VALUE + r"|(?P<bare>[^\r\n]+))"
+)
+# The separator's whitespace runs are BOUNDED ({0,4}, not *) on purpose: an unbounded
+# quantifier followed by a character that can fail makes the match polynomial in the
+# length of a space run, and this text is supplied by a remote party — a long run of
+# spaces after a key-like word would be quadratic work per scan position (CodeQL
+# py/polynomial-redos). Four is past any realistic JSON or query formatting.
 
 
 def redact_secrets(value: object) -> str:
@@ -129,12 +170,7 @@ def redact_secrets(value: object) -> str:
     writing tokens and client secrets to the console. Parsing (e.g.
     ``_registration_status``) still reads the RAW exception; only the surfaced copy is
     scrubbed."""
-    text = _AUTH_HEADER_RE.sub(
-        lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}<redacted>{m.group(3)}", str(value)
-    )
-    return _SECRET_RE.sub(
-        lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}<redacted>{m.group(3)}", text
-    )
+    return _SECRET_RE.sub(_mask, _AUTH_HEADER_RE.sub(_mask, str(value)))
 
 
 # One log record per failure, however long or hostile the upstream text: newlines and
@@ -148,9 +184,16 @@ def log_safe(value: object, *, limit: int = _LOG_TEXT_LIMIT) -> str:
     """``redact_secrets`` plus log-injection defence: credentials scrubbed, control
     characters folded to spaces, and the result truncated. Use this — not
     ``redact_secrets`` alone — for anything that reaches a log record and did not
-    originate here."""
-    text = _CONTROL_CHARS.sub(" ", redact_secrets(value)).strip()
-    return text if len(text) <= limit else f"{text[:limit]}… (truncated)"
+    originate here.
+
+    Truncation happens FIRST, so the pattern matching only ever runs over a bounded
+    string: no remote party can make this expensive by sending a megabyte. Cutting
+    before redacting is safe — a key that survives the cut still has its value
+    redacted, and a value whose key was cut off didn't survive either."""
+    text = str(value)
+    if len(text) > limit:
+        text = f"{text[:limit]}… (truncated)"
+    return _CONTROL_CHARS.sub(" ", redact_secrets(text)).strip()
 
 
 class OAuthGrantRejected(RuntimeError):
@@ -835,7 +878,9 @@ async def _drive(
     # sign-in, and under uvicorn's default logging (no root handler, app.* effective
     # level WARNING) an INFO record is dropped before it reaches stderr — leaving the
     # operator with a failure toast and no way to find out why.
-    logger.warning("OAuth authorization for %s failed: %s", server.id, redact_secrets(error))
+    # log_safe, not redact_secrets: this text comes from the provider, so it also needs
+    # control-character folding (no forged records) and a length bound (no drowned one).
+    logger.warning("OAuth authorization for %s failed: %s", server.id, log_safe(error))
     url_pending = not pending.url_future.done()
     if url_pending:
         # Failed during discovery/registration, before an authorization URL was produced
