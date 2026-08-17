@@ -10,10 +10,14 @@ state is simply rejected."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
+import traceback
 
+import httpx
 from fastapi import APIRouter, Depends
+from mcp.client.auth import OAuthTokenError
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
 from sqlmodel import Session
@@ -75,13 +79,77 @@ async def oauth_client_metadata(request: Request) -> dict:
 # Fixed, literal redirect targets. The callback deliberately puts NO request-derived
 # data into the Location header: the SPA reads the coarse ``oauth`` flag and shows its
 # own message. Keeping the redirect free of remote input rules out URL-redirection /
-# header-injection entirely (the specific failure reason is logged server-side instead).
+# header-injection entirely (the full failure reason is logged server-side instead).
 _ERROR_REDIRECT = "/?oauth=error"
+
+# Coarse failure codes appended as ``&reason=`` so the SPA's toast can say something
+# better than "OAuth sign-in failed." (it already renders `OAuth failed: <reason>`).
+# Every value is a LITERAL authored here — never a provider-supplied string — so the
+# no-remote-input property of the redirect is preserved; the detail stays in the log.
+# Each code names only what we can actually tell apart, so none of them sends the
+# operator after the wrong thing:
+_REASON_PROVIDER_DENIED = "provider_denied"  # the AS said no (access_denied)
+_REASON_PROVIDER_UNAVAILABLE = "provider_unavailable"  # the AS is down/overloaded — retry
+_REASON_PROVIDER_REJECTED = "provider_rejected_request"  # the AS refused OUR request shape
+_REASON_NO_CODE = "no_code"  # redirect carried no code/state
+_REASON_EXPIRED = "expired_or_superseded"  # unknown state: reaped, cancelled, restarted
+_REASON_EXCHANGE_FAILED = "token_exchange_failed"  # the AS refused the code (SDK OAuthTokenError)
+_REASON_TOKEN_REFUSED = "upstream_refused_token"  # got a token; the RESOURCE rejected it (scopes)
+_REASON_CONFIG_CHANGED = "config_changed"  # server deleted/reassigned/reconfigured mid-flow
+_REASON_TIMEOUT = "timed_out"  # the exchange didn't finish inside the callback's budget
+_REASON_UNEXPECTED = "unexpected_error"  # anything else — the log carries the detail
+_REASON_SERVER_GONE = "server_deleted"  # the row vanished mid-flow
+
+# A sanitized traceback is folded to a single line, so it needs more room than a plain
+# message before truncation makes it useless.
+_TRACEBACK_LIMIT = 4000
 
 
 def _oauth_redirect(path: str) -> RedirectResponse:
     # 303 so the browser follows with GET regardless of how it arrived here.
     return RedirectResponse(path, status_code=303)
+
+
+def _oauth_error(reason: str) -> RedirectResponse:
+    """Failure redirect carrying a coarse, self-authored reason code."""
+    return _oauth_redirect(f"{_ERROR_REDIRECT}&reason={reason}")
+
+
+# RFC 6749 §4.1.2.1 error codes, grouped by what the OPERATOR should do about them. The
+# provider's code is used only to SELECT one of our literals — never echoed — so the
+# redirect keeps its no-remote-input property.
+_PROVIDER_UNAVAILABLE_ERRORS = frozenset({"server_error", "temporarily_unavailable"})
+# The OIDC codes (OpenID Connect Core §3.1.2.6) belong here rather than with the
+# request-shape rejections: they all say the provider wants something from the PERSON —
+# consent, a fresh login, an account choice — not that our request was malformed. Reading
+# them as "your configuration is wrong" would send the operator to edit a server that is
+# fine, when the fix is to click Authenticate and complete the prompt.
+_PROVIDER_DENIED_ERRORS = frozenset(
+    {
+        "access_denied",
+        "consent_required",
+        "login_required",
+        "interaction_required",
+        "account_selection_required",
+    }
+)
+
+
+def _provider_error_reason(error: str) -> str:
+    """Which failure the authorization server actually reported.
+
+    Calling every ``?error=`` a denial tells the operator they were refused when the
+    provider was merely down — a wrong diagnosis with a wrong remedy, in the one feature
+    whose entire purpose is naming the failure. ``temporarily_unavailable`` is not
+    hypothetical: it is what Cloudflare returns when it can't fetch a client-metadata
+    document. Anything else (invalid_request, invalid_scope, unauthorized_client, …) is
+    the provider rejecting how WE asked, which points at this server's configuration."""
+    code = error.strip().lower()
+    if code in _PROVIDER_UNAVAILABLE_ERRORS:
+        return _REASON_PROVIDER_UNAVAILABLE
+    if code in _PROVIDER_DENIED_ERRORS:
+        return _REASON_PROVIDER_DENIED
+    return _REASON_PROVIDER_REJECTED
 
 
 @router.get("/oauth/callback")
@@ -102,10 +170,62 @@ async def oauth_callback(
     the Location — so a malicious ``?error=``/``?state=`` can't turn this into an open
     redirect. The exact failure reason is logged, not reflected."""
     if error:
-        logger.info("OAuth callback returned an error: %r", error_description or error)
-        return _oauth_redirect(_ERROR_REDIRECT)
+        # WARNING, not INFO: an operator-initiated sign-in just failed and this text is
+        # the ONLY record of why. Under uvicorn's default logging the root logger has no
+        # handler and app.* sits at WARNING, so an INFO line here is discarded outright —
+        # the operator would be left with a toast and nothing to debug from.
+        #
+        # But this endpoint is PUBLIC, so the detail is only echoed once the ``state``
+        # correlates with an authorization THIS instance started (the same anchor the
+        # success path uses). A real provider denial always echoes that state (RFC 6749
+        # §4.1.2.1); an anonymous caller replaying ``?error=…&error_description=…``
+        # cannot forge one, so it can never write its own text into the log. Even when
+        # correlated the text is sanitized and bounded (``log_safe``) — the upstream is
+        # trusted to be the upstream, not to be well-behaved.
+        denied_server = oauth_flow.pending_server_id(state) if state else None
+        if denied_server is not None:
+            logger.warning(
+                "OAuth callback returned an error: %s",
+                oauth_flow.log_safe(error_description or error),
+            )
+            # A denial ENDS this sign-in, so retire the flow rather than leaving it
+            # parked: otherwise its task sits out the full browser window and then logs
+            # a second, misleading "timed out" for a failure already reported here — and
+            # the state stays live, so the same callback can be replayed to re-emit
+            # operator-level records.
+            oauth_flow.cancel_pending(denied_server, superseded=True)
+        else:
+            # INFO, not WARNING: nothing correlates this to a sign-in we started, so it
+            # is indistinguishable from a scanner hitting a public URL. Emitting an
+            # operator-level record here would let anyone who can reach the endpoint
+            # generate unbounded WARNING volume — and page an operator whose alerting
+            # watches that level — for an event no operator needs to act on.
+            logger.info(
+                "OAuth callback reported an error for an unknown or expired state; "
+                "ignoring the unsolicited callback (detail withheld: it is not tied to "
+                "any sign-in this instance started)"
+            )
+        # The provider's code SELECTS one of our literals; it is never echoed, so the
+        # redirect stays free of remote input either way. Classifying the uncorrelated
+        # case too costs nothing — the answer is a literal — and keeps one code path.
+        return _oauth_error(_provider_error_reason(error))
     if not code or not state:
-        return _oauth_redirect(_ERROR_REDIRECT)
+        # A callback carrying a VALID pending state but no code is a broken provider
+        # failing a real operator's sign-in — not noise — so it earns the operator-level
+        # record and retires the flow, exactly as the denial branch does. Without that,
+        # the driver stays parked for the whole browser window and later logs a second,
+        # misleading timeout while its state remains replayable.
+        stranded = oauth_flow.pending_server_id(state) if state else None
+        if stranded is not None:
+            logger.warning(
+                "OAuth callback for a pending sign-in carried no authorization code — "
+                "the provider redirected without one. Start the sign-in again."
+            )
+            oauth_flow.cancel_pending(stranded, superseded=True)
+        else:
+            # No correlated state: nobody's sign-in is failing here.
+            logger.info("OAuth callback arrived without a code/state pair")
+        return _oauth_error(_REASON_NO_CODE)
 
     sup = request.app.state.supervisor
     # Stop the target server's bridge BEFORE the grant is promoted (which happens inside
@@ -125,23 +245,93 @@ async def oauth_callback(
     try:
         server_id = await oauth_flow.complete_authorization(state, code)
     except KeyError:
+        # INFO for the same reason as the branches above — an unmatched state is
+        # indistinguishable from noise. The operator whose own flow expired is not left
+        # guessing: they get ``reason=expired_or_superseded`` in the toast, which names
+        # the cause and the remedy. Every branch BELOW this point is inherently
+        # correlated (the state matched a flow this instance started), so those stay at
+        # WARNING — a real sign-in really did fail.
+        logger.info(
+            "OAuth callback carried an unknown or expired state — the sign-in was "
+            "superseded by a newer attempt, timed out, or the control plane restarted "
+            "mid-flow. Start the sign-in again."
+        )
         if stopped:
             sup.nudge()  # unknown state; bring the stopped bridge back with existing tokens
-        return _oauth_redirect(_ERROR_REDIRECT)
-    except Exception as exc:  # token exchange / provider error
-        logger.info("OAuth callback failed: %r", exc)
+        return _oauth_error(_REASON_EXPIRED)
+    except oauth_flow.OAuthGrantRejected as exc:
+        # A token WAS issued; the resource server refused it. Its own code, because the
+        # remedy is specific: adjust the server's scopes (or the upstream URL the token
+        # is bound to), not retry the sign-in.
+        logger.warning(
+            "OAuth sign-in produced a token the upstream rejected: %s",
+            oauth_flow.log_safe(exc),
+        )
+        if stopped:
+            sup.nudge()
+        return _oauth_error(_REASON_TOKEN_REFUSED)
+    except (oauth_flow.OAuthPromotionBlocked, oauth_flow.OAuthFlowCancelled) as exc:
+        # Cancelled flows land here promptly instead of burning the callback budget and
+        # reporting a timeout they didn't have. The causes get different codes because
+        # they ask different things of the operator: a deleted server has nothing left
+        # to inspect OR retry, a superseded or expired attempt just needs starting
+        # again, and a configuration change is something to look at before retrying.
+        logger.warning("OAuth grant discarded: %s", oauth_flow.log_safe(exc))
+        if stopped:
+            sup.nudge()
+        if getattr(exc, "deleted", False):
+            return _oauth_error(_REASON_SERVER_GONE)
+        if getattr(exc, "superseded", False):
+            return _oauth_error(_REASON_EXPIRED)
+        return _oauth_error(_REASON_CONFIG_CHANGED)
+    except OAuthTokenError as exc:
+        # The authorization server refused the code itself (bad redirect_uri, expired or
+        # replayed code, PKCE mismatch, client auth rejected).
+        logger.warning("OAuth token exchange failed: %s", oauth_flow.log_safe(exc))
+        if stopped:
+            sup.nudge()
+        return _oauth_error(_REASON_EXCHANGE_FAILED)
+    except (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException) as exc:
+        # httpx raises its OWN timeout hierarchy (ReadTimeout/ConnectTimeout/…), which is
+        # not a builtin TimeoutError — the flow's client has a 30s budget, so an upstream
+        # that stalls is a ROUTINE timeout and must read as one instead of falling through
+        # to "unexpected_error".
+        logger.warning(
+            "OAuth token exchange did not finish in time: %s", oauth_flow.log_safe(exc)
+        )
+        if stopped:
+            sup.nudge()
+        return _oauth_error(_REASON_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001 — deliberate boundary, see below
+        # Everything else: a persistence failure writing the token store, or an outright
+        # bug. The catch-all is deliberate and must stay — this is a PUBLIC endpoint the
+        # provider redirects a browser to, so an escaping exception would strand the
+        # operator on an unstyled 500 with the bridge still stopped. Instead they land
+        # back in the UI with an honestly UNCLASSIFIED code (never one claiming a phase
+        # we didn't identify), the bridge is restored, and the traceback goes to the log.
+        # NOT exc_info=True: the formatter would append the ORIGINAL exception and its
+        # traceback verbatim, straight past the redaction and the length bound applied to
+        # the message argument. The stack is still worth having for an unclassified
+        # failure, so it is formatted here and sanitized like any other provider-derived
+        # text (folded to one line by the control-character pass, hence the larger bound).
+        logger.warning(
+            "OAuth callback failed unexpectedly: %s | traceback: %s",
+            oauth_flow.log_safe(exc),
+            oauth_flow.log_safe(traceback.format_exc(), limit=_TRACEBACK_LIMIT),
+        )
         if stopped:
             sup.nudge()  # failed re-auth; restart with the preserved old credentials
-        return _oauth_redirect(_ERROR_REDIRECT)
+        return _oauth_error(_REASON_UNEXPECTED)
 
     # Look the server up by the id the flow reported. Redirecting with the *stored* id
     # (read from the DB row, never from the request) keeps remote-controlled data out of
     # the Location entirely.
     server = repo.get_server(session, server_id)
     if server is None:
+        logger.warning("OAuth sign-in completed for a server that no longer exists")
         if stopped:
             sup.nudge()
-        return _oauth_redirect(_ERROR_REDIRECT)
+        return _oauth_error(_REASON_SERVER_GONE)
 
     # Force a post-promote restart: stop (idempotent) AFTER the tokens are stored, then
     # nudge. This guarantees the bridge that ends up serving an enabled server is one that

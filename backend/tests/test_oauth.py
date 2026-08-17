@@ -21,6 +21,7 @@ from mcp.shared.auth import OAuthToken
 
 from conftest import LOOPBACK
 
+from app.api import auth as auth_api
 from app.auth import oauth_flow
 from app.auth.oauth_store import ServerTokenStorage
 from app.main import app
@@ -1576,6 +1577,960 @@ def test_callback_unknown_state_redirects_with_error():
         )
         assert r.status_code == 303
         assert "oauth=error" in r.headers["location"]
+        # A coarse reason rides along so the SPA's toast can name the failure class.
+        assert "reason=expired_or_superseded" in r.headers["location"]
+
+
+def test_callback_failure_reasons_are_self_authored_codes(monkeypatch):
+    # Each failure class carries a distinct, LITERAL reason code — never a
+    # provider-supplied string, so the redirect stays free of remote input (no open
+    # redirect / header injection) while still telling the operator what happened.
+    # Request-shape failures first (no flow involved).
+    with TestClient(app) as c:
+        for params, reason in [
+            ({"error": "access_denied", "error_description": "user said no"}, "provider_denied"),
+            ({"state": "st"}, "no_code"),  # code missing
+            ({"code": "cd"}, "no_code"),  # state missing
+        ]:
+            r = c.get(
+                "/api/oauth/callback", params=params, headers=LOOPBACK, follow_redirects=False
+            )
+            assert r.status_code == 303
+            assert r.headers["location"] == f"/?oauth=error&reason={reason}", params
+        # The provider's own error text is never echoed into the Location header.
+        r = c.get(
+            "/api/oauth/callback",
+            params={"error": "access_denied", "error_description": "https://evil.example"},
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+        assert "evil.example" not in r.headers["location"]
+
+
+def test_provider_error_codes_are_classified_not_all_called_denials():
+    # Reporting every `?error=` as a denial is a WRONG diagnosis with a wrong remedy: it
+    # tells the operator they were refused when the provider was merely down, in the one
+    # feature whose entire purpose is naming the failure. `temporarily_unavailable` is not
+    # hypothetical — it is exactly what Cloudflare returned when it could not fetch this
+    # instance's client-metadata document, the bug that started this work.
+    cases = [
+        # The user (or the AS on their behalf) said no. Nothing to fix here.
+        ("access_denied", "provider_denied"),
+        ("consent_required", "provider_denied"),
+        ("login_required", "provider_denied"),
+        # The AS is unwell. The remedy is to retry, not to reconfigure.
+        ("temporarily_unavailable", "provider_unavailable"),
+        ("server_error", "provider_unavailable"),
+        # The AS refused how WE asked — this points at our own configuration.
+        ("invalid_request", "provider_rejected_request"),
+        ("invalid_scope", "provider_rejected_request"),
+        ("unauthorized_client", "provider_rejected_request"),
+        ("unsupported_response_type", "provider_rejected_request"),
+        # An unknown/vendor code is a rejection of our request as far as we can tell; it
+        # must not be laundered into the confident "the user denied you" reading.
+        ("cf_metadata_fetch_failed", "provider_rejected_request"),
+        # Providers are inconsistent about case and stray whitespace; the classification
+        # is on the code, not on its typography.
+        ("  Temporarily_Unavailable  ", "provider_unavailable"),
+        ("ACCESS_DENIED", "provider_denied"),
+        # OIDC (Core §3.1.2.6) asks for something from the PERSON, not a different
+        # request: reading these as "your configuration is wrong" sends the operator to
+        # edit a server that is fine, when the fix is to sign in and finish the prompt.
+        ("interaction_required", "provider_denied"),
+        ("account_selection_required", "provider_denied"),
+    ]
+    for code, reason in cases:
+        assert auth_api._provider_error_reason(code) == reason, code
+
+    # And the classification actually reaches the redirect — still as a self-authored
+    # literal, with the provider's own text nowhere in the Location header.
+    with TestClient(app) as c:
+        r = c.get(
+            "/api/oauth/callback",
+            params={
+                "error": "temporarily_unavailable",
+                "error_description": "Client metadata is temporarily unavailable",
+            },
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert r.headers["location"] == "/?oauth=error&reason=provider_unavailable"
+        assert "metadata" not in r.headers["location"]
+
+
+def test_callback_maps_each_flow_failure_to_its_own_reason(monkeypatch):
+    # The phases the flow can actually tell apart get distinct codes, so a code never
+    # sends the operator after the wrong thing: a token the RESOURCE refused (fix the
+    # scopes) reads differently from a code the AS refused (retry the sign-in), from a
+    # mid-flow reconfiguration, from an outright bug.
+    from mcp.client.auth import OAuthTokenError
+
+    cases = [
+        (oauth_flow.OAuthGrantRejected("upstream said 401"), "upstream_refused_token"),
+        (oauth_flow.OAuthPromotionBlocked("config changed mid-flow"), "config_changed"),
+        # A DELETED server is not a reconfigured one: there is no configuration left to
+        # inspect and nothing to retry, so "config_changed" would send the operator after
+        # a server that no longer exists. Both paths that can report it are covered — the
+        # promotion backstop and the delete route's cancellation of a waiting flow.
+        (
+            oauth_flow.OAuthPromotionBlocked("server was deleted", deleted=True),
+            "server_deleted",
+        ),
+        (
+            oauth_flow.OAuthFlowCancelled("server was deleted", deleted=True),
+            "server_deleted",
+        ),
+        (oauth_flow.OAuthFlowCancelled("replaced", superseded=True), "expired_or_superseded"),
+        (oauth_flow.OAuthFlowCancelled("reconfigured"), "config_changed"),
+        (OAuthTokenError("Token exchange failed (400)"), "token_exchange_failed"),
+        (TimeoutError("exchange overran"), "timed_out"),
+        # httpx has its OWN timeout hierarchy, which is not a builtin TimeoutError; an
+        # upstream that stalls is routine and must not read as "unexpected_error".
+        (httpx.ReadTimeout("token endpoint stalled"), "timed_out"),
+        (httpx.ConnectTimeout("token endpoint unreachable"), "timed_out"),
+        # A persistence failure or a plain bug must NOT borrow a phase-specific code.
+        (OSError("token store is read-only"), "unexpected_error"),
+    ]
+    with TestClient(app) as c:
+        for exc, reason in cases:
+
+            async def _boom(_state, _code, _exc=exc):
+                raise _exc
+
+            monkeypatch.setattr(oauth_flow, "complete_authorization", _boom)
+            r = c.get(
+                "/api/oauth/callback",
+                params={"code": "cd", "state": "st"},
+                headers=LOOPBACK,
+                follow_redirects=False,
+            )
+            assert r.status_code == 303
+            assert r.headers["location"] == f"/?oauth=error&reason={reason}", exc
+
+
+async def test_unexpected_callback_failure_does_not_log_a_raw_traceback(monkeypatch, caplog):
+    # The catch-all logs a stack, which is worth having for an unclassified failure — but
+    # `exc_info=True` would make the FORMATTER append the original exception and traceback
+    # verbatim, straight past the redaction and length bound applied to the message. The
+    # stack must go through the same sanitizing as everything else at this boundary.
+    import logging
+
+    leaked = "TRACEBACK-LEAKED-SECRET"
+
+    async def _boom(_state, _code):
+        raise OSError(f'token store failed: {{"client_secret": "{leaked}"}}')
+
+    monkeypatch.setattr(oauth_flow, "complete_authorization", _boom)
+    with TestClient(app) as c, caplog.at_level(logging.WARNING, logger="app.api.auth"):
+        r = c.get(
+            "/api/oauth/callback",
+            params={"code": "cd", "state": "st"},
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+    assert r.headers["location"] == "/?oauth=error&reason=unexpected_error"
+    # caplog.text renders the record the way a handler would, exception text included.
+    assert leaked not in caplog.text, caplog.text
+    for rec in caplog.records:
+        assert rec.exc_info is None, "exc_info bypasses redaction — format the stack instead"
+    # ...and the stack is still there, sanitized, so an unclassified failure stays debuggable.
+    assert "traceback:" in caplog.text and "OSError" in caplog.text
+
+
+async def test_abort_wakes_a_parked_callback_instead_of_timing_it_out():
+    # Cancelling a flow (config edit, ownership transfer, disconnect, delete, or a newer
+    # Authenticate click) cancels the driving task, which never resolves done_future. A
+    # callback already parked there would burn its full 90s budget and then report
+    # "timed_out" for what was a deliberate cancellation — so cancellation wakes the
+    # waiter with an accurate, typed error instead.
+    #
+    # Exercised on the mechanism directly: driving a real flow here would mean setting
+    # callback_event, which is also what un-parks the flow's OWN callback_handler, so the
+    # driving task would race the cancellation to resolve the future (it wins on some
+    # interpreter/scheduler combinations — this test failed on CI's 3.14 and not locally).
+    import asyncio
+
+    pending = oauth_flow._Pending("srv-abort-wakes-waiter-1")
+    pending.callback_event.set()  # the browser came back; complete_authorization is waiting
+    waiter = asyncio.ensure_future(
+        asyncio.wait_for(asyncio.shield(pending.done_future), timeout=90.0)
+    )
+    await asyncio.sleep(0)
+
+    oauth_flow._abort(pending, "superseded by a newer sign-in")
+
+    with pytest.raises(oauth_flow.OAuthFlowCancelled):
+        await asyncio.wait_for(waiter, timeout=5.0)  # promptly, not after the 90s budget
+
+
+async def test_cancellation_cause_picks_the_reason_the_operator_needs():
+    # A superseded or expired attempt and a reconfigured server both discard the grant,
+    # but they ask different things: start again vs look at what changed. The cause rides
+    # on the exception so the callback can say which happened.
+    import asyncio
+
+    async def _cancelled(*, superseded: bool):
+        pending = oauth_flow._Pending(f"srv-cause-{superseded}")
+        pending.callback_event.set()
+        waiter = asyncio.ensure_future(asyncio.shield(pending.done_future))
+        await asyncio.sleep(0)
+        oauth_flow._abort(pending, "cause under test", superseded=superseded)
+        with pytest.raises(oauth_flow.OAuthFlowCancelled) as excinfo:
+            await asyncio.wait_for(waiter, timeout=5.0)
+        return excinfo.value
+
+    assert (await _cancelled(superseded=True)).superseded is True
+    assert (await _cancelled(superseded=False)).superseded is False
+
+    # And the public entry point classifies each caller correctly: a denial or a newer
+    # sign-in supersedes, while an OAuth config edit (the default) is a change to look at.
+    async def _via_cancel_pending(server_id: str, **kwargs):
+        pending = oauth_flow._Pending(server_id)
+        pending.callback_event.set()
+        oauth_flow._PENDING[pending.id] = pending  # registered, so cancel_pending finds it
+        oauth_flow.cancel_pending(server_id, **kwargs)
+        with pytest.raises(oauth_flow.OAuthFlowCancelled) as excinfo:
+            await pending.done_future
+        return excinfo.value
+
+    assert (await _via_cancel_pending("srv-cause-denial", superseded=True)).superseded is True
+    assert (await _via_cancel_pending("srv-cause-config-edit")).superseded is False
+
+    # Deletion is its own cause. It rode in as the default (neither superseded nor
+    # deleted) and so reported "config changed" — telling the operator to go inspect the
+    # configuration of a server that had just been removed. The DELETE route passes
+    # deleted=True; the message says so too, since it is what lands in the log.
+    # Disconnect is the operator ENDING the sign-in, not a configuration moving under it,
+    # so it supersedes: reporting config_changed sent them to inspect a server whose
+    # config nobody touched.
+    assert (await _via_cancel_pending("srv-cause-disconnect", superseded=True)).superseded
+
+    gone = await _via_cancel_pending("srv-cause-deleted", deleted=True)
+    assert gone.deleted is True and gone.superseded is False
+    assert "deleted" in str(gone)
+
+    # The promotion backstop reaches the same verdict independently — it catches a flow
+    # deleted while still in its pre-registration awaits, where there was nothing in
+    # _PENDING for the DELETE route to cancel. It returns the typed exception so the
+    # cause survives instead of being re-derived from message text.
+    orphan = oauth_flow._Pending("srv-never-persisted-1", row_existed=True)
+    blocked = oauth_flow._promotion_blocked(orphan)
+    assert isinstance(blocked, oauth_flow.OAuthPromotionBlocked)
+    assert blocked.deleted is True
+    # A row that never existed at all (unpersisted test servers) is exempt, not deleted.
+    assert oauth_flow._promotion_blocked(oauth_flow._Pending("srv-never-persisted-2")) is None
+
+
+async def test_pending_lookup_does_not_report_an_expired_flow_as_live():
+    # `_drive` times out and cancels its future at the flow window, but the record and its
+    # state index entry survive until the reaper next runs. The callback uses this lookup
+    # to decide BOTH whether a late callback is a real operator failure — WARNING, with the
+    # provider's own text echoed — and which reason code to report. Treating an expired
+    # record as live therefore let a stale state pull the caller's text onto an
+    # operator-level record and reported the provider's verdict for a sign-in that had
+    # already run out of time.
+    pending = oauth_flow._Pending("srv-expired-lookup-1")
+    pending.state = "state-expired-lookup-1"
+    oauth_flow._PENDING[pending.id] = pending
+    oauth_flow._STATE_INDEX[pending.state] = pending.id
+    try:
+        assert oauth_flow.pending_server_id(pending.state) == "srv-expired-lookup-1"
+
+        # Push it past the window; the reaper has not run.
+        pending.created_at -= oauth_flow._FLOW_TIMEOUT + 1
+        assert oauth_flow.pending_server_id(pending.state) is None
+        # ...and the lookup retired it, so `complete_authorization` reports the expiry
+        # rather than finding a half-dead record.
+        assert pending.state not in oauth_flow._STATE_INDEX
+        assert pending.id not in oauth_flow._PENDING
+    finally:
+        oauth_flow._PENDING.pop(pending.id, None)
+        oauth_flow._STATE_INDEX.pop(pending.state, None)
+
+
+async def test_abort_of_an_unattended_flow_sets_no_unretrieved_exception():
+    # With no callback parked, nobody will ever retrieve an exception — and an unretrieved
+    # future exception surfaces as a spurious "Future exception was never retrieved" when
+    # it is collected. Such a flow is cancelled silently instead.
+    pending = oauth_flow._Pending("srv-abort-unattended-1")
+    assert not pending.callback_event.is_set()
+
+    oauth_flow._abort(pending, "nobody is waiting")
+
+    assert pending.done_future.cancelled()
+    assert all(p.server_id != "srv-abort-unattended-1" for p in oauth_flow._PENDING.values())
+
+
+async def test_correlated_callback_without_a_code_is_an_operator_failure(monkeypatch, caplog):
+    # A callback carrying a VALID pending state but no code is a broken provider failing
+    # a real sign-in — not scanner noise. It earns the operator-level record and retires
+    # the flow, or the driver stays parked for the whole browser window and later logs a
+    # second, misleading timeout while its state remains replayable.
+    import logging
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+
+    class _Srv:
+        id = "srv-no-code-correlated-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+        )
+        state = _FakeAsyncClient.STATE
+        monkeypatch.undo()  # the app lifespan needs a real httpx.AsyncClient
+        with TestClient(app) as c, caplog.at_level(logging.INFO, logger="app.api.auth"):
+            r = c.get(
+                "/api/oauth/callback",
+                params={"state": state},  # correlated, but no code
+                headers=LOOPBACK,
+                follow_redirects=False,
+            )
+        assert r.headers["location"] == "/?oauth=error&reason=no_code"
+        assert any(
+            rec.levelno >= logging.WARNING and "no authorization code" in rec.getMessage()
+            for rec in caplog.records
+        ), [(x.levelname, x.getMessage()) for x in caplog.records]
+        assert oauth_flow.pending_server_id(state) is None  # retired, not left parked
+    finally:
+        store.clear()
+
+
+async def test_provider_denial_retires_the_pending_flow(monkeypatch):
+    # A denial ends the sign-in, so the flow must not stay parked: otherwise its task sits
+    # out the full browser window and logs a second, misleading timeout, and the still-live
+    # state can be replayed to re-emit operator-level records.
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+
+    class _Srv:
+        id = "srv-denial-retires-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+        )
+        state = _FakeAsyncClient.STATE
+        assert oauth_flow.pending_server_id(state) == _Srv.id
+
+        # Drop the fake client before the app starts: its lifespan builds a real
+        # httpx.AsyncClient, and the stand-in has no aclose().
+        monkeypatch.undo()
+        with TestClient(app) as c:
+            r = c.get(
+                "/api/oauth/callback",
+                params={"error": "access_denied", "state": state},
+                headers=LOOPBACK,
+                follow_redirects=False,
+            )
+        assert r.headers["location"] == "/?oauth=error&reason=provider_denied"
+        # The flow is gone, so a replay of the same state can't re-trigger the branch.
+        assert oauth_flow.pending_server_id(state) is None
+        assert all(p.server_id != _Srv.id for p in oauth_flow._PENDING.values())
+    finally:
+        store.clear()
+
+
+def test_callback_for_vanished_server_redirects_with_server_deleted(monkeypatch):
+    # The grant completed but the row is gone (deleted between promotion and this read):
+    # its own code, and no crash on the missing server.
+    async def _completed_for_ghost(_state, _code):
+        return "srv-does-not-exist"
+
+    monkeypatch.setattr(oauth_flow, "complete_authorization", _completed_for_ghost)
+    with TestClient(app) as c:
+        r = c.get(
+            "/api/oauth/callback",
+            params={"code": "cd", "state": "st"},
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert r.headers["location"] == "/?oauth=error&reason=server_deleted"
+
+
+def test_redact_secrets_scrubs_credential_values():
+    # Making OAuth failures visible must not turn into writing credentials to the
+    # console: the MCP SDK embeds the RAW provider response body in its error text, and a
+    # registration body carries a freshly issued client_secret. Values go, keys stay, so
+    # the operator still sees the shape of the failure.
+    sdk_error = (
+        'Registration failed: 201 {"client_id": "abc", "client_secret": "sup3r-s3cret", '
+        '"grant_types": ["authorization_code"]}'
+    )
+    out = oauth_flow.redact_secrets(sdk_error)
+    assert "sup3r-s3cret" not in out
+    assert '"client_secret": "<redacted>"' in out
+    assert '"client_id": "abc"' in out  # non-secret context preserved
+    assert "Registration failed: 201" in out  # the diagnosable part survives
+
+    # A value is matched as a COMPLETE token: a prefix match would leave the tail of the
+    # credential visible next to a "<redacted>" claiming otherwise. Provider secrets may
+    # legally contain spaces or escaped quotes.
+    spaced = oauth_flow.redact_secrets('{"client_secret": "abc def ghi"}')
+    assert "abc" not in spaced and "ghi" not in spaced
+    assert spaced == '{"client_secret": "<redacted>"}'
+    escaped = oauth_flow.redact_secrets('{"client_secret":"abc\\"def"}')
+    assert "def" not in escaped, escaped
+    assert oauth_flow.redact_secrets("{'client_secret': 'a b'}") == "{'client_secret': '<redacted>'}"
+
+    token_body = "Token exchange failed (400): access_token=AT-live&refresh_token=RT-live&scope=read"
+    out = oauth_flow.redact_secrets(token_body)
+    assert "AT-live" not in out and "RT-live" not in out
+    assert "access_token=<redacted>" in out and "scope=read" in out
+
+    # A name that merely ENDS in a secret key keeps its value — status_code/error_code
+    # are diagnostics, not credentials (no word boundary before "code" after "_").
+    assert "status_code=401" in oauth_flow.redact_secrets("boom status_code=401")
+    assert "error_code=invalid_grant" in oauth_flow.redact_secrets("error_code=invalid_grant")
+    # ...while a bare authorization code IS scrubbed.
+    assert "4ebff81" not in oauth_flow.redact_secrets("callback code=4ebff81:mqAB5wc")
+
+
+def test_redact_secrets_covers_vendor_prefixed_credential_names():
+    # Credential names come with prefixes, and a word boundary cannot see them: "_" is a
+    # word character, so there is no boundary before the suffix in
+    # `registration_access_token`. That name is not exotic — RFC 7592 issues it during the
+    # DCR this code performs, and the SDK embeds the whole registration body in its error
+    # text, so a plain `\b`-anchored key list wrote a live management token to the log.
+    #
+    # The KEY is what is under test, so the fixtures name keys and share one sentinel
+    # value, built at runtime. Writing a literal value next to a credential-shaped key
+    # would trip secret scanners on this file — a fake one reads exactly like a real one
+    # to a detector, and a test asserting that secrets get scrubbed is a poor place to
+    # leave something that looks like a secret.
+    sentinel = "-".join(["sentinel", "value", "under", "test"])
+    for key in (
+        "registration_access_token",  # RFC 7592 management token
+        "initial_access_token",
+        "client_secret",
+        "oauth_refresh_token",
+        "user_password",
+    ):
+        out = oauth_flow.redact_secrets(f'Registration failed: 400 {{"{key}": "{sentinel}"}}')
+        assert sentinel not in out, out
+        assert f'"{key}": "<redacted>"' in out, out
+        assert "Registration failed: 400" in out
+
+    # The prefix rule is deliberately narrow: it applies to the credential FAMILIES only,
+    # so the diagnostics that share a suffix with `code` stay readable.
+    readable = oauth_flow.redact_secrets(
+        "status_code=400 error_code=invalid_client "
+        '{"registration_client_uri": "https://as.example/reg/1"}'
+    )
+    assert "status_code=400" in readable
+    assert "error_code=invalid_client" in readable
+    assert "https://as.example/reg/1" in readable
+
+
+def test_redact_secrets_sees_json_escaped_key_names():
+    # JSON permits \uXXXX escapes in MEMBER NAMES, and the SDK embeds a provider's
+    # response body verbatim, so `{"access_token": "..."}` is well-formed JSON that
+    # a literal-spelling pattern reads as a harmless field — and the token went to the
+    # log untouched. A provider that spells its keys this way is unusual, but "unusual
+    # provider output" is the entire input domain of this redactor.
+    #
+    # And not only JSON's escapes: the SDK does NOT parse a non-2xx body, it embeds
+    # whatever arrived, so the text need not be JSON at all and its escapes need not be
+    # JSON's — `\xNN` and octal spell the same key.
+    for body, spelling in [
+        ('{"\\x61ccess_token":"%s"}', "hex escape, not JSON's"),
+        ('{"\\141ccess_token":"%s"}', "octal escape"),
+        ('{"\\u0061ccess_token":"%s"}', "leading char escaped"),
+        ('{"client_\\u0073ecret":"%s"}', "escape inside a prefixed family name"),
+        ('{"\\u0063ode":"%s"}', "whole-word key, escaped"),
+        ('{"\\u0041uthorization":"Bearer %s"}', "the header rule's own key"),
+    ]:
+        secret = "-".join(["sentinel", "value", "under", "test"])
+        out = oauth_flow.redact_secrets(body % secret)
+        assert secret not in out, (spelling, out)
+
+    # The escape handling must not cost the exemptions: a diagnostic stays readable
+    # whether or not its name is spelled with escapes, since an escaped `status_code` is
+    # still `status_code` and still not a credential.
+    assert "401" in oauth_flow.redact_secrets("status_code=401")
+    assert "401" in oauth_flow.redact_secrets("status_\\u0063ode=401")
+    assert "abc123" in oauth_flow.redact_secrets("code_challenge=abc123")
+
+
+def test_redaction_does_not_amplify_memory_on_a_match_dense_body():
+    # These sinks take provider bodies of unbounded size in the single process that also
+    # serves every proxy request. Collecting a slice and a replacement per match made a
+    # body densely packed with matches cost several times the body itself — the per-object
+    # overhead of a hundred thousand short strings, not their contents. Writing into one
+    # buffer keeps the cost proportional to input + output, which is the floor.
+    import tracemalloc
+
+    body = "access_token=x " * 70_000  # ~1 MB, ~70k matches
+    tracemalloc.start()
+    try:
+        baseline = tracemalloc.get_traced_memory()[0]
+        out = oauth_flow.redact_secrets(body)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert "access_token=<redacted>" in out and "x" not in out.replace("<redacted>", "")
+    # Output is legitimately bigger than the input here ("<redacted>" is longer than "x"),
+    # so the floor is len(body) + len(out). Allow generous headroom for buffer growth and
+    # still catch a return to per-match accumulation, which cost ~7x.
+    floor = len(body) + len(out)
+    assert peak - baseline < floor * 2, (peak - baseline, floor)
+
+
+def test_secret_key_matches_are_merged_lazily_and_in_order():
+    # These patterns run over provider response bodies of unbounded size in the single
+    # process that also serves every proxy request. Collecting every match into a list to
+    # sort it lets a body densely packed with `access_token=x` amplify memory well beyond
+    # the response itself, so the merge must stay lazy.
+    matches = oauth_flow._find_secret_keys("access_token=a")
+    assert not isinstance(matches, (list, tuple))
+    assert iter(matches) is matches  # a one-shot iterator, not a materialized sequence
+
+    # Laziness is only safe if the merge still yields positionally — `redact_secrets`
+    # advances a cursor and skips anything behind it, so an out-of-order match would be
+    # dropped silently and its value left in the clear. Interleave the two patterns.
+    text = "code=A1 Authorization: Bearer B2\nrefresh_token=C3 authorization: Basic D4\nsecret=E5"
+    starts = [m.start() for m in oauth_flow._find_secret_keys(text)]
+    assert starts == sorted(starts)
+    assert len(starts) == 5
+    out = oauth_flow.redact_secrets(text)
+    for live in ("A1", "B2", "C3", "D4", "E5"):
+        assert live not in out, out
+
+
+async def test_upstream_rejection_overrides_a_stream_close_error(monkeypatch):
+    # The status line is read as soon as headers arrive, so closing the stream can raise
+    # afterwards. That incidental transport error must not outrank an observed 401: the
+    # rejection is the one verdict here that names a remedy (fix the scopes/resource),
+    # and reporting "unexpected_error" instead would send the operator hunting the wrong
+    # thing — precisely the misdiagnosis this PR exists to prevent.
+    class _RejectedThenCloseFails(_FakeAsyncClient):
+        def stream(self, _method, _url, **_kwargs):
+            handshake = self._handshake
+
+            class _Ctx:
+                async def __aenter__(_self):
+                    await handshake()  # grant completes; tokens land
+                    return httpx.Response(401)  # ...and the resource refuses the token
+
+                async def __aexit__(_self, *exc):
+                    raise httpx.ReadError("connection reset while closing the stream")
+
+            return _Ctx()
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _RejectedThenCloseFails)
+
+    class _Srv:
+        id = "srv-rejection-wins-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+        )
+        with pytest.raises(oauth_flow.OAuthGrantRejected):
+            await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+        assert store.status()["authenticated"] is False
+    finally:
+        store.clear()
+
+
+async def test_promotion_block_overrides_an_incidental_retry_error(monkeypatch):
+    # Tokens landing alongside an inner_error is a TOLERATED outcome: the exchange stores
+    # them before the original request is retried, so a failing retry still leaves a
+    # usable grant. When promotion is then blocked, the definitive reason must win — with
+    # `inner_error or …` the incidental transport error survived and the operator was told
+    # "unexpected_error" instead of the actionable "config changed, sign in again".
+    class _TokensThenRetryFails(_FakeAsyncClient):
+        def stream(self, _method, _url, **_kwargs):
+            handshake = self._handshake
+
+            class _Ctx:
+                async def __aenter__(_self):
+                    await handshake()  # the grant completes; tokens are in the ephemeral store
+                    raise httpx.ConnectError("connection dropped on the retried request")
+
+                async def __aexit__(_self, *exc):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _TokensThenRetryFails)
+    monkeypatch.setattr(
+        oauth_flow,
+        "_promotion_blocked",
+        lambda _pending: oauth_flow.OAuthPromotionBlocked(
+            "server OAuth configuration changed during authorization"
+        ),
+    )
+
+    class _Srv:
+        id = "srv-block-overrides-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+        )
+        with pytest.raises(oauth_flow.OAuthPromotionBlocked):
+            await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+        assert store.status()["authenticated"] is False  # nothing promoted
+    finally:
+        store.clear()
+
+
+def test_log_safe_blocks_log_injection_and_bounds_length():
+    # This callback is public, so externally-supplied text must not be able to forge log
+    # records (CWE-117) or drown the record it belongs to.
+    forged = "denied\nWARNING:app.api.auth:OAuth sign-in succeeded for srv-attacker"
+    out = oauth_flow.log_safe(forged)
+    assert "\n" not in out and "\r" not in out
+    assert "denied WARNING:app.api.auth:OAuth sign-in succeeded" in out  # folded, not dropped
+    assert oauth_flow.log_safe("x\x00\x1b[31my") == "x  [31my"  # NULs and escapes neutralized
+
+    long_out = oauth_flow.log_safe("A" * 5000)
+    assert len(long_out) < 600 and long_out.endswith("… (truncated)")
+
+    # Truncation must not be able to split a quoted secret and leave its tail beside a
+    # <redacted> that claims to have covered it. Redaction runs first, so every offset
+    # that puts the boundary inside the value is safe — sweep the whole window.
+    for pad in range(440, 520):
+        out = oauth_flow.log_safe("x" * pad + '{"client_secret": "alpha beta gamma"}')
+        assert "beta" not in out and "gamma" not in out, (pad, out[-70:])
+
+    # The same hazard applies to ANY pre-cut, so there is no input ceiling either: a
+    # credential long enough to straddle one would be split exactly the same way.
+    straddling = '{"client_secret": "' + "s3cret " * 12_000 + 'tail"}'
+    assert "s3cret" not in oauth_flow.log_safe(straddling)
+
+    # Malformed provider JSON (echoed verbatim in pydantic validation errors) can leave a
+    # quote unterminated. The bare branch would then stop at the first space and expose
+    # the tail — an opening quote with no partner means "the rest of the line".
+    for malformed in (
+        '{"access_token": "alpha beta gamma',
+        "{'client_secret': 'alpha beta gamma",
+        '{"refresh_token": "alpha beta\n"next_key": 1}',
+    ):
+        out = oauth_flow.redact_secrets(malformed)
+        assert "beta" not in out, out
+        assert "gamma" not in out, out
+    # An unterminated value that WRAPS must not leak its continuation: stopping at the
+    # line end would mask only the first line, and log_safe folds the newline afterwards
+    # — putting the rest of the credential straight back on the same record.
+    wrapped = '{"client_secret": "alpha beta\ngamma delta'
+    for out in (oauth_flow.redact_secrets(wrapped), oauth_flow.log_safe(wrapped)):
+        assert "gamma" not in out and "delta" not in out, out
+    # A COMPLETE value that merely spans a newline is a different thing: it ends where
+    # its closing quote says, so the well-formed neighbour after it stays readable.
+    assert "next_key" in oauth_flow.redact_secrets('{"refresh_token": "alpha beta\n"next_key": 1}')
+
+    # Pydantic renders a rejected field with the FIELD NAME on an earlier line and the
+    # offending data under `input_value=`, so a key/value pattern anchored on
+    # "access_token" cannot reach it — and the SDK feeds exactly this into OAuthTokenError
+    # for a malformed token response. Built from a REAL validation error, not a guess at
+    # its formatting.
+    from mcp.shared.auth import OAuthToken
+
+    try:
+        OAuthToken.model_validate({"access_token": ["SUPER-ACCESS-TOKEN"], "token_type": "Bearer"})
+    except Exception as exc:  # noqa: BLE001 — the point is the rendered text
+        validation_text = f"Invalid token response: {exc}"
+    scrubbed = oauth_flow.redact_secrets(validation_text)
+    assert "SUPER-ACCESS-TOKEN" not in scrubbed, scrubbed
+    # ...while everything that makes it diagnosable survives.
+    assert "access_token" in scrubbed and "input_type=list" in scrubbed
+    assert "Input should be a valid string" in scrubbed
+
+    # A list or dict value is ONE token: a delimiter-terminated match would stop at the
+    # first space inside it and leave the rest in the clear. The scan is quote-aware and
+    # depth-aware, so a closing bracket INSIDE a quoted element doesn't end it early and
+    # nesting doesn't either — a pattern can't do either of those.
+    for container in (
+        "input_value=['tok a', 'tok b']",
+        "input_value={'k': 'tok a'}",
+        "input_value=['SUPER]SECRET']",
+        "input_value={'a': ['tok x', 'tok y']}",
+    ):
+        out = oauth_flow.redact_secrets(container + ", input_type=x")
+        for secret in ("tok a", "tok b", "tok x", "tok y", "SUPER", "SECRET"):
+            assert secret not in out, (container, out)
+        assert "input_type=x" in out
+
+    # A MISMATCHED closer is the case a depth counter gets wrong: counting treats "}" as
+    # closing a "[", so the value looked finished at the mismatch and its tail stayed in
+    # the clear beside a mask claiming otherwise. Matching by type means a mismatch is
+    # malformed text — which is precisely when we can't know where the value ends — so it
+    # consumes the rest, exactly like an unterminated opener.
+    # Pydantic renders a rejected RAW body as `input_value=b'...'`, and a repr prefix is
+    # not the first character of a bare token — reading it that way stopped the value at
+    # the first space INSIDE the quoted body, masking `b'{"access_token"` and leaving the
+    # credential after it in the clear. This is the shape a provider produces by
+    # returning malformed token/registration JSON, which is exactly when these sinks run.
+    for prefixed in (
+        "input_value=b'{\"access_token\" : \"SUPER SECRET\"}', input_type=bytes",
+        'input_value=rb"SUPER SECRET", input_type=bytes',
+        "input_value=b'unterminated SUPER SECRET",
+    ):
+        out = oauth_flow.redact_secrets(prefixed)
+        assert "SUPER" not in out and "SECRET" not in out, (prefixed, out)
+    # ...but a bare value that merely STARTS with one of those letters is still bare, so
+    # the neighbouring diagnostics keep their own boundaries.
+    assert oauth_flow.redact_secrets("refresh_token=b1234 next=ok").endswith(" next=ok")
+
+    for malformed in (
+        "access_token=[SUPER}SECRET]",
+        "access_token={SUPER]SECRET}",
+        "access_token=[SUPER}SECRET] trailing=text",
+    ):
+        out = oauth_flow.redact_secrets(malformed)
+        assert "SUPER" not in out and "SECRET" not in out, (malformed, out)
+        assert out.startswith("access_token=<redacted>"), out
+
+
+def test_redaction_of_hostile_input_stays_linear():
+    # Repeated UNTERMINATED containers were quadratic under the lazy pattern that used to
+    # match them (~1s at 48 KB), which is a denial-of-service on a single-worker control
+    # plane fed by a remote party — log_safe deliberately scrubs the whole string before
+    # truncating. The forward scan is one pass; timings are a blowup tripwire, generous
+    # enough not to flake on a slow runner.
+    import time
+
+    hostile = "access_token=[ " * 3200  # ~48 KB of unterminated openers
+    start = time.perf_counter()
+    oauth_flow.redact_secrets(hostile)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 1.0, f"{elapsed:.3f}s — the container scan regressed to superlinear"
+
+    # Quadrupling the input must not multiply the cost by ~16.
+    start = time.perf_counter()
+    oauth_flow.redact_secrets("access_token=[ " * 12800)
+    assert time.perf_counter() - start < 4.0
+
+    # Unicode line separators break records for str.splitlines() and line-oriented log
+    # tooling just like \n does, so they are folded too.
+    for sep in ("\x85", "\u2028", "\u2029"):
+        folded = oauth_flow.log_safe(f"denied{sep}WARNING:forged record")
+        assert sep not in folded, repr(folded)
+        assert "denied WARNING:forged record" in folded
+
+    # JSON permits arbitrary whitespace around the separator: a provider writing five
+    # spaces must not sail past the redaction (a fixed bound would be linear but wrong).
+    for gap in (0, 1, 5, 40, 500):
+        out = oauth_flow.redact_secrets('{"client_secret":' + " " * gap + '"live secret"}')
+        assert "live secret" not in out, (gap, out)
+    assert "live" not in oauth_flow.redact_secrets('{"client_secret"\n\t:\n  "live secret"}')
+    # Redaction still applies through log_safe.
+    assert "leaked" not in oauth_flow.log_safe('{"client_secret": "leaked"}')
+
+
+async def test_drive_warning_cannot_emit_a_client_secret(monkeypatch, caplog):
+    # End-to-end proof at the exact sink CodeQL flags (py/clear-text-logging-sensitive-
+    # data on _drive's WARNING): drive a failure whose exception text embeds a real
+    # client_secret the way the SDK does — OAuthRegistrationError carries the raw
+    # registration body — and assert the secret reaches neither the log record nor the
+    # operator-facing error. The static alert cannot see through re.sub; this can.
+    import logging
+
+    from mcp.client.auth import OAuthRegistrationError
+
+    leaked = "SUPER-SECRET-CLIENT-VALUE"
+
+    class _RegistrationEchoesSecret(_FakeAsyncClient):
+        def stream(self, _method, _url, **_kwargs):
+            class _Ctx:
+                async def __aenter__(_self):
+                    raise OAuthRegistrationError(
+                        f'Registration failed: 201 {{"client_id": "cid", "client_secret": "{leaked}"}}'
+                    )
+
+                async def __aexit__(_self, *exc):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _RegistrationEchoesSecret)
+
+    class _Srv:
+        id = "srv-secret-never-logged-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = leaked  # the sensitive source the query traces
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        with caplog.at_level(logging.WARNING, logger="app.auth.oauth_flow"):
+            with pytest.raises(oauth_flow.OAuthBeginError) as excinfo:
+                await oauth_flow.begin_authorization(
+                    _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+                )
+        logged = " ".join(rec.getMessage() for rec in caplog.records)
+        assert leaked not in logged, logged  # the WARNING sink
+        assert leaked not in str(excinfo.value)  # the 502 detail the SPA renders
+        assert "<redacted>" in logged  # ...and the failure is still diagnosable
+        assert "Registration failed: 201" in logged
+    finally:
+        store.clear()
+
+
+def test_redaction_stays_linear_on_pathological_input():
+    # The scrubbers run over text a remote party controls, so their patterns must not
+    # backtrack polynomially (CodeQL py/polynomial-redos): the separator's whitespace
+    # runs use POSSESSIVE quantifiers, so a long run cannot backtrack at all. log_safe
+    # scrubs the WHOLE string and truncates afterwards — the reverse order leaves a
+    # split quoted value's tail in the clear, which is a leak this suite pins at
+    # `test_log_safe_blocks_log_injection_and_bounds_length`; length is survivable
+    # here because the scan is linear, not because the input was cut first. The wall
+    # clock is deliberately loose — a "quadratic blowup" tripwire, not a performance
+    # assertion, so it can't flake on a slow runner.
+    import time
+
+    pathological = "client_secret" + " " * 200_000 + "x"
+    start = time.perf_counter()
+    oauth_flow.redact_secrets(pathological)
+    oauth_flow.log_safe(pathological)
+    assert time.perf_counter() - start < 2.0
+
+    # A linear scan plus a bounded OUTPUT is what makes length harmless — 2 MB in, one
+    # short record out, with no pre-cut of the input to get there.
+    assert len(oauth_flow.log_safe("a" * 2_000_000)) < 600
+
+
+def test_callback_error_detail_needs_a_correlated_state(caplog):
+    # An anonymous caller can reach this public endpoint, so its text is only echoed when
+    # the state matches a sign-in THIS instance started. Otherwise the log records the
+    # event without the attacker-controlled detail.
+    import logging
+
+    # Captured at INFO: an uncorrelated callback is recorded BELOW operator level (see
+    # test_unsolicited_callbacks_stay_below_warning), and the point here is that whatever
+    # level it lands at, the caller's text is not in it.
+    with TestClient(app) as c, caplog.at_level(logging.INFO, logger="app.api.auth"):
+        c.get(
+            "/api/oauth/callback",
+            params={
+                "error": "access_denied",
+                "error_description": "PAYLOAD-SHOULD-NOT-APPEAR",
+                "state": "not-a-real-pending-state",
+            },
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+    logged = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "PAYLOAD-SHOULD-NOT-APPEAR" not in logged
+    assert "unknown or expired state" in logged
+
+
+def test_callback_error_detail_is_logged_for_a_real_pending_flow(monkeypatch, caplog):
+    # The flip side: a genuine provider denial echoes our state, so the operator DOES get
+    # the provider's reason — that's the whole point of the WARNING.
+    import logging
+
+    monkeypatch.setattr(oauth_flow, "pending_server_id", lambda _state: "srv-real")
+    with TestClient(app) as c, caplog.at_level(logging.WARNING, logger="app.api.auth"):
+        c.get(
+            "/api/oauth/callback",
+            params={
+                "error": "access_denied",
+                "error_description": "user refused the consent screen",
+                "state": "correlated",
+            },
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+    assert any("user refused the consent screen" in r.getMessage() for r in caplog.records)
+
+
+def test_begin_error_detail_is_redacted(monkeypatch):
+    # The 502 detail from a failed begin reaches the SPA, so it gets the same scrubbing
+    # as the logs — a provider body echoed into an API response is no safer than one
+    # echoed into a log line.
+    exc = RuntimeError('upstream said {"client_secret": "leaked-value"}')
+    err = oauth_flow._classify_begin_error(exc)
+    assert "leaked-value" not in str(err)
+    assert "<redacted>" in str(err)
+
+
+def test_oauth_failure_reasons_log_at_warning(monkeypatch, caplog):
+    # Regression: a real sign-in failure's reason is the ONLY record of what went wrong,
+    # and under uvicorn's default logging config the root logger has no handler while
+    # app.* sits at effective level WARNING — so an INFO record is discarded and the
+    # operator is left with a toast and nothing to debug. Once the state has matched a
+    # flow this instance started, the failure IS the operator's, so it must be WARNING.
+    import logging
+
+    async def _boom(_state, _code):
+        raise OSError("the token store is read-only")
+
+    monkeypatch.setattr(oauth_flow, "complete_authorization", _boom)
+    with TestClient(app) as c, caplog.at_level(logging.INFO, logger="app.api.auth"):
+        c.get(
+            "/api/oauth/callback",
+            params={"code": "cd", "state": "st"},
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+    assert any(
+        rec.levelno >= logging.WARNING and "failed unexpectedly" in rec.getMessage()
+        for rec in caplog.records
+    ), [(r.levelname, r.getMessage()) for r in caplog.records]
+
+
+def test_unsolicited_callbacks_stay_below_warning(caplog):
+    # The callback is PUBLIC, so anything that doesn't correlate with a sign-in this
+    # instance started is indistinguishable from a scanner. Warning there would let any
+    # remote caller generate unbounded operator-level records (and page whoever alerts on
+    # them) for an event no operator can act on. These stay at INFO; the operator whose
+    # own flow expired still gets reason=expired_or_superseded in the toast.
+    import logging
+
+    with TestClient(app) as c, caplog.at_level(logging.INFO, logger="app.api.auth"):
+        for params in (
+            {},  # bare GET
+            {"code": "x", "state": "bogus-state-not-pending"},  # unmatched state
+            {"error": "access_denied", "state": "bogus-state-not-pending"},  # unsolicited
+        ):
+            c.get(
+                "/api/oauth/callback", params=params, headers=LOOPBACK, follow_redirects=False
+            )
+    assert caplog.records, "the events are still recorded, just not at operator level"
+    assert all(rec.levelno < logging.WARNING for rec in caplog.records), [
+        (r.levelname, r.getMessage()) for r in caplog.records
+    ]
 
 
 def test_callback_success_redirects_to_server(monkeypatch):

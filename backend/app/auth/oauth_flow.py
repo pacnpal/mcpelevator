@@ -29,6 +29,8 @@ reaper drops entries the operator never completed.
 from __future__ import annotations
 
 import asyncio
+import heapq
+import io
 import logging
 import re
 import time
@@ -88,6 +90,337 @@ class OAuthBeginError(RuntimeError):
         self.status_code = status_code
 
 
+# Keys whose VALUES must never reach a log line or an operator-facing message. Our own
+# error strings are safe by construction, but a third-party one is not: the MCP SDK
+# embeds the RAW provider response body in its error text (``OAuthTokenError`` carries
+# the token-endpoint body, ``OAuthRegistrationError`` the registration body — which
+# contains a freshly issued ``client_secret``). Those messages are now surfaced by
+# design (WARNING logs, and the 502 detail from ``_classify_begin_error``), so they are
+# scrubbed on the way out. Values are replaced, keys kept: the operator still sees the
+# shape of the failure, just not the credential.
+# Matched ANYWHERE in a name, not just at a word boundary: the credential families come
+# with vendor prefixes (RFC 7592's ``registration_access_token``, ``initial_access_token``,
+# and ``client_secret`` itself), and a leading ``\b`` cannot see them — ``_`` is a word
+# character, so there is no boundary before the suffix. Prefixes are always still the same
+# kind of credential, so matching the family is the safe reading.
+_SECRET_KEYS_ANYWHERE = (
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "secret",
+    "password",
+)
+# Matched as WHOLE words only. ``code`` is the reason this split exists: allowing a prefix
+# would scrub ``status_code`` and ``error_code``, which are diagnostics rather than
+# credentials and must stay readable.
+_SECRET_KEYS_WHOLE = (
+    "code_verifier",
+    "code",
+    # Pydantic renders a rejected field as ``… input_value=['SUPER-TOKEN'], input_type=list``
+    # with the FIELD NAME on an earlier line, so a key/value pattern anchored on
+    # ``access_token`` can't reach it — and the SDK feeds exactly this into
+    # ``OAuthTokenError`` when a provider returns a malformed token response. Treat the
+    # echoed input as sensitive regardless of which field failed: it is provider data by
+    # definition, and the diagnosis survives without it (the field name, the expected
+    # type, and the actual type are all reported separately).
+    "input_value",
+)
+# WHERE a value ends is decided by a scanner, not by the pattern. Expressing "a complete
+# quoted string, or a balanced container, or a bare token" in a regex produced a steady
+# drip of leaks — a prefix match beside a "<redacted>" that claimed to have covered it —
+# because each shape needs state the pattern doesn't have: escapes inside quotes, a
+# closing bracket inside a quoted element (``['SUPER]SECRET']``), an unterminated opener.
+# The lazy container match that handled the first of those was also quadratic on repeated
+# unterminated openers (~1s at 48 KB), which is a denial-of-service on a single-worker
+# control plane fed by a remote party. A forward scan handles every shape in one linear
+# pass, and the pattern is left doing only what patterns are good at: finding the key.
+_SEPARATOR = r"(?P<sep>[\"']?[ \t\r\n]*+[=:][ \t\r\n]*+)"
+# Requiring the separator right after the key is what spares names that merely START with
+# one: code_challenge and authorization_endpoint are not credentials and stay readable.
+#
+# Whitespace runs in the separator use POSSESSIVE quantifiers (``*+``, Python 3.11+),
+# which is what lets them be unbounded without being dangerous: a plain ``*`` before a
+# character that can fail is polynomial in the length of a space run (CodeQL
+# py/polynomial-redos), while a fixed bound like ``{0,4}`` is linear but WRONG, since JSON
+# permits arbitrary whitespace and a provider writing five spaces would sail past the
+# redaction entirely.
+
+
+def _escapable(literal: str) -> str:
+    """Pattern source matching ``literal`` spelled plainly OR with any of its characters
+    written as a JSON ``\\uXXXX`` escape.
+
+    JSON permits escapes in MEMBER NAMES, and the SDK embeds a provider's response body
+    verbatim, so a body answering with ``{"\\u0061ccess_token": "LIVE"}`` is well-formed
+    JSON that a literal-spelling pattern cannot see — it read as a non-secret field and
+    the token went to the log untouched. Matching the escapes here rather than decoding
+    the text first is what preserves the offsets the scanner splices on.
+
+    ``\\xNN`` and octal follow because the SDK does NOT parse a non-2xx body: it embeds
+    whatever bytes arrived, so the text is not necessarily JSON and its escapes are not
+    necessarily JSON's. See ``redact_secrets`` on why enumerating dialects is a floor
+    rather than a guarantee."""
+    codes = []
+    for char in literal:
+        forms = [re.escape(char)]
+        # Either case is the same letter to a case-insensitive match, but the ESCAPE
+        # spells a specific code point, so both have to be listed.
+        for variant in {char.lower(), char.upper()}:
+            point = ord(variant)
+            forms += [rf"\\u{point:04x}", rf"\\x{point:02x}", rf"\\{point:03o}"]
+        codes.append("(?:" + "|".join(forms) + ")")
+    return "".join(codes)
+
+
+# ``(?<!\w)`` rather than ``\b``: it means the same thing for a plainly spelled key, but
+# an escaped one STARTS with a backslash, and ``\b`` between a preceding ``"`` and that
+# ``\`` does not exist (neither is a word character) — so the whole-word keys would have
+# been exempt from the escape handling above. The lookbehind asks the question that
+# actually matters, "is this the tail of a longer name", and still spares status_code and
+# error_code (both preceded by ``_``, escaped or not).
+_NOT_AFTER_WORD = r"(?<![0-9A-Za-z_])"
+_SECRET_KEY_RE = re.compile(
+    "(?i)(?P<key>"
+    + "|".join(_escapable(key) for key in _SECRET_KEYS_ANYWHERE)
+    + "|"
+    + _NOT_AFTER_WORD
+    + "(?:"
+    + "|".join(_escapable(key) for key in _SECRET_KEYS_WHOLE)
+    + "))"
+    + _SEPARATOR
+)
+# ``Authorization: Bearer <token>`` needs its own rule: the credential sits AFTER a scheme
+# word, so a whitespace-terminated value would redact "Bearer" and leave the token itself
+# in the clear. Its unquoted form therefore runs to end of line.
+_AUTH_KEY_RE = re.compile(
+    "(?i)" + _NOT_AFTER_WORD + "(?P<key>" + _escapable("authorization") + ")" + _SEPARATOR
+)
+_BARE_TERMINATORS = " \t\r\n,&)}]"
+_CONTAINER_CLOSERS = {"[": "]", "{": "}"}
+# Python string/bytes literal prefixes (b, r, u, f and the two-letter combinations). Only
+# treated as a prefix when a quote actually follows, so an ordinary value that merely
+# starts with one of these letters is still a bare token.
+_REPR_PREFIXES = "bBrRuUfF"
+
+
+def _value_end(text: str, start: int, *, to_end_of_line: bool) -> int:
+    """Index just past the value beginning at ``start`` — one forward pass, no backtracking.
+
+    Quoted values run to their matching quote, honouring backslash escapes. Containers run
+    to their balanced close, ignoring brackets that sit inside quoted elements. An
+    unterminated quote or container consumes the REST OF THE INPUT: we cannot know where
+    such a value ends, and masking only part of it would leave the remainder in the clear
+    (log_safe later folds newlines, so "just this line" is no protection either). Bare
+    values stop at a delimiter — or at end of line for ``Authorization``, whose value is a
+    scheme word followed by the credential."""
+    n = len(text)
+    if start >= n:
+        return start
+    # A Python str/bytes REPR is a quoted value wearing a prefix. Pydantic renders a
+    # rejected raw body as ``input_value=b'{"access_token": "SUPER SECRET"}'``, and
+    # reading the ``b`` as the first character of a bare token stopped the value at the
+    # first space inside it — masking ``b'{"access_token"`` and leaving the credential
+    # after it in the clear. Skip the prefix and let the quote be the opener.
+    prefix = 0
+    while prefix < 2 and start + prefix < n and text[start + prefix] in _REPR_PREFIXES:
+        prefix += 1
+    if prefix and start + prefix < n and text[start + prefix] in "\"'":
+        return _value_end(text, start + prefix, to_end_of_line=to_end_of_line)
+    opener = text[start]
+    if opener in "\"'":
+        i = start + 1
+        while i < n:
+            if text[i] == "\\":
+                i += 2
+                continue
+            if text[i] == opener:
+                return i + 1
+            i += 1
+        return n  # unterminated
+    if opener in "[{":
+        # A STACK of expected closers, not a depth counter: counting treats ``}`` as
+        # closing a ``[``, so ``access_token=[SUPER}SECRET]`` ended at the ``}`` and left
+        # ``SECRET]`` in the clear. A mismatch means the text is malformed, and malformed
+        # is exactly the case where we cannot know where the value ends — so it falls in
+        # with the unterminated openers below and consumes the rest.
+        expected: list[str] = []
+        quote = None
+        i = start
+        while i < n:
+            char = text[i]
+            if quote is not None:
+                if char == "\\":
+                    i += 2
+                    continue
+                if char == quote:
+                    quote = None
+            elif char in "\"'":
+                quote = char
+            elif char in _CONTAINER_CLOSERS:
+                expected.append(_CONTAINER_CLOSERS[char])
+            elif char in "]}":
+                if char != expected[-1]:  # non-empty: ``start`` was itself an opener
+                    return n  # mismatched
+                expected.pop()
+                if not expected:
+                    return i + 1
+            i += 1
+        return n  # unterminated
+    stop = "\r\n" if to_end_of_line else _BARE_TERMINATORS
+    i = start
+    while i < n and text[i] not in stop:
+        i += 1
+    return i
+
+
+def _redacted_value(text: str, start: int, end: int) -> str:
+    """``<redacted>`` wearing the same quotes the original value wore, so the surrounding
+    JSON or query string still reads as the shape it was. An unterminated quote keeps its
+    lone opener rather than gaining a closer we invented — the text was malformed and
+    should still look it."""
+    if start >= len(text):
+        return "<redacted>"
+    opener = text[start]
+    if opener in "\"'":
+        closed = end > start + 1 and text[end - 1] == opener
+        return f"{opener}<redacted>{opener}" if closed else f"{opener}<redacted>"
+    return "<redacted>"
+
+
+def redact_secrets(value: object) -> str:
+    """``str(value)`` with the values of credential-bearing keys replaced.
+
+    Applied wherever an error that may carry third-party text becomes visible — a log
+    record or an API error detail — so making OAuth failures debuggable never turns into
+    writing tokens and client secrets to the console. Parsing (e.g.
+    ``_registration_status``) still reads the RAW exception; only the surfaced copy is
+    scrubbed.
+
+    One left-to-right pass: each key match hands off to ``_value_end``, and the cursor
+    jumps past whatever that value turned out to be. Total work is linear in the length
+    of the text — a key inside an already-redacted value is skipped rather than rescanned,
+    which is what keeps hostile input (repeated unterminated containers) cheap.
+
+    Output is WRITTEN incrementally rather than collected. Accumulating a slice and a
+    replacement per match into a list made a body densely packed with ``access_token=x``
+    cost far more than the body itself (1 MB in, 7.2 MB peak), because the per-object
+    overhead of ~140k short strings dwarfs their contents — and the party choosing that
+    body is the remote one, in the single process serving all API and proxy traffic. A
+    buffer holds one growing string instead."""
+    text = str(value)
+    out = io.StringIO()
+    cursor = 0
+    for key_match in _find_secret_keys(text):
+        if key_match.start() < cursor:
+            continue  # this key sat inside a value we already masked
+        value_start = key_match.end()
+        # Which PATTERN matched, not what the text says: an escaped spelling of the key
+        # won't compare equal to "authorization", and only this pattern's values run to
+        # end of line.
+        is_auth_header = key_match.re is _AUTH_KEY_RE
+        value_stop = _value_end(text, value_start, to_end_of_line=is_auth_header)
+        if value_stop <= value_start:
+            continue  # nothing to mask (e.g. the key ended the string)
+        out.write(text[cursor:value_start])
+        out.write(_redacted_value(text, value_start, value_stop))
+        cursor = value_stop
+    if cursor == 0:
+        return text  # nothing matched — hand back the original rather than copying it
+    out.write(text[cursor:])
+    return out.getvalue()
+
+
+def _find_secret_keys(text: str):
+    """Credential-bearing key occurrences in positional order, from both patterns (the
+    general key list and the ``Authorization`` header, whose value shape differs).
+
+    Lazily merged, never materialized: this runs over provider response bodies of
+    unbounded size, and collecting every match into a list to sort it would let a body
+    densely packed with ``access_token=x`` amplify memory well beyond the response
+    itself — in the single process that also serves every other control-plane and proxy
+    request. Both iterators are already ordered, so merging them costs nothing extra."""
+    return heapq.merge(
+        _SECRET_KEY_RE.finditer(text),
+        _AUTH_KEY_RE.finditer(text),
+        key=lambda match: match.start(),
+    )
+
+
+# One log record per failure, however long or hostile the upstream text: newlines and
+# control characters would let externally-supplied text forge additional log lines
+# (CWE-117), and an unbounded body would drown the record it belongs to.
+_LOG_TEXT_LIMIT = 500
+# C0 controls and DEL, plus the Unicode separators NEL / LINE / PARAGRAPH: Python's own
+# ``str.splitlines`` and plenty of line-oriented log tooling break on those too, so
+# leaving them through would let provider text split one record into apparent forged
+# ones — the very thing this pass exists to prevent.
+_CONTROL_CHARS = re.compile("[\x00-\x1f\x7f\x85\u2028\u2029]")
+
+
+def log_safe(value: object, *, limit: int = _LOG_TEXT_LIMIT) -> str:
+    """``redact_secrets`` plus log-injection defence: credentials scrubbed, control
+    characters folded to spaces, and the result truncated. Use this — not
+    ``redact_secrets`` alone — for anything that reaches a log record and did not
+    originate here.
+
+    Redaction runs BEFORE truncation, over the WHOLE string — every cut is taken after
+    masking, never before. Cutting first looks safer but isn't: a cut landing inside a
+    quoted value leaves the quote unterminated, the complete-string branch then fails, and
+    the bare branch masks only up to the first space — emitting
+    ``client_secret: <redacted> beta gamma``, a mask sitting next to the tail it claims to
+    have covered. That applies to ANY pre-cut, including a "generous" input ceiling: a
+    credential long enough to straddle it would be split exactly the same way. The
+    patterns are linear by construction (possessive quantifiers), so there is nothing to
+    gain by capping the input first."""
+    text = _CONTROL_CHARS.sub(" ", redact_secrets(value)).strip()
+    return text if len(text) <= limit else f"{text[:limit]}… (truncated)"
+
+
+class OAuthGrantRejected(RuntimeError):
+    """The grant completed, but the UPSTREAM refused the token it produced (the retried
+    MCP request came back 401/403). Distinct from a token-exchange failure: the provider
+    issued a credential, the resource server won't accept it — typically a scope or
+    ``resource`` mismatch, which is a configuration problem on this server rather than a
+    transport or protocol fault. Typed so the callback can say which of the two happened
+    instead of labelling every post-redirect failure the same way."""
+
+
+class OAuthFlowCancelled(RuntimeError):
+    """The flow was cancelled from outside while its callback was already waiting — a
+    config edit, ownership transfer, disconnect, delete, a newer Authenticate click, or
+    the sign-in window expiring. Typed so the waiter fails FAST and accurately: without
+    it, cancelling the driving task leaves ``done_future`` unresolved, the callback burns
+    its full budget, and the operator is told the exchange "timed out" when it was
+    deliberately superseded.
+
+    The causes are separated because they ask different things of an operator:
+    ``superseded`` means the attempt was replaced or ran out of time (just sign in
+    again), ``deleted`` means the server itself is gone (there is nothing left to sign
+    in to), and neither means the configuration it belonged to changed (look at what
+    changed first). They stay plain booleans so the reason-code vocabulary lives entirely
+    in the API layer that owns it."""
+
+    def __init__(self, message: str, *, superseded: bool = False, deleted: bool = False):
+        super().__init__(message)
+        self.superseded = superseded
+        self.deleted = deleted
+
+
+class OAuthPromotionBlocked(RuntimeError):
+    """The grant was obtained but must NOT become this server's credential: the row was
+    deleted, its owner changed, or its OAuth configuration changed while the operator was
+    signing in (see ``_promotion_blocked``). Nothing is wrong with the grant — it just
+    belongs to a configuration that no longer exists, so the remedy is to sign in again.
+
+    ``deleted`` carries the one cause with a different remedy: when the row is gone there
+    is no configuration to inspect and nothing to retry, so telling the operator to check
+    what changed would send them after a server that no longer exists."""
+
+    def __init__(self, message: str, *, deleted: bool = False):
+        super().__init__(message)
+        self.deleted = deleted
+
+
 def _registration_status(exc: OAuthRegistrationError) -> Optional[int]:
     """Pull the HTTP status out of an ``OAuthRegistrationError``. The SDK bakes it into the
     message as ``"Registration failed: <status> <body>"`` (mcp.client.auth.utils) with no
@@ -129,7 +462,9 @@ def _classify_begin_error(exc: BaseException) -> OAuthBeginError:
             "with the provider and set an explicit Client ID to skip registration.",
             status_code=429,
         )
-    return OAuthBeginError(f"could not start OAuth: {exc}", status_code=502)
+    # The provider's raw error body can ride along in ``exc`` (see ``redact_secrets``) and
+    # this message becomes an API error detail the SPA displays — scrub it too.
+    return OAuthBeginError(f"could not start OAuth: {redact_secrets(exc)}", status_code=502)
 
 
 def _merge_scopes(*scope_strings: Optional[str]) -> Optional[str]:
@@ -290,35 +625,88 @@ def _forget(pending: _Pending) -> None:
         pending.task.cancel()
 
 
+def _abort(
+    pending: _Pending, why: str, *, superseded: bool = False, deleted: bool = False
+) -> None:
+    """Forget a flow that something EXTERNAL ended, waking anyone parked on it.
+
+    ``_forget`` alone cancels the driving task, which never resolves ``done_future`` —
+    so a callback already waiting there would sit for its full budget and then report a
+    timeout for what was actually a deliberate cancellation. The exception is set only
+    when the callback has actually arrived (``callback_event``): with no one to retrieve
+    it, a future's exception surfaces as a spurious "never retrieved" at collection, so
+    an unattended flow is cancelled silently instead."""
+    if not pending.done_future.done():
+        if pending.callback_event.is_set():
+            pending.done_future.set_exception(
+                OAuthFlowCancelled(why, superseded=superseded, deleted=deleted)
+            )
+        else:
+            pending.done_future.cancel()
+    _forget(pending)
+
+
 def _reap_stale() -> None:
     now = time.monotonic()
     for pending in list(_PENDING.values()):
         if now - pending.created_at > _FLOW_TIMEOUT:
-            _forget(pending)
+            # Expiry, not reconfiguration: the remedy is simply to start again.
+            _abort(
+                pending,
+                "the sign-in window expired before it completed",
+                superseded=True,
+            )
 
 
-def _cancel_existing(server_id: str) -> None:
+def _cancel_existing(
+    server_id: str, why: str, *, superseded: bool, deleted: bool = False
+) -> None:
     """Only one authorization can be in flight per server — a second click supersedes
-    the first (its state/PKCE would otherwise dangle until it reaps)."""
+    the first (its state/PKCE would otherwise dangle until it reaps). Callers say WHY,
+    because "you clicked Authenticate again" and "this server was reconfigured" need
+    different things from the operator."""
     for pending in list(_PENDING.values()):
         if pending.server_id == server_id:
-            _forget(pending)
+            _abort(pending, why, superseded=superseded, deleted=deleted)
 
 
 def pending_server_id(state: str) -> Optional[str]:
     """The server id of the authorization parked on ``state``, or ``None`` — so the
     callback can stop that server's running bridge *before* the grant is promoted,
-    closing the window where an old bridge's refresh could overwrite the new tokens."""
+    closing the window where an old bridge's refresh could overwrite the new tokens.
+
+    Expired flows are reaped FIRST, so this answers "is there a LIVE sign-in on this
+    state" rather than "is there a record". ``_drive`` times out and cancels its future
+    at the flow window, but the record and its state index entry survive until the reaper
+    next runs — and the callback uses this answer to decide both whether a late callback
+    is a real operator failure (WARNING, provider-supplied detail echoed) or unsolicited
+    noise, and which reason code to report. Without the reap a callback arriving after the
+    window was treated as current, so an expired sign-in reported the provider's verdict
+    instead of ``expired_or_superseded`` and let the caller's text onto an operator-level
+    record."""
+    _reap_stale()
     pending_id = _STATE_INDEX.get(state)
     pending = _PENDING.get(pending_id) if pending_id else None
     return pending.server_id if pending is not None else None
 
 
-def cancel_pending(server_id: str) -> None:
+def cancel_pending(
+    server_id: str, *, superseded: bool = False, deleted: bool = False
+) -> None:
     """Cancel any in-flight authorization for a server. Called when its OAuth config is
     edited: a background flow started against the OLD upstream/scopes/client must not
-    complete and write credentials for the wrong resource back under this id."""
-    _cancel_existing(server_id)
+    complete and write credentials for the wrong resource back under this id. Also used
+    when a provider denial or a DISCONNECT ends a flow — ``superseded=True`` for both,
+    since nothing about the server's configuration changed — and by the DELETE path, where
+    ``deleted=True`` keeps the operator from being sent to inspect a server that no longer
+    exists."""
+    if deleted:
+        why = "the server was deleted during the sign-in"
+    elif superseded:
+        why = "the sign-in ended before it could complete"
+    else:
+        why = "the server's OAuth configuration or ownership changed during the sign-in"
+    _cancel_existing(server_id, why, superseded=superseded, deleted=deleted)
 
 
 def _repair_authorization_url(url: str) -> str:
@@ -620,9 +1008,12 @@ def _oauth_signature_of(server) -> tuple:
     )
 
 
-def _promotion_blocked(pending: _Pending) -> Optional[str]:
+def _promotion_blocked(pending: _Pending) -> Optional[OAuthPromotionBlocked]:
     """Why this flow's grant must NOT be promoted (None = go ahead), judged against
-    the committed row at promotion time. Registered pending flows are cancelled by
+    the committed row at promotion time. Returns the typed exception rather than a bare
+    string so the DELETION cause survives to the callback: a deleted row and a changed
+    config need different things said to the operator, and re-deriving that by matching
+    on message text would be a rule in two places. Registered pending flows are cancelled by
     the delete/reassign/config-edit paths, but a flow still in its pre-registration
     awaits escapes all of them — these checks are the backstop:
 
@@ -639,12 +1030,18 @@ def _promotion_blocked(pending: _Pending) -> Optional[str]:
     row = _server_row(pending.server_id)
     if row is None:
         if pending.row_existed:
-            return "server was deleted during authorization"
+            return OAuthPromotionBlocked(
+                "server was deleted during authorization", deleted=True
+            )
         return None
     if row.owner_id != pending.owner_id:
-        return "server ownership changed during authorization — sign in again"
+        return OAuthPromotionBlocked(
+            "server ownership changed during authorization — sign in again"
+        )
     if _oauth_signature_of(row) != pending.oauth_sig:
-        return "server OAuth configuration changed during authorization — sign in again"
+        return OAuthPromotionBlocked(
+            "server OAuth configuration changed during authorization — sign in again"
+        )
     return None
 
 
@@ -693,7 +1090,12 @@ async def _drive(
     # leave the UI reporting "connected" and restart the bridge with a credential the upstream
     # refuses, so treat that as an authorization failure instead of a success.
     if tokens is not None and final_status in (401, 403):
-        inner_error = inner_error or RuntimeError(
+        # Overrides, never defers (same reasoning as the promotion block below): the
+        # status line is read once headers arrive, so an exception can still surface
+        # afterwards from closing the stream. That incidental transport error would
+        # otherwise win and report the failure as unclassified, when the resource has in
+        # fact explicitly refused the token — the one verdict here that names a remedy.
+        inner_error = OAuthGrantRejected(
             f"the upstream still rejected the new OAuth token (HTTP {final_status}) — the "
             "granted scopes or resource may not match what this server requires"
         )
@@ -714,7 +1116,7 @@ async def _drive(
         oauth_metadata = getattr(provider.context, "oauth_metadata", None)
         pr_metadata = getattr(provider.context, "protected_resource_metadata", None)
 
-        def _checked_promote() -> Optional[str]:
+        def _checked_promote() -> Optional[OAuthPromotionBlocked]:
             from app.registry import service  # local import: keep module load cycle-free
 
             with service.config_write_lock():
@@ -735,14 +1137,26 @@ async def _drive(
             inner_error = exc
         else:
             if blocked is not None:
-                inner_error = inner_error or RuntimeError(blocked)
+                # Overrides, never defers: tokens landing WITH an inner_error is a
+                # tolerated outcome (the exchange stores them before the original
+                # request is retried, so a failing retry still leaves a usable grant),
+                # so `inner_error or …` would keep that incidental retry/transport
+                # error and report the failure as unclassified. A promotion block is
+                # the definitive, actionable reason the grant was discarded.
+                inner_error = blocked
             else:
                 if not pending.done_future.done():
                     pending.done_future.set_result(None)
                 return
 
     error = inner_error or RuntimeError("OAuth flow finished without returning tokens")
-    logger.info("OAuth authorization for %s failed: %s", server.id, error)
+    # WARNING, not INFO: this is the root-cause text for a failed operator-initiated
+    # sign-in, and under uvicorn's default logging (no root handler, app.* effective
+    # level WARNING) an INFO record is dropped before it reaches stderr — leaving the
+    # operator with a failure toast and no way to find out why.
+    # log_safe, not redact_secrets: this text comes from the provider, so it also needs
+    # control-character folding (no forged records) and a length bound (no drowned one).
+    logger.warning("OAuth authorization for %s failed: %s", server.id, log_safe(error))
     url_pending = not pending.url_future.done()
     if url_pending:
         # Failed during discovery/registration, before an authorization URL was produced
@@ -768,7 +1182,11 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     """Start the interactive flow for ``server`` and return the URL to send the
     operator's browser to. Raises on a discovery/registration failure or timeout."""
     _reap_stale()
-    _cancel_existing(server.id)
+    _cancel_existing(
+        server.id,
+        "a newer sign-in for this server superseded it",
+        superseded=True,
+    )
     # Snapshot the row's existence BEFORE any await: a deletion landing during the
     # client-info/token-store reads below must still read as "existed at begin", so
     # promotion blocks (_promotion_blocked) instead of recreating an orphan
