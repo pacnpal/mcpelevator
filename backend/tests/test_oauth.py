@@ -1671,44 +1671,43 @@ async def test_unexpected_callback_failure_does_not_log_a_raw_traceback(monkeypa
     assert "traceback:" in caplog.text and "OSError" in caplog.text
 
 
-async def test_cancelled_flow_wakes_the_waiting_callback_promptly(monkeypatch):
+async def test_abort_wakes_a_parked_callback_instead_of_timing_it_out():
     # Cancelling a flow (config edit, ownership transfer, disconnect, delete, or a newer
     # Authenticate click) cancels the driving task, which never resolves done_future. A
     # callback already parked there would burn its full 90s budget and then report
-    # "timed_out" for what was a deliberate cancellation — so cancellation now wakes the
+    # "timed_out" for what was a deliberate cancellation — so cancellation wakes the
     # waiter with an accurate, typed error instead.
+    #
+    # Exercised on the mechanism directly: driving a real flow here would mean setting
+    # callback_event, which is also what un-parks the flow's OWN callback_handler, so the
+    # driving task would race the cancellation to resolve the future (it wins on some
+    # interpreter/scheduler combinations — this test failed on CI's 3.14 and not locally).
     import asyncio
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    pending = oauth_flow._Pending("srv-abort-wakes-waiter-1")
+    pending.callback_event.set()  # the browser came back; complete_authorization is waiting
+    waiter = asyncio.ensure_future(
+        asyncio.wait_for(asyncio.shield(pending.done_future), timeout=90.0)
+    )
+    await asyncio.sleep(0)
 
-    class _Srv:
-        id = "srv-cancel-wakes-waiter-1"
-        command = "https://up.example/mcp"
-        args = ["streamable-http"]
-        env: dict = {}
-        oauth_client_id = None
-        oauth_client_secret = None
-        oauth_scopes = ""
+    oauth_flow._abort(pending, "superseded by a newer sign-in")
 
-    store = ServerTokenStorage(_Srv.id)
-    store.clear()
-    try:
-        await oauth_flow.begin_authorization(
-            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
-        )
-        pending = next(p for p in oauth_flow._PENDING.values() if p.server_id == _Srv.id)
-        # Park a waiter as the callback does, then cancel the flow out from under it.
-        pending.callback_event.set()
-        waiter = asyncio.ensure_future(
-            asyncio.wait_for(asyncio.shield(pending.done_future), timeout=90.0)
-        )
-        await asyncio.sleep(0)
-        oauth_flow.cancel_pending(_Srv.id)
-        # Promptly — not after the 90s budget — and with the reason it actually had.
-        with pytest.raises(oauth_flow.OAuthFlowCancelled):
-            await asyncio.wait_for(waiter, timeout=5.0)
-    finally:
-        store.clear()
+    with pytest.raises(oauth_flow.OAuthFlowCancelled):
+        await asyncio.wait_for(waiter, timeout=5.0)  # promptly, not after the 90s budget
+
+
+async def test_abort_of_an_unattended_flow_sets_no_unretrieved_exception():
+    # With no callback parked, nobody will ever retrieve an exception — and an unretrieved
+    # future exception surfaces as a spurious "Future exception was never retrieved" when
+    # it is collected. Such a flow is cancelled silently instead.
+    pending = oauth_flow._Pending("srv-abort-unattended-1")
+    assert not pending.callback_event.is_set()
+
+    oauth_flow._abort(pending, "nobody is waiting")
+
+    assert pending.done_future.cancelled()
+    assert all(p.server_id != "srv-abort-unattended-1" for p in oauth_flow._PENDING.values())
 
 
 async def test_provider_denial_retires_the_pending_flow(monkeypatch):
