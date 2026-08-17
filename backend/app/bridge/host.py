@@ -146,9 +146,10 @@ def _build_oauth_auth(oauth: dict):
     If the refresh token itself has lapsed, the upstream 401 leads here, the request
     fails, and the server goes unhealthy — the operator re-authenticates from the UI.
     """
+    from app.auth.oauth_client import SingleChannelOAuthClientProvider
     from app.auth.oauth_store import ServerTokenStorage  # local import: keeps bridge import light
 
-    from mcp.client.auth import OAuthClientProvider, TokenStorage
+    from mcp.client.auth import TokenStorage
     from mcp.shared.auth import OAuthClientMetadata
     from pydantic import AnyHttpUrl
 
@@ -204,7 +205,11 @@ def _build_oauth_auth(oauth: dict):
         response_types=["code"],
         scope=oauth.get("scopes") or None,
     )
-    provider = OAuthClientProvider(
+    # The SHARED provider, not a locally composed one: refresh sends token requests too,
+    # so it needs the same one-credential-channel rule the control plane applies to the
+    # code exchange — otherwise a sign-in would succeed and then fail at the first
+    # refresh against a Basic-registered client.
+    provider = SingleChannelOAuthClientProvider(
         server_url=url,
         client_metadata=client_metadata,
         storage=_RefreshOnlyStorage(storage),

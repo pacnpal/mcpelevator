@@ -42,6 +42,7 @@ from mcp.client.auth import OAuthClientProvider, OAuthRegistrationError, TokenSt
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 from pydantic import AnyHttpUrl
 
+from app.auth.oauth_client import SingleChannelOAuthClientProvider
 from app.auth.oauth_store import ServerTokenStorage
 from app.runners.remote import DEFAULT_TRANSPORT, canonical_transport
 from app.util import new_id
@@ -493,8 +494,11 @@ def _offline_access_default(context) -> bool:
     return OFFLINE_ACCESS in supported
 
 
-class _ScopedOAuthClientProvider(OAuthClientProvider):
+class _ScopedOAuthClientProvider(SingleChannelOAuthClientProvider):
     """``OAuthClientProvider`` that requests a refresh token and keeps the operator's scopes.
+
+    Built on ``SingleChannelOAuthClientProvider``, so no token request it sends ever
+    carries the client id in two places at once (see ``oauth_client``).
 
     The SDK runs its own "scope selection strategy" during the 401-driven handshake and
     OVERWRITES ``context.client_metadata.scope`` from the WWW-Authenticate header / the

@@ -811,6 +811,171 @@ async def test_stored_cimd_identity_is_not_reused_as_seed(monkeypatch):
         oauth_flow._PROBE_CACHE.clear()
 
 
+def test_basic_auth_token_request_sends_the_client_id_once():
+    # RFC 6749 §2.3: a client MUST NOT use more than one authentication method per request.
+    # The SDK breaks that for a client_secret_basic registration — it builds the body with
+    # client_id in it, THEN adds the Basic header and strips only client_secret — so the
+    # client id goes out through both channels and a server enforcing §2.3 refuses:
+    #   {"error":"invalid_request",
+    #    "error_description":"Client must not use multiple authentication methods"}
+    # That is exactly what Cloudflare returns, and which auth method we get is the
+    # authorization server's choice at registration, not ours.
+    from app.auth.oauth_client import strip_duplicate_client_id
+
+    # Built at runtime: a credential-shaped literal reads the same to a secret scanner
+    # whether it is real or not, and these values are pure filler — the assertions are
+    # about WHICH CHANNEL carries the client id, never about the bytes.
+    basic = "Basic " + "not-a-real-credential"
+    bearer = "Bearer " + "not-a-real-credential"
+
+    duplicated = httpx.Request(
+        "POST",
+        "https://as.example/token",
+        headers={
+            "Authorization": basic,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        content="grant_type=authorization_code&code=abc&client_id=dcr-client&code_verifier=v",
+    )
+    fixed = strip_duplicate_client_id(duplicated)
+    body = fixed.content.decode()
+    assert "client_id=" not in body
+    # ...and nothing else is disturbed: the grant still carries everything it needs, and
+    # the header — where the client id now lives, once — is untouched.
+    assert "grant_type=authorization_code" in body and "code=abc" in body
+    assert "code_verifier=v" in body
+    assert fixed.headers["Authorization"] == basic
+
+
+def test_single_channel_rule_leaves_every_other_request_alone():
+    # The mixin sits in front of EVERY request the SDK emits — discovery, registration,
+    # the exchange, refresh — so it has to be inert on all of them but the one broken
+    # shape. A client_secret_post client authenticates in the body by design: stripping
+    # client_id there would break the very method that has no duplication problem.
+    from app.auth.oauth_client import strip_duplicate_client_id
+
+    form = "application/x-www-form-urlencoded"
+    basic = "Basic " + "not-a-real-credential"
+    bearer = "Bearer " + "not-a-real-credential"
+    untouched = [
+        # client_secret_post: credentials in the body, no Basic header — one channel already.
+        httpx.Request(
+            "POST",
+            "https://as.example/token",
+            headers={"Content-Type": form},
+            content="grant_type=refresh_token&client_id=c&client_secret=s",
+        ),
+        # Bearer is a RESOURCE credential, not client authentication.
+        httpx.Request(
+            "POST",
+            "https://as.example/token",
+            headers={"Authorization": bearer, "Content-Type": form},
+            content="grant_type=refresh_token&client_id=c",
+        ),
+        # Basic, but a JSON body (registration) — not a form to rewrite.
+        httpx.Request(
+            "POST",
+            "https://as.example/register",
+            headers={"Authorization": basic, "Content-Type": "application/json"},
+            content=b'{"client_id": "c"}',
+        ),
+        # Basic with nothing duplicated.
+        httpx.Request(
+            "POST",
+            "https://as.example/token",
+            headers={"Authorization": basic, "Content-Type": form},
+            content="grant_type=refresh_token",
+        ),
+    ]
+    for request in untouched:
+        assert strip_duplicate_client_id(request).content == request.content, request.url
+
+
+async def test_aborted_request_does_not_strand_the_sdk_lock():
+    # The mixin DELEGATES to the SDK's generator, so it has to forward closure as well as
+    # values. The SDK holds ``context.lock`` across every yield of its flow, so when httpx
+    # aborts a request mid-send — a transport error, or cancellation — an inner generator
+    # left suspended keeps that lock until async-generator finalization. On the bridge's
+    # long-lived provider that deadlocks every later request: one transient network blip
+    # wedging the server for good.
+    import asyncio
+
+    from app.auth.oauth_client import SingleChannelAuthMixin
+
+    class _LockingFlow:
+        def __init__(self):
+            self.lock = asyncio.Lock()
+
+        async def async_auth_flow(self, request):
+            async with self.lock:  # exactly what OAuthClientProvider does
+                yield request
+                yield request
+
+    class _Wrapped(SingleChannelAuthMixin, _LockingFlow):
+        pass
+
+    provider = _Wrapped()
+    flow = provider.async_auth_flow(httpx.Request("GET", "https://up.example/mcp"))
+    await anext(flow)  # first request is out with httpx
+    assert provider.lock.locked()
+    await flow.aclose()  # ...which then aborts
+    assert not provider.lock.locked()
+
+    # The ordinary path still runs to completion and releases just the same.
+    flow = provider.async_auth_flow(httpx.Request("GET", "https://up.example/mcp"))
+    async for _ in flow:
+        pass
+    assert not provider.lock.locked()
+
+
+async def test_a_basic_auth_registration_is_still_reused(monkeypatch):
+    # The one-channel rule is applied at the REQUEST, so a stored client_secret_basic
+    # registration is usable as it stands. That's the point of fixing it there rather than
+    # asking DCR for client_secret_post: RFC 7591 §3.2.2 lets a server reject metadata it
+    # cannot honour, so demanding an auth method would turn a Basic-only provider's broken
+    # exchange into a broken REGISTRATION — and would force every already-registered
+    # instance through a needless re-registration.
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    callback = "http://127.0.0.1:8080/api/oauth/callback"
+    seeds: list = []
+    real_store = oauth_flow._MemoryTokenStorage
+
+    class _SpyStore(real_store):
+        def __init__(self, *args, **kwargs):
+            seeds.append(kwargs.get("client_info"))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(oauth_flow, "_MemoryTokenStorage", _SpyStore)
+
+    class _Srv:
+        id = "srv-basic-registration-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await store.set_client_info(
+            OAuthClientInformationFull(
+                client_id="dcr-client-basic",
+                client_secret="stored-secret",
+                redirect_uris=[callback],
+                token_endpoint_auth_method="client_secret_basic",
+            )
+        )
+        await oauth_flow.begin_authorization(_Srv, callback_url=callback)
+        assert getattr(seeds[-1], "client_id", None) == "dcr-client-basic"
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+    finally:
+        store.clear()
+
+
 async def test_probe_verdict_is_cached_across_sign_ins(monkeypatch):
     # Every server on an instance shares ONE metadata URL, so consecutive sign-ins
     # (several servers, or a re-auth) reuse the conclusive verdict instead of
