@@ -88,6 +88,71 @@ class OAuthBeginError(RuntimeError):
         self.status_code = status_code
 
 
+# Keys whose VALUES must never reach a log line or an operator-facing message. Our own
+# error strings are safe by construction, but a third-party one is not: the MCP SDK
+# embeds the RAW provider response body in its error text (``OAuthTokenError`` carries
+# the token-endpoint body, ``OAuthRegistrationError`` the registration body — which
+# contains a freshly issued ``client_secret``). Those messages are now surfaced by
+# design (WARNING logs, and the 502 detail from ``_classify_begin_error``), so they are
+# scrubbed on the way out. Values are replaced, keys kept: the operator still sees the
+# shape of the failure, just not the credential.
+_SECRET_KEYS = (
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "client_secret",
+    "code_verifier",
+    "code",
+    "password",
+)
+# key [closing-quote] ( = or : ) [opening-quote] VALUE [same-quote]. The optional quote
+# after the key is what lets this match JSON (``"client_secret": "x"``) as well as query
+# and form shapes (``client_secret=x``). ``\b`` before the key means a name that merely
+# ENDS in one of these (status_code, error_code) is left alone — ``_`` is a word
+# character, so there is no boundary there — and requiring the separator right after the
+# key spares names that merely START with one (code_challenge, authorization_endpoint are
+# not credentials and stay readable).
+_SECRET_RE = re.compile(
+    r"(?i)\b(" + "|".join(_SECRET_KEYS) + r")([\"']?\s*[=:]\s*)([\"']?)([^\"'\s,&})\]]+)\3"
+)
+# ``Authorization: Bearer <token>`` needs its own rule: the credential sits AFTER a scheme
+# word, so the whitespace-terminated pattern above would redact "Bearer" and leave the
+# token itself in the clear. Take everything to the closing quote or end of line.
+_AUTH_HEADER_RE = re.compile(r"(?i)\b(authorization)([\"']?\s*[=:]\s*)([\"']?)([^\"'\r\n]+)\3")
+
+
+def redact_secrets(value: object) -> str:
+    """``str(value)`` with the values of credential-bearing keys replaced.
+
+    Applied wherever an error that may carry third-party text becomes visible — a log
+    record or an API error detail — so making OAuth failures debuggable never turns into
+    writing tokens and client secrets to the console. Parsing (e.g.
+    ``_registration_status``) still reads the RAW exception; only the surfaced copy is
+    scrubbed."""
+    text = _AUTH_HEADER_RE.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}<redacted>{m.group(3)}", str(value)
+    )
+    return _SECRET_RE.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}<redacted>{m.group(3)}", text
+    )
+
+
+# One log record per failure, however long or hostile the upstream text: newlines and
+# control characters would let externally-supplied text forge additional log lines
+# (CWE-117), and an unbounded body would drown the record it belongs to.
+_LOG_TEXT_LIMIT = 500
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def log_safe(value: object, *, limit: int = _LOG_TEXT_LIMIT) -> str:
+    """``redact_secrets`` plus log-injection defence: credentials scrubbed, control
+    characters folded to spaces, and the result truncated. Use this — not
+    ``redact_secrets`` alone — for anything that reaches a log record and did not
+    originate here."""
+    text = _CONTROL_CHARS.sub(" ", redact_secrets(value)).strip()
+    return text if len(text) <= limit else f"{text[:limit]}… (truncated)"
+
+
 class OAuthGrantRejected(RuntimeError):
     """The grant completed, but the UPSTREAM refused the token it produced (the retried
     MCP request came back 401/403). Distinct from a token-exchange failure: the provider
@@ -145,7 +210,9 @@ def _classify_begin_error(exc: BaseException) -> OAuthBeginError:
             "with the provider and set an explicit Client ID to skip registration.",
             status_code=429,
         )
-    return OAuthBeginError(f"could not start OAuth: {exc}", status_code=502)
+    # The provider's raw error body can ride along in ``exc`` (see ``redact_secrets``) and
+    # this message becomes an API error detail the SPA displays — scrub it too.
+    return OAuthBeginError(f"could not start OAuth: {redact_secrets(exc)}", status_code=502)
 
 
 def _merge_scopes(*scope_strings: Optional[str]) -> Optional[str]:
@@ -751,7 +818,13 @@ async def _drive(
             inner_error = exc
         else:
             if blocked is not None:
-                inner_error = inner_error or OAuthPromotionBlocked(blocked)
+                # Overrides, never defers: tokens landing WITH an inner_error is a
+                # tolerated outcome (the exchange stores them before the original
+                # request is retried, so a failing retry still leaves a usable grant),
+                # so `inner_error or …` would keep that incidental retry/transport
+                # error and report the failure as unclassified. A promotion block is
+                # the definitive, actionable reason the grant was discarded.
+                inner_error = OAuthPromotionBlocked(blocked)
             else:
                 if not pending.done_future.done():
                     pending.done_future.set_result(None)
@@ -762,7 +835,7 @@ async def _drive(
     # sign-in, and under uvicorn's default logging (no root handler, app.* effective
     # level WARNING) an INFO record is dropped before it reaches stderr — leaving the
     # operator with a failure toast and no way to find out why.
-    logger.warning("OAuth authorization for %s failed: %s", server.id, error)
+    logger.warning("OAuth authorization for %s failed: %s", server.id, redact_secrets(error))
     url_pending = not pending.url_future.done()
     if url_pending:
         # Failed during discovery/registration, before an authorization URL was produced

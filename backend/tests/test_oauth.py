@@ -1656,6 +1656,150 @@ def test_callback_for_vanished_server_redirects_with_server_deleted(monkeypatch)
         assert r.headers["location"] == "/?oauth=error&reason=server_deleted"
 
 
+def test_redact_secrets_scrubs_credential_values():
+    # Making OAuth failures visible must not turn into writing credentials to the
+    # console: the MCP SDK embeds the RAW provider response body in its error text, and a
+    # registration body carries a freshly issued client_secret. Values go, keys stay, so
+    # the operator still sees the shape of the failure.
+    sdk_error = (
+        'Registration failed: 201 {"client_id": "abc", "client_secret": "sup3r-s3cret", '
+        '"grant_types": ["authorization_code"]}'
+    )
+    out = oauth_flow.redact_secrets(sdk_error)
+    assert "sup3r-s3cret" not in out
+    assert '"client_secret": "<redacted>"' in out
+    assert '"client_id": "abc"' in out  # non-secret context preserved
+    assert "Registration failed: 201" in out  # the diagnosable part survives
+
+    token_body = "Token exchange failed (400): access_token=AT-live&refresh_token=RT-live&scope=read"
+    out = oauth_flow.redact_secrets(token_body)
+    assert "AT-live" not in out and "RT-live" not in out
+    assert "access_token=<redacted>" in out and "scope=read" in out
+
+    # A name that merely ENDS in a secret key keeps its value — status_code/error_code
+    # are diagnostics, not credentials (no word boundary before "code" after "_").
+    assert "status_code=401" in oauth_flow.redact_secrets("boom status_code=401")
+    assert "error_code=invalid_grant" in oauth_flow.redact_secrets("error_code=invalid_grant")
+    # ...while a bare authorization code IS scrubbed.
+    assert "4ebff81" not in oauth_flow.redact_secrets("callback code=4ebff81:mqAB5wc")
+
+
+async def test_promotion_block_overrides_an_incidental_retry_error(monkeypatch):
+    # Tokens landing alongside an inner_error is a TOLERATED outcome: the exchange stores
+    # them before the original request is retried, so a failing retry still leaves a
+    # usable grant. When promotion is then blocked, the definitive reason must win — with
+    # `inner_error or …` the incidental transport error survived and the operator was told
+    # "unexpected_error" instead of the actionable "config changed, sign in again".
+    class _TokensThenRetryFails(_FakeAsyncClient):
+        def stream(self, _method, _url, **_kwargs):
+            handshake = self._handshake
+
+            class _Ctx:
+                async def __aenter__(_self):
+                    await handshake()  # the grant completes; tokens are in the ephemeral store
+                    raise httpx.ConnectError("connection dropped on the retried request")
+
+                async def __aexit__(_self, *exc):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _TokensThenRetryFails)
+    monkeypatch.setattr(
+        oauth_flow,
+        "_promotion_blocked",
+        lambda _pending: "server OAuth configuration changed during authorization",
+    )
+
+    class _Srv:
+        id = "srv-block-overrides-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+        )
+        with pytest.raises(oauth_flow.OAuthPromotionBlocked):
+            await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+        assert store.status()["authenticated"] is False  # nothing promoted
+    finally:
+        store.clear()
+
+
+def test_log_safe_blocks_log_injection_and_bounds_length():
+    # This callback is public, so externally-supplied text must not be able to forge log
+    # records (CWE-117) or drown the record it belongs to.
+    forged = "denied\nWARNING:app.api.auth:OAuth sign-in succeeded for srv-attacker"
+    out = oauth_flow.log_safe(forged)
+    assert "\n" not in out and "\r" not in out
+    assert "denied WARNING:app.api.auth:OAuth sign-in succeeded" in out  # folded, not dropped
+    assert oauth_flow.log_safe("x\x00\x1b[31my") == "x  [31my"  # NULs and escapes neutralized
+
+    long_out = oauth_flow.log_safe("A" * 5000)
+    assert len(long_out) < 600 and long_out.endswith("… (truncated)")
+    # Redaction still applies through log_safe.
+    assert "leaked" not in oauth_flow.log_safe('{"client_secret": "leaked"}')
+
+
+def test_callback_error_detail_needs_a_correlated_state(caplog):
+    # An anonymous caller can reach this public endpoint, so its text is only echoed when
+    # the state matches a sign-in THIS instance started. Otherwise the log records the
+    # event without the attacker-controlled detail.
+    import logging
+
+    with TestClient(app) as c, caplog.at_level(logging.WARNING, logger="app.api.auth"):
+        c.get(
+            "/api/oauth/callback",
+            params={
+                "error": "access_denied",
+                "error_description": "PAYLOAD-SHOULD-NOT-APPEAR",
+                "state": "not-a-real-pending-state",
+            },
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+    logged = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "PAYLOAD-SHOULD-NOT-APPEAR" not in logged
+    assert "unknown or expired state" in logged
+
+
+def test_callback_error_detail_is_logged_for_a_real_pending_flow(monkeypatch, caplog):
+    # The flip side: a genuine provider denial echoes our state, so the operator DOES get
+    # the provider's reason — that's the whole point of the WARNING.
+    import logging
+
+    monkeypatch.setattr(oauth_flow, "pending_server_id", lambda _state: "srv-real")
+    with TestClient(app) as c, caplog.at_level(logging.WARNING, logger="app.api.auth"):
+        c.get(
+            "/api/oauth/callback",
+            params={
+                "error": "access_denied",
+                "error_description": "user refused the consent screen",
+                "state": "correlated",
+            },
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+    assert any("user refused the consent screen" in r.getMessage() for r in caplog.records)
+
+
+def test_begin_error_detail_is_redacted(monkeypatch):
+    # The 502 detail from a failed begin reaches the SPA, so it gets the same scrubbing
+    # as the logs — a provider body echoed into an API response is no safer than one
+    # echoed into a log line.
+    exc = RuntimeError('upstream said {"client_secret": "leaked-value"}')
+    err = oauth_flow._classify_begin_error(exc)
+    assert "leaked-value" not in str(err)
+    assert "<redacted>" in str(err)
+
+
 def test_oauth_failure_reasons_log_at_warning(caplog):
     # Regression: these lines are the ONLY record of why a sign-in failed, and under
     # uvicorn's default logging config the root logger has no handler while app.* sits

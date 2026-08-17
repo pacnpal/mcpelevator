@@ -129,7 +129,25 @@ async def oauth_callback(
         # the ONLY record of why. Under uvicorn's default logging the root logger has no
         # handler and app.* sits at WARNING, so an INFO line here is discarded outright —
         # the operator would be left with a toast and nothing to debug from.
-        logger.warning("OAuth callback returned an error: %r", error_description or error)
+        #
+        # But this endpoint is PUBLIC, so the detail is only echoed once the ``state``
+        # correlates with an authorization THIS instance started (the same anchor the
+        # success path uses). A real provider denial always echoes that state (RFC 6749
+        # §4.1.2.1); an anonymous caller replaying ``?error=…&error_description=…``
+        # cannot forge one, so it can never write its own text into the log. Even when
+        # correlated the text is sanitized and bounded (``log_safe``) — the upstream is
+        # trusted to be the upstream, not to be well-behaved.
+        if state and oauth_flow.pending_server_id(state) is not None:
+            logger.warning(
+                "OAuth callback returned an error: %s",
+                oauth_flow.log_safe(error_description or error),
+            )
+        else:
+            logger.warning(
+                "OAuth callback reported an error for an unknown or expired state; "
+                "ignoring the unsolicited callback (detail withheld: it is not tied to "
+                "any sign-in this instance started)"
+            )
         return _oauth_error(_REASON_PROVIDER_DENIED)
     if not code or not state:
         logger.warning("OAuth callback arrived without a code/state pair")
@@ -165,24 +183,29 @@ async def oauth_callback(
         # A token WAS issued; the resource server refused it. Its own code, because the
         # remedy is specific: adjust the server's scopes (or the upstream URL the token
         # is bound to), not retry the sign-in.
-        logger.warning("OAuth sign-in produced a token the upstream rejected: %s", exc)
+        logger.warning(
+            "OAuth sign-in produced a token the upstream rejected: %s",
+            oauth_flow.log_safe(exc),
+        )
         if stopped:
             sup.nudge()
         return _oauth_error(_REASON_TOKEN_REFUSED)
     except oauth_flow.OAuthPromotionBlocked as exc:
-        logger.warning("OAuth grant discarded: %s", exc)
+        logger.warning("OAuth grant discarded: %s", oauth_flow.log_safe(exc))
         if stopped:
             sup.nudge()
         return _oauth_error(_REASON_CONFIG_CHANGED)
     except OAuthTokenError as exc:
         # The authorization server refused the code itself (bad redirect_uri, expired or
         # replayed code, PKCE mismatch, client auth rejected).
-        logger.warning("OAuth token exchange failed: %r", exc)
+        logger.warning("OAuth token exchange failed: %s", oauth_flow.log_safe(exc))
         if stopped:
             sup.nudge()
         return _oauth_error(_REASON_EXCHANGE_FAILED)
     except (TimeoutError, asyncio.TimeoutError) as exc:
-        logger.warning("OAuth token exchange did not finish in time: %r", exc)
+        logger.warning(
+            "OAuth token exchange did not finish in time: %s", oauth_flow.log_safe(exc)
+        )
         if stopped:
             sup.nudge()
         return _oauth_error(_REASON_TIMEOUT)
@@ -193,7 +216,9 @@ async def oauth_callback(
         # operator on an unstyled 500 with the bridge still stopped. Instead they land
         # back in the UI with an honestly UNCLASSIFIED code (never one claiming a phase
         # we didn't identify), the bridge is restored, and the traceback goes to the log.
-        logger.warning("OAuth callback failed unexpectedly: %r", exc, exc_info=True)
+        logger.warning(
+            "OAuth callback failed unexpectedly: %s", oauth_flow.log_safe(exc), exc_info=True
+        )
         if stopped:
             sup.nudge()  # failed re-auth; restart with the preserved old credentials
         return _oauth_error(_REASON_UNEXPECTED)
