@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import io
 import logging
 import re
 import time
@@ -143,18 +144,51 @@ _SEPARATOR = r"(?P<sep>[\"']?[ \t\r\n]*+[=:][ \t\r\n]*+)"
 # py/polynomial-redos), while a fixed bound like ``{0,4}`` is linear but WRONG, since JSON
 # permits arbitrary whitespace and a provider writing five spaces would sail past the
 # redaction entirely.
+
+
+def _escapable(literal: str) -> str:
+    """Pattern source matching ``literal`` spelled plainly OR with any of its characters
+    written as a JSON ``\\uXXXX`` escape.
+
+    JSON permits escapes in MEMBER NAMES, and the SDK embeds a provider's response body
+    verbatim, so a body answering with ``{"\\u0061ccess_token": "LIVE"}`` is well-formed
+    JSON that a literal-spelling pattern cannot see — it read as a non-secret field and
+    the token went to the log untouched. Matching the escapes here rather than decoding
+    the text first is what preserves the offsets the scanner splices on."""
+    alternatives = []
+    for char in literal:
+        forms = [re.escape(char)]
+        if char.isalpha():  # either case is the same letter to a case-insensitive match
+            forms += [rf"\\u00{ord(char.lower()):02x}", rf"\\u00{ord(char.upper()):02x}"]
+        else:
+            forms.append(rf"\\u{ord(char):04x}")
+        alternatives.append("(?:" + "|".join(forms) + ")")
+    return "".join(alternatives)
+
+
+# ``(?<!\w)`` rather than ``\b``: it means the same thing for a plainly spelled key, but
+# an escaped one STARTS with a backslash, and ``\b`` between a preceding ``"`` and that
+# ``\`` does not exist (neither is a word character) — so the whole-word keys would have
+# been exempt from the escape handling above. The lookbehind asks the question that
+# actually matters, "is this the tail of a longer name", and still spares status_code and
+# error_code (both preceded by ``_``, escaped or not).
+_NOT_AFTER_WORD = r"(?<![0-9A-Za-z_])"
 _SECRET_KEY_RE = re.compile(
     "(?i)(?P<key>"
-    + "|".join(_SECRET_KEYS_ANYWHERE)
-    + r"|\b(?:"
-    + "|".join(_SECRET_KEYS_WHOLE)
-    + r"))"
+    + "|".join(_escapable(key) for key in _SECRET_KEYS_ANYWHERE)
+    + "|"
+    + _NOT_AFTER_WORD
+    + "(?:"
+    + "|".join(_escapable(key) for key in _SECRET_KEYS_WHOLE)
+    + "))"
     + _SEPARATOR
 )
 # ``Authorization: Bearer <token>`` needs its own rule: the credential sits AFTER a scheme
 # word, so a whitespace-terminated value would redact "Bearer" and leave the token itself
 # in the clear. Its unquoted form therefore runs to end of line.
-_AUTH_KEY_RE = re.compile(r"(?i)\b(?P<key>authorization)" + _SEPARATOR)
+_AUTH_KEY_RE = re.compile(
+    "(?i)" + _NOT_AFTER_WORD + "(?P<key>" + _escapable("authorization") + ")" + _SEPARATOR
+)
 _BARE_TERMINATORS = " \t\r\n,&)}]"
 _CONTAINER_CLOSERS = {"[": "]", "{": "}"}
 
@@ -245,23 +279,35 @@ def redact_secrets(value: object) -> str:
     One left-to-right pass: each key match hands off to ``_value_end``, and the cursor
     jumps past whatever that value turned out to be. Total work is linear in the length
     of the text — a key inside an already-redacted value is skipped rather than rescanned,
-    which is what keeps hostile input (repeated unterminated containers) cheap."""
+    which is what keeps hostile input (repeated unterminated containers) cheap.
+
+    Output is WRITTEN incrementally rather than collected. Accumulating a slice and a
+    replacement per match into a list made a body densely packed with ``access_token=x``
+    cost far more than the body itself (1 MB in, 7.2 MB peak), because the per-object
+    overhead of ~140k short strings dwarfs their contents — and the party choosing that
+    body is the remote one, in the single process serving all API and proxy traffic. A
+    buffer holds one growing string instead."""
     text = str(value)
-    pieces: list[str] = []
+    out = io.StringIO()
     cursor = 0
     for key_match in _find_secret_keys(text):
         if key_match.start() < cursor:
             continue  # this key sat inside a value we already masked
         value_start = key_match.end()
-        is_auth_header = key_match.group("key").lower() == "authorization"
+        # Which PATTERN matched, not what the text says: an escaped spelling of the key
+        # won't compare equal to "authorization", and only this pattern's values run to
+        # end of line.
+        is_auth_header = key_match.re is _AUTH_KEY_RE
         value_stop = _value_end(text, value_start, to_end_of_line=is_auth_header)
         if value_stop <= value_start:
             continue  # nothing to mask (e.g. the key ended the string)
-        pieces.append(text[cursor:value_start])
-        pieces.append(_redacted_value(text, value_start, value_stop))
+        out.write(text[cursor:value_start])
+        out.write(_redacted_value(text, value_start, value_stop))
         cursor = value_stop
-    pieces.append(text[cursor:])
-    return "".join(pieces)
+    if cursor == 0:
+        return text  # nothing matched — hand back the original rather than copying it
+    out.write(text[cursor:])
+    return out.getvalue()
 
 
 def _find_secret_keys(text: str):
@@ -327,22 +373,32 @@ class OAuthFlowCancelled(RuntimeError):
     its full budget, and the operator is told the exchange "timed out" when it was
     deliberately superseded.
 
-    ``superseded`` separates "this attempt was replaced or ran out of time" from "the
-    configuration it belonged to changed", because those are different things to tell an
-    operator: the first means simply sign in again, the second means check what changed.
-    The flag stays a plain boolean so the reason-code vocabulary lives entirely in the
-    API layer that owns it."""
+    The causes are separated because they ask different things of an operator:
+    ``superseded`` means the attempt was replaced or ran out of time (just sign in
+    again), ``deleted`` means the server itself is gone (there is nothing left to sign
+    in to), and neither means the configuration it belonged to changed (look at what
+    changed first). They stay plain booleans so the reason-code vocabulary lives entirely
+    in the API layer that owns it."""
 
-    def __init__(self, message: str, *, superseded: bool = False):
+    def __init__(self, message: str, *, superseded: bool = False, deleted: bool = False):
         super().__init__(message)
         self.superseded = superseded
+        self.deleted = deleted
 
 
 class OAuthPromotionBlocked(RuntimeError):
     """The grant was obtained but must NOT become this server's credential: the row was
     deleted, its owner changed, or its OAuth configuration changed while the operator was
     signing in (see ``_promotion_blocked``). Nothing is wrong with the grant — it just
-    belongs to a configuration that no longer exists, so the remedy is to sign in again."""
+    belongs to a configuration that no longer exists, so the remedy is to sign in again.
+
+    ``deleted`` carries the one cause with a different remedy: when the row is gone there
+    is no configuration to inspect and nothing to retry, so telling the operator to check
+    what changed would send them after a server that no longer exists."""
+
+    def __init__(self, message: str, *, deleted: bool = False):
+        super().__init__(message)
+        self.deleted = deleted
 
 
 def _registration_status(exc: OAuthRegistrationError) -> Optional[int]:
@@ -549,7 +605,9 @@ def _forget(pending: _Pending) -> None:
         pending.task.cancel()
 
 
-def _abort(pending: _Pending, why: str, *, superseded: bool = False) -> None:
+def _abort(
+    pending: _Pending, why: str, *, superseded: bool = False, deleted: bool = False
+) -> None:
     """Forget a flow that something EXTERNAL ended, waking anyone parked on it.
 
     ``_forget`` alone cancels the driving task, which never resolves ``done_future`` —
@@ -560,7 +618,9 @@ def _abort(pending: _Pending, why: str, *, superseded: bool = False) -> None:
     an unattended flow is cancelled silently instead."""
     if not pending.done_future.done():
         if pending.callback_event.is_set():
-            pending.done_future.set_exception(OAuthFlowCancelled(why, superseded=superseded))
+            pending.done_future.set_exception(
+                OAuthFlowCancelled(why, superseded=superseded, deleted=deleted)
+            )
         else:
             pending.done_future.cancel()
     _forget(pending)
@@ -578,14 +638,16 @@ def _reap_stale() -> None:
             )
 
 
-def _cancel_existing(server_id: str, why: str, *, superseded: bool) -> None:
+def _cancel_existing(
+    server_id: str, why: str, *, superseded: bool, deleted: bool = False
+) -> None:
     """Only one authorization can be in flight per server — a second click supersedes
     the first (its state/PKCE would otherwise dangle until it reaps). Callers say WHY,
     because "you clicked Authenticate again" and "this server was reconfigured" need
     different things from the operator."""
     for pending in list(_PENDING.values()):
         if pending.server_id == server_id:
-            _abort(pending, why, superseded=superseded)
+            _abort(pending, why, superseded=superseded, deleted=deleted)
 
 
 def pending_server_id(state: str) -> Optional[str]:
@@ -597,19 +659,22 @@ def pending_server_id(state: str) -> Optional[str]:
     return pending.server_id if pending is not None else None
 
 
-def cancel_pending(server_id: str, *, superseded: bool = False) -> None:
+def cancel_pending(
+    server_id: str, *, superseded: bool = False, deleted: bool = False
+) -> None:
     """Cancel any in-flight authorization for a server. Called when its OAuth config is
     edited: a background flow started against the OLD upstream/scopes/client must not
     complete and write credentials for the wrong resource back under this id. Also used
     when a provider denial ends a flow — ``superseded=True`` there, since nothing about
-    the server's configuration changed."""
-    _cancel_existing(
-        server_id,
-        "the sign-in ended before it could complete"
-        if superseded
-        else "the server's OAuth configuration or ownership changed during the sign-in",
-        superseded=superseded,
-    )
+    the server's configuration changed — and by the DELETE path, where ``deleted=True``
+    keeps the operator from being sent to inspect a server that no longer exists."""
+    if deleted:
+        why = "the server was deleted during the sign-in"
+    elif superseded:
+        why = "the sign-in ended before it could complete"
+    else:
+        why = "the server's OAuth configuration or ownership changed during the sign-in"
+    _cancel_existing(server_id, why, superseded=superseded, deleted=deleted)
 
 
 def _repair_authorization_url(url: str) -> str:
@@ -911,9 +976,12 @@ def _oauth_signature_of(server) -> tuple:
     )
 
 
-def _promotion_blocked(pending: _Pending) -> Optional[str]:
+def _promotion_blocked(pending: _Pending) -> Optional[OAuthPromotionBlocked]:
     """Why this flow's grant must NOT be promoted (None = go ahead), judged against
-    the committed row at promotion time. Registered pending flows are cancelled by
+    the committed row at promotion time. Returns the typed exception rather than a bare
+    string so the DELETION cause survives to the callback: a deleted row and a changed
+    config need different things said to the operator, and re-deriving that by matching
+    on message text would be a rule in two places. Registered pending flows are cancelled by
     the delete/reassign/config-edit paths, but a flow still in its pre-registration
     awaits escapes all of them — these checks are the backstop:
 
@@ -930,12 +998,18 @@ def _promotion_blocked(pending: _Pending) -> Optional[str]:
     row = _server_row(pending.server_id)
     if row is None:
         if pending.row_existed:
-            return "server was deleted during authorization"
+            return OAuthPromotionBlocked(
+                "server was deleted during authorization", deleted=True
+            )
         return None
     if row.owner_id != pending.owner_id:
-        return "server ownership changed during authorization — sign in again"
+        return OAuthPromotionBlocked(
+            "server ownership changed during authorization — sign in again"
+        )
     if _oauth_signature_of(row) != pending.oauth_sig:
-        return "server OAuth configuration changed during authorization — sign in again"
+        return OAuthPromotionBlocked(
+            "server OAuth configuration changed during authorization — sign in again"
+        )
     return None
 
 
@@ -1010,7 +1084,7 @@ async def _drive(
         oauth_metadata = getattr(provider.context, "oauth_metadata", None)
         pr_metadata = getattr(provider.context, "protected_resource_metadata", None)
 
-        def _checked_promote() -> Optional[str]:
+        def _checked_promote() -> Optional[OAuthPromotionBlocked]:
             from app.registry import service  # local import: keep module load cycle-free
 
             with service.config_write_lock():
@@ -1037,7 +1111,7 @@ async def _drive(
                 # so `inner_error or …` would keep that incidental retry/transport
                 # error and report the failure as unclassified. A promotion block is
                 # the definitive, actionable reason the grant was discarded.
-                inner_error = OAuthPromotionBlocked(blocked)
+                inner_error = blocked
             else:
                 if not pending.done_future.done():
                     pending.done_future.set_result(None)

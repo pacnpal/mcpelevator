@@ -1633,6 +1633,11 @@ def test_provider_error_codes_are_classified_not_all_called_denials():
         # is on the code, not on its typography.
         ("  Temporarily_Unavailable  ", "provider_unavailable"),
         ("ACCESS_DENIED", "provider_denied"),
+        # OIDC (Core §3.1.2.6) asks for something from the PERSON, not a different
+        # request: reading these as "your configuration is wrong" sends the operator to
+        # edit a server that is fine, when the fix is to sign in and finish the prompt.
+        ("interaction_required", "provider_denied"),
+        ("account_selection_required", "provider_denied"),
     ]
     for code, reason in cases:
         assert auth_api._provider_error_reason(code) == reason, code
@@ -1664,6 +1669,20 @@ def test_callback_maps_each_flow_failure_to_its_own_reason(monkeypatch):
     cases = [
         (oauth_flow.OAuthGrantRejected("upstream said 401"), "upstream_refused_token"),
         (oauth_flow.OAuthPromotionBlocked("config changed mid-flow"), "config_changed"),
+        # A DELETED server is not a reconfigured one: there is no configuration left to
+        # inspect and nothing to retry, so "config_changed" would send the operator after
+        # a server that no longer exists. Both paths that can report it are covered — the
+        # promotion backstop and the delete route's cancellation of a waiting flow.
+        (
+            oauth_flow.OAuthPromotionBlocked("server was deleted", deleted=True),
+            "server_deleted",
+        ),
+        (
+            oauth_flow.OAuthFlowCancelled("server was deleted", deleted=True),
+            "server_deleted",
+        ),
+        (oauth_flow.OAuthFlowCancelled("replaced", superseded=True), "expired_or_superseded"),
+        (oauth_flow.OAuthFlowCancelled("reconfigured"), "config_changed"),
         (OAuthTokenError("Token exchange failed (400)"), "token_exchange_failed"),
         (TimeoutError("exchange overran"), "timed_out"),
         # httpx has its OWN timeout hierarchy, which is not a builtin TimeoutError; an
@@ -1777,6 +1796,25 @@ async def test_cancellation_cause_picks_the_reason_the_operator_needs():
 
     assert (await _via_cancel_pending("srv-cause-denial", superseded=True)).superseded is True
     assert (await _via_cancel_pending("srv-cause-config-edit")).superseded is False
+
+    # Deletion is its own cause. It rode in as the default (neither superseded nor
+    # deleted) and so reported "config changed" — telling the operator to go inspect the
+    # configuration of a server that had just been removed. The DELETE route passes
+    # deleted=True; the message says so too, since it is what lands in the log.
+    gone = await _via_cancel_pending("srv-cause-deleted", deleted=True)
+    assert gone.deleted is True and gone.superseded is False
+    assert "deleted" in str(gone)
+
+    # The promotion backstop reaches the same verdict independently — it catches a flow
+    # deleted while still in its pre-registration awaits, where there was nothing in
+    # _PENDING for the DELETE route to cancel. It returns the typed exception so the
+    # cause survives instead of being re-derived from message text.
+    orphan = oauth_flow._Pending("srv-never-persisted-1", row_existed=True)
+    blocked = oauth_flow._promotion_blocked(orphan)
+    assert isinstance(blocked, oauth_flow.OAuthPromotionBlocked)
+    assert blocked.deleted is True
+    # A row that never existed at all (unpersisted test servers) is exempt, not deleted.
+    assert oauth_flow._promotion_blocked(oauth_flow._Pending("srv-never-persisted-2")) is None
 
 
 async def test_abort_of_an_unattended_flow_sets_no_unretrieved_exception():
@@ -1969,6 +2007,55 @@ def test_redact_secrets_covers_vendor_prefixed_credential_names():
     assert "https://as.example/reg/1" in readable
 
 
+def test_redact_secrets_sees_json_escaped_key_names():
+    # JSON permits \uXXXX escapes in MEMBER NAMES, and the SDK embeds a provider's
+    # response body verbatim, so `{"access_token": "..."}` is well-formed JSON that
+    # a literal-spelling pattern reads as a harmless field — and the token went to the
+    # log untouched. A provider that spells its keys this way is unusual, but "unusual
+    # provider output" is the entire input domain of this redactor.
+    for body, spelling in [
+        ('{"\\u0061ccess_token":"%s"}', "leading char escaped"),
+        ('{"client_\\u0073ecret":"%s"}', "escape inside a prefixed family name"),
+        ('{"\\u0063ode":"%s"}', "whole-word key, escaped"),
+        ('{"\\u0041uthorization":"Bearer %s"}', "the header rule's own key"),
+    ]:
+        secret = "-".join(["sentinel", "value", "under", "test"])
+        out = oauth_flow.redact_secrets(body % secret)
+        assert secret not in out, (spelling, out)
+
+    # The escape handling must not cost the exemptions: a diagnostic stays readable
+    # whether or not its name is spelled with escapes, since an escaped `status_code` is
+    # still `status_code` and still not a credential.
+    assert "401" in oauth_flow.redact_secrets("status_code=401")
+    assert "401" in oauth_flow.redact_secrets("status_\\u0063ode=401")
+    assert "abc123" in oauth_flow.redact_secrets("code_challenge=abc123")
+
+
+def test_redaction_does_not_amplify_memory_on_a_match_dense_body():
+    # These sinks take provider bodies of unbounded size in the single process that also
+    # serves every proxy request. Collecting a slice and a replacement per match made a
+    # body densely packed with matches cost several times the body itself — the per-object
+    # overhead of a hundred thousand short strings, not their contents. Writing into one
+    # buffer keeps the cost proportional to input + output, which is the floor.
+    import tracemalloc
+
+    body = "access_token=x " * 70_000  # ~1 MB, ~70k matches
+    tracemalloc.start()
+    try:
+        baseline = tracemalloc.get_traced_memory()[0]
+        out = oauth_flow.redact_secrets(body)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert "access_token=<redacted>" in out and "x" not in out.replace("<redacted>", "")
+    # Output is legitimately bigger than the input here ("<redacted>" is longer than "x"),
+    # so the floor is len(body) + len(out). Allow generous headroom for buffer growth and
+    # still catch a return to per-match accumulation, which cost ~7x.
+    floor = len(body) + len(out)
+    assert peak - baseline < floor * 2, (peak - baseline, floor)
+
+
 def test_secret_key_matches_are_merged_lazily_and_in_order():
     # These patterns run over provider response bodies of unbounded size in the single
     # process that also serves every proxy request. Collecting every match into a list to
@@ -2058,7 +2145,9 @@ async def test_promotion_block_overrides_an_incidental_retry_error(monkeypatch):
     monkeypatch.setattr(
         oauth_flow,
         "_promotion_blocked",
-        lambda _pending: "server OAuth configuration changed during authorization",
+        lambda _pending: oauth_flow.OAuthPromotionBlocked(
+            "server OAuth configuration changed during authorization"
+        ),
     )
 
     class _Srv:

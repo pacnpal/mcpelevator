@@ -565,8 +565,10 @@ async def delete_server(
         raise HTTPException(status_code=404, detail="server not found")
     # Cancel any in-flight authorization and drop stored upstream OAuth credentials for this
     # (now-deleted) server — otherwise a late callback could re-promote tokens and leave an
-    # orphan credential file on disk for a server that no longer exists.
-    oauth_flow.cancel_pending(server_id)
+    # orphan credential file on disk for a server that no longer exists. ``deleted=True``
+    # so the waiting callback reports "server deleted" rather than sending the operator to
+    # inspect a configuration that is gone.
+    oauth_flow.cancel_pending(server_id, deleted=True)
     ServerTokenStorage(server_id).clear()
     await resync_groups(request)
     return Response(status_code=204)

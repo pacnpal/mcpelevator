@@ -119,7 +119,20 @@ def _oauth_error(reason: str) -> RedirectResponse:
 # provider's code is used only to SELECT one of our literals — never echoed — so the
 # redirect keeps its no-remote-input property.
 _PROVIDER_UNAVAILABLE_ERRORS = frozenset({"server_error", "temporarily_unavailable"})
-_PROVIDER_DENIED_ERRORS = frozenset({"access_denied", "consent_required", "login_required"})
+# The OIDC codes (OpenID Connect Core §3.1.2.6) belong here rather than with the
+# request-shape rejections: they all say the provider wants something from the PERSON —
+# consent, a fresh login, an account choice — not that our request was malformed. Reading
+# them as "your configuration is wrong" would send the operator to edit a server that is
+# fine, when the fix is to click Authenticate and complete the prompt.
+_PROVIDER_DENIED_ERRORS = frozenset(
+    {
+        "access_denied",
+        "consent_required",
+        "login_required",
+        "interaction_required",
+        "account_selection_required",
+    }
+)
 
 
 def _provider_error_reason(error: str) -> str:
@@ -259,15 +272,18 @@ async def oauth_callback(
         return _oauth_error(_REASON_TOKEN_REFUSED)
     except (oauth_flow.OAuthPromotionBlocked, oauth_flow.OAuthFlowCancelled) as exc:
         # Cancelled flows land here promptly instead of burning the callback budget and
-        # reporting a timeout they didn't have. The two causes get different codes
-        # because they ask different things of the operator: a superseded or expired
-        # attempt just needs starting again, while a configuration change is something
-        # to look at before retrying.
+        # reporting a timeout they didn't have. The causes get different codes because
+        # they ask different things of the operator: a deleted server has nothing left
+        # to inspect OR retry, a superseded or expired attempt just needs starting
+        # again, and a configuration change is something to look at before retrying.
         logger.warning("OAuth grant discarded: %s", oauth_flow.log_safe(exc))
         if stopped:
             sup.nudge()
-        superseded = getattr(exc, "superseded", False)
-        return _oauth_error(_REASON_EXPIRED if superseded else _REASON_CONFIG_CHANGED)
+        if getattr(exc, "deleted", False):
+            return _oauth_error(_REASON_SERVER_GONE)
+        if getattr(exc, "superseded", False):
+            return _oauth_error(_REASON_EXPIRED)
+        return _oauth_error(_REASON_CONFIG_CHANGED)
     except OAuthTokenError as exc:
         # The authorization server refused the code itself (bad redirect_uri, expired or
         # replayed code, PKCE mismatch, client auth rejected).
