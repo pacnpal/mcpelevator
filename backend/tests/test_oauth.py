@@ -1887,7 +1887,10 @@ def test_callback_error_detail_needs_a_correlated_state(caplog):
     # event without the attacker-controlled detail.
     import logging
 
-    with TestClient(app) as c, caplog.at_level(logging.WARNING, logger="app.api.auth"):
+    # Captured at INFO: an uncorrelated callback is recorded BELOW operator level (see
+    # test_unsolicited_callbacks_stay_below_warning), and the point here is that whatever
+    # level it lands at, the caller's text is not in it.
+    with TestClient(app) as c, caplog.at_level(logging.INFO, logger="app.api.auth"):
         c.get(
             "/api/oauth/callback",
             params={
@@ -1933,24 +1936,52 @@ def test_begin_error_detail_is_redacted(monkeypatch):
     assert "<redacted>" in str(err)
 
 
-def test_oauth_failure_reasons_log_at_warning(caplog):
-    # Regression: these lines are the ONLY record of why a sign-in failed, and under
-    # uvicorn's default logging config the root logger has no handler while app.* sits
-    # at effective level WARNING — so an INFO record is discarded and the operator is
-    # left with a toast and nothing to debug. They must be WARNING or above.
+def test_oauth_failure_reasons_log_at_warning(monkeypatch, caplog):
+    # Regression: a real sign-in failure's reason is the ONLY record of what went wrong,
+    # and under uvicorn's default logging config the root logger has no handler while
+    # app.* sits at effective level WARNING — so an INFO record is discarded and the
+    # operator is left with a toast and nothing to debug. Once the state has matched a
+    # flow this instance started, the failure IS the operator's, so it must be WARNING.
     import logging
 
-    with TestClient(app) as c, caplog.at_level(logging.WARNING, logger="app.api.auth"):
+    async def _boom(_state, _code):
+        raise OSError("the token store is read-only")
+
+    monkeypatch.setattr(oauth_flow, "complete_authorization", _boom)
+    with TestClient(app) as c, caplog.at_level(logging.INFO, logger="app.api.auth"):
         c.get(
             "/api/oauth/callback",
-            params={"code": "x", "state": "bogus-state-for-log-test"},
+            params={"code": "cd", "state": "st"},
             headers=LOOPBACK,
             follow_redirects=False,
         )
     assert any(
-        rec.levelno >= logging.WARNING and "unknown or expired state" in rec.getMessage()
+        rec.levelno >= logging.WARNING and "failed unexpectedly" in rec.getMessage()
         for rec in caplog.records
-    ), [r.getMessage() for r in caplog.records]
+    ), [(r.levelname, r.getMessage()) for r in caplog.records]
+
+
+def test_unsolicited_callbacks_stay_below_warning(caplog):
+    # The callback is PUBLIC, so anything that doesn't correlate with a sign-in this
+    # instance started is indistinguishable from a scanner. Warning there would let any
+    # remote caller generate unbounded operator-level records (and page whoever alerts on
+    # them) for an event no operator can act on. These stay at INFO; the operator whose
+    # own flow expired still gets reason=expired_or_superseded in the toast.
+    import logging
+
+    with TestClient(app) as c, caplog.at_level(logging.INFO, logger="app.api.auth"):
+        for params in (
+            {},  # bare GET
+            {"code": "x", "state": "bogus-state-not-pending"},  # unmatched state
+            {"error": "access_denied", "state": "bogus-state-not-pending"},  # unsolicited
+        ):
+            c.get(
+                "/api/oauth/callback", params=params, headers=LOOPBACK, follow_redirects=False
+            )
+    assert caplog.records, "the events are still recorded, just not at operator level"
+    assert all(rec.levelno < logging.WARNING for rec in caplog.records), [
+        (r.levelname, r.getMessage()) for r in caplog.records
+    ]
 
 
 def test_callback_success_redirects_to_server(monkeypatch):

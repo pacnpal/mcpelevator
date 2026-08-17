@@ -149,14 +149,20 @@ async def oauth_callback(
                 oauth_flow.log_safe(error_description or error),
             )
         else:
-            logger.warning(
+            # INFO, not WARNING: nothing correlates this to a sign-in we started, so it
+            # is indistinguishable from a scanner hitting a public URL. Emitting an
+            # operator-level record here would let anyone who can reach the endpoint
+            # generate unbounded WARNING volume — and page an operator whose alerting
+            # watches that level — for an event no operator needs to act on.
+            logger.info(
                 "OAuth callback reported an error for an unknown or expired state; "
                 "ignoring the unsolicited callback (detail withheld: it is not tied to "
                 "any sign-in this instance started)"
             )
         return _oauth_error(_REASON_PROVIDER_DENIED)
     if not code or not state:
-        logger.warning("OAuth callback arrived without a code/state pair")
+        # Same reasoning: no state at all means nobody's sign-in is failing here.
+        logger.info("OAuth callback arrived without a code/state pair")
         return _oauth_error(_REASON_NO_CODE)
 
     sup = request.app.state.supervisor
@@ -177,7 +183,13 @@ async def oauth_callback(
     try:
         server_id = await oauth_flow.complete_authorization(state, code)
     except KeyError:
-        logger.warning(
+        # INFO for the same reason as the branches above — an unmatched state is
+        # indistinguishable from noise. The operator whose own flow expired is not left
+        # guessing: they get ``reason=expired_or_superseded`` in the toast, which names
+        # the cause and the remedy. Every branch BELOW this point is inherently
+        # correlated (the state matched a flow this instance started), so those stay at
+        # WARNING — a real sign-in really did fail.
+        logger.info(
             "OAuth callback carried an unknown or expired state — the sign-in was "
             "superseded by a newer attempt, timed out, or the control plane restarted "
             "mid-flow. Start the sign-in again."
