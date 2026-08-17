@@ -154,16 +154,22 @@ def _escapable(literal: str) -> str:
     verbatim, so a body answering with ``{"\\u0061ccess_token": "LIVE"}`` is well-formed
     JSON that a literal-spelling pattern cannot see — it read as a non-secret field and
     the token went to the log untouched. Matching the escapes here rather than decoding
-    the text first is what preserves the offsets the scanner splices on."""
-    alternatives = []
+    the text first is what preserves the offsets the scanner splices on.
+
+    ``\\xNN`` and octal follow because the SDK does NOT parse a non-2xx body: it embeds
+    whatever bytes arrived, so the text is not necessarily JSON and its escapes are not
+    necessarily JSON's. See ``redact_secrets`` on why enumerating dialects is a floor
+    rather than a guarantee."""
+    codes = []
     for char in literal:
         forms = [re.escape(char)]
-        if char.isalpha():  # either case is the same letter to a case-insensitive match
-            forms += [rf"\\u00{ord(char.lower()):02x}", rf"\\u00{ord(char.upper()):02x}"]
-        else:
-            forms.append(rf"\\u{ord(char):04x}")
-        alternatives.append("(?:" + "|".join(forms) + ")")
-    return "".join(alternatives)
+        # Either case is the same letter to a case-insensitive match, but the ESCAPE
+        # spells a specific code point, so both have to be listed.
+        for variant in {char.lower(), char.upper()}:
+            point = ord(variant)
+            forms += [rf"\\u{point:04x}", rf"\\x{point:02x}", rf"\\{point:03o}"]
+        codes.append("(?:" + "|".join(forms) + ")")
+    return "".join(codes)
 
 
 # ``(?<!\w)`` rather than ``\b``: it means the same thing for a plainly spelled key, but
@@ -667,7 +673,18 @@ def _cancel_existing(
 def pending_server_id(state: str) -> Optional[str]:
     """The server id of the authorization parked on ``state``, or ``None`` — so the
     callback can stop that server's running bridge *before* the grant is promoted,
-    closing the window where an old bridge's refresh could overwrite the new tokens."""
+    closing the window where an old bridge's refresh could overwrite the new tokens.
+
+    Expired flows are reaped FIRST, so this answers "is there a LIVE sign-in on this
+    state" rather than "is there a record". ``_drive`` times out and cancels its future
+    at the flow window, but the record and its state index entry survive until the reaper
+    next runs — and the callback uses this answer to decide both whether a late callback
+    is a real operator failure (WARNING, provider-supplied detail echoed) or unsolicited
+    noise, and which reason code to report. Without the reap a callback arriving after the
+    window was treated as current, so an expired sign-in reported the provider's verdict
+    instead of ``expired_or_superseded`` and let the caller's text onto an operator-level
+    record."""
+    _reap_stale()
     pending_id = _STATE_INDEX.get(state)
     pending = _PENDING.get(pending_id) if pending_id else None
     return pending.server_id if pending is not None else None
@@ -679,9 +696,10 @@ def cancel_pending(
     """Cancel any in-flight authorization for a server. Called when its OAuth config is
     edited: a background flow started against the OLD upstream/scopes/client must not
     complete and write credentials for the wrong resource back under this id. Also used
-    when a provider denial ends a flow — ``superseded=True`` there, since nothing about
-    the server's configuration changed — and by the DELETE path, where ``deleted=True``
-    keeps the operator from being sent to inspect a server that no longer exists."""
+    when a provider denial or a DISCONNECT ends a flow — ``superseded=True`` for both,
+    since nothing about the server's configuration changed — and by the DELETE path, where
+    ``deleted=True`` keeps the operator from being sent to inspect a server that no longer
+    exists."""
     if deleted:
         why = "the server was deleted during the sign-in"
     elif superseded:

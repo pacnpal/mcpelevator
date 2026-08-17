@@ -1801,6 +1801,11 @@ async def test_cancellation_cause_picks_the_reason_the_operator_needs():
     # deleted) and so reported "config changed" — telling the operator to go inspect the
     # configuration of a server that had just been removed. The DELETE route passes
     # deleted=True; the message says so too, since it is what lands in the log.
+    # Disconnect is the operator ENDING the sign-in, not a configuration moving under it,
+    # so it supersedes: reporting config_changed sent them to inspect a server whose
+    # config nobody touched.
+    assert (await _via_cancel_pending("srv-cause-disconnect", superseded=True)).superseded
+
     gone = await _via_cancel_pending("srv-cause-deleted", deleted=True)
     assert gone.deleted is True and gone.superseded is False
     assert "deleted" in str(gone)
@@ -1815,6 +1820,33 @@ async def test_cancellation_cause_picks_the_reason_the_operator_needs():
     assert blocked.deleted is True
     # A row that never existed at all (unpersisted test servers) is exempt, not deleted.
     assert oauth_flow._promotion_blocked(oauth_flow._Pending("srv-never-persisted-2")) is None
+
+
+async def test_pending_lookup_does_not_report_an_expired_flow_as_live():
+    # `_drive` times out and cancels its future at the flow window, but the record and its
+    # state index entry survive until the reaper next runs. The callback uses this lookup
+    # to decide BOTH whether a late callback is a real operator failure — WARNING, with the
+    # provider's own text echoed — and which reason code to report. Treating an expired
+    # record as live therefore let a stale state pull the caller's text onto an
+    # operator-level record and reported the provider's verdict for a sign-in that had
+    # already run out of time.
+    pending = oauth_flow._Pending("srv-expired-lookup-1")
+    pending.state = "state-expired-lookup-1"
+    oauth_flow._PENDING[pending.id] = pending
+    oauth_flow._STATE_INDEX[pending.state] = pending.id
+    try:
+        assert oauth_flow.pending_server_id(pending.state) == "srv-expired-lookup-1"
+
+        # Push it past the window; the reaper has not run.
+        pending.created_at -= oauth_flow._FLOW_TIMEOUT + 1
+        assert oauth_flow.pending_server_id(pending.state) is None
+        # ...and the lookup retired it, so `complete_authorization` reports the expiry
+        # rather than finding a half-dead record.
+        assert pending.state not in oauth_flow._STATE_INDEX
+        assert pending.id not in oauth_flow._PENDING
+    finally:
+        oauth_flow._PENDING.pop(pending.id, None)
+        oauth_flow._STATE_INDEX.pop(pending.state, None)
 
 
 async def test_abort_of_an_unattended_flow_sets_no_unretrieved_exception():
@@ -2013,7 +2045,13 @@ def test_redact_secrets_sees_json_escaped_key_names():
     # a literal-spelling pattern reads as a harmless field — and the token went to the
     # log untouched. A provider that spells its keys this way is unusual, but "unusual
     # provider output" is the entire input domain of this redactor.
+    #
+    # And not only JSON's escapes: the SDK does NOT parse a non-2xx body, it embeds
+    # whatever arrived, so the text need not be JSON at all and its escapes need not be
+    # JSON's — `\xNN` and octal spell the same key.
     for body, spelling in [
+        ('{"\\x61ccess_token":"%s"}', "hex escape, not JSON's"),
+        ('{"\\141ccess_token":"%s"}', "octal escape"),
         ('{"\\u0061ccess_token":"%s"}', "leading char escaped"),
         ('{"client_\\u0073ecret":"%s"}', "escape inside a prefixed family name"),
         ('{"\\u0063ode":"%s"}', "whole-word key, escaped"),

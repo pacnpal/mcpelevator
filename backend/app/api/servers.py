@@ -650,8 +650,10 @@ async def disconnect_oauth(
     sup = request.app.state.supervisor
     # Cancel any in-flight authorization first: otherwise a callback for that parked flow
     # could land after the clear and re-promote tokens, silently re-authenticating the
-    # server the operator just disconnected.
-    oauth_flow.cancel_pending(server_id)
+    # server the operator just disconnected. ``superseded=True`` because nothing about the
+    # configuration changed — the operator ended this sign-in themselves, so the remedy is
+    # to start again, not to go looking for what moved.
+    oauth_flow.cancel_pending(server_id, superseded=True)
     # STOP the bridge before clearing: a running bridge may have an in-flight refresh whose
     # set_tokens() would otherwise recreate the file after clear(), and the nudge would then
     # restart the server with fresh credentials despite the UI reporting it disconnected.
