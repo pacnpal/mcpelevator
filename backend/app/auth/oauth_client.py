@@ -36,6 +36,7 @@ from collections.abc import AsyncGenerator
 from urllib.parse import parse_qsl, urlencode
 
 import httpx
+from mcp.client.auth import OAuthClientProvider
 
 _FORM = "application/x-www-form-urlencoded"
 
@@ -62,13 +63,18 @@ def strip_duplicate_client_id(request: httpx.Request) -> httpx.Request:
 
 
 class SingleChannelAuthMixin:
-    """Mixin for ``OAuthClientProvider`` that enforces the one-channel rule on the way out.
+    """The one-channel rule, over any ``OAuthClientProvider``.
+
+    Separate from the concrete class below so it can be composed over a stand-in in
+    tests: the deadlock this guards against is only observable by driving a flow that
+    holds a lock across its yields, and constructing a real provider to prove it would
+    test the SDK rather than this wrapper.
 
     ``async_auth_flow`` is a generator that yields each request to httpx and is sent the
     response back, so the whole flow — discovery, registration, code exchange, refresh —
     passes through here. Requests are forwarded unchanged except for the one shape that
-    violates RFC 6749 §2.3, and responses are handed back to the SDK untouched, so the
-    SDK keeps owning every decision about what to send and what to do with the answer."""
+    violates RFC 6749 §2.3, and responses go back to the SDK untouched, so the SDK keeps
+    owning every decision about what to send and what to make of the answer."""
 
     async def async_auth_flow(
         self, request: httpx.Request
@@ -93,3 +99,12 @@ class SingleChannelAuthMixin:
             # long-lived provider would deadlock every later request on it: one transient
             # network blip turning into a permanently wedged server.
             await flow.aclose()
+
+
+class SingleChannelOAuthClientProvider(SingleChannelAuthMixin, OAuthClientProvider):
+    """THE provider this codebase talks to authorization servers with.
+
+    Composed once, here, so "which provider do we use" has one answer instead of one per
+    call site — the bridge previously built its own class inside the function that starts
+    it, so a fresh class object appeared on every bridge start. Anything needing extra
+    behaviour subclasses THIS, so a future third caller cannot forget the rule."""
