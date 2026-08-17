@@ -112,14 +112,18 @@ _SECRET_KEYS = (
 # credential in the clear next to a "<redacted>" that claims otherwise. The alternatives
 # inside each quoted form are mutually exclusive on their first character (escape vs not),
 # so the nested quantifier cannot backtrack ambiguously.
-_QUOTED_VALUE = r"\"(?P<dq>(?:\\.|[^\"\\])*)\"|'(?P<sq>(?:\\.|[^'\\])*)'"
+_QUOTED_VALUE = r"\"(?P<dq>(?:\\.|[^\"\\])*+)\"|'(?P<sq>(?:\\.|[^'\\])*+)'"
 # The optional quote after the key is what lets one pattern match JSON
 # (``"client_secret": "x"``) as well as query and form shapes (``client_secret=x``).
-# Whitespace runs are BOUNDED ({0,4}, not *) on purpose: an unbounded quantifier followed
-# by a character that can fail makes matching polynomial in the length of a space run, and
-# this text comes from a remote party (CodeQL py/polynomial-redos). Four is past any
-# realistic JSON or query formatting.
-_SEPARATOR = r"(?P<sep>[\"']?[ \t]{0,4}[=:][ \t]{0,4})"
+#
+# Whitespace runs use POSSESSIVE quantifiers (``*+``, Python 3.11+), which is what lets
+# them be unbounded without being dangerous. A plain ``*`` before a character that can
+# fail is polynomial in the length of a space run on remote-supplied text (CodeQL
+# py/polynomial-redos); a fixed bound like ``{0,4}`` is linear but WRONG, because JSON
+# permits arbitrary whitespace and a provider writing five spaces would sail past the
+# redaction entirely. Possessive matching gives both: any amount of whitespace, no
+# backtracking (measured linear: 4M spaces in ~52ms).
+_SEPARATOR = r"(?P<sep>[\"']?[ \t\r\n]*+[=:][ \t\r\n]*+)"
 # ``\b`` before the key means a name that merely ENDS in one of these (status_code,
 # error_code) is left alone — ``_`` is a word character, so there is no boundary there —
 # and requiring the separator right after the key spares names that merely START with one
@@ -169,9 +173,6 @@ def redact_secrets(value: object) -> str:
 # control characters would let externally-supplied text forge additional log lines
 # (CWE-117), and an unbounded body would drown the record it belongs to.
 _LOG_TEXT_LIMIT = 500
-# Ceiling on how much text the patterns ever scan, far above _LOG_TEXT_LIMIT so it can
-# never cut inside the part that gets emitted (see log_safe).
-_LOG_INPUT_CEILING = 65536
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -181,20 +182,16 @@ def log_safe(value: object, *, limit: int = _LOG_TEXT_LIMIT) -> str:
     ``redact_secrets`` alone — for anything that reaches a log record and did not
     originate here.
 
-    Redaction runs BEFORE truncation. Cutting first looks safer but isn't: a cut landing
-    inside a quoted value leaves the quote unterminated, the complete-string branch then
-    fails, and the bare branch masks only up to the first space — emitting
+    Redaction runs BEFORE truncation, over the WHOLE string — every cut is taken after
+    masking, never before. Cutting first looks safer but isn't: a cut landing inside a
+    quoted value leaves the quote unterminated, the complete-string branch then fails, and
+    the bare branch masks only up to the first space — emitting
     ``client_secret: <redacted> beta gamma``, a mask sitting next to the tail it claims to
-    have covered. Redacting first means the pattern always sees whole values, and a cut
-    afterwards can only ever land inside an already-substituted ``<redacted>``.
-
-    The input is capped at ``_LOG_INPUT_CEILING`` purely to bound the matching work (the
-    patterns are linear, so this is a belt-and-braces limit against a remote party sending
-    a megabyte). It sits far above ``limit``, so a value split by THAT cut is nowhere near
-    the emitted prefix."""
-    text = _CONTROL_CHARS.sub(
-        " ", redact_secrets(str(value)[:_LOG_INPUT_CEILING])
-    ).strip()
+    have covered. That applies to ANY pre-cut, including a "generous" input ceiling: a
+    credential long enough to straddle it would be split exactly the same way. The
+    patterns are linear by construction (possessive quantifiers), so there is nothing to
+    gain by capping the input first."""
+    text = _CONTROL_CHARS.sub(" ", redact_secrets(value)).strip()
     return text if len(text) <= limit else f"{text[:limit]}… (truncated)"
 
 

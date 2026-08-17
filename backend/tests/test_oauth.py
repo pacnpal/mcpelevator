@@ -1794,6 +1794,18 @@ def test_log_safe_blocks_log_injection_and_bounds_length():
     for pad in range(440, 520):
         out = oauth_flow.log_safe("x" * pad + '{"client_secret": "alpha beta gamma"}')
         assert "beta" not in out and "gamma" not in out, (pad, out[-70:])
+
+    # The same hazard applies to ANY pre-cut, so there is no input ceiling either: a
+    # credential long enough to straddle one would be split exactly the same way.
+    straddling = '{"client_secret": "' + "s3cret " * 12_000 + 'tail"}'
+    assert "s3cret" not in oauth_flow.log_safe(straddling)
+
+    # JSON permits arbitrary whitespace around the separator: a provider writing five
+    # spaces must not sail past the redaction (a fixed bound would be linear but wrong).
+    for gap in (0, 1, 5, 40, 500):
+        out = oauth_flow.redact_secrets('{"client_secret":' + " " * gap + '"live secret"}')
+        assert "live secret" not in out, (gap, out)
+    assert "live" not in oauth_flow.redact_secrets('{"client_secret"\n\t:\n  "live secret"}')
     # Redaction still applies through log_safe.
     assert "leaked" not in oauth_flow.log_safe('{"client_secret": "leaked"}')
 
