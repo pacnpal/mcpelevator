@@ -2160,6 +2160,20 @@ def test_log_safe_blocks_log_injection_and_bounds_length():
             assert secret not in out, (container, out)
         assert "input_type=x" in out
 
+    # A MISMATCHED closer is the case a depth counter gets wrong: counting treats "}" as
+    # closing a "[", so the value looked finished at the mismatch and its tail stayed in
+    # the clear beside a mask claiming otherwise. Matching by type means a mismatch is
+    # malformed text — which is precisely when we can't know where the value ends — so it
+    # consumes the rest, exactly like an unterminated opener.
+    for malformed in (
+        "access_token=[SUPER}SECRET]",
+        "access_token={SUPER]SECRET}",
+        "access_token=[SUPER}SECRET] trailing=text",
+    ):
+        out = oauth_flow.redact_secrets(malformed)
+        assert "SUPER" not in out and "SECRET" not in out, (malformed, out)
+        assert out.startswith("access_token=<redacted>"), out
+
 
 def test_redaction_of_hostile_input_stays_linear():
     # Repeated UNTERMINATED containers were quadratic under the lazy pattern that used to

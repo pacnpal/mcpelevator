@@ -156,6 +156,7 @@ _SECRET_KEY_RE = re.compile(
 # in the clear. Its unquoted form therefore runs to end of line.
 _AUTH_KEY_RE = re.compile(r"(?i)\b(?P<key>authorization)" + _SEPARATOR)
 _BARE_TERMINATORS = " \t\r\n,&)}]"
+_CONTAINER_CLOSERS = {"[": "]", "{": "}"}
 
 
 def _value_end(text: str, start: int, *, to_end_of_line: bool) -> int:
@@ -183,7 +184,12 @@ def _value_end(text: str, start: int, *, to_end_of_line: bool) -> int:
             i += 1
         return n  # unterminated
     if opener in "[{":
-        depth = 0
+        # A STACK of expected closers, not a depth counter: counting treats ``}`` as
+        # closing a ``[``, so ``access_token=[SUPER}SECRET]`` ended at the ``}`` and left
+        # ``SECRET]`` in the clear. A mismatch means the text is malformed, and malformed
+        # is exactly the case where we cannot know where the value ends — so it falls in
+        # with the unterminated openers below and consumes the rest.
+        expected: list[str] = []
         quote = None
         i = start
         while i < n:
@@ -196,11 +202,13 @@ def _value_end(text: str, start: int, *, to_end_of_line: bool) -> int:
                     quote = None
             elif char in "\"'":
                 quote = char
-            elif char in "[{":
-                depth += 1
+            elif char in _CONTAINER_CLOSERS:
+                expected.append(_CONTAINER_CLOSERS[char])
             elif char in "]}":
-                depth -= 1
-                if depth == 0:
+                if char != expected[-1]:  # non-empty: ``start`` was itself an opener
+                    return n  # mismatched
+                expected.pop()
+                if not expected:
                     return i + 1
             i += 1
         return n  # unterminated
