@@ -891,6 +891,43 @@ def test_single_channel_rule_leaves_every_other_request_alone():
         assert strip_duplicate_client_id(request).content == request.content, request.url
 
 
+async def test_aborted_request_does_not_strand_the_sdk_lock():
+    # The mixin DELEGATES to the SDK's generator, so it has to forward closure as well as
+    # values. The SDK holds ``context.lock`` across every yield of its flow, so when httpx
+    # aborts a request mid-send — a transport error, or cancellation — an inner generator
+    # left suspended keeps that lock until async-generator finalization. On the bridge's
+    # long-lived provider that deadlocks every later request: one transient network blip
+    # wedging the server for good.
+    import asyncio
+
+    from app.auth.oauth_client import SingleChannelAuthMixin
+
+    class _LockingFlow:
+        def __init__(self):
+            self.lock = asyncio.Lock()
+
+        async def async_auth_flow(self, request):
+            async with self.lock:  # exactly what OAuthClientProvider does
+                yield request
+                yield request
+
+    class _Wrapped(SingleChannelAuthMixin, _LockingFlow):
+        pass
+
+    provider = _Wrapped()
+    flow = provider.async_auth_flow(httpx.Request("GET", "https://up.example/mcp"))
+    await anext(flow)  # first request is out with httpx
+    assert provider.lock.locked()
+    await flow.aclose()  # ...which then aborts
+    assert not provider.lock.locked()
+
+    # The ordinary path still runs to completion and releases just the same.
+    flow = provider.async_auth_flow(httpx.Request("GET", "https://up.example/mcp"))
+    async for _ in flow:
+        pass
+    assert not provider.lock.locked()
+
+
 async def test_a_basic_auth_registration_is_still_reused(monkeypatch):
     # The one-channel rule is applied at the REQUEST, so a stored client_secret_basic
     # registration is usable as it stands. That's the point of fixing it there rather than

@@ -75,11 +75,21 @@ class SingleChannelAuthMixin:
     ) -> AsyncGenerator[httpx.Request, httpx.Response]:
         flow = super().async_auth_flow(request)  # type: ignore[misc]
         response: httpx.Response | None = None
-        while True:
-            try:
-                outgoing = (
-                    await flow.asend(response) if response is not None else await anext(flow)
-                )
-            except StopAsyncIteration:
-                return
-            response = yield strip_duplicate_client_id(outgoing)
+        try:
+            while True:
+                try:
+                    outgoing = (
+                        await flow.asend(response) if response is not None else await anext(flow)
+                    )
+                except StopAsyncIteration:
+                    return
+                response = yield strip_duplicate_client_id(outgoing)
+        finally:
+            # Delegation has to forward CLOSURE too, not just values. If a request raises a
+            # transport error or is cancelled mid-send, httpx closes this wrapper — and
+            # without this the inner generator is left suspended at its yield, still inside
+            # the ``async with self.context.lock`` the SDK holds across the whole flow. The
+            # lock would then release only at async-generator finalization, so the bridge's
+            # long-lived provider would deadlock every later request on it: one transient
+            # network blip turning into a permanently wedged server.
+            await flow.aclose()
