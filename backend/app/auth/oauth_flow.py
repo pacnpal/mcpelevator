@@ -113,83 +113,100 @@ _SECRET_KEYS = (
     # type, and the actual type are all reported separately).
     "input_value",
 )
-# A value is matched as a COMPLETE token, not up to the first awkward character: the
-# quoted forms consume the whole string including escapes and spaces (a provider-issued
-# secret may legally contain either), and only the unquoted form is delimiter-terminated.
-# Matching a prefix is worse than not matching at all — it leaves the tail of the
-# credential in the clear next to a "<redacted>" that claims otherwise. The alternatives
-# inside each quoted form are mutually exclusive on their first character (escape vs not),
-# so the nested quantifier cannot backtrack ambiguously.
-# The last two alternatives cover an UNTERMINATED opening quote, which a provider's
-# malformed JSON produces (and pydantic echoes verbatim in its validation errors): with
-# only the complete forms, the bare branch would take over and stop at the first space,
-# turning ``{"access_token": "alpha beta gamma`` into ``<redacted> beta gamma``.
-#
-# They consume the REST OF THE INPUT, newlines included. Stopping at the line end would
-# mask only the first line of a value that wraps, and log_safe folds those newlines
-# afterwards — putting the continuation right back on the same record. When a quote has
-# no partner we cannot know where the value ends, so the safe reading is "everything
-# after it". That over-redacts the tail of a malformed message, which is the correct
-# trade: readability of provider garbage is worth less than a credential.
-_QUOTED_VALUE = (
-    r"\"(?P<dq>(?:\\.|[^\"\\])*+)\""
-    r"|'(?P<sq>(?:\\.|[^'\\])*+)'"
-    r"|\"(?P<dq_open>(?s:.*))"
-    r"|'(?P<sq_open>(?s:.*))"
-)
-# The optional quote after the key is what lets one pattern match JSON
-# (``"client_secret": "x"``) as well as query and form shapes (``client_secret=x``).
-#
-# Whitespace runs use POSSESSIVE quantifiers (``*+``, Python 3.11+), which is what lets
-# them be unbounded without being dangerous. A plain ``*`` before a character that can
-# fail is polynomial in the length of a space run on remote-supplied text (CodeQL
-# py/polynomial-redos); a fixed bound like ``{0,4}`` is linear but WRONG, because JSON
-# permits arbitrary whitespace and a provider writing five spaces would sail past the
-# redaction entirely. Possessive matching gives both: any amount of whitespace, no
-# backtracking (measured linear: 4M spaces in ~52ms).
+# WHERE a value ends is decided by a scanner, not by the pattern. Expressing "a complete
+# quoted string, or a balanced container, or a bare token" in a regex produced a steady
+# drip of leaks — a prefix match beside a "<redacted>" that claimed to have covered it —
+# because each shape needs state the pattern doesn't have: escapes inside quotes, a
+# closing bracket inside a quoted element (``['SUPER]SECRET']``), an unterminated opener.
+# The lazy container match that handled the first of those was also quadratic on repeated
+# unterminated openers (~1s at 48 KB), which is a denial-of-service on a single-worker
+# control plane fed by a remote party. A forward scan handles every shape in one linear
+# pass, and the pattern is left doing only what patterns are good at: finding the key.
 _SEPARATOR = r"(?P<sep>[\"']?[ \t\r\n]*+[=:][ \t\r\n]*+)"
 # ``\b`` before the key means a name that merely ENDS in one of these (status_code,
 # error_code) is left alone — ``_`` is a word character, so there is no boundary there —
 # and requiring the separator right after the key spares names that merely START with one
 # (code_challenge, authorization_endpoint are not credentials and stay readable).
-_SECRET_RE = re.compile(
-    r"(?i)\b(?P<key>"
-    + "|".join(_SECRET_KEYS)
-    + r")"
-    + _SEPARATOR
-    + r"(?:"
-    + _QUOTED_VALUE
-    # A list/dict value is one token, not several: the delimiter-terminated branch would
-    # stop at the first space inside it and leave the rest ("['tok a', 'tok b']" keeping
-    # everything after the comma) in the clear.
-    + r"|(?P<seq>[\[{](?s:.*?)[\]}])"
-    + r"|(?P<bare>[^\s,&})\]]+))"
-)
-
-
-def _mask(match: "re.Match[str]") -> str:
-    """Rebuild ``key<sep>`` with the value replaced, preserving the quoting style so the
-    surrounding JSON or query string still reads as the shape it was."""
-    key, sep = match.group("key"), match.group("sep")
-    if match.group("dq") is not None:
-        return f'{key}{sep}"<redacted>"'
-    if match.group("sq") is not None:
-        return f"{key}{sep}'<redacted>'"
-    # Unterminated: keep the lone opening quote so the text still reads as the malformed
-    # thing it was, rather than implying a well-formed value we invented.
-    if match.group("dq_open") is not None:
-        return f'{key}{sep}"<redacted>'
-    if match.group("sq_open") is not None:
-        return f"{key}{sep}'<redacted>"
-    return f"{key}{sep}<redacted>"
-
-
+#
+# Whitespace runs in the separator use POSSESSIVE quantifiers (``*+``, Python 3.11+),
+# which is what lets them be unbounded without being dangerous: a plain ``*`` before a
+# character that can fail is polynomial in the length of a space run (CodeQL
+# py/polynomial-redos), while a fixed bound like ``{0,4}`` is linear but WRONG, since JSON
+# permits arbitrary whitespace and a provider writing five spaces would sail past the
+# redaction entirely.
+_SECRET_KEY_RE = re.compile(r"(?i)\b(?P<key>" + "|".join(_SECRET_KEYS) + r")" + _SEPARATOR)
 # ``Authorization: Bearer <token>`` needs its own rule: the credential sits AFTER a scheme
 # word, so a whitespace-terminated value would redact "Bearer" and leave the token itself
 # in the clear. Its unquoted form therefore runs to end of line.
-_AUTH_HEADER_RE = re.compile(
-    r"(?i)\b(?P<key>authorization)" + _SEPARATOR + r"(?:" + _QUOTED_VALUE + r"|(?P<bare>[^\r\n]+))"
-)
+_AUTH_KEY_RE = re.compile(r"(?i)\b(?P<key>authorization)" + _SEPARATOR)
+_BARE_TERMINATORS = " \t\r\n,&)}]"
+
+
+def _value_end(text: str, start: int, *, to_end_of_line: bool) -> int:
+    """Index just past the value beginning at ``start`` — one forward pass, no backtracking.
+
+    Quoted values run to their matching quote, honouring backslash escapes. Containers run
+    to their balanced close, ignoring brackets that sit inside quoted elements. An
+    unterminated quote or container consumes the REST OF THE INPUT: we cannot know where
+    such a value ends, and masking only part of it would leave the remainder in the clear
+    (log_safe later folds newlines, so "just this line" is no protection either). Bare
+    values stop at a delimiter — or at end of line for ``Authorization``, whose value is a
+    scheme word followed by the credential."""
+    n = len(text)
+    if start >= n:
+        return start
+    opener = text[start]
+    if opener in "\"'":
+        i = start + 1
+        while i < n:
+            if text[i] == "\\":
+                i += 2
+                continue
+            if text[i] == opener:
+                return i + 1
+            i += 1
+        return n  # unterminated
+    if opener in "[{":
+        depth = 0
+        quote = None
+        i = start
+        while i < n:
+            char = text[i]
+            if quote is not None:
+                if char == "\\":
+                    i += 2
+                    continue
+                if char == quote:
+                    quote = None
+            elif char in "\"'":
+                quote = char
+            elif char in "[{":
+                depth += 1
+            elif char in "]}":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+            i += 1
+        return n  # unterminated
+    stop = "\r\n" if to_end_of_line else _BARE_TERMINATORS
+    i = start
+    while i < n and text[i] not in stop:
+        i += 1
+    return i
+
+
+def _redacted_value(text: str, start: int, end: int) -> str:
+    """``<redacted>`` wearing the same quotes the original value wore, so the surrounding
+    JSON or query string still reads as the shape it was. An unterminated quote keeps its
+    lone opener rather than gaining a closer we invented — the text was malformed and
+    should still look it."""
+    if start >= len(text):
+        return "<redacted>"
+    opener = text[start]
+    if opener in "\"'":
+        closed = end > start + 1 and text[end - 1] == opener
+        return f"{opener}<redacted>{opener}" if closed else f"{opener}<redacted>"
+    return "<redacted>"
 
 
 def redact_secrets(value: object) -> str:
@@ -199,8 +216,36 @@ def redact_secrets(value: object) -> str:
     record or an API error detail — so making OAuth failures debuggable never turns into
     writing tokens and client secrets to the console. Parsing (e.g.
     ``_registration_status``) still reads the RAW exception; only the surfaced copy is
-    scrubbed."""
-    return _SECRET_RE.sub(_mask, _AUTH_HEADER_RE.sub(_mask, str(value)))
+    scrubbed.
+
+    One left-to-right pass: each key match hands off to ``_value_end``, and the cursor
+    jumps past whatever that value turned out to be. Total work is linear in the length
+    of the text — a key inside an already-redacted value is skipped rather than rescanned,
+    which is what keeps hostile input (repeated unterminated containers) cheap."""
+    text = str(value)
+    pieces: list[str] = []
+    cursor = 0
+    for key_match in _find_secret_keys(text):
+        if key_match.start() < cursor:
+            continue  # this key sat inside a value we already masked
+        value_start = key_match.end()
+        is_auth_header = key_match.group("key").lower() == "authorization"
+        value_stop = _value_end(text, value_start, to_end_of_line=is_auth_header)
+        if value_stop <= value_start:
+            continue  # nothing to mask (e.g. the key ended the string)
+        pieces.append(text[cursor:value_start])
+        pieces.append(_redacted_value(text, value_start, value_stop))
+        cursor = value_stop
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _find_secret_keys(text: str):
+    """Every credential-bearing key occurrence, in positional order, from both patterns
+    (the general key list and the ``Authorization`` header, whose value shape differs)."""
+    matches = [*_SECRET_KEY_RE.finditer(text), *_AUTH_KEY_RE.finditer(text)]
+    matches.sort(key=lambda m: m.start())
+    return matches
 
 
 # One log record per failure, however long or hostile the upstream text: newlines and

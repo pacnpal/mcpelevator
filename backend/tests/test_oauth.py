@@ -2041,11 +2041,39 @@ def test_log_safe_blocks_log_injection_and_bounds_length():
     assert "Input should be a valid string" in scrubbed
 
     # A list or dict value is ONE token: a delimiter-terminated match would stop at the
-    # first space inside it and leave the rest in the clear.
-    for container in ("input_value=['tok a', 'tok b']", "input_value={'k': 'tok a'}"):
+    # first space inside it and leave the rest in the clear. The scan is quote-aware and
+    # depth-aware, so a closing bracket INSIDE a quoted element doesn't end it early and
+    # nesting doesn't either — a pattern can't do either of those.
+    for container in (
+        "input_value=['tok a', 'tok b']",
+        "input_value={'k': 'tok a'}",
+        "input_value=['SUPER]SECRET']",
+        "input_value={'a': ['tok x', 'tok y']}",
+    ):
         out = oauth_flow.redact_secrets(container + ", input_type=x")
-        assert "tok a" not in out and "tok b" not in out, out
+        for secret in ("tok a", "tok b", "tok x", "tok y", "SUPER", "SECRET"):
+            assert secret not in out, (container, out)
         assert "input_type=x" in out
+
+
+def test_redaction_of_hostile_input_stays_linear():
+    # Repeated UNTERMINATED containers were quadratic under the lazy pattern that used to
+    # match them (~1s at 48 KB), which is a denial-of-service on a single-worker control
+    # plane fed by a remote party — log_safe deliberately scrubs the whole string before
+    # truncating. The forward scan is one pass; timings are a blowup tripwire, generous
+    # enough not to flake on a slow runner.
+    import time
+
+    hostile = "access_token=[ " * 3200  # ~48 KB of unterminated openers
+    start = time.perf_counter()
+    oauth_flow.redact_secrets(hostile)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 1.0, f"{elapsed:.3f}s — the container scan regressed to superlinear"
+
+    # Quadrupling the input must not multiply the cost by ~16.
+    start = time.perf_counter()
+    oauth_flow.redact_secrets("access_token=[ " * 12800)
+    assert time.perf_counter() - start < 4.0
 
     # Unicode line separators break records for str.splitlines() and line-oriented log
     # tooling just like \n does, so they are folded too.
