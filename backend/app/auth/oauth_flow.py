@@ -1219,8 +1219,9 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         # when: it was registered for a DIFFERENT callback URL (mcpelevator now reached via a
         # different base URL — localhost vs LAN, or a changed MCPE_PUBLIC_BASE_URL — whose
         # redirect_uri a strict provider would reject), OR its client secret has EXPIRED
-        # (a past nonzero client_secret_expires_at), which would otherwise fail the exchange
-        # and leave the operator unable to reconnect via Re-authenticate.
+        # (a past nonzero client_secret_expires_at), OR it authenticates in a way that sends
+        # credentials through two channels at once (see below) — each of which would fail the
+        # exchange and leave the operator unable to reconnect via Re-authenticate.
         existing = await real.get_client_info()
         registered = {str(u) for u in (getattr(existing, "redirect_uris", None) or [])}
         expires_at = getattr(existing, "client_secret_expires_at", None) if existing else None
@@ -1235,12 +1236,24 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         cimd_identity = existing is not None and str(existing.client_id) == _client_metadata_url(
             callback_url
         )
+        # A registration that authenticates with HTTP Basic is unusable, because the SDK
+        # sends the Basic header while STILL putting ``client_id`` in the form body — two
+        # channels, which a strict authorization server refuses ("Client must not use
+        # multiple authentication methods"). Registrations predating the
+        # ``client_secret_post`` preference above carry whatever default the provider chose,
+        # so without this they would be reused forever and the preference would never take
+        # effect on an instance that already has one. Re-registering costs a DCR round trip
+        # once; leaving it in place costs every sign-in.
+        duplicates_credentials = (
+            getattr(existing, "token_endpoint_auth_method", None) == "client_secret_basic"
+        )
         reusable = (
             existing is not None
             and not cimd_identity
             and client_mode != "cimd"
             and callback_url in registered
             and not expired
+            and not duplicates_credentials
         )
         seed_client_info = existing if reusable else None
 
@@ -1288,6 +1301,24 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],
         scope=server.oauth_scopes or None,
+        # ASK for the method we can actually speak (RFC 7591 §2 lets a client state its
+        # preference at registration). Leaving this unset let the authorization server
+        # pick, and Cloudflare picks ``client_secret_basic`` — which the SDK sends as an
+        # ``Authorization: Basic`` header while STILL putting ``client_id`` in the form
+        # body, because the body is built before the auth method is consulted
+        # (``_exchange_token_authorization_code`` → ``prepare_token_auth``). A server
+        # enforcing RFC 6749 §2.3.1 reads credentials arriving through two channels as two
+        # authentication methods and refuses the exchange:
+        #
+        #     {"error":"invalid_request",
+        #      "error_description":"Client must not use multiple authentication methods"}
+        #
+        # ``client_secret_post`` keeps the secret in the same channel as the client id, so
+        # there is only ever one. This matters most on the DCR fallback path, which is
+        # exactly where an instance whose client-metadata document is gated by an
+        # authenticating proxy ends up — so the fallback must not then depend on the
+        # provider defaulting to a shape we can talk.
+        token_endpoint_auth_method="client_secret_post",
     )
 
     # URL-based client id (CIMD): the SDK only consumes it when the provider advertises

@@ -811,6 +811,108 @@ async def test_stored_cimd_identity_is_not_reused_as_seed(monkeypatch):
         oauth_flow._PROBE_CACHE.clear()
 
 
+async def test_dcr_asks_for_a_single_channel_auth_method(monkeypatch):
+    # Leaving token_endpoint_auth_method unset lets the AUTHORIZATION SERVER pick, and
+    # Cloudflare picks client_secret_basic. The SDK then sends `Authorization: Basic` while
+    # still putting client_id in the form body — it builds the body before consulting the
+    # auth method — so credentials arrive through two channels and a server enforcing
+    # RFC 6749 §2.3.1 refuses the exchange outright:
+    #
+    #   {"error":"invalid_request",
+    #    "error_description":"Client must not use multiple authentication methods"}
+    #
+    # This is the DCR fallback path, which is exactly where an instance whose
+    # client-metadata document is gated by an authenticating proxy ends up — so the
+    # fallback must not depend on the provider defaulting to a shape we can talk.
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    captured = _spy_provider(monkeypatch)
+
+    class _Srv:
+        id = "srv-dcr-auth-method-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+        )
+        assert captured["client_metadata"].token_endpoint_auth_method == "client_secret_post"
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+    finally:
+        store.clear()
+
+
+async def test_a_basic_auth_registration_is_not_reused(monkeypatch):
+    # The preference above only helps a FUTURE registration. An instance that already
+    # signed in before it existed holds a client_secret_basic registration, and the reuse
+    # path would seed it forever — so the fix would never reach the deployments that
+    # actually hit the bug. A registration that authenticates through two channels is
+    # therefore treated like an expired secret or a stale redirect_uri: not reusable.
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    captured = _spy_provider(monkeypatch)
+    callback = "http://127.0.0.1:8080/api/oauth/callback"
+
+    # The seed goes to the ephemeral store, not the provider, and the SDK may write its own
+    # registration into it during the flow — so record the seed at construction time.
+    seeds: list = []
+    real_store = oauth_flow._MemoryTokenStorage
+
+    class _SpyStore(real_store):
+        def __init__(self, *args, **kwargs):
+            seeds.append(kwargs.get("client_info"))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(oauth_flow, "_MemoryTokenStorage", _SpyStore)
+
+    class _Srv:
+        id = "srv-basic-registration-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await store.set_client_info(
+            OAuthClientInformationFull(
+                client_id="dcr-client-basic",
+                client_secret="stored-secret",
+                redirect_uris=[callback],
+                token_endpoint_auth_method="client_secret_basic",
+            )
+        )
+        await oauth_flow.begin_authorization(_Srv, callback_url=callback)
+        # Not seeded — the flow re-registers, which asks for client_secret_post.
+        assert seeds[-1] is None
+        assert captured["client_metadata"].token_endpoint_auth_method == "client_secret_post"
+
+        # ...while an otherwise-identical registration that uses ONE channel is still
+        # reused, so this doesn't turn every sign-in into a fresh DCR round trip.
+        await store.set_client_info(
+            OAuthClientInformationFull(
+                client_id="dcr-client-post",
+                client_secret="stored-secret",
+                redirect_uris=[callback],
+                token_endpoint_auth_method="client_secret_post",
+            )
+        )
+        await oauth_flow.begin_authorization(_Srv, callback_url=callback)
+        assert getattr(seeds[-1], "client_id", None) == "dcr-client-post"
+    finally:
+        store.clear()
+
+
 async def test_probe_verdict_is_cached_across_sign_ins(monkeypatch):
     # Every server on an instance shares ONE metadata URL, so consecutive sign-ins
     # (several servers, or a re-auth) reuse the conclusive verdict instead of
