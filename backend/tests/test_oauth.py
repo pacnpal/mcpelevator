@@ -550,6 +550,124 @@ async def test_begin_skips_cimd_probe_for_static_client(monkeypatch):
         store.clear()
 
 
+async def test_second_begin_supersedes_first_parked_in_probe(monkeypatch):
+    # Regression: only one authorization may be in flight per server. The self-probe is a
+    # real suspension point BEFORE the flow used to register in _PENDING, so a second
+    # Authenticate click landing mid-probe couldn't see (and cancel) the first flow —
+    # both would then drive to promotion, the loser overwriting the winner's tokens.
+    # Now the flow registers before the probe: the second click supersedes it there, and
+    # the first begin refuses to start _drive when it wakes up superseded.
+    import asyncio
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    release = asyncio.Event()
+    calls = {"n": 0}
+
+    async def _probe(_url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await release.wait()  # park the FIRST begin inside its probe
+        return httpx.Response(401)
+
+    monkeypatch.setattr(oauth_flow, "_fetch_client_metadata", _probe)
+
+    class _Srv:
+        id = "srv-cimd-supersede-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        first = asyncio.ensure_future(
+            oauth_flow.begin_authorization(
+                _Srv, callback_url="https://mcp.example/api/oauth/callback"
+            )
+        )
+        while calls["n"] == 0:  # let the first begin reach (and park in) its probe
+            await asyncio.sleep(0)
+
+        url = await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        assert url.startswith("https://auth.example/authorize")
+
+        release.set()
+        with pytest.raises(oauth_flow.OAuthBeginError) as excinfo:
+            await first
+        assert excinfo.value.status_code == 409
+
+        # Exactly ONE live flow remains for the server — the second click's.
+        assert sum(1 for p in oauth_flow._PENDING.values() if p.server_id == _Srv.id) == 1
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+    finally:
+        store.clear()
+
+
+async def test_fetch_client_metadata_bounds_body_and_wall_clock(monkeypatch):
+    # The probe must not trust the peer to be well-behaved: httpx timeouts are per
+    # network operation, so a response trickling in small chunks would otherwise hold
+    # /oauth/authorize open indefinitely and buffer without bound. The fetch caps the
+    # body read and the whole request's wall clock.
+    class _Streaming:
+        chunks = None  # set per scenario: async generator factory
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def stream(self, _method, _url, **_kwargs):
+            chunk_gen = type(self).chunks
+
+            class _Resp:
+                status_code = 200
+
+                async def aiter_bytes(_self):
+                    async for chunk in chunk_gen():
+                        yield chunk
+
+            class _Ctx:
+                async def __aenter__(_self):
+                    return _Resp()
+
+                async def __aexit__(_self, *exc):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _Streaming)
+    url = "https://mcp.example/api/oauth/client-metadata.json"
+
+    async def _oversized():
+        for _ in range(1000):
+            yield b"x" * 4096  # 4 MB total, far past the cap
+
+    _Streaming.chunks = _oversized
+    response = await oauth_flow._fetch_client_metadata(url)
+    assert len(response.content) <= oauth_flow._CIMD_PROBE_MAX_BYTES + 4096
+
+    import asyncio
+
+    async def _trickle_forever():
+        while True:
+            await asyncio.sleep(0.01)
+            yield b"x"
+
+    _Streaming.chunks = _trickle_forever
+    monkeypatch.setattr(oauth_flow, "_CIMD_PROBE_TIMEOUT", 0.05)
+    with pytest.raises(asyncio.TimeoutError):
+        await oauth_flow._fetch_client_metadata(url)
+
+
 async def test_stored_cimd_identity_is_not_reused_as_seed(monkeypatch):
     # Regression: a prior CIMD sign-in persists client info whose client_id IS the
     # metadata URL (the SDK stores the identity it fabricates). That's not a DCR

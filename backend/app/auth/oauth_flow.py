@@ -389,15 +389,37 @@ def _client_metadata_url(callback_url: str) -> Optional[str]:
 # server-side timeout themselves, so a document that takes longer than this is as
 # good as unreachable for CIMD purposes anyway.
 _CIMD_PROBE_TIMEOUT = 8.0
+# The real document is a small JSON object; anything past this bound is not it. A
+# truncated over-limit body fails the json parse below and reads as a definitive
+# non-document, so a misbehaving proxy can't balloon memory through the probe.
+_CIMD_PROBE_MAX_BYTES = 65536
 
 
 async def _fetch_client_metadata(url: str) -> httpx.Response:
     """One unauthenticated GET of our own client-metadata URL — no cookies, no bearer,
-    no redirects — exactly the fetch a CIMD-supporting authorization server performs."""
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(_CIMD_PROBE_TIMEOUT), follow_redirects=False
-    ) as client:
-        return await client.get(url, headers={"Accept": "application/json"})
+    no redirects — exactly the fetch a CIMD-supporting authorization server performs.
+    Bounded twice over: ``asyncio.wait_for`` caps the WHOLE request wall-clock (httpx
+    timeouts are per network operation, so a response trickling in under-timeout chunks
+    could otherwise hold /oauth/authorize open indefinitely), and the body read stops
+    past ``_CIMD_PROBE_MAX_BYTES``."""
+
+    async def _get() -> httpx.Response:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(_CIMD_PROBE_TIMEOUT), follow_redirects=False
+        ) as client:
+            async with client.stream(
+                "GET", url, headers={"Accept": "application/json"}
+            ) as response:
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in response.aiter_bytes():
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    if size > _CIMD_PROBE_MAX_BYTES:
+                        break
+                return httpx.Response(response.status_code, content=b"".join(chunks))
+
+    return await asyncio.wait_for(_get(), timeout=_CIMD_PROBE_TIMEOUT)
 
 
 async def _reachable_client_metadata_url(callback_url: str) -> Optional[str]:
@@ -707,6 +729,13 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         row_existed=row_existed,
         oauth_sig=_oauth_signature_of(server),
     )
+    # Register BEFORE any further await — notably the CIMD self-probe's network
+    # round-trip below. A second Authenticate click (and the delete/reassign/
+    # config-edit cancel paths) supersede a flow by finding it here; a flow parked
+    # in a pre-registration await would be invisible to them, and two flows for one
+    # server could then both run to promotion. The pre-_drive check further down
+    # notices the supersession and refuses to start the driven flow.
+    _PENDING[pending.id] = pending
     mem = _MemoryTokenStorage(
         client_info=seed_client_info,
         persist_registration_to=persist_registration_to,
@@ -731,11 +760,16 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     # support AND no client is seeded, so DCR/static-client behavior is unchanged
     # everywhere else. The self-probe (with its up-to-8s worst case) runs only when the
     # URL could actually be used — a seeded client bypasses CIMD, so pass the raw
-    # derived value there and skip the probe.
-    if seed_client_info is None:
-        client_metadata_url = await _reachable_client_metadata_url(callback_url)
-    else:
-        client_metadata_url = _client_metadata_url(callback_url)
+    # derived value there and skip the probe. On any raise, drop the registration made
+    # above so a failed begin doesn't leave a dangling pending until the reaper.
+    try:
+        if seed_client_info is None:
+            client_metadata_url = await _reachable_client_metadata_url(callback_url)
+        else:
+            client_metadata_url = _client_metadata_url(callback_url)
+    except BaseException:
+        _forget(pending)
+        raise
 
     async def redirect_handler(authorization_url: str) -> None:
         authorization_url = _repair_authorization_url(authorization_url)
@@ -756,18 +790,31 @@ async def begin_authorization(server, *, callback_url: str) -> str:
             raise RuntimeError("OAuth callback delivered no authorization code")
         return pending.code, pending.state
 
-    provider = _ScopedOAuthClientProvider(
-        server_url=server.command,
-        client_metadata=client_metadata,
-        storage=mem,
-        redirect_handler=redirect_handler,
-        callback_handler=callback_handler,
-        timeout=_FLOW_TIMEOUT,
-        operator_scopes=server.oauth_scopes or None,
-        client_metadata_url=client_metadata_url,
-    )
+    try:
+        provider = _ScopedOAuthClientProvider(
+            server_url=server.command,
+            client_metadata=client_metadata,
+            storage=mem,
+            redirect_handler=redirect_handler,
+            callback_handler=callback_handler,
+            timeout=_FLOW_TIMEOUT,
+            operator_scopes=server.oauth_scopes or None,
+            client_metadata_url=client_metadata_url,
+        )
+    except BaseException:
+        _forget(pending)  # same dangling-registration cleanup as the probe above
+        raise
 
-    _PENDING[pending.id] = pending
+    # Re-check the registration made before the awaits above: if it's gone, a newer
+    # Authenticate click (or a delete/config-edit) superseded this flow while it was
+    # parked in the self-probe. Refuse to start _drive — the documented invariant is
+    # ONE authorization in flight per server, and two driven flows could otherwise
+    # both promote, the loser overwriting the winner's tokens.
+    if _PENDING.get(pending.id) is not pending:
+        raise OAuthBeginError(
+            "this sign-in attempt was superseded by a newer one for the same server",
+            status_code=409,
+        )
     pending.task = asyncio.create_task(_drive(server, provider, mem, real, pending))
 
     try:
