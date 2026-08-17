@@ -675,7 +675,17 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         registered = {str(u) for u in (getattr(existing, "redirect_uris", None) or [])}
         expires_at = getattr(existing, "client_secret_expires_at", None) if existing else None
         expired = bool(expires_at) and expires_at < time.time()
-        reusable = existing is not None and callback_url in registered and not expired
+        # A stored client whose client_id IS this instance's client-metadata URL came from a
+        # prior CIMD sign-in (the SDK persists the identity it fabricates). That's not a
+        # registration — there's no quota to protect and it's recreated locally for free —
+        # so it must NOT seed the flow: seeding bypasses the SDK's CIMD/DCR decision AND the
+        # reachability probe below, resending a possibly gated URL client id forever.
+        cimd_identity = existing is not None and str(existing.client_id) == _client_metadata_url(
+            callback_url
+        )
+        reusable = (
+            existing is not None and not cimd_identity and callback_url in registered and not expired
+        )
         seed_client_info = existing if reusable else None
 
     # Drive the grant against an EPHEMERAL store (no tokens → the probe 401s → the browser

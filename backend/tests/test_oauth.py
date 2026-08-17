@@ -550,6 +550,55 @@ async def test_begin_skips_cimd_probe_for_static_client(monkeypatch):
         store.clear()
 
 
+async def test_stored_cimd_identity_is_not_reused_as_seed(monkeypatch):
+    # Regression: a prior CIMD sign-in persists client info whose client_id IS the
+    # metadata URL (the SDK stores the identity it fabricates). That's not a DCR
+    # registration — no quota to protect, recreated locally for free — so it must not
+    # seed the next flow: seeding would bypass both the SDK's CIMD/DCR decision and the
+    # reachability probe, resending a gated URL client id on every re-authentication.
+    # With the store holding a CIMD identity and the probe answering 401, the flow must
+    # probe (proving nothing was seeded) and fall back to DCR.
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    captured = _spy_provider(monkeypatch)
+    probed = {"count": 0}
+
+    async def _probe(_url):
+        probed["count"] += 1
+        return httpx.Response(401)
+
+    monkeypatch.setattr(oauth_flow, "_fetch_client_metadata", _probe)
+
+    class _Srv:
+        id = "srv-cimd-stale-identity-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await store.set_client_info(
+            OAuthClientInformationFull(
+                client_id="https://mcp.example/api/oauth/client-metadata.json",
+                redirect_uris=["https://mcp.example/api/oauth/callback"],
+                token_endpoint_auth_method="none",
+            )
+        )
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        assert probed["count"] == 1  # the stale identity did not short-circuit the decision
+        assert captured["client_metadata_url"] is None
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+    finally:
+        store.clear()
+
+
 async def test_drive_cancels_done_future_on_pre_url_failure(monkeypatch):
     # Regression: when the flow fails BEFORE handing back an authorization URL, done_future is
     # never awaited by anyone (complete_authorization only runs after the browser returns). It
