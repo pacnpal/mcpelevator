@@ -177,6 +177,9 @@ def redact_secrets(value: object) -> str:
 # control characters would let externally-supplied text forge additional log lines
 # (CWE-117), and an unbounded body would drown the record it belongs to.
 _LOG_TEXT_LIMIT = 500
+# Ceiling on how much text the patterns ever scan, far above _LOG_TEXT_LIMIT so it can
+# never cut inside the part that gets emitted (see log_safe).
+_LOG_INPUT_CEILING = 65536
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -186,14 +189,21 @@ def log_safe(value: object, *, limit: int = _LOG_TEXT_LIMIT) -> str:
     ``redact_secrets`` alone — for anything that reaches a log record and did not
     originate here.
 
-    Truncation happens FIRST, so the pattern matching only ever runs over a bounded
-    string: no remote party can make this expensive by sending a megabyte. Cutting
-    before redacting is safe — a key that survives the cut still has its value
-    redacted, and a value whose key was cut off didn't survive either."""
-    text = str(value)
-    if len(text) > limit:
-        text = f"{text[:limit]}… (truncated)"
-    return _CONTROL_CHARS.sub(" ", redact_secrets(text)).strip()
+    Redaction runs BEFORE truncation. Cutting first looks safer but isn't: a cut landing
+    inside a quoted value leaves the quote unterminated, the complete-string branch then
+    fails, and the bare branch masks only up to the first space — emitting
+    ``client_secret: <redacted> beta gamma``, a mask sitting next to the tail it claims to
+    have covered. Redacting first means the pattern always sees whole values, and a cut
+    afterwards can only ever land inside an already-substituted ``<redacted>``.
+
+    The input is capped at ``_LOG_INPUT_CEILING`` purely to bound the matching work (the
+    patterns are linear, so this is a belt-and-braces limit against a remote party sending
+    a megabyte). It sits far above ``limit``, so a value split by THAT cut is nowhere near
+    the emitted prefix."""
+    text = _CONTROL_CHARS.sub(
+        " ", redact_secrets(str(value)[:_LOG_INPUT_CEILING])
+    ).strip()
+    return text if len(text) <= limit else f"{text[:limit]}… (truncated)"
 
 
 class OAuthGrantRejected(RuntimeError):

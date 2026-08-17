@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import traceback
 
 import httpx
 from fastapi import APIRouter, Depends
@@ -96,6 +97,10 @@ _REASON_CONFIG_CHANGED = "config_changed"  # server deleted/reassigned/reconfigu
 _REASON_TIMEOUT = "timed_out"  # the exchange didn't finish inside the callback's budget
 _REASON_UNEXPECTED = "unexpected_error"  # anything else — the log carries the detail
 _REASON_SERVER_GONE = "server_deleted"  # the row vanished mid-flow
+
+# A sanitized traceback is folded to a single line, so it needs more room than a plain
+# message before truncation makes it useless.
+_TRACEBACK_LIMIT = 4000
 
 
 def _oauth_redirect(path: str) -> RedirectResponse:
@@ -221,8 +226,15 @@ async def oauth_callback(
         # operator on an unstyled 500 with the bridge still stopped. Instead they land
         # back in the UI with an honestly UNCLASSIFIED code (never one claiming a phase
         # we didn't identify), the bridge is restored, and the traceback goes to the log.
+        # NOT exc_info=True: the formatter would append the ORIGINAL exception and its
+        # traceback verbatim, straight past the redaction and the length bound applied to
+        # the message argument. The stack is still worth having for an unclassified
+        # failure, so it is formatted here and sanitized like any other provider-derived
+        # text (folded to one line by the control-character pass, hence the larger bound).
         logger.warning(
-            "OAuth callback failed unexpectedly: %s", oauth_flow.log_safe(exc), exc_info=True
+            "OAuth callback failed unexpectedly: %s | traceback: %s",
+            oauth_flow.log_safe(exc),
+            oauth_flow.log_safe(traceback.format_exc(), limit=_TRACEBACK_LIMIT),
         )
         if stopped:
             sup.nudge()  # failed re-auth; restart with the preserved old credentials

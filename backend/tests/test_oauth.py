@@ -1642,6 +1642,35 @@ def test_callback_maps_each_flow_failure_to_its_own_reason(monkeypatch):
             assert r.headers["location"] == f"/?oauth=error&reason={reason}", exc
 
 
+async def test_unexpected_callback_failure_does_not_log_a_raw_traceback(monkeypatch, caplog):
+    # The catch-all logs a stack, which is worth having for an unclassified failure — but
+    # `exc_info=True` would make the FORMATTER append the original exception and traceback
+    # verbatim, straight past the redaction and length bound applied to the message. The
+    # stack must go through the same sanitizing as everything else at this boundary.
+    import logging
+
+    leaked = "TRACEBACK-LEAKED-SECRET"
+
+    async def _boom(_state, _code):
+        raise OSError(f'token store failed: {{"client_secret": "{leaked}"}}')
+
+    monkeypatch.setattr(oauth_flow, "complete_authorization", _boom)
+    with TestClient(app) as c, caplog.at_level(logging.WARNING, logger="app.api.auth"):
+        r = c.get(
+            "/api/oauth/callback",
+            params={"code": "cd", "state": "st"},
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+    assert r.headers["location"] == "/?oauth=error&reason=unexpected_error"
+    # caplog.text renders the record the way a handler would, exception text included.
+    assert leaked not in caplog.text, caplog.text
+    for rec in caplog.records:
+        assert rec.exc_info is None, "exc_info bypasses redaction — format the stack instead"
+    # ...and the stack is still there, sanitized, so an unclassified failure stays debuggable.
+    assert "traceback:" in caplog.text and "OSError" in caplog.text
+
+
 def test_callback_for_vanished_server_redirects_with_server_deleted(monkeypatch):
     # The grant completed but the row is gone (deleted between promotion and this read):
     # its own code, and no crash on the missing server.
@@ -1758,6 +1787,13 @@ def test_log_safe_blocks_log_injection_and_bounds_length():
 
     long_out = oauth_flow.log_safe("A" * 5000)
     assert len(long_out) < 600 and long_out.endswith("… (truncated)")
+
+    # Truncation must not be able to split a quoted secret and leave its tail beside a
+    # <redacted> that claims to have covered it. Redaction runs first, so every offset
+    # that puts the boundary inside the value is safe — sweep the whole window.
+    for pad in range(440, 520):
+        out = oauth_flow.log_safe("x" * pad + '{"client_secret": "alpha beta gamma"}')
+        assert "beta" not in out and "gamma" not in out, (pad, out[-70:])
     # Redaction still applies through log_safe.
     assert "leaked" not in oauth_flow.log_safe('{"client_secret": "leaked"}')
 
