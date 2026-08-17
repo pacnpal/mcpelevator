@@ -105,27 +105,25 @@ _SECRET_KEYS = (
     "code",
     "password",
 )
-# key [closing-quote] ( = or : ) [opening-quote] VALUE [same-quote]. The optional quote
-# after the key is what lets this match JSON (``"client_secret": "x"``) as well as query
-# and form shapes (``client_secret=x``). ``\b`` before the key means a name that merely
-# ENDS in one of these (status_code, error_code) is left alone — ``_`` is a word
-# character, so there is no boundary there — and requiring the separator right after the
-# key spares names that merely START with one (code_challenge, authorization_endpoint are
-# not credentials and stay readable).
-# A value is matched as a COMPLETE token, not up to the first awkward character: a
-# quoted form consumes the whole string including escapes and spaces (a provider-issued
+# A value is matched as a COMPLETE token, not up to the first awkward character: the
+# quoted forms consume the whole string including escapes and spaces (a provider-issued
 # secret may legally contain either), and only the unquoted form is delimiter-terminated.
 # Matching a prefix is worse than not matching at all — it leaves the tail of the
 # credential in the clear next to a "<redacted>" that claims otherwise. The alternatives
 # inside each quoted form are mutually exclusive on their first character (escape vs not),
 # so the nested quantifier cannot backtrack ambiguously.
 _QUOTED_VALUE = r"\"(?P<dq>(?:\\.|[^\"\\])*)\"|'(?P<sq>(?:\\.|[^'\\])*)'"
-# key [closing-quote] ( = or : ) then the value in one of three shapes. ``\b`` before the
-# key means a name that merely ENDS in one of these (status_code, error_code) is left
-# alone — ``_`` is a word character, so there is no boundary there — and requiring the
-# separator right after the key spares names that merely START with one (code_challenge,
-# authorization_endpoint are not credentials and stay readable).
+# The optional quote after the key is what lets one pattern match JSON
+# (``"client_secret": "x"``) as well as query and form shapes (``client_secret=x``).
+# Whitespace runs are BOUNDED ({0,4}, not *) on purpose: an unbounded quantifier followed
+# by a character that can fail makes matching polynomial in the length of a space run, and
+# this text comes from a remote party (CodeQL py/polynomial-redos). Four is past any
+# realistic JSON or query formatting.
 _SEPARATOR = r"(?P<sep>[\"']?[ \t]{0,4}[=:][ \t]{0,4})"
+# ``\b`` before the key means a name that merely ENDS in one of these (status_code,
+# error_code) is left alone — ``_`` is a word character, so there is no boundary there —
+# and requiring the separator right after the key spares names that merely START with one
+# (code_challenge, authorization_endpoint are not credentials and stay readable).
 _SECRET_RE = re.compile(
     r"(?i)\b(?P<key>"
     + "|".join(_SECRET_KEYS)
@@ -146,20 +144,14 @@ def _mask(match: "re.Match[str]") -> str:
     if match.group("sq") is not None:
         return f"{key}{sep}'<redacted>'"
     return f"{key}{sep}<redacted>"
-# ``Authorization: Bearer <token>`` needs its own rule: the credential sits AFTER a scheme
-# word, so the whitespace-terminated pattern above would redact "Bearer" and leave the
-# token itself in the clear. Take everything to the closing quote or end of line.
+
+
 # ``Authorization: Bearer <token>`` needs its own rule: the credential sits AFTER a scheme
 # word, so a whitespace-terminated value would redact "Bearer" and leave the token itself
 # in the clear. Its unquoted form therefore runs to end of line.
 _AUTH_HEADER_RE = re.compile(
     r"(?i)\b(?P<key>authorization)" + _SEPARATOR + r"(?:" + _QUOTED_VALUE + r"|(?P<bare>[^\r\n]+))"
 )
-# The separator's whitespace runs are BOUNDED ({0,4}, not *) on purpose: an unbounded
-# quantifier followed by a character that can fail makes the match polynomial in the
-# length of a space run, and this text is supplied by a remote party — a long run of
-# spaces after a key-like word would be quadratic work per scan position (CodeQL
-# py/polynomial-redos). Four is past any realistic JSON or query formatting.
 
 
 def redact_secrets(value: object) -> str:
