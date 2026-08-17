@@ -503,13 +503,22 @@ def _upstream_client_mode() -> str:
         return runtime_settings.upstream_oauth_client_mode(session)
 
 
-async def _decide_client_metadata_url(callback_url: str) -> Optional[str]:
+def _effective_client_mode(server) -> str:
+    """The client-identity mode governing this server's sign-in: the server's own
+    ``oauth_client_mode`` when it picked one, else the instance-wide runtime setting.
+    Blank/legacy values ('' from the ADD COLUMN migration) read as inherit."""
+    mode = (getattr(server, "oauth_client_mode", "") or "").strip()
+    if mode in ("auto", "cimd", "dcr"):
+        return mode
+    return _upstream_client_mode()
+
+
+async def _decide_client_metadata_url(callback_url: str, mode: str) -> Optional[str]:
     """What to hand the provider as ``client_metadata_url`` for an UNSEEDED flow,
-    honouring the operator's ``upstream_oauth_client_mode``: ``dcr`` never offers the
-    URL client id, ``cimd`` always offers the derived URL probe-free (the operator
-    knows their document is reachable even if this container can't see it), and
-    ``auto`` (default) offers it only when the self-probe confirms it's fetchable."""
-    mode = _upstream_client_mode()
+    honouring the effective client-identity mode: ``dcr`` never offers the URL client
+    id, ``cimd`` always offers the derived URL probe-free (the operator knows their
+    document is reachable even if this container can't see it), and ``auto`` (default)
+    offers it only when the self-probe confirms it's fetchable."""
     if mode == "dcr":
         return None
     url = _client_metadata_url(callback_url)
@@ -721,6 +730,10 @@ async def begin_authorization(server, *, callback_url: str) -> str:
 
     real = ServerTokenStorage(server.id)
     redirect_uris = [AnyHttpUrl(callback_url)]
+    # The client-identity mode for this sign-in (server override, else the runtime
+    # setting) — resolved once, before any await, and used both for seed reuse below
+    # and for the CIMD offer decision. Irrelevant when a static client id is set.
+    client_mode = _effective_client_mode(server)
 
     # Seed the client info the flow will use. A static, pre-registered client (operator
     # supplied a client id) skips Dynamic Client Registration; otherwise reuse a prior DCR
@@ -752,11 +765,17 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         # registration — there's no quota to protect and it's recreated locally for free —
         # so it must NOT seed the flow: seeding bypasses the SDK's CIMD/DCR decision AND the
         # reachability probe below, resending a possibly gated URL client id forever.
+        # Symmetrically, an EXPLICIT 'cimd' mode ignores a stored DCR registration — the
+        # operator pinned the URL-based identity, and a seeded client would override it.
         cimd_identity = existing is not None and str(existing.client_id) == _client_metadata_url(
             callback_url
         )
         reusable = (
-            existing is not None and not cimd_identity and callback_url in registered and not expired
+            existing is not None
+            and not cimd_identity
+            and client_mode != "cimd"
+            and callback_url in registered
+            and not expired
         )
         seed_client_info = existing if reusable else None
 
@@ -814,7 +833,11 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     # above so a failed begin doesn't leave a dangling pending until the reaper.
     try:
         if seed_client_info is None:
-            client_metadata_url = await _decide_client_metadata_url(callback_url)
+            client_metadata_url = await _decide_client_metadata_url(callback_url, client_mode)
+        elif client_mode == "dcr":
+            # A seeded client already bypasses CIMD in the SDK, so the URL would be
+            # inert either way — but an explicit 'dcr' pick shouldn't offer it at all.
+            client_metadata_url = None
         else:
             client_metadata_url = _client_metadata_url(callback_url)
     except BaseException:

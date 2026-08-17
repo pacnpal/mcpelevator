@@ -262,9 +262,10 @@ A `remote` server authenticates **to the upstream** one of two ways:
   **Settings → Upstream OAuth client identity**: `auto` (the probed default),
   `CIMD` (always offer the URL client id — for deployments whose document is public
   even though the probe can't confirm it from inside the container), or `DCR`
-  (never offer it). To use CIMD behind such a gate instead, exempt
-  `/api/oauth/client-metadata.json` from it — the document is public by design and
-  carries no secrets.
+  (never offer it) — and override that per server via **Client identity** in the
+  server's OAuth client-credentials section (`inherit` follows the Settings choice).
+  To use CIMD behind such a gate instead, exempt `/api/oauth/client-metadata.json`
+  from it — the document is public by design and carries no secrets.
 
   Scopes are **discovered automatically** at sign-in (RFC 9728 / RFC 8414 / OIDC
   well-known metadata), so `oauth_scopes` is usually unnecessary — leave it blank.

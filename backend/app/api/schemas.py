@@ -13,6 +13,11 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr, mo
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
 # than silently stored and then failed-closed at request time.
 AuthProvider = Literal["inherit", "none", "bearer", "oauth"]
+
+# Per-server upstream-OAuth client identity: 'inherit' defers to the
+# `upstream_oauth_client_mode` runtime setting; the rest pin it for this server
+# ('auto' = self-probe CIMD with DCR fallback, 'cimd'/'dcr' = explicit, probe-free).
+OauthClientMode = Literal["inherit", "auto", "cimd", "dcr"]
 EffectiveAuthProvider = Literal["none", "bearer", "oauth"]
 StartupPhase = Literal["queued", "setup", "bridge", "readiness", "retry_wait"]
 
@@ -144,6 +149,8 @@ class ServerDetail(ServerSummary):
     # The client secret is write-only: accepted on create/patch but never echoed back
     # (this response is polled by the UI), so only its presence is exposed.
     oauth_has_client_secret: bool = False
+    # Client identity for sign-ins: inherit the runtime setting, or a per-server pick.
+    oauth_client_mode: OauthClientMode = "inherit"
     oauth_status: OAuthStatus = OAuthStatus()
     # Idle quiescence: None = inherit the global `idle_timeout_s` setting; 0 = never.
     idle_timeout_s: Optional[int] = None
@@ -188,6 +195,8 @@ class ServerCreate(BaseModel):
     oauth_scopes: str = ""
     oauth_client_id: Optional[str] = None
     oauth_client_secret: Optional[str] = None
+    # Client identity for sign-ins ('inherit' defers to the runtime setting).
+    oauth_client_mode: OauthClientMode = "inherit"
     # Idle quiescence: None = inherit the global setting; 0 = never idle out.
     # StrictInt: lax mode coerces a JSON `true` to 1, which would silently
     # configure a one-second shutdown instead of failing validation.
@@ -228,6 +237,8 @@ class ServerUpdate(BaseModel):
     oauth_scopes: Optional[str] = None
     oauth_client_id: Optional[str] = None
     oauth_client_secret: Optional[str] = None
+    # None = unchanged; send "inherit" to fall back to the runtime setting.
+    oauth_client_mode: Optional[OauthClientMode] = None
     # Nullable like the OAuth client fields: an explicit null means "inherit the
     # global default" and is preserved by the PATCH handler (model_fields_set).
     # StrictInt so a JSON `true` can't lax-coerce to a 1-second shutdown.

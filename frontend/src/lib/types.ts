@@ -125,6 +125,9 @@ export interface ServerDetail extends ServerSummary {
 	/** Whether a static client secret is stored. The secret itself is write-only —
 	 * accepted on create/patch but never returned. */
 	oauth_has_client_secret: boolean;
+	/** Client identity for sign-ins: 'inherit' follows the instance-wide setting;
+	 * auto/cimd/dcr pin it for this server. Moot when a static client id is set. */
+	oauth_client_mode: ServerOauthClientMode;
 	oauth_status: OAuthStatus;
 	/** Idle quiescence override in seconds: null = inherit the global setting,
 	 * 0 = never idle this server out. */
@@ -182,6 +185,8 @@ export interface ServerCreate {
 	oauth_scopes?: string;
 	oauth_client_id?: string | null;
 	oauth_client_secret?: string | null;
+	/** Client identity for sign-ins ('inherit' = follow the instance-wide setting). */
+	oauth_client_mode?: ServerOauthClientMode;
 	/** Idle quiescence override in seconds (null = inherit, 0 = never idle). */
 	idle_timeout_s?: number | null;
 	/** Upstream tool names to hide from every exposed surface. [] re-exposes all. */
@@ -347,6 +352,9 @@ export type ControlPlaneAuth = 'auto' | 'always';
  * set: 'auto' self-probes the CIMD client-metadata document and falls back to DCR
  * when it isn't publicly fetchable; 'cimd' / 'dcr' pin the choice, probe-free. */
 export type UpstreamOauthClientMode = 'auto' | 'cimd' | 'dcr';
+
+/** Per-server override of the above; 'inherit' follows the instance-wide setting. */
+export type ServerOauthClientMode = 'inherit' | UpstreamOauthClientMode;
 
 /** Shape of GET/PATCH /api/settings. */
 export interface SettingsInfo {

@@ -134,6 +134,20 @@ def test_normalize_oauth_secret_without_id_rejected():
         service.normalize_oauth("remote", True, "", None, "secret-without-id")
 
 
+def test_normalize_oauth_client_mode():
+    # Remote OAuth servers keep an explicit pick; blank/None ('' also being what the
+    # ADD COLUMN migration leaves on old rows) reads as inherit; anything else is
+    # rejected; a non-remote or non-OAuth server is forced back to inherit.
+    assert service.normalize_oauth_client_mode("remote", True, "cimd") == "cimd"
+    assert service.normalize_oauth_client_mode("remote", True, "dcr") == "dcr"
+    assert service.normalize_oauth_client_mode("remote", True, "") == "inherit"
+    assert service.normalize_oauth_client_mode("remote", True, None) == "inherit"
+    assert service.normalize_oauth_client_mode("remote", False, "cimd") == "inherit"
+    assert service.normalize_oauth_client_mode("npx", True, "dcr") == "inherit"
+    with pytest.raises(ValueError):
+        service.normalize_oauth_client_mode("remote", True, "always")
+
+
 def test_config_hash_excludes_client_secret():
     # The config fingerprint must never read the client secret (it's a credential and the
     # bridge doesn't consume it from the spec) — neither its value nor its presence affects
@@ -856,6 +870,83 @@ async def test_upstream_oauth_client_mode_overrides_probe(monkeypatch):
                 runtime_settings.write(s, {"upstream_oauth_client_mode": "always"})
     finally:
         _set_mode("auto")
+        store.clear()
+        oauth_flow._PROBE_CACHE.clear()
+
+
+async def test_per_server_client_mode_overrides_global(monkeypatch):
+    # A server's own oauth_client_mode wins over the runtime setting; 'inherit' (or the
+    # '' an old-row migration leaves behind) defers to it. Also: an explicit 'cimd' must
+    # ignore a stored DCR registration — the SDK only consults the URL client id when no
+    # client is seeded, so seeding would silently keep the DCR identity forever.
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    captured = _spy_provider(monkeypatch)
+    oauth_flow._PROBE_CACHE.clear()
+    probed = {"count": 0}
+
+    async def _probe(_url):
+        probed["count"] += 1
+        return httpx.Response(401)
+
+    monkeypatch.setattr(oauth_flow, "_fetch_client_metadata", _probe)
+    url = "https://mcp.example/api/oauth/client-metadata.json"
+
+    class _Srv:
+        id = "srv-cimd-per-server-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+        oauth_client_mode = "cimd"  # server override; global stays 'auto'
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        # A stored DCR registration for the right callback would normally be seeded…
+        await store.set_client_info(
+            OAuthClientInformationFull(
+                client_id="dcr-registration-123",
+                redirect_uris=["https://mcp.example/api/oauth/callback"],
+            )
+        )
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        # …but the explicit 'cimd' pick ignores it (no seed) and offers the URL,
+        # probe-free, even though the probe would have said "gated".
+        assert captured["client_metadata_url"] == url
+        assert await captured["storage"].get_client_info() is None
+        assert probed["count"] == 0
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+
+        # 'dcr' on the server likewise wins without probing: no URL offered. (The stored
+        # DCR registration IS reused here — that's the identity the operator picked.)
+        captured.clear()
+        _Srv.oauth_client_mode = "dcr"
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        assert captured["client_metadata_url"] is None
+        assert probed["count"] == 0
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c2")
+
+        # '' (legacy migrated rows) falls back to the global 'auto' path: the probe
+        # runs and its 401 verdict withholds the URL. Fresh store so no registration
+        # (carried forward by promote) short-circuits the decision.
+        store.clear()
+        captured.clear()
+        _Srv.oauth_client_mode = ""
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        assert captured["client_metadata_url"] is None
+        assert probed["count"] == 1
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c3")
+    finally:
         store.clear()
         oauth_flow._PROBE_CACHE.clear()
 

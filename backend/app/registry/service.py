@@ -121,6 +121,22 @@ def normalize_oauth(
     return True, scopes, client_id, client_secret
 
 
+_OAUTH_CLIENT_MODES = ("inherit", "auto", "cimd", "dcr")
+
+
+def normalize_oauth_client_mode(runner: str, oauth: bool, mode: Optional[str]) -> str:
+    """Canonicalize the per-server client-identity mode. Blank/None (including the ''
+    an ADD COLUMN migration leaves on old rows) reads as 'inherit'; unknown values are
+    rejected; a non-OAuth or non-remote server is forced back to 'inherit' so a
+    converted row can't carry a stale pick."""
+    mode = (mode or "inherit").strip() or "inherit"
+    if mode not in _OAUTH_CLIENT_MODES:
+        raise ValueError(f"invalid oauth_client_mode: {mode!r} (one of {_OAUTH_CLIENT_MODES})")
+    if runner != "remote" or not oauth:
+        return "inherit"
+    return mode
+
+
 # --- docker (OCI image) normalization ------------------------------------------
 # The canonical stored shape for a docker server is minimal (SSOT): command = image
 # reference, args = the CONTAINER's own arguments, env = the env map. A pasted
@@ -1785,6 +1801,7 @@ def create_server(
     oauth_scopes: str = "",
     oauth_client_id: Optional[str] = None,
     oauth_client_secret: Optional[str] = None,
+    oauth_client_mode: str = "inherit",
     idle_timeout_s: Optional[int] = None,
     enabled: bool = False,
     source: str = "manual",
@@ -1816,6 +1833,7 @@ def create_server(
     oauth, oauth_scopes, oauth_client_id, oauth_client_secret = normalize_oauth(
         runner, oauth, oauth_scopes, oauth_client_id, oauth_client_secret
     )
+    oauth_client_mode = normalize_oauth_client_mode(runner, oauth, oauth_client_mode)
     # A docker server is stored in canonical (image, container_args, env) shape; a pasted
     # `docker run …` invocation is parsed down to it. The gate bites only when the server
     # is created already enabled — a disabled import stays reviewable.
@@ -1860,6 +1878,7 @@ def create_server(
         oauth_scopes=oauth_scopes,
         oauth_client_id=oauth_client_id,
         oauth_client_secret=oauth_client_secret,
+        oauth_client_mode=oauth_client_mode,
         idle_timeout_s=idle_timeout_s,
         enabled=enabled,
         source=source,
@@ -1894,6 +1913,8 @@ _MUTABLE_FIELDS = {
     "oauth_scopes",
     "oauth_client_id",
     "oauth_client_secret",
+    # Sign-in concern only, like idle_timeout_s: outside config_hash, no restart.
+    "oauth_client_mode",
     # Like auth_provider, idle_timeout_s is enforced outside the bridge (by the
     # supervisor), so it's mutable without entering config_hash — no restart on change.
     "idle_timeout_s",
@@ -1961,6 +1982,9 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
             server.oauth_client_id,
             server.oauth_client_secret,
         )
+    )
+    server.oauth_client_mode = normalize_oauth_client_mode(
+        server.runner, server.oauth, server.oauth_client_mode
     )
     if server.runner == "docker":
         server.command, server.args, server.env, _ = _normalize_validate_docker(
@@ -2052,6 +2076,7 @@ def clone_server(
         oauth_scopes=src.oauth_scopes or "",
         oauth_client_id=src.oauth_client_id,
         oauth_client_secret=src.oauth_client_secret,
+        oauth_client_mode=src.oauth_client_mode or "inherit",
         idle_timeout_s=src.idle_timeout_s,
         enabled=False,
         source="clone",

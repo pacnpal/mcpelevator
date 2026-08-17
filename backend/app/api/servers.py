@@ -259,6 +259,8 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         oauth_scopes=server.oauth_scopes or "",
         oauth_client_id=server.oauth_client_id,
         oauth_has_client_secret=bool(server.oauth_client_secret),
+        # '' on rows migrated by ADD COLUMN reads as inherit — canonicalize here.
+        oauth_client_mode=server.oauth_client_mode or "inherit",
         oauth_status=_oauth_status(server),
         idle_timeout_s=server.idle_timeout_s,
         disabled_tools=list(server.disabled_tools or []),
