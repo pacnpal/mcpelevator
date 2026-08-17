@@ -811,57 +811,97 @@ async def test_stored_cimd_identity_is_not_reused_as_seed(monkeypatch):
         oauth_flow._PROBE_CACHE.clear()
 
 
-async def test_dcr_asks_for_a_single_channel_auth_method(monkeypatch):
-    # Leaving token_endpoint_auth_method unset lets the AUTHORIZATION SERVER pick, and
-    # Cloudflare picks client_secret_basic. The SDK then sends `Authorization: Basic` while
-    # still putting client_id in the form body — it builds the body before consulting the
-    # auth method — so credentials arrive through two channels and a server enforcing
-    # RFC 6749 §2.3.1 refuses the exchange outright:
-    #
+def test_basic_auth_token_request_sends_the_client_id_once():
+    # RFC 6749 §2.3: a client MUST NOT use more than one authentication method per request.
+    # The SDK breaks that for a client_secret_basic registration — it builds the body with
+    # client_id in it, THEN adds the Basic header and strips only client_secret — so the
+    # client id goes out through both channels and a server enforcing §2.3 refuses:
     #   {"error":"invalid_request",
     #    "error_description":"Client must not use multiple authentication methods"}
-    #
-    # This is the DCR fallback path, which is exactly where an instance whose
-    # client-metadata document is gated by an authenticating proxy ends up — so the
-    # fallback must not depend on the provider defaulting to a shape we can talk.
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
-    captured = _spy_provider(monkeypatch)
+    # That is exactly what Cloudflare returns, and which auth method we get is the
+    # authorization server's choice at registration, not ours.
+    from app.auth.oauth_client import strip_duplicate_client_id
 
-    class _Srv:
-        id = "srv-dcr-auth-method-1"
-        command = "https://up.example/mcp"
-        args = ["streamable-http"]
-        env: dict = {}
-        oauth_client_id = None
-        oauth_client_secret = None
-        oauth_scopes = ""
+    # Built at runtime: a credential-shaped literal reads the same to a secret scanner
+    # whether it is real or not, and these values are pure filler — the assertions are
+    # about WHICH CHANNEL carries the client id, never about the bytes.
+    basic = "Basic " + "not-a-real-credential"
+    bearer = "Bearer " + "not-a-real-credential"
 
-    store = ServerTokenStorage(_Srv.id)
-    store.clear()
-    try:
-        await oauth_flow.begin_authorization(
-            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
-        )
-        assert captured["client_metadata"].token_endpoint_auth_method == "client_secret_post"
-        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
-    finally:
-        store.clear()
+    duplicated = httpx.Request(
+        "POST",
+        "https://as.example/token",
+        headers={
+            "Authorization": basic,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        content="grant_type=authorization_code&code=abc&client_id=dcr-client&code_verifier=v",
+    )
+    fixed = strip_duplicate_client_id(duplicated)
+    body = fixed.content.decode()
+    assert "client_id=" not in body
+    # ...and nothing else is disturbed: the grant still carries everything it needs, and
+    # the header — where the client id now lives, once — is untouched.
+    assert "grant_type=authorization_code" in body and "code=abc" in body
+    assert "code_verifier=v" in body
+    assert fixed.headers["Authorization"] == basic
 
 
-async def test_a_basic_auth_registration_is_not_reused(monkeypatch):
-    # The preference above only helps a FUTURE registration. An instance that already
-    # signed in before it existed holds a client_secret_basic registration, and the reuse
-    # path would seed it forever — so the fix would never reach the deployments that
-    # actually hit the bug. A registration that authenticates through two channels is
-    # therefore treated like an expired secret or a stale redirect_uri: not reusable.
+def test_single_channel_rule_leaves_every_other_request_alone():
+    # The mixin sits in front of EVERY request the SDK emits — discovery, registration,
+    # the exchange, refresh — so it has to be inert on all of them but the one broken
+    # shape. A client_secret_post client authenticates in the body by design: stripping
+    # client_id there would break the very method that has no duplication problem.
+    from app.auth.oauth_client import strip_duplicate_client_id
+
+    form = "application/x-www-form-urlencoded"
+    basic = "Basic " + "not-a-real-credential"
+    bearer = "Bearer " + "not-a-real-credential"
+    untouched = [
+        # client_secret_post: credentials in the body, no Basic header — one channel already.
+        httpx.Request(
+            "POST",
+            "https://as.example/token",
+            headers={"Content-Type": form},
+            content="grant_type=refresh_token&client_id=c&client_secret=s",
+        ),
+        # Bearer is a RESOURCE credential, not client authentication.
+        httpx.Request(
+            "POST",
+            "https://as.example/token",
+            headers={"Authorization": bearer, "Content-Type": form},
+            content="grant_type=refresh_token&client_id=c",
+        ),
+        # Basic, but a JSON body (registration) — not a form to rewrite.
+        httpx.Request(
+            "POST",
+            "https://as.example/register",
+            headers={"Authorization": basic, "Content-Type": "application/json"},
+            content=b'{"client_id": "c"}',
+        ),
+        # Basic with nothing duplicated.
+        httpx.Request(
+            "POST",
+            "https://as.example/token",
+            headers={"Authorization": basic, "Content-Type": form},
+            content="grant_type=refresh_token",
+        ),
+    ]
+    for request in untouched:
+        assert strip_duplicate_client_id(request).content == request.content, request.url
+
+
+async def test_a_basic_auth_registration_is_still_reused(monkeypatch):
+    # The one-channel rule is applied at the REQUEST, so a stored client_secret_basic
+    # registration is usable as it stands. That's the point of fixing it there rather than
+    # asking DCR for client_secret_post: RFC 7591 §3.2.2 lets a server reject metadata it
+    # cannot honour, so demanding an auth method would turn a Basic-only provider's broken
+    # exchange into a broken REGISTRATION — and would force every already-registered
+    # instance through a needless re-registration.
     from mcp.shared.auth import OAuthClientInformationFull
 
     monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
-    captured = _spy_provider(monkeypatch)
     callback = "http://127.0.0.1:8080/api/oauth/callback"
-
-    # The seed goes to the ephemeral store, not the provider, and the SDK may write its own
-    # registration into it during the flow — so record the seed at construction time.
     seeds: list = []
     real_store = oauth_flow._MemoryTokenStorage
 
@@ -893,22 +933,8 @@ async def test_a_basic_auth_registration_is_not_reused(monkeypatch):
             )
         )
         await oauth_flow.begin_authorization(_Srv, callback_url=callback)
-        # Not seeded — the flow re-registers, which asks for client_secret_post.
-        assert seeds[-1] is None
-        assert captured["client_metadata"].token_endpoint_auth_method == "client_secret_post"
-
-        # ...while an otherwise-identical registration that uses ONE channel is still
-        # reused, so this doesn't turn every sign-in into a fresh DCR round trip.
-        await store.set_client_info(
-            OAuthClientInformationFull(
-                client_id="dcr-client-post",
-                client_secret="stored-secret",
-                redirect_uris=[callback],
-                token_endpoint_auth_method="client_secret_post",
-            )
-        )
-        await oauth_flow.begin_authorization(_Srv, callback_url=callback)
-        assert getattr(seeds[-1], "client_id", None) == "dcr-client-post"
+        assert getattr(seeds[-1], "client_id", None) == "dcr-client-basic"
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
     finally:
         store.clear()
 
