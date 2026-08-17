@@ -75,13 +75,28 @@ async def oauth_client_metadata(request: Request) -> dict:
 # Fixed, literal redirect targets. The callback deliberately puts NO request-derived
 # data into the Location header: the SPA reads the coarse ``oauth`` flag and shows its
 # own message. Keeping the redirect free of remote input rules out URL-redirection /
-# header-injection entirely (the specific failure reason is logged server-side instead).
+# header-injection entirely (the full failure reason is logged server-side instead).
 _ERROR_REDIRECT = "/?oauth=error"
+
+# Coarse failure codes appended as ``&reason=`` so the SPA's toast can say something
+# better than "OAuth sign-in failed." (it already renders `OAuth failed: <reason>`).
+# Every value is a LITERAL authored here — never a provider-supplied string — so the
+# no-remote-input property of the redirect is preserved; the detail stays in the log.
+_REASON_PROVIDER_DENIED = "provider_denied"  # the AS came back with ?error=…
+_REASON_NO_CODE = "no_code"  # redirect carried no code/state
+_REASON_EXPIRED = "expired_or_superseded"  # unknown state: reaped, cancelled, restarted
+_REASON_EXCHANGE_FAILED = "token_exchange_failed"  # code->token, or the upstream refused it
+_REASON_SERVER_GONE = "server_deleted"  # the row vanished mid-flow
 
 
 def _oauth_redirect(path: str) -> RedirectResponse:
     # 303 so the browser follows with GET regardless of how it arrived here.
     return RedirectResponse(path, status_code=303)
+
+
+def _oauth_error(reason: str) -> RedirectResponse:
+    """Failure redirect carrying a coarse, self-authored reason code."""
+    return _oauth_redirect(f"{_ERROR_REDIRECT}&reason={reason}")
 
 
 @router.get("/oauth/callback")
@@ -102,10 +117,15 @@ async def oauth_callback(
     the Location — so a malicious ``?error=``/``?state=`` can't turn this into an open
     redirect. The exact failure reason is logged, not reflected."""
     if error:
-        logger.info("OAuth callback returned an error: %r", error_description or error)
-        return _oauth_redirect(_ERROR_REDIRECT)
+        # WARNING, not INFO: an operator-initiated sign-in just failed and this text is
+        # the ONLY record of why. Under uvicorn's default logging the root logger has no
+        # handler and app.* sits at WARNING, so an INFO line here is discarded outright —
+        # the operator would be left with a toast and nothing to debug from.
+        logger.warning("OAuth callback returned an error: %r", error_description or error)
+        return _oauth_error(_REASON_PROVIDER_DENIED)
     if not code or not state:
-        return _oauth_redirect(_ERROR_REDIRECT)
+        logger.warning("OAuth callback arrived without a code/state pair")
+        return _oauth_error(_REASON_NO_CODE)
 
     sup = request.app.state.supervisor
     # Stop the target server's bridge BEFORE the grant is promoted (which happens inside
@@ -125,23 +145,29 @@ async def oauth_callback(
     try:
         server_id = await oauth_flow.complete_authorization(state, code)
     except KeyError:
+        logger.warning(
+            "OAuth callback carried an unknown or expired state — the sign-in was "
+            "superseded by a newer attempt, timed out, or the control plane restarted "
+            "mid-flow. Start the sign-in again."
+        )
         if stopped:
             sup.nudge()  # unknown state; bring the stopped bridge back with existing tokens
-        return _oauth_redirect(_ERROR_REDIRECT)
+        return _oauth_error(_REASON_EXPIRED)
     except Exception as exc:  # token exchange / provider error
-        logger.info("OAuth callback failed: %r", exc)
+        logger.warning("OAuth callback failed: %r", exc)
         if stopped:
             sup.nudge()  # failed re-auth; restart with the preserved old credentials
-        return _oauth_redirect(_ERROR_REDIRECT)
+        return _oauth_error(_REASON_EXCHANGE_FAILED)
 
     # Look the server up by the id the flow reported. Redirecting with the *stored* id
     # (read from the DB row, never from the request) keeps remote-controlled data out of
     # the Location entirely.
     server = repo.get_server(session, server_id)
     if server is None:
+        logger.warning("OAuth sign-in completed for a server that no longer exists")
         if stopped:
             sup.nudge()
-        return _oauth_redirect(_ERROR_REDIRECT)
+        return _oauth_error(_REASON_SERVER_GONE)
 
     # Force a post-promote restart: stop (idempotent) AFTER the tokens are stored, then
     # nudge. This guarantees the bridge that ends up serving an enabled server is one that

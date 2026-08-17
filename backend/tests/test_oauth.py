@@ -1576,6 +1576,65 @@ def test_callback_unknown_state_redirects_with_error():
         )
         assert r.status_code == 303
         assert "oauth=error" in r.headers["location"]
+        # A coarse reason rides along so the SPA's toast can name the failure class.
+        assert "reason=expired_or_superseded" in r.headers["location"]
+
+
+def test_callback_failure_reasons_are_self_authored_codes(monkeypatch):
+    # Each failure class carries a distinct, LITERAL reason code — never a
+    # provider-supplied string, so the redirect stays free of remote input (no open
+    # redirect / header injection) while still telling the operator what happened.
+    with TestClient(app) as c:
+
+        async def _boom(state, code):
+            raise RuntimeError("the upstream still rejected the new OAuth token (HTTP 401)")
+
+        monkeypatch.setattr(oauth_flow, "complete_authorization", _boom)
+        cases = [
+            # (query params, expected reason)
+            ({"error": "access_denied", "error_description": "user said no"}, "provider_denied"),
+            ({"state": "st"}, "no_code"),  # code missing
+            ({"code": "cd"}, "no_code"),  # state missing
+            ({"code": "cd", "state": "st"}, "token_exchange_failed"),
+        ]
+        for params, reason in cases:
+            r = c.get(
+                "/api/oauth/callback",
+                params=params,
+                headers=LOOPBACK,
+                follow_redirects=False,
+            )
+            assert r.status_code == 303
+            assert r.headers["location"] == f"/?oauth=error&reason={reason}", params
+        # The provider's own error text is never echoed into the Location header.
+        r = c.get(
+            "/api/oauth/callback",
+            params={"error": "access_denied", "error_description": "https://evil.example"},
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+        assert "evil.example" not in r.headers["location"]
+
+
+def test_oauth_failure_reasons_log_at_warning(caplog):
+    # Regression: these lines are the ONLY record of why a sign-in failed, and under
+    # uvicorn's default logging config the root logger has no handler while app.* sits
+    # at effective level WARNING — so an INFO record is discarded and the operator is
+    # left with a toast and nothing to debug. They must be WARNING or above.
+    import logging
+
+    with TestClient(app) as c:
+        with caplog.at_level(logging.WARNING, logger="app.api.auth"):
+            c.get(
+                "/api/oauth/callback",
+                params={"code": "x", "state": "bogus-state-for-log-test"},
+                headers=LOOPBACK,
+                follow_redirects=False,
+            )
+    assert any(
+        rec.levelno >= logging.WARNING and "unknown or expired state" in rec.getMessage()
+        for rec in caplog.records
+    ), [r.getMessage() for r in caplog.records]
 
 
 def test_callback_success_redirects_to_server(monkeypatch):

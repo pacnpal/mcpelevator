@@ -742,7 +742,11 @@ async def _drive(
                 return
 
     error = inner_error or RuntimeError("OAuth flow finished without returning tokens")
-    logger.info("OAuth authorization for %s failed: %s", server.id, error)
+    # WARNING, not INFO: this is the root-cause text for a failed operator-initiated
+    # sign-in, and under uvicorn's default logging (no root handler, app.* effective
+    # level WARNING) an INFO record is dropped before it reaches stderr — leaving the
+    # operator with a failure toast and no way to find out why.
+    logger.warning("OAuth authorization for %s failed: %s", server.id, error)
     url_pending = not pending.url_future.done()
     if url_pending:
         # Failed during discovery/registration, before an authorization URL was produced
