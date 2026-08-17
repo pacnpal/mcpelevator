@@ -88,6 +88,22 @@ class OAuthBeginError(RuntimeError):
         self.status_code = status_code
 
 
+class OAuthGrantRejected(RuntimeError):
+    """The grant completed, but the UPSTREAM refused the token it produced (the retried
+    MCP request came back 401/403). Distinct from a token-exchange failure: the provider
+    issued a credential, the resource server won't accept it — typically a scope or
+    ``resource`` mismatch, which is a configuration problem on this server rather than a
+    transport or protocol fault. Typed so the callback can say which of the two happened
+    instead of labelling every post-redirect failure the same way."""
+
+
+class OAuthPromotionBlocked(RuntimeError):
+    """The grant was obtained but must NOT become this server's credential: the row was
+    deleted, its owner changed, or its OAuth configuration changed while the operator was
+    signing in (see ``_promotion_blocked``). Nothing is wrong with the grant — it just
+    belongs to a configuration that no longer exists, so the remedy is to sign in again."""
+
+
 def _registration_status(exc: OAuthRegistrationError) -> Optional[int]:
     """Pull the HTTP status out of an ``OAuthRegistrationError``. The SDK bakes it into the
     message as ``"Registration failed: <status> <body>"`` (mcp.client.auth.utils) with no
@@ -693,7 +709,7 @@ async def _drive(
     # leave the UI reporting "connected" and restart the bridge with a credential the upstream
     # refuses, so treat that as an authorization failure instead of a success.
     if tokens is not None and final_status in (401, 403):
-        inner_error = inner_error or RuntimeError(
+        inner_error = inner_error or OAuthGrantRejected(
             f"the upstream still rejected the new OAuth token (HTTP {final_status}) — the "
             "granted scopes or resource may not match what this server requires"
         )
@@ -735,7 +751,7 @@ async def _drive(
             inner_error = exc
         else:
             if blocked is not None:
-                inner_error = inner_error or RuntimeError(blocked)
+                inner_error = inner_error or OAuthPromotionBlocked(blocked)
             else:
                 if not pending.done_future.done():
                     pending.done_future.set_result(None)

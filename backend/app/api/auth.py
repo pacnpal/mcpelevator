@@ -10,10 +10,12 @@ state is simply rejected."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 
 from fastapi import APIRouter, Depends
+from mcp.client.auth import OAuthTokenError
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
 from sqlmodel import Session
@@ -82,10 +84,16 @@ _ERROR_REDIRECT = "/?oauth=error"
 # better than "OAuth sign-in failed." (it already renders `OAuth failed: <reason>`).
 # Every value is a LITERAL authored here — never a provider-supplied string — so the
 # no-remote-input property of the redirect is preserved; the detail stays in the log.
+# Each code names only what we can actually tell apart, so none of them sends the
+# operator after the wrong thing:
 _REASON_PROVIDER_DENIED = "provider_denied"  # the AS came back with ?error=…
 _REASON_NO_CODE = "no_code"  # redirect carried no code/state
 _REASON_EXPIRED = "expired_or_superseded"  # unknown state: reaped, cancelled, restarted
-_REASON_EXCHANGE_FAILED = "token_exchange_failed"  # code->token, or the upstream refused it
+_REASON_EXCHANGE_FAILED = "token_exchange_failed"  # the AS refused the code (SDK OAuthTokenError)
+_REASON_TOKEN_REFUSED = "upstream_refused_token"  # got a token; the RESOURCE rejected it (scopes)
+_REASON_CONFIG_CHANGED = "config_changed"  # server deleted/reassigned/reconfigured mid-flow
+_REASON_TIMEOUT = "timed_out"  # the exchange didn't finish inside the callback's budget
+_REASON_UNEXPECTED = "unexpected_error"  # anything else — the log carries the detail
 _REASON_SERVER_GONE = "server_deleted"  # the row vanished mid-flow
 
 
@@ -153,11 +161,42 @@ async def oauth_callback(
         if stopped:
             sup.nudge()  # unknown state; bring the stopped bridge back with existing tokens
         return _oauth_error(_REASON_EXPIRED)
-    except Exception as exc:  # token exchange / provider error
-        logger.warning("OAuth callback failed: %r", exc)
+    except oauth_flow.OAuthGrantRejected as exc:
+        # A token WAS issued; the resource server refused it. Its own code, because the
+        # remedy is specific: adjust the server's scopes (or the upstream URL the token
+        # is bound to), not retry the sign-in.
+        logger.warning("OAuth sign-in produced a token the upstream rejected: %s", exc)
+        if stopped:
+            sup.nudge()
+        return _oauth_error(_REASON_TOKEN_REFUSED)
+    except oauth_flow.OAuthPromotionBlocked as exc:
+        logger.warning("OAuth grant discarded: %s", exc)
+        if stopped:
+            sup.nudge()
+        return _oauth_error(_REASON_CONFIG_CHANGED)
+    except OAuthTokenError as exc:
+        # The authorization server refused the code itself (bad redirect_uri, expired or
+        # replayed code, PKCE mismatch, client auth rejected).
+        logger.warning("OAuth token exchange failed: %r", exc)
+        if stopped:
+            sup.nudge()
+        return _oauth_error(_REASON_EXCHANGE_FAILED)
+    except (TimeoutError, asyncio.TimeoutError) as exc:
+        logger.warning("OAuth token exchange did not finish in time: %r", exc)
+        if stopped:
+            sup.nudge()
+        return _oauth_error(_REASON_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001 — deliberate boundary, see below
+        # Everything else: a persistence failure writing the token store, or an outright
+        # bug. The catch-all is deliberate and must stay — this is a PUBLIC endpoint the
+        # provider redirects a browser to, so an escaping exception would strand the
+        # operator on an unstyled 500 with the bridge still stopped. Instead they land
+        # back in the UI with an honestly UNCLASSIFIED code (never one claiming a phase
+        # we didn't identify), the bridge is restored, and the traceback goes to the log.
+        logger.warning("OAuth callback failed unexpectedly: %r", exc, exc_info=True)
         if stopped:
             sup.nudge()  # failed re-auth; restart with the preserved old credentials
-        return _oauth_error(_REASON_EXCHANGE_FAILED)
+        return _oauth_error(_REASON_UNEXPECTED)
 
     # Look the server up by the id the flow reported. Redirecting with the *stored* id
     # (read from the DB row, never from the request) keeps remote-controlled data out of

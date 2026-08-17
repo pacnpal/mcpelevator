@@ -1584,25 +1584,15 @@ def test_callback_failure_reasons_are_self_authored_codes(monkeypatch):
     # Each failure class carries a distinct, LITERAL reason code — never a
     # provider-supplied string, so the redirect stays free of remote input (no open
     # redirect / header injection) while still telling the operator what happened.
+    # Request-shape failures first (no flow involved).
     with TestClient(app) as c:
-
-        async def _boom(state, code):
-            raise RuntimeError("the upstream still rejected the new OAuth token (HTTP 401)")
-
-        monkeypatch.setattr(oauth_flow, "complete_authorization", _boom)
-        cases = [
-            # (query params, expected reason)
+        for params, reason in [
             ({"error": "access_denied", "error_description": "user said no"}, "provider_denied"),
             ({"state": "st"}, "no_code"),  # code missing
             ({"code": "cd"}, "no_code"),  # state missing
-            ({"code": "cd", "state": "st"}, "token_exchange_failed"),
-        ]
-        for params, reason in cases:
+        ]:
             r = c.get(
-                "/api/oauth/callback",
-                params=params,
-                headers=LOOPBACK,
-                follow_redirects=False,
+                "/api/oauth/callback", params=params, headers=LOOPBACK, follow_redirects=False
             )
             assert r.status_code == 303
             assert r.headers["location"] == f"/?oauth=error&reason={reason}", params
@@ -1616,6 +1606,56 @@ def test_callback_failure_reasons_are_self_authored_codes(monkeypatch):
         assert "evil.example" not in r.headers["location"]
 
 
+def test_callback_maps_each_flow_failure_to_its_own_reason(monkeypatch):
+    # The phases the flow can actually tell apart get distinct codes, so a code never
+    # sends the operator after the wrong thing: a token the RESOURCE refused (fix the
+    # scopes) reads differently from a code the AS refused (retry the sign-in), from a
+    # mid-flow reconfiguration, from an outright bug.
+    from mcp.client.auth import OAuthTokenError
+
+    cases = [
+        (oauth_flow.OAuthGrantRejected("upstream said 401"), "upstream_refused_token"),
+        (oauth_flow.OAuthPromotionBlocked("config changed mid-flow"), "config_changed"),
+        (OAuthTokenError("Token exchange failed (400)"), "token_exchange_failed"),
+        (TimeoutError("exchange overran"), "timed_out"),
+        # A persistence failure or a plain bug must NOT borrow a phase-specific code.
+        (OSError("token store is read-only"), "unexpected_error"),
+    ]
+    with TestClient(app) as c:
+        for exc, reason in cases:
+
+            async def _boom(_state, _code, _exc=exc):
+                raise _exc
+
+            monkeypatch.setattr(oauth_flow, "complete_authorization", _boom)
+            r = c.get(
+                "/api/oauth/callback",
+                params={"code": "cd", "state": "st"},
+                headers=LOOPBACK,
+                follow_redirects=False,
+            )
+            assert r.status_code == 303
+            assert r.headers["location"] == f"/?oauth=error&reason={reason}", exc
+
+
+def test_callback_for_vanished_server_redirects_with_server_deleted(monkeypatch):
+    # The grant completed but the row is gone (deleted between promotion and this read):
+    # its own code, and no crash on the missing server.
+    async def _completed_for_ghost(_state, _code):
+        return "srv-does-not-exist"
+
+    monkeypatch.setattr(oauth_flow, "complete_authorization", _completed_for_ghost)
+    with TestClient(app) as c:
+        r = c.get(
+            "/api/oauth/callback",
+            params={"code": "cd", "state": "st"},
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert r.headers["location"] == "/?oauth=error&reason=server_deleted"
+
+
 def test_oauth_failure_reasons_log_at_warning(caplog):
     # Regression: these lines are the ONLY record of why a sign-in failed, and under
     # uvicorn's default logging config the root logger has no handler while app.* sits
@@ -1623,14 +1663,13 @@ def test_oauth_failure_reasons_log_at_warning(caplog):
     # left with a toast and nothing to debug. They must be WARNING or above.
     import logging
 
-    with TestClient(app) as c:
-        with caplog.at_level(logging.WARNING, logger="app.api.auth"):
-            c.get(
-                "/api/oauth/callback",
-                params={"code": "x", "state": "bogus-state-for-log-test"},
-                headers=LOOPBACK,
-                follow_redirects=False,
-            )
+    with TestClient(app) as c, caplog.at_level(logging.WARNING, logger="app.api.auth"):
+        c.get(
+            "/api/oauth/callback",
+            params={"code": "x", "state": "bogus-state-for-log-test"},
+            headers=LOOPBACK,
+            follow_redirects=False,
+        )
     assert any(
         rec.levelno >= logging.WARNING and "unknown or expired state" in rec.getMessage()
         for rec in caplog.records
