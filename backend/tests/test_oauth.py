@@ -546,6 +546,27 @@ async def test_begin_offers_cimd_url_on_probe_success_or_transport_error(monkeyp
         )
         assert captured["client_metadata_url"] is None
         await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c4")
+
+        # A DELIVERY timeout is the opposite of a connect failure: the connection was
+        # established but the document couldn't arrive within the provider-compatible
+        # budget, so a provider's own fetch would fail the same way — withhold (uncached).
+        captured.clear()
+        oauth_flow._PROBE_CACHE.clear()
+        probe["response"] = httpx.ReadTimeout("body stalled")
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        assert captured["client_metadata_url"] is None
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c5")
+
+        # ...while a CONNECT timeout keeps the hairpin benefit of the doubt.
+        captured.clear()
+        probe["response"] = httpx.ConnectTimeout("no route from in here")
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="https://mcp.example/api/oauth/callback"
+        )
+        assert captured["client_metadata_url"] == url
+        await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c6")
     finally:
         store.clear()
         oauth_flow._PROBE_CACHE.clear()

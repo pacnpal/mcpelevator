@@ -452,15 +452,39 @@ async def _reachable_client_metadata_url(url: str) -> Optional[str]:
 
     Only a DEFINITIVE bad answer — an HTTP response in the stable shape of a gate or a
     body that isn't the public document with the matching ``client_id`` — withholds the
-    offer. Inconclusive evidence keeps it: a transport error proves nothing (plenty of
-    deployments can't hairpin their own public hostname from inside the container while
-    the provider reaches it fine), and neither does a transient status (429/5xx/408)."""
+    offer, with one addition: a connection that IS established but can't deliver the
+    document within the budget (stalled/trickling response) also withholds, uncached —
+    the provider's own server-side fetch would exhaust its deadline the same way.
+    Inconclusive evidence keeps the offer: a CONNECTION failure proves nothing (plenty
+    of deployments can't hairpin their own public hostname from inside the container
+    while the provider reaches it fine), and neither does a transient status
+    (429/5xx/408)."""
     cached = _PROBE_CACHE.get(url)
     if cached is not None and time.monotonic() < cached[1]:
         return cached[0]
     try:
         response = await _fetch_client_metadata(url)
-    except Exception as exc:  # noqa: BLE001 — transport-level failure: not evidence
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        # Couldn't even open a connection from inside the container — the classic
+        # no-hairpin-route shape. Not evidence about the provider's path: offer.
+        logger.debug(
+            "CIMD self-probe of %s could not connect (%s); offering the URL anyway", url, exc
+        )
+        return url
+    except (TimeoutError, httpx.TimeoutException) as exc:
+        # The connection was established (ConnectTimeout is excluded above) but the
+        # document couldn't be delivered inside the provider-compatible budget — a
+        # stalled read or a body trickling past the wall clock. A provider's fetch
+        # would fail the same way, so withhold; possibly transient, so don't cache.
+        logger.warning(
+            "the client-metadata document at %s could not be delivered within %.0fs (%s) — "
+            "falling back to Dynamic Client Registration for this sign-in.",
+            url,
+            _CIMD_PROBE_TIMEOUT,
+            type(exc).__name__,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 — other transport-level failure: not evidence
         logger.debug("CIMD self-probe of %s errored (%s); offering the URL anyway", url, exc)
         return url
     status = response.status_code
