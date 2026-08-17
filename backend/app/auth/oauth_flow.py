@@ -401,27 +401,50 @@ async def _fetch_client_metadata(url: str) -> httpx.Response:
     Bounded twice over: ``asyncio.wait_for`` caps the WHOLE request wall-clock (httpx
     timeouts are per network operation, so a response trickling in under-timeout chunks
     could otherwise hold /oauth/authorize open indefinitely), and the body read stops
-    past ``_CIMD_PROBE_MAX_BYTES``."""
+    past ``_CIMD_PROBE_MAX_BYTES``.
+
+    The wall-clock deadline shares its budget with httpx's connect timeout and can win
+    that race, so a bare deadline expiry is ambiguous. Disambiguate for the caller by
+    whether response HEADERS had arrived when it fired: before headers, re-raise as
+    ``ConnectTimeout`` — indistinguishable from a hairpin blackhole, so inconclusive —
+    and only after headers as ``TimeoutError``, an established-but-undeliverable
+    response the caller treats as disqualifying."""
+    got_headers = False
 
     async def _get() -> httpx.Response:
+        nonlocal got_headers
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(_CIMD_PROBE_TIMEOUT), follow_redirects=False
         ) as client:
+            # Accept-Encoding: identity + aiter_raw: the bound must hold on the bytes
+            # actually allocated. aiter_bytes DECODES each raw chunk before yielding —
+            # a small gzip body can expand ~1000x into one materialized bytes object
+            # before any slice runs — so read the raw wire bytes with no decoding and
+            # ask the server not to compress. A proxy that compresses anyway despite
+            # identity yields a body that fails the JSON parse and reads as a
+            # definitive non-document, which is the safe outcome.
             async with client.stream(
-                "GET", url, headers={"Accept": "application/json"}
+                "GET",
+                url,
+                headers={"Accept": "application/json", "Accept-Encoding": "identity"},
             ) as response:
-                # Slice each chunk to the remaining budget BEFORE retaining it:
-                # aiter_bytes yields DECODED data, so a small compressed body can
-                # expand into one chunk far larger than the cap — appending it whole
-                # and checking after would keep the oversized chunk in memory.
+                got_headers = True
+                # Slice each chunk to the remaining budget BEFORE retaining it.
                 body = bytearray()
-                async for chunk in response.aiter_bytes():
+                async for chunk in response.aiter_raw():
                     body.extend(chunk[: _CIMD_PROBE_MAX_BYTES + 1 - len(body)])
                     if len(body) > _CIMD_PROBE_MAX_BYTES:
                         break
                 return httpx.Response(response.status_code, content=bytes(body))
 
-    return await asyncio.wait_for(_get(), timeout=_CIMD_PROBE_TIMEOUT)
+    try:
+        return await asyncio.wait_for(_get(), timeout=_CIMD_PROBE_TIMEOUT)
+    except TimeoutError:
+        if got_headers:
+            raise
+        raise httpx.ConnectTimeout(
+            f"no response headers within {_CIMD_PROBE_TIMEOUT:.0f}s"
+        ) from None
 
 
 # Conclusive probe verdicts, cached per URL for a few minutes: every server on an

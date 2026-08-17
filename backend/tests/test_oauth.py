@@ -694,7 +694,7 @@ async def test_fetch_client_metadata_bounds_body_and_wall_clock(monkeypatch):
             class _Resp:
                 status_code = 200
 
-                async def aiter_bytes(_self):
+                async def aiter_raw(_self):
                     async for chunk in chunk_gen():
                         yield chunk
 
@@ -719,8 +719,7 @@ async def test_fetch_client_metadata_bounds_body_and_wall_clock(monkeypatch):
     assert len(response.content) == oauth_flow._CIMD_PROBE_MAX_BYTES + 1
 
     async def _one_giant_chunk():
-        # aiter_bytes yields DECODED data: one small compressed body can expand into a
-        # single chunk far past the cap, so each chunk must be sliced before retention.
+        # One chunk far past the cap must be sliced before retention, never held whole.
         yield b"x" * (64 * 1024 * 1024)
 
     _Streaming.chunks = _one_giant_chunk
@@ -734,9 +733,29 @@ async def test_fetch_client_metadata_bounds_body_and_wall_clock(monkeypatch):
             await asyncio.sleep(0.01)
             yield b"x"
 
+    # Headers arrived, body trickles past the wall clock -> a genuine TimeoutError
+    # (the caller's disqualifying shape).
     _Streaming.chunks = _trickle_forever
     monkeypatch.setattr(oauth_flow, "_CIMD_PROBE_TIMEOUT", 0.05)
     with pytest.raises(asyncio.TimeoutError):
+        await oauth_flow._fetch_client_metadata(url)
+
+    # The wall clock expiring BEFORE response headers is ambiguous with a hairpin
+    # blackhole (the outer deadline can beat httpx's equally sized connect timeout),
+    # so it must surface as ConnectTimeout — the caller's inconclusive shape.
+    class _NeverConnects(_Streaming):
+        def stream(self, _method, _url, **_kwargs):
+            class _Ctx:
+                async def __aenter__(_self):
+                    await asyncio.sleep(3600)  # headers never arrive
+
+                async def __aexit__(_self, *exc):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _NeverConnects)
+    with pytest.raises(httpx.ConnectTimeout):
         await oauth_flow._fetch_client_metadata(url)
 
 
