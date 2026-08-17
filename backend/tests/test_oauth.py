@@ -2253,9 +2253,13 @@ async def test_drive_warning_cannot_emit_a_client_secret(monkeypatch, caplog):
 def test_redaction_stays_linear_on_pathological_input():
     # The scrubbers run over text a remote party controls, so their patterns must not
     # backtrack polynomially (CodeQL py/polynomial-redos): the separator's whitespace
-    # runs are bounded quantifiers, and log_safe truncates BEFORE matching. The wall
-    # clock here is deliberately loose — it is a "quadratic blowup" tripwire, not a
-    # performance assertion, so it can't flake on a slow runner.
+    # runs use POSSESSIVE quantifiers, so a long run cannot backtrack at all. log_safe
+    # scrubs the WHOLE string and truncates afterwards — the reverse order leaves a
+    # split quoted value's tail in the clear, which is a leak this suite pins at
+    # `test_log_safe_blocks_log_injection_and_bounds_length`; length is survivable
+    # here because the scan is linear, not because the input was cut first. The wall
+    # clock is deliberately loose — a "quadratic blowup" tripwire, not a performance
+    # assertion, so it can't flake on a slow runner.
     import time
 
     pathological = "client_secret" + " " * 200_000 + "x"
@@ -2264,7 +2268,8 @@ def test_redaction_stays_linear_on_pathological_input():
     oauth_flow.log_safe(pathological)
     assert time.perf_counter() - start < 2.0
 
-    # Truncation before matching means length can't be the attack surface at all.
+    # A linear scan plus a bounded OUTPUT is what makes length harmless — 2 MB in, one
+    # short record out, with no pre-cut of the input to get there.
     assert len(oauth_flow.log_safe("a" * 2_000_000)) < 600
 
 
