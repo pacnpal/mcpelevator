@@ -2023,6 +2023,30 @@ def test_log_safe_blocks_log_injection_and_bounds_length():
     # its closing quote says, so the well-formed neighbour after it stays readable.
     assert "next_key" in oauth_flow.redact_secrets('{"refresh_token": "alpha beta\n"next_key": 1}')
 
+    # Pydantic renders a rejected field with the FIELD NAME on an earlier line and the
+    # offending data under `input_value=`, so a key/value pattern anchored on
+    # "access_token" cannot reach it — and the SDK feeds exactly this into OAuthTokenError
+    # for a malformed token response. Built from a REAL validation error, not a guess at
+    # its formatting.
+    from mcp.shared.auth import OAuthToken
+
+    try:
+        OAuthToken.model_validate({"access_token": ["SUPER-ACCESS-TOKEN"], "token_type": "Bearer"})
+    except Exception as exc:  # noqa: BLE001 — the point is the rendered text
+        validation_text = f"Invalid token response: {exc}"
+    scrubbed = oauth_flow.redact_secrets(validation_text)
+    assert "SUPER-ACCESS-TOKEN" not in scrubbed, scrubbed
+    # ...while everything that makes it diagnosable survives.
+    assert "access_token" in scrubbed and "input_type=list" in scrubbed
+    assert "Input should be a valid string" in scrubbed
+
+    # A list or dict value is ONE token: a delimiter-terminated match would stop at the
+    # first space inside it and leave the rest in the clear.
+    for container in ("input_value=['tok a', 'tok b']", "input_value={'k': 'tok a'}"):
+        out = oauth_flow.redact_secrets(container + ", input_type=x")
+        assert "tok a" not in out and "tok b" not in out, out
+        assert "input_type=x" in out
+
     # Unicode line separators break records for str.splitlines() and line-oriented log
     # tooling just like \n does, so they are folded too.
     for sep in ("\x85", "\u2028", "\u2029"):

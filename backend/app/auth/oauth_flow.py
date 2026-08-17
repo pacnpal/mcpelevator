@@ -104,6 +104,14 @@ _SECRET_KEYS = (
     "code_verifier",
     "code",
     "password",
+    # Pydantic renders a rejected field as ``… input_value=['SUPER-TOKEN'], input_type=list``
+    # with the FIELD NAME on an earlier line, so a key/value pattern anchored on
+    # ``access_token`` can't reach it — and the SDK feeds exactly this into
+    # ``OAuthTokenError`` when a provider returns a malformed token response. Treat the
+    # echoed input as sensitive regardless of which field failed: it is provider data by
+    # definition, and the diagnosis survives without it (the field name, the expected
+    # type, and the actual type are all reported separately).
+    "input_value",
 )
 # A value is matched as a COMPLETE token, not up to the first awkward character: the
 # quoted forms consume the whole string including escapes and spaces (a provider-issued
@@ -151,6 +159,10 @@ _SECRET_RE = re.compile(
     + _SEPARATOR
     + r"(?:"
     + _QUOTED_VALUE
+    # A list/dict value is one token, not several: the delimiter-terminated branch would
+    # stop at the first space inside it and leave the rest ("['tok a', 'tok b']" keeping
+    # everything after the comma) in the clear.
+    + r"|(?P<seq>[\[{](?s:.*?)[\]}])"
     + r"|(?P<bare>[^\s,&})\]]+))"
 )
 
