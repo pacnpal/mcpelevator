@@ -154,7 +154,7 @@ async def oauth_callback(
             # a second, misleading "timed out" for a failure already reported here — and
             # the state stays live, so the same callback can be replayed to re-emit
             # operator-level records.
-            oauth_flow.cancel_pending(denied_server)
+            oauth_flow.cancel_pending(denied_server, superseded=True)
         else:
             # INFO, not WARNING: nothing correlates this to a sign-in we started, so it
             # is indistinguishable from a scanner hitting a public URL. Emitting an
@@ -168,8 +168,21 @@ async def oauth_callback(
             )
         return _oauth_error(_REASON_PROVIDER_DENIED)
     if not code or not state:
-        # Same reasoning: no state at all means nobody's sign-in is failing here.
-        logger.info("OAuth callback arrived without a code/state pair")
+        # A callback carrying a VALID pending state but no code is a broken provider
+        # failing a real operator's sign-in — not noise — so it earns the operator-level
+        # record and retires the flow, exactly as the denial branch does. Without that,
+        # the driver stays parked for the whole browser window and later logs a second,
+        # misleading timeout while its state remains replayable.
+        stranded = oauth_flow.pending_server_id(state) if state else None
+        if stranded is not None:
+            logger.warning(
+                "OAuth callback for a pending sign-in carried no authorization code — "
+                "the provider redirected without one. Start the sign-in again."
+            )
+            oauth_flow.cancel_pending(stranded, superseded=True)
+        else:
+            # No correlated state: nobody's sign-in is failing here.
+            logger.info("OAuth callback arrived without a code/state pair")
         return _oauth_error(_REASON_NO_CODE)
 
     sup = request.app.state.supervisor
@@ -216,13 +229,16 @@ async def oauth_callback(
             sup.nudge()
         return _oauth_error(_REASON_TOKEN_REFUSED)
     except (oauth_flow.OAuthPromotionBlocked, oauth_flow.OAuthFlowCancelled) as exc:
-        # Same remedy either way — the configuration this sign-in belonged to is gone, so
-        # start again. Cancelled flows land here promptly instead of burning the callback
-        # budget and reporting a timeout they didn't have.
+        # Cancelled flows land here promptly instead of burning the callback budget and
+        # reporting a timeout they didn't have. The two causes get different codes
+        # because they ask different things of the operator: a superseded or expired
+        # attempt just needs starting again, while a configuration change is something
+        # to look at before retrying.
         logger.warning("OAuth grant discarded: %s", oauth_flow.log_safe(exc))
         if stopped:
             sup.nudge()
-        return _oauth_error(_REASON_CONFIG_CHANGED)
+        superseded = getattr(exc, "superseded", False)
+        return _oauth_error(_REASON_EXPIRED if superseded else _REASON_CONFIG_CHANGED)
     except OAuthTokenError as exc:
         # The authorization server refused the code itself (bad redirect_uri, expired or
         # replayed code, PKCE mismatch, client auth rejected).

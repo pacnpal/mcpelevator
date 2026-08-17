@@ -1697,6 +1697,40 @@ async def test_abort_wakes_a_parked_callback_instead_of_timing_it_out():
         await asyncio.wait_for(waiter, timeout=5.0)  # promptly, not after the 90s budget
 
 
+async def test_cancellation_cause_picks_the_reason_the_operator_needs():
+    # A superseded or expired attempt and a reconfigured server both discard the grant,
+    # but they ask different things: start again vs look at what changed. The cause rides
+    # on the exception so the callback can say which happened.
+    import asyncio
+
+    async def _cancelled(*, superseded: bool):
+        pending = oauth_flow._Pending(f"srv-cause-{superseded}")
+        pending.callback_event.set()
+        waiter = asyncio.ensure_future(asyncio.shield(pending.done_future))
+        await asyncio.sleep(0)
+        oauth_flow._abort(pending, "cause under test", superseded=superseded)
+        with pytest.raises(oauth_flow.OAuthFlowCancelled) as excinfo:
+            await asyncio.wait_for(waiter, timeout=5.0)
+        return excinfo.value
+
+    assert (await _cancelled(superseded=True)).superseded is True
+    assert (await _cancelled(superseded=False)).superseded is False
+
+    # And the public entry point classifies each caller correctly: a denial or a newer
+    # sign-in supersedes, while an OAuth config edit (the default) is a change to look at.
+    async def _via_cancel_pending(server_id: str, **kwargs):
+        pending = oauth_flow._Pending(server_id)
+        pending.callback_event.set()
+        oauth_flow._PENDING[pending.id] = pending  # registered, so cancel_pending finds it
+        oauth_flow.cancel_pending(server_id, **kwargs)
+        with pytest.raises(oauth_flow.OAuthFlowCancelled) as excinfo:
+            await pending.done_future
+        return excinfo.value
+
+    assert (await _via_cancel_pending("srv-cause-denial", superseded=True)).superseded is True
+    assert (await _via_cancel_pending("srv-cause-config-edit")).superseded is False
+
+
 async def test_abort_of_an_unattended_flow_sets_no_unretrieved_exception():
     # With no callback parked, nobody will ever retrieve an exception — and an unretrieved
     # future exception surfaces as a spurious "Future exception was never retrieved" when
@@ -1708,6 +1742,49 @@ async def test_abort_of_an_unattended_flow_sets_no_unretrieved_exception():
 
     assert pending.done_future.cancelled()
     assert all(p.server_id != "srv-abort-unattended-1" for p in oauth_flow._PENDING.values())
+
+
+async def test_correlated_callback_without_a_code_is_an_operator_failure(monkeypatch, caplog):
+    # A callback carrying a VALID pending state but no code is a broken provider failing
+    # a real sign-in — not scanner noise. It earns the operator-level record and retires
+    # the flow, or the driver stays parked for the whole browser window and later logs a
+    # second, misleading timeout while its state remains replayable.
+    import logging
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+
+    class _Srv:
+        id = "srv-no-code-correlated-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+        )
+        state = _FakeAsyncClient.STATE
+        monkeypatch.undo()  # the app lifespan needs a real httpx.AsyncClient
+        with TestClient(app) as c, caplog.at_level(logging.INFO, logger="app.api.auth"):
+            r = c.get(
+                "/api/oauth/callback",
+                params={"state": state},  # correlated, but no code
+                headers=LOOPBACK,
+                follow_redirects=False,
+            )
+        assert r.headers["location"] == "/?oauth=error&reason=no_code"
+        assert any(
+            rec.levelno >= logging.WARNING and "no authorization code" in rec.getMessage()
+            for rec in caplog.records
+        ), [(x.levelname, x.getMessage()) for x in caplog.records]
+        assert oauth_flow.pending_server_id(state) is None  # retired, not left parked
+    finally:
+        store.clear()
 
 
 async def test_provider_denial_retires_the_pending_flow(monkeypatch):
@@ -1808,6 +1885,50 @@ def test_redact_secrets_scrubs_credential_values():
     assert "4ebff81" not in oauth_flow.redact_secrets("callback code=4ebff81:mqAB5wc")
 
 
+async def test_upstream_rejection_overrides_a_stream_close_error(monkeypatch):
+    # The status line is read as soon as headers arrive, so closing the stream can raise
+    # afterwards. That incidental transport error must not outrank an observed 401: the
+    # rejection is the one verdict here that names a remedy (fix the scopes/resource),
+    # and reporting "unexpected_error" instead would send the operator hunting the wrong
+    # thing — precisely the misdiagnosis this PR exists to prevent.
+    class _RejectedThenCloseFails(_FakeAsyncClient):
+        def stream(self, _method, _url, **_kwargs):
+            handshake = self._handshake
+
+            class _Ctx:
+                async def __aenter__(_self):
+                    await handshake()  # grant completes; tokens land
+                    return httpx.Response(401)  # ...and the resource refuses the token
+
+                async def __aexit__(_self, *exc):
+                    raise httpx.ReadError("connection reset while closing the stream")
+
+            return _Ctx()
+
+    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _RejectedThenCloseFails)
+
+    class _Srv:
+        id = "srv-rejection-wins-1"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(
+            _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
+        )
+        with pytest.raises(oauth_flow.OAuthGrantRejected):
+            await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c1")
+        assert store.status()["authenticated"] is False
+    finally:
+        store.clear()
+
+
 async def test_promotion_block_overrides_an_incidental_retry_error(monkeypatch):
     # Tokens landing alongside an inner_error is a TOLERATED outcome: the exchange stores
     # them before the original request is retried, so a failing retry still leaves a
@@ -1892,7 +2013,14 @@ def test_log_safe_blocks_log_injection_and_bounds_length():
         out = oauth_flow.redact_secrets(malformed)
         assert "beta" not in out, out
         assert "gamma" not in out, out
-    # ...but a well-formed neighbour on the NEXT line is still readable.
+    # An unterminated value that WRAPS must not leak its continuation: stopping at the
+    # line end would mask only the first line, and log_safe folds the newline afterwards
+    # — putting the rest of the credential straight back on the same record.
+    wrapped = '{"client_secret": "alpha beta\ngamma delta'
+    for out in (oauth_flow.redact_secrets(wrapped), oauth_flow.log_safe(wrapped)):
+        assert "gamma" not in out and "delta" not in out, out
+    # A COMPLETE value that merely spans a newline is a different thing: it ends where
+    # its closing quote says, so the well-formed neighbour after it stays readable.
     assert "next_key" in oauth_flow.redact_secrets('{"refresh_token": "alpha beta\n"next_key": 1}')
 
     # Unicode line separators break records for str.splitlines() and line-oriented log

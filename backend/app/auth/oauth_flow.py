@@ -115,13 +115,19 @@ _SECRET_KEYS = (
 # The last two alternatives cover an UNTERMINATED opening quote, which a provider's
 # malformed JSON produces (and pydantic echoes verbatim in its validation errors): with
 # only the complete forms, the bare branch would take over and stop at the first space,
-# turning ``{"access_token": "alpha beta gamma`` into ``<redacted> beta gamma``. An
-# opening quote with no partner means "the rest of this line is the value".
+# turning ``{"access_token": "alpha beta gamma`` into ``<redacted> beta gamma``.
+#
+# They consume the REST OF THE INPUT, newlines included. Stopping at the line end would
+# mask only the first line of a value that wraps, and log_safe folds those newlines
+# afterwards — putting the continuation right back on the same record. When a quote has
+# no partner we cannot know where the value ends, so the safe reading is "everything
+# after it". That over-redacts the tail of a malformed message, which is the correct
+# trade: readability of provider garbage is worth less than a credential.
 _QUOTED_VALUE = (
     r"\"(?P<dq>(?:\\.|[^\"\\])*+)\""
     r"|'(?P<sq>(?:\\.|[^'\\])*+)'"
-    r"|\"(?P<dq_open>[^\r\n]*)"
-    r"|'(?P<sq_open>[^\r\n]*)"
+    r"|\"(?P<dq_open>(?s:.*))"
+    r"|'(?P<sq_open>(?s:.*))"
 )
 # The optional quote after the key is what lets one pattern match JSON
 # (``"client_secret": "x"``) as well as query and form shapes (``client_secret=x``).
@@ -226,10 +232,21 @@ class OAuthGrantRejected(RuntimeError):
 
 class OAuthFlowCancelled(RuntimeError):
     """The flow was cancelled from outside while its callback was already waiting — a
-    config edit, ownership transfer, disconnect, delete, or a newer Authenticate click.
-    Typed so the waiter fails FAST and accurately: without it, cancelling the driving
-    task leaves ``done_future`` unresolved, the callback burns its full budget, and the
-    operator is told the exchange "timed out" when it was deliberately superseded."""
+    config edit, ownership transfer, disconnect, delete, a newer Authenticate click, or
+    the sign-in window expiring. Typed so the waiter fails FAST and accurately: without
+    it, cancelling the driving task leaves ``done_future`` unresolved, the callback burns
+    its full budget, and the operator is told the exchange "timed out" when it was
+    deliberately superseded.
+
+    ``superseded`` separates "this attempt was replaced or ran out of time" from "the
+    configuration it belonged to changed", because those are different things to tell an
+    operator: the first means simply sign in again, the second means check what changed.
+    The flag stays a plain boolean so the reason-code vocabulary lives entirely in the
+    API layer that owns it."""
+
+    def __init__(self, message: str, *, superseded: bool = False):
+        super().__init__(message)
+        self.superseded = superseded
 
 
 class OAuthPromotionBlocked(RuntimeError):
@@ -443,7 +460,7 @@ def _forget(pending: _Pending) -> None:
         pending.task.cancel()
 
 
-def _abort(pending: _Pending, why: str) -> None:
+def _abort(pending: _Pending, why: str, *, superseded: bool = False) -> None:
     """Forget a flow that something EXTERNAL ended, waking anyone parked on it.
 
     ``_forget`` alone cancels the driving task, which never resolves ``done_future`` —
@@ -454,7 +471,7 @@ def _abort(pending: _Pending, why: str) -> None:
     an unattended flow is cancelled silently instead."""
     if not pending.done_future.done():
         if pending.callback_event.is_set():
-            pending.done_future.set_exception(OAuthFlowCancelled(why))
+            pending.done_future.set_exception(OAuthFlowCancelled(why, superseded=superseded))
         else:
             pending.done_future.cancel()
     _forget(pending)
@@ -464,18 +481,22 @@ def _reap_stale() -> None:
     now = time.monotonic()
     for pending in list(_PENDING.values()):
         if now - pending.created_at > _FLOW_TIMEOUT:
-            _abort(pending, "the sign-in window expired before it completed")
-
-
-def _cancel_existing(server_id: str) -> None:
-    """Only one authorization can be in flight per server — a second click supersedes
-    the first (its state/PKCE would otherwise dangle until it reaps)."""
-    for pending in list(_PENDING.values()):
-        if pending.server_id == server_id:
+            # Expiry, not reconfiguration: the remedy is simply to start again.
             _abort(
                 pending,
-                "the sign-in was superseded or its server's OAuth configuration changed",
+                "the sign-in window expired before it completed",
+                superseded=True,
             )
+
+
+def _cancel_existing(server_id: str, why: str, *, superseded: bool) -> None:
+    """Only one authorization can be in flight per server — a second click supersedes
+    the first (its state/PKCE would otherwise dangle until it reaps). Callers say WHY,
+    because "you clicked Authenticate again" and "this server was reconfigured" need
+    different things from the operator."""
+    for pending in list(_PENDING.values()):
+        if pending.server_id == server_id:
+            _abort(pending, why, superseded=superseded)
 
 
 def pending_server_id(state: str) -> Optional[str]:
@@ -487,11 +508,19 @@ def pending_server_id(state: str) -> Optional[str]:
     return pending.server_id if pending is not None else None
 
 
-def cancel_pending(server_id: str) -> None:
+def cancel_pending(server_id: str, *, superseded: bool = False) -> None:
     """Cancel any in-flight authorization for a server. Called when its OAuth config is
     edited: a background flow started against the OLD upstream/scopes/client must not
-    complete and write credentials for the wrong resource back under this id."""
-    _cancel_existing(server_id)
+    complete and write credentials for the wrong resource back under this id. Also used
+    when a provider denial ends a flow — ``superseded=True`` there, since nothing about
+    the server's configuration changed."""
+    _cancel_existing(
+        server_id,
+        "the sign-in ended before it could complete"
+        if superseded
+        else "the server's OAuth configuration or ownership changed during the sign-in",
+        superseded=superseded,
+    )
 
 
 def _repair_authorization_url(url: str) -> str:
@@ -866,7 +895,12 @@ async def _drive(
     # leave the UI reporting "connected" and restart the bridge with a credential the upstream
     # refuses, so treat that as an authorization failure instead of a success.
     if tokens is not None and final_status in (401, 403):
-        inner_error = inner_error or OAuthGrantRejected(
+        # Overrides, never defers (same reasoning as the promotion block below): the
+        # status line is read once headers arrive, so an exception can still surface
+        # afterwards from closing the stream. That incidental transport error would
+        # otherwise win and report the failure as unclassified, when the resource has in
+        # fact explicitly refused the token — the one verdict here that names a remedy.
+        inner_error = OAuthGrantRejected(
             f"the upstream still rejected the new OAuth token (HTTP {final_status}) — the "
             "granted scopes or resource may not match what this server requires"
         )
@@ -953,7 +987,11 @@ async def begin_authorization(server, *, callback_url: str) -> str:
     """Start the interactive flow for ``server`` and return the URL to send the
     operator's browser to. Raises on a discovery/registration failure or timeout."""
     _reap_stale()
-    _cancel_existing(server.id)
+    _cancel_existing(
+        server.id,
+        "a newer sign-in for this server superseded it",
+        superseded=True,
+    )
     # Snapshot the row's existence BEFORE any await: a deletion landing during the
     # client-info/token-store reads below must still read as "existed at begin", so
     # promotion blocks (_promotion_blocked) instead of recreating an orphan
