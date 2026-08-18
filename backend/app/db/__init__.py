@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from sqlalchemy import JSON, Boolean, DateTime, Integer, inspect, text
+from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.config import get_settings
@@ -22,6 +23,15 @@ def get_engine():
         _engine = create_engine(
             f"sqlite:///{settings.resolved_db_path}",
             connect_args={"check_same_thread": False},
+            # No connection pool: a local SQLite connection costs microseconds to
+            # open, while SQLAlchemy's default QueuePool caps the process at 15 and
+            # blocks 30s before failing. A request holds its session for its WHOLE
+            # lifetime (FastAPI closes generator dependencies only after the response
+            # is sent), so long-lived ones — an SSE log stream, a 300s playground tool
+            # call — each parked a pooled connection and enough open browser tabs
+            # wedged the entire control plane: every /api request, login included,
+            # stalled in the Host allowlist middleware and 500'd on QueuePool timeout.
+            poolclass=NullPool,
         )
     return _engine
 

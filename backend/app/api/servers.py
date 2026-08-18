@@ -932,6 +932,11 @@ async def stream_logs(
     404 if the server row doesn't exist (or isn't visible to the caller).
     """
     _visible(principal, session, server_id)
+    # Entry checks are done and the stream below never touches this session (it
+    # re-validates on its own short-lived ones), so hand the DB connection back
+    # NOW instead of at response end — which for an SSE stream is whenever the
+    # viewer closes the tab, hours later.
+    session.close()
 
     sup = request.app.state.supervisor
     headers = {
