@@ -267,35 +267,87 @@ def _build_oauth_auth(oauth: dict):
 # and FastMCP's.
 UPSTREAM_META_KEY = "io.mcpelevator/upstream"
 
-# `normalize_schema_dialect` rewrites a legacy `$schema` declaration (e.g. draft-07,
-# which the MCP TypeScript SDK hardcodes with no config option) to this dialect.
-# 2020-12 is what the MCP spec itself targets and what a strict client's default
-# validator expects; rewriting only the dialect pointer (never the schema's actual
-# keywords) is safe for the common case a proxied tool schema is in — plain
-# type/properties/required with nothing draft-07-specific.
+# `normalize_schema_dialect` rewrites a `$schema` declaring exactly draft-07 — the dialect
+# the MCP TypeScript SDK hardcodes with no config option (mcpelevator/mcpelevator#123) — to
+# this one. 2020-12 is what the MCP spec itself targets and what a strict client's default
+# validator expects; rewriting only the dialect pointer (never the schema's actual keywords)
+# is safe for the common case a proxied tool schema is in — plain type/properties/required
+# with nothing draft-07-specific — PROVIDED the source dialect really is draft-07: an older
+# dialect (draft-04's boolean-form `exclusiveMinimum`/`exclusiveMaximum`, for one) has its
+# own incompatibilities this module doesn't catalogue, so normalization intentionally covers
+# ONLY draft-07's known-safe-when-guarded case (see `_DRAFT_07_SCHEMA_URIS`,
+# `_has_incompatible_draft07_construct`) and leaves every other dialect — including one we've
+# simply never seen — exactly as declared.
 _SCHEMA_DIALECT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
 
+# Every `$schema` string form draft-07 is plausibly declared with (with/without the trailing
+# `#` fragment some generators omit; http vs the https json-schema.org now also serves).
+_DRAFT_07_SCHEMA_URIS = frozenset(
+    {
+        "http://json-schema.org/draft-07/schema#",
+        "http://json-schema.org/draft-07/schema",
+        "https://json-schema.org/draft-07/schema#",
+        "https://json-schema.org/draft-07/schema",
+    }
+)
 
-def _has_incompatible_draft07_construct(node: object) -> bool:
-    """Whether ``node`` (a schema, or any part of one) uses a keyword whose MEANING
-    changed between draft-07 and 2020-12 — so relabeling `$schema` alone would silently
-    mis-declare it, not just rename it. Two known cases (mcpelevator/mcpelevator#123
-    review): an array-valued `items` means positional TUPLE validation in draft-07,
-    but `items` must be a single schema in 2020-12 (tuples moved to `prefixItems`) —
-    left as array-valued under a 2020-12 label, a strict validator either rejects the
-    schema outright or silently stops enforcing the per-position types. `dependencies`
-    (property/schema dependencies) has no keyword of that name in 2020-12 at all (split
-    into `dependentRequired`/`dependentSchemas`) — left in place, it would just be
-    ignored, silently dropping whatever constraint the upstream author intended.
-    Checked recursively (`properties`/`items`/`prefixItems`/… can nest either
-    construct arbitrarily deep) so a top-level-clean schema with a buried tuple or
-    dependency isn't waved through."""
-    if isinstance(node, dict):
-        if isinstance(node.get("items"), list) or "dependencies" in node:
+# Keyword positions whose value is DIRECTLY a sub-schema (not a schema wrapped in another
+# structure) — a construct nested under one of these still needs checking.
+_SCHEMA_KEYWORDS = (
+    "additionalProperties",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "items",  # only when NOT list-valued — the list-valued (tuple) case is the construct itself
+    "contains",
+    "propertyNames",
+    "not",
+    "if",
+    "then",
+    "else",
+)
+# Keyword positions whose value is a LIST of sub-schemas.
+_SCHEMA_LIST_KEYWORDS = ("allOf", "anyOf", "oneOf", "prefixItems")
+# Keyword positions whose value is a MAP OF ARBITRARY NAME -> sub-schema — the keys are
+# property/definition NAMES, never schema keywords, so they must never be checked as if they
+# were one (a property literally named "dependencies" is not the `dependencies` keyword).
+_SCHEMA_NAME_MAP_KEYWORDS = ("properties", "patternProperties", "$defs", "definitions")
+
+
+def _has_incompatible_draft07_construct(schema: object) -> bool:
+    """Whether ``schema`` (a JSON Schema node) uses a keyword whose MEANING changed between
+    draft-07 and 2020-12 — so relabeling `$schema` alone would silently mis-declare it, not
+    just rename it. Two known cases (mcpelevator/mcpelevator#123 review): an array-valued
+    `items` means positional TUPLE validation in draft-07, but `items` must be a single
+    schema in 2020-12 (tuples moved to `prefixItems`) — left as array-valued under a 2020-12
+    label, a strict validator either rejects the schema outright or silently stops enforcing
+    the per-position types. `dependencies` (property/schema dependencies) has no keyword of
+    that name in 2020-12 at all (split into `dependentRequired`/`dependentSchemas`) — left in
+    place, it would just be ignored, silently dropping whatever constraint the upstream author
+    intended.
+
+    Checked recursively — either construct can be nested arbitrarily deep — but ONLY through
+    positions the JSON Schema grammar actually declares as sub-schemas
+    (`_SCHEMA_KEYWORDS`/`_SCHEMA_LIST_KEYWORDS`/`_SCHEMA_NAME_MAP_KEYWORDS`). A naive
+    "recurse into every dict value" walk would descend into a `properties` map and mistake a
+    PROPERTY NAME that happens to read `dependencies` for the keyword itself (review on #124),
+    both missing real matches hidden behind other keywords this function doesn't yet know
+    about and reporting one that isn't there.
+    """
+    if not isinstance(schema, dict):
+        return False
+    if isinstance(schema.get("items"), list) or "dependencies" in schema:
+        return True
+    for key in _SCHEMA_KEYWORDS:
+        if key in schema and _has_incompatible_draft07_construct(schema[key]):
             return True
-        return any(_has_incompatible_draft07_construct(v) for v in node.values())
-    if isinstance(node, list):
-        return any(_has_incompatible_draft07_construct(v) for v in node)
+    for key in _SCHEMA_LIST_KEYWORDS:
+        sub = schema.get(key)
+        if isinstance(sub, list) and any(_has_incompatible_draft07_construct(v) for v in sub):
+            return True
+    for key in _SCHEMA_NAME_MAP_KEYWORDS:
+        sub = schema.get(key)
+        if isinstance(sub, dict) and any(_has_incompatible_draft07_construct(v) for v in sub.values()):
+            return True
     return False
 
 
@@ -331,16 +383,19 @@ class _ToolTransform(ToolTransform):
       different tool would stay exposed. The key is stripped from every upstream tool, so
       only this transform can ever put it there.
 
-    * **A legacy schema dialect can be normalized — but never mis-declared.**
-      ``normalize_schema_dialect`` rewrites every tool's ``$schema`` (parameters/output
-      schema) to 2020-12, independent of the hide/rename policy above — a server whose
-      SDK hardcodes an older dialect (issue #123) would otherwise have every tool refused
-      by a strict client, whether or not the operator has touched its name or description.
-      A schema using a construct whose MEANING changed between dialects (an array-valued
-      ``items`` — draft-07 tuple validation, invalid shape in 2020-12; ``dependencies`` —
-      no 2020-12 keyword of that name) is left under its original dialect instead: relabeling
-      only the pointer there would silently invalidate or drop a constraint, which is worse
-      than the client refusing the tool outright.
+    * **A draft-07 schema dialect can be normalized — but never mis-declared, and never
+      guessed at for a dialect this bridge doesn't know.** ``normalize_schema_dialect``
+      rewrites a tool's ``$schema`` (parameters/output schema) from EXACTLY draft-07 to
+      2020-12, independent of the hide/rename policy above — a server whose SDK hardcodes
+      draft-07 (issue #123) would otherwise have every tool refused by a strict client,
+      whether or not the operator has touched its name or description. Two things stop
+      that rewrite: a schema using a construct whose MEANING changed between the two
+      dialects (an array-valued ``items`` — draft-07 tuple validation, invalid shape in
+      2020-12; ``dependencies`` — no 2020-12 keyword of that name) is left under draft-07
+      instead, since relabeling only the pointer there would silently invalidate or drop a
+      constraint; and a schema declaring any OTHER dialect (draft-04, draft-06, a custom
+      URI) is left untouched entirely, since this bridge only catalogues draft-07's
+      specific incompatibilities.
     """
 
     def __init__(
@@ -372,14 +427,18 @@ class _ToolTransform(ToolTransform):
 
     @staticmethod
     def _normalized_schema(schema: dict | None) -> dict | None:
-        """Rewrite ``schema``'s ``$schema`` dialect to 2020-12, if it declares one, it
-        isn't already 2020-12, and the schema doesn't use a construct the dialect bump
-        alone would silently mis-declare (see ``_has_incompatible_draft07_construct``).
-        Returns the input unchanged (same object) otherwise, so callers can cheaply tell
-        whether anything actually moved."""
+        """Rewrite ``schema``'s ``$schema`` to 2020-12, if — and only if — it declares
+        EXACTLY draft-07 (``_DRAFT_07_SCHEMA_URIS``) and doesn't use a construct the
+        dialect bump alone would silently mis-declare (see
+        ``_has_incompatible_draft07_construct``). Absent, already 2020-12, or any OTHER
+        dialect (draft-04, draft-06, a custom URI, …) is left exactly as declared — this
+        function only knows draft-07's specific incompatibilities, so normalizing a
+        dialect it hasn't catalogued would be a guess, not a fix. Returns the input
+        unchanged (same object) otherwise, so callers can cheaply tell whether anything
+        actually moved."""
         if not isinstance(schema, dict):
             return schema
-        if schema.get("$schema") in (None, _SCHEMA_DIALECT_2020_12):
+        if schema.get("$schema") not in _DRAFT_07_SCHEMA_URIS:
             return schema
         if _has_incompatible_draft07_construct(schema):
             return schema

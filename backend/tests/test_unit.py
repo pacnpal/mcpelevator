@@ -357,6 +357,20 @@ def test_per_tool_policy_reaches_the_bridge_payload(tmp_path):
     assert json.loads(json.dumps(payload))["tool_overrides"] == payload["tool_overrides"]
 
 
+def test_normalize_schema_dialect_omitted_from_payload_when_off(tmp_path):
+    """Unlike every other bridge-payload field, `normalize_schema_dialect` is OMITTED
+    (not sent as `False`) when unset — review on #124: always including it would grow
+    every already-persisted spec on the next reconcile, and a spec accepted right up
+    against BRIDGE_SPEC_MAX_BYTES before this field existed could cross the limit on
+    upgrade alone (the startup hash backfill doesn't re-run the launchability check).
+    `_tool_transform` already reads a missing key as falsy, so this must be a no-op."""
+    server = _server(tmp_path, setup_script="")
+    assert "normalize_schema_dialect" not in ServerUnit(server)._bridge_payload()
+
+    server.normalize_schema_dialect = True
+    assert ServerUnit(server)._bridge_payload()["normalize_schema_dialect"] is True
+
+
 def test_tool_summary_lifts_the_upstream_name_out_of_meta():
     """A renamed tool's cached entry carries `upstream_name` so the UI has a stable
     identity for it; an un-renamed tool carries none (its `name` IS the upstream name)."""

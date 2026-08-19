@@ -852,3 +852,41 @@ def test_has_incompatible_draft07_construct():
     assert host._has_incompatible_draft07_construct({"items": {"type": "string"}}) is False
     assert host._has_incompatible_draft07_construct({"type": "object", "properties": {}}) is False
     assert host._has_incompatible_draft07_construct("not a schema") is False
+    # A PROPERTY NAMED "dependencies" is not the `dependencies` KEYWORD — `properties`' keys
+    # are arbitrary names, never schema keywords (review on #124: a naive "recurse into every
+    # dict value" walk mistook this for the incompatible construct).
+    assert (
+        host._has_incompatible_draft07_construct(
+            {"type": "object", "properties": {"dependencies": {"type": "string"}}}
+        )
+        is False
+    )
+    # Same for a property literally named "items" holding an array-valued schema keyword one
+    # level down inside ITS OWN `items` — a real nested tuple, correctly still caught.
+    assert (
+        host._has_incompatible_draft07_construct(
+            {"properties": {"items": {"type": "array", "items": [{"type": "string"}]}}}
+        )
+        is True
+    )
+    # Genuinely nested through a real schema position (`items`, a single sub-schema) is caught.
+    assert (
+        host._has_incompatible_draft07_construct({"type": "array", "items": {"dependencies": {}}})
+        is True
+    )
+
+
+def test_normalized_schema_only_touches_draft07():
+    """draft-04's boolean-form `exclusiveMinimum` (superseded by draft-06's numeric form,
+    which draft-07 keeps) is a real, different incompatibility this module doesn't
+    catalogue — review on #124. Left untouched: normalization is scoped to draft-07 only,
+    not "anything that isn't already 2020-12"."""
+    draft04 = {
+        "$schema": "http://json-schema.org/draft-04/schema#",
+        "minimum": 0,
+        "exclusiveMinimum": True,
+    }
+    assert host._ToolTransform._normalized_schema(draft04) is draft04
+    # An unrecognized/custom dialect URI is likewise left alone.
+    custom = {"$schema": "https://example.test/my-dialect", "type": "object"}
+    assert host._ToolTransform._normalized_schema(custom) is custom

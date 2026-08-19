@@ -99,14 +99,19 @@ class Server(SQLModel, table=True):
     # restarts the bridge. Nullable: rows predating the column hold NULL, read as {}.
     tool_overrides: Optional[dict] = Field(default=None, sa_column=Column(JSON))
 
-    # Rewrite a legacy `$schema` dialect (e.g. draft-07, which the MCP TypeScript SDK
-    # hardcodes with no config option) on every proxied tool's inputSchema/outputSchema to
-    # 2020-12 before advertising it. A strict client whose validator only accepts 2020-12
-    # otherwise refuses EVERY tool such a server declares (issue #123), even though the
-    # schema itself carries no dialect-specific keywords. Applied by the same bridge
-    # transform as `disabled_tools`/`tool_overrides`, so it reaches every surface. Opt-in
-    # (default off) since it rewrites what the upstream literally declared. Part of the
-    # launch spec (config_hash), so a change restarts the bridge.
+    # Rewrite a `$schema` declaring exactly draft-07 (the dialect the MCP TypeScript SDK
+    # hardcodes with no config option) on a proxied tool's inputSchema/outputSchema to
+    # 2020-12 before advertising it, UNLESS the schema uses a construct whose meaning
+    # changed between the two dialects (left as-is then — see
+    # app.bridge.host._has_incompatible_draft07_construct) — and never touches any OTHER
+    # dialect (draft-04, draft-06, a custom URI): this only catalogues draft-07's specific
+    # incompatibilities, so normalizing a dialect it hasn't would be a guess, not a fix. A
+    # strict client whose validator only accepts 2020-12 otherwise refuses EVERY tool such
+    # a server declares (issue #123), even though the schema itself usually carries no
+    # dialect-specific keywords. Applied by the same bridge transform as
+    # `disabled_tools`/`tool_overrides`, so it reaches every surface. Opt-in (default off)
+    # since it rewrites what the upstream literally declared. Part of the launch spec
+    # (config_hash), so a change restarts the bridge.
     normalize_schema_dialect: bool = False
 
     # uvx runner only: launch with the Python mcp SDK held below 2.0
