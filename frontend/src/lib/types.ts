@@ -144,6 +144,10 @@ export interface ServerDetail extends ServerSummary {
 	 * as the upstream declares it. Because `tools` holds what clients actually see, a
 	 * renamed tool is discovered under its NEW name — the UI maps it back through here. */
 	tool_overrides: Record<string, ToolOverride>;
+	/** Rewrite a legacy `$schema` dialect (draft-07, …) on every tool's parameters/output
+	 * schema to 2020-12 before advertising it, so a strict client stops refusing every
+	 * tool this server declares (issue #123). Opt-in; default false. */
+	normalize_schema_dialect: boolean;
 	config_hash: string;
 	source: string;
 	tools: ServerTool[];
@@ -194,6 +198,9 @@ export interface ServerCreate {
 	/** Upstream tool name -> replacement name/description. Replaces the whole map;
 	 * {} restores every tool's upstream labels. */
 	tool_overrides?: Record<string, ToolOverride>;
+	/** Rewrite a legacy `$schema` dialect (draft-07, …) on every tool's parameters/output
+	 * schema to 2020-12 before advertising it. Forced false unless set (issue #123). */
+	normalize_schema_dialect?: boolean;
 	enabled?: boolean;
 	/** Provenance. Only a `catalog:<id>` value is honored server-side (a registry install). */
 	source?: string | null;

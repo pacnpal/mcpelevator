@@ -31,6 +31,7 @@ def bridge_payload(spec, name: str, *, mcp_http: bool, rest_openapi: bool) -> di
         "oauth": spec.oauth,
         "disabled_tools": list(spec.disabled_tools or []),
         "tool_overrides": {k: dict(v) for k, v in (spec.tool_overrides or {}).items()},
+        "normalize_schema_dialect": bool(spec.normalize_schema_dialect),
         "name": name,
         "mcp_http": mcp_http,
         "rest_openapi": rest_openapi,

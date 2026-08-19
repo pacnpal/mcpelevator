@@ -1334,6 +1334,9 @@ def _hash_payload(server: Server) -> dict[str, Any]:
         "tool_overrides": normalize_tool_overrides(
             server.tool_overrides, server.disabled_tools or []
         ),
+        # Rewriting the advertised schema dialect is applied by the same bridge
+        # transform as the two fields above, so a toggle must restart the bridge.
+        "normalize_schema_dialect": bool(server.normalize_schema_dialect),
         # OAuth config drives how the bridge authenticates upstream, so it IS part
         # of the launch spec — a change must restart the bridge. (The tokens live in
         # a file store, not the row, so *authenticating* leaves the hash untouched.)
@@ -1796,6 +1799,7 @@ def create_server(
     rest_openapi: bool = False,
     disabled_tools: Optional[list[str]] = None,
     tool_overrides: Optional[dict[str, dict[str, str]]] = None,
+    normalize_schema_dialect: bool = False,
     auth_provider: str = "inherit",
     oauth: bool = False,
     oauth_scopes: str = "",
@@ -1873,6 +1877,7 @@ def create_server(
         rest_openapi=rest_openapi,
         disabled_tools=disabled_tools,
         tool_overrides=tool_overrides,
+        normalize_schema_dialect=bool(normalize_schema_dialect),
         auth_provider=auth_provider,
         oauth=oauth,
         oauth_scopes=oauth_scopes,
@@ -1908,6 +1913,7 @@ _MUTABLE_FIELDS = {
     "rest_openapi",
     "disabled_tools",
     "tool_overrides",
+    "normalize_schema_dialect",
     "auth_provider",
     "oauth",
     "oauth_scopes",
@@ -2071,6 +2077,7 @@ def clone_server(
         rest_openapi=src.rest_openapi,
         disabled_tools=list(src.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (src.tool_overrides or {}).items()},
+        normalize_schema_dialect=bool(src.normalize_schema_dialect),
         auth_provider=src.auth_provider,
         oauth=bool(src.oauth),
         oauth_scopes=src.oauth_scopes or "",

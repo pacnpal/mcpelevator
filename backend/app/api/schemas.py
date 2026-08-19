@@ -158,6 +158,10 @@ class ServerDetail(ServerSummary):
     disabled_tools: list[str] = []
     # Upstream tool name -> replacement name/description. Empty = serve tools as declared.
     tool_overrides: dict[str, ToolOverride] = {}
+    # Rewrite a legacy `$schema` dialect (draft-07, …) on every tool's schema to 2020-12
+    # before advertising it, so a strict client stops refusing every tool this server
+    # declares. Opt-in; default false leaves the upstream's declared dialect untouched.
+    normalize_schema_dialect: bool = False
     config_hash: str = ""
     source: str = "manual"
     # Whether GET /servers/{id}/mcpb would produce a bundle (app.mcpb.exportable);
@@ -189,6 +193,9 @@ class ServerCreate(BaseModel):
     disabled_tools: list[StrictStr] = []
     # Upstream tool name -> replacement name/description (empty = serve as declared).
     tool_overrides: dict[StrictStr, ToolOverride] = {}
+    # Rewrite a legacy `$schema` dialect (draft-07, …) on every tool's schema to 2020-12
+    # before advertising it (issue #123). Opt-in; default false.
+    normalize_schema_dialect: bool = False
     auth_provider: AuthProvider = "inherit"
     # Upstream OAuth (remote runner only; forced off elsewhere server-side).
     oauth: bool = False
@@ -229,6 +236,8 @@ class ServerUpdate(BaseModel):
     # Replace the whole override map; {} restores every tool's upstream name/description.
     # Omitted (null) = unchanged. A per-tool merge would give no way to clear one entry.
     tool_overrides: Optional[dict[StrictStr, ToolOverride]] = None
+    # Omitted (null) = unchanged.
+    normalize_schema_dialect: Optional[bool] = None
     auth_provider: Optional[AuthProvider] = None
     # StrictBool (unlike mcp_http/rest_openapi above): oauth gates a security-sensitive
     # upstream-auth mode, so a truthy-coerced "yes"/1 must never silently flip it on — the

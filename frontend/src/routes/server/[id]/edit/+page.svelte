@@ -60,6 +60,7 @@
 					pin_mcp1: server.pin_mcp1,
 					mcp_http: server.transports.mcp_http,
 					rest_openapi: server.transports.rest_openapi,
+					normalize_schema_dialect: server.normalize_schema_dialect,
 					auth_provider: server.auth_provider,
 					idle_timeout_s: server.idle_timeout_s,
 					oauth: server.oauth,

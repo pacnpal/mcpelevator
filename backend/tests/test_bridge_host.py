@@ -631,3 +631,140 @@ async def test_override_keeps_a_dynamic_schema_tool_callable():
             result = await client.call_tool(exposed, {"a": 7}, raise_on_error=False)
         assert result.is_error is False, policy
         assert result.structured_content == {"a": 7}, policy
+
+
+# --- schema dialect normalization (issue #123) -----------------------------------
+#
+# The MCP TypeScript SDK hardcodes a draft-07 `$schema` into every generated tool
+# schema with no config option; a strict client whose validator only supports
+# 2020-12 refuses every such tool outright. `normalize_schema_dialect` rewrites just
+# the dialect pointer so the schema's actual keywords (which the upstream server, not
+# this bridge, is responsible for) are left untouched.
+
+_DRAFT_07 = "http://json-schema.org/draft-07/schema#"
+_DIALECT_2020_12 = host._SCHEMA_DIALECT_2020_12
+
+
+def _tool_with_schemas(*, parameters=None, output_schema=None):
+    def fn(x: int) -> int:
+        """Upstream tool."""
+        return x
+
+    update = {}
+    if parameters is not None:
+        update["parameters"] = parameters
+    if output_schema is not None:
+        update["output_schema"] = output_schema
+    return FastMCPTool.from_function(fn, name="tasky").model_copy(update=update)
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_off_by_default_leaves_draft07_untouched():
+    """Opt-in: without the flag, a draft-07 dialect passes through unchanged — this
+    bridge must not silently rewrite what the upstream literally declared."""
+    tool = _tool_with_schemas(
+        parameters={"type": "object", "properties": {"x": {"type": "integer"}}, "$schema": _DRAFT_07},
+        output_schema={"type": "integer", "$schema": _DRAFT_07},
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t"})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DRAFT_07
+    assert served.outputSchema["$schema"] == _DRAFT_07
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_rewrites_input_and_output_schema():
+    """Enabled: a legacy dialect on EITHER schema is rewritten to 2020-12, and nothing
+    else about the schema (its actual keywords) moves."""
+    tool = _tool_with_schemas(
+        parameters={"type": "object", "properties": {"x": {"type": "integer"}}, "$schema": _DRAFT_07},
+        output_schema={"type": "integer", "$schema": _DRAFT_07},
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DIALECT_2020_12
+    assert served.inputSchema["properties"] == {"x": {"type": "integer"}}
+    assert served.outputSchema["$schema"] == _DIALECT_2020_12
+    assert served.outputSchema["type"] == "integer"
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_does_not_invent_a_dialect():
+    """A schema declaring no `$schema` at all must not have one injected — normalizing
+    is a rewrite of an existing (wrong) dialect, not an assertion of a new one."""
+    tool = _tool_with_schemas(parameters={"type": "object", "properties": {}})
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert "$schema" not in served.inputSchema
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_leaves_2020_12_alone():
+    """Already the target dialect: rewritten to the same value, i.e. a no-op."""
+    tool = _tool_with_schemas(
+        parameters={"type": "object", "properties": {}, "$schema": _DIALECT_2020_12}
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DIALECT_2020_12
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_applies_without_any_hide_or_rename_policy():
+    """The dialect rewrite is orthogonal to disabled_tools/tool_overrides — it must fire
+    on a tool that carries neither, not only on tools an operator has otherwise touched."""
+    tool = _tool_with_schemas(
+        parameters={"type": "object", "properties": {}, "$schema": _DRAFT_07}
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DIALECT_2020_12
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_combines_with_rename():
+    """A renamed tool still gets its dialect rewritten — the two controls compose."""
+    tool = _tool_with_schemas(
+        parameters={"type": "object", "properties": {}, "$schema": _DRAFT_07}
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy(
+            {
+                "command": "x",
+                "name": "t",
+                "normalize_schema_dialect": True,
+                "tool_overrides": {"tasky": {"name": "renamed"}},
+            }
+        )
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.name == "renamed"
+    assert served.inputSchema["$schema"] == _DIALECT_2020_12
+
+
+def test_tool_transform_reads_normalize_schema_dialect_from_spec():
+    """Unit-level: the spec key reaches the transform's constructor flag."""
+    assert host._tool_transform({})._normalize_schema_dialect is False
+    assert host._tool_transform({"normalize_schema_dialect": True})._normalize_schema_dialect is True

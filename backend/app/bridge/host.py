@@ -267,6 +267,14 @@ def _build_oauth_auth(oauth: dict):
 # and FastMCP's.
 UPSTREAM_META_KEY = "io.mcpelevator/upstream"
 
+# `normalize_schema_dialect` rewrites a legacy `$schema` declaration (e.g. draft-07,
+# which the MCP TypeScript SDK hardcodes with no config option) to this dialect.
+# 2020-12 is what the MCP spec itself targets and what a strict client's default
+# validator expects; rewriting only the dialect pointer (never the schema's actual
+# keywords) is safe for the common case a proxied tool schema is in — plain
+# type/properties/required with nothing draft-07-specific.
+_SCHEMA_DIALECT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
+
 
 class _ToolTransform(ToolTransform):
     """FastMCP's ``ToolTransform`` with the gaps that matter to elevation closed.
@@ -299,9 +307,20 @@ class _ToolTransform(ToolTransform):
       UI a false identity to key policy off — the operator would disable one row and a
       different tool would stay exposed. The key is stripped from every upstream tool, so
       only this transform can ever put it there.
+
+    * **A legacy schema dialect can be normalized.** ``normalize_schema_dialect`` rewrites
+      every tool's ``$schema`` (parameters/output schema) to 2020-12, independent of the
+      hide/rename policy above — a server whose SDK hardcodes an older dialect (issue #123)
+      would otherwise have every tool refused by a strict client, whether or not the
+      operator has touched its name or description.
     """
 
-    def __init__(self, transforms: dict[str, ToolTransformConfig]) -> None:
+    def __init__(
+        self,
+        transforms: dict[str, ToolTransformConfig],
+        *,
+        normalize_schema_dialect: bool = False,
+    ) -> None:
         # Own the reverse map rather than inheriting it: a HIDDEN tool exposes no name, so
         # it must not reserve one. FastMCP's constructor reserves a target for every entry
         # and raises on a duplicate, which made "hide `b`, rename `a` to `b`" — a
@@ -316,6 +335,7 @@ class _ToolTransform(ToolTransform):
         # `x` that doesn't exist — advertised and uncallable, the exact split this class
         # exists to prevent.
         self._transforms = transforms
+        self._normalize_schema_dialect = normalize_schema_dialect
         self._name_reverse = {}
         for source, config in transforms.items():
             if not config.enabled or not config.name or config.name == source:
@@ -323,14 +343,31 @@ class _ToolTransform(ToolTransform):
             self._name_reverse[config.name] = source
 
     @staticmethod
-    def _scrub(tool: Tool) -> Tool:
-        """Drop our reserved identity key from an upstream tool (see the class docstring)."""
+    def _normalized_schema(schema: dict | None) -> dict | None:
+        """Rewrite ``schema``'s ``$schema`` dialect to 2020-12, if it declares one and
+        it isn't already 2020-12. Returns the input unchanged (same object) otherwise,
+        so callers can cheaply tell whether anything actually moved."""
+        if not isinstance(schema, dict):
+            return schema
+        if schema.get("$schema") in (None, _SCHEMA_DIALECT_2020_12):
+            return schema
+        return {**schema, "$schema": _SCHEMA_DIALECT_2020_12}
+
+    def _scrub(self, tool: Tool) -> Tool:
+        """Drop our reserved identity key, and — when enabled — normalize the schema
+        dialect, on an upstream tool (see the class docstring)."""
         meta = tool.meta or {}
-        if UPSTREAM_META_KEY not in meta:
-            return tool
-        return tool.model_copy(
-            update={"meta": {k: v for k, v in meta.items() if k != UPSTREAM_META_KEY}}
-        )
+        update: dict = {}
+        if UPSTREAM_META_KEY in meta:
+            update["meta"] = {k: v for k, v in meta.items() if k != UPSTREAM_META_KEY}
+        if self._normalize_schema_dialect:
+            parameters = self._normalized_schema(tool.parameters)
+            if parameters is not tool.parameters:
+                update["parameters"] = parameters
+            output_schema = self._normalized_schema(tool.output_schema)
+            if output_schema is not tool.output_schema:
+                update["output_schema"] = output_schema
+        return tool.model_copy(update=update) if update else tool
 
     def _hides(self, name: str) -> bool:
         config = self._transforms.get(name)
@@ -453,6 +490,11 @@ def _tool_transform(spec: dict) -> ToolTransform:
     what clients see, and the UI maps those names back to their upstream keys via the same
     overrides it holds in the DB row.
 
+    A third, orthogonal control also rides this transform: ``normalize_schema_dialect``
+    (issue #123) rewrites a legacy ``$schema`` dialect declaration on every tool's
+    parameters/output schema to 2020-12, regardless of whether that tool carries any
+    hide/rename policy — see ``_ToolTransform._scrub``.
+
     Always returns a transform, even with an empty policy: ``_ToolTransform`` also strips our
     reserved identity key from upstream tools, and a server can forge that key whether or not
     anyone has set a policy on it. A key naming a tool the upstream doesn't (or no longer)
@@ -480,7 +522,9 @@ def _tool_transform(spec: dict) -> ToolTransform:
             fields["enabled"] = False
         if fields:
             configs[tool] = ToolTransformConfig(**fields)
-    return _ToolTransform(configs)
+    return _ToolTransform(
+        configs, normalize_schema_dialect=bool(spec.get("normalize_schema_dialect"))
+    )
 
 
 def _build_transport(spec: dict):

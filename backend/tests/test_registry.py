@@ -279,6 +279,42 @@ def test_disabled_tools_survive_clone(session):
     assert clone.disabled_tools == ["secret"]
 
 
+def test_normalize_schema_dialect_default_false(session):
+    """Opt-in: the dialect rewrite defaults off (issue #123)."""
+    a = _mk(session)
+    assert a.normalize_schema_dialect is False
+
+
+def test_normalize_schema_dialect_change_bounces_bridge(session):
+    """Applied inside the bridge's tool transform, so toggling it must restart the
+    bridge — same as disabled_tools/tool_overrides."""
+    a = _mk(session)
+    before = a.config_hash
+    service.update_server(session, a.id, {"normalize_schema_dialect": True})
+    after = repo.get_server(session, a.id).config_hash
+    assert after != before
+
+
+def test_normalize_schema_dialect_survives_clone(session):
+    a = _mk(session, normalize_schema_dialect=True)
+    clone = service.clone_server(session, a.id)
+    assert clone.normalize_schema_dialect is True
+
+
+def test_normalize_schema_dialect_applies_to_every_runner(session):
+    """Unlike pin_mcp1 (uvx-only), this is a bridge-level policy that applies
+    regardless of runner — it must not be forced off on create/update."""
+    remote = _mk(
+        session,
+        name="Remote",
+        runner="remote",
+        command="https://example.test/mcp",
+        args=["streamable-http"],
+        normalize_schema_dialect=True,
+    )
+    assert remote.normalize_schema_dialect is True
+
+
 # --- tool overrides (issue #112) ----------------------------------------------
 
 
