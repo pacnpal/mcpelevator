@@ -823,6 +823,24 @@ async def test_normalize_schema_dialect_skips_dependencies_keyword():
 
 
 @pytest.mark.asyncio
+async def test_normalize_schema_dialect_skips_ref_with_assertion_sibling():
+    """draft-07 ignores every sibling of `$ref`; 2020-12 evaluates them. Relabeling would
+    make the schema STRICTER — an argument the upstream tool previously accepted (the
+    sibling `required` was silently ignored) could start failing validation post-proxy."""
+    tool = _tool_with_schemas(
+        parameters={"$ref": "#/$defs/Thing", "required": ["name"], "$schema": _DRAFT_07}
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DRAFT_07
+    assert served.inputSchema["required"] == ["name"]
+
+
+@pytest.mark.asyncio
 async def test_normalize_schema_dialect_skips_nested_tuple_items():
     """The incompatible construct can be buried inside a property's own schema, not
     just at the top level — checked recursively so a top-level-clean schema with a
@@ -873,6 +891,24 @@ def test_has_incompatible_draft07_construct():
     assert (
         host._has_incompatible_draft07_construct({"type": "array", "items": {"dependencies": {}}})
         is True
+    )
+    # `$ref` next to an ASSERTION sibling (`required`): draft-07 ignores the sibling and
+    # validates only the reference; 2020-12 evaluates both — relabeling would make the schema
+    # STRICTER than the upstream author intended (review on #124).
+    assert (
+        host._has_incompatible_draft07_construct(
+            {"$ref": "#/$defs/Thing", "required": ["name"]}
+        )
+        is True
+    )
+    # A bare `$ref` (nothing else) has no sibling to change meaning.
+    assert host._has_incompatible_draft07_construct({"$ref": "#/$defs/Thing"}) is False
+    # `$ref` beside PURE ANNOTATIONS (no validation behavior in either dialect) is fine.
+    assert (
+        host._has_incompatible_draft07_construct(
+            {"$ref": "#/$defs/Thing", "$schema": "http://json-schema.org/draft-07/schema#", "title": "Thing"}
+        )
+        is False
     )
 
 

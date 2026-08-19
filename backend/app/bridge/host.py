@@ -312,20 +312,48 @@ _SCHEMA_LIST_KEYWORDS = ("allOf", "anyOf", "oneOf", "prefixItems")
 # were one (a property literally named "dependencies" is not the `dependencies` keyword).
 _SCHEMA_NAME_MAP_KEYWORDS = ("properties", "patternProperties", "$defs", "definitions")
 
+# Pure annotations: keywords that carry no validation behavior in EITHER dialect, so their
+# presence beside `$ref` is never the sibling-semantics hazard below — only an ASSERTION
+# keyword sitting next to `$ref` changes meaning across the dialect boundary.
+_ANNOTATION_ONLY_KEYWORDS = frozenset(
+    {
+        "$schema",
+        "$id",
+        "$comment",
+        "title",
+        "description",
+        "default",
+        "examples",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+    }
+)
+
 
 def _has_incompatible_draft07_construct(schema: object) -> bool:
     """Whether ``schema`` (a JSON Schema node) uses a keyword whose MEANING changed between
     draft-07 and 2020-12 — so relabeling `$schema` alone would silently mis-declare it, not
-    just rename it. Two known cases (mcpelevator/mcpelevator#123 review): an array-valued
-    `items` means positional TUPLE validation in draft-07, but `items` must be a single
-    schema in 2020-12 (tuples moved to `prefixItems`) — left as array-valued under a 2020-12
-    label, a strict validator either rejects the schema outright or silently stops enforcing
-    the per-position types. `dependencies` (property/schema dependencies) has no keyword of
-    that name in 2020-12 at all (split into `dependentRequired`/`dependentSchemas`) — left in
-    place, it would just be ignored, silently dropping whatever constraint the upstream author
-    intended.
+    just rename it. Three known cases (mcpelevator/mcpelevator#123 and #124 review):
 
-    Checked recursively — either construct can be nested arbitrarily deep — but ONLY through
+    * An array-valued ``items`` means positional TUPLE validation in draft-07, but ``items``
+      must be a single schema in 2020-12 (tuples moved to ``prefixItems``) — left as
+      array-valued under a 2020-12 label, a strict validator either rejects the schema
+      outright or silently stops enforcing the per-position types.
+    * ``dependencies`` (property/schema dependencies) has no keyword of that name in 2020-12
+      at all (split into ``dependentRequired``/``dependentSchemas``) — left in place, it
+      would just be ignored, silently DROPPING whatever constraint the upstream author
+      intended (under-enforcement).
+    * ``$ref`` alongside an ASSERTION keyword (``required``, ``minLength``, a sibling
+      ``properties``, …): draft-07 ignores every sibling of ``$ref`` and validates only the
+      referenced schema; 2020-12 evaluates the siblings too. Relabeling such a schema makes
+      it STRICTER — arguments the upstream tool previously accepted (because the sibling was
+      silently ignored) can start failing validation post-proxy (over-enforcement, the
+      mirror image of the ``dependencies`` case). Pure-annotation siblings
+      (``_ANNOTATION_ONLY_KEYWORDS`` — ``title``, ``description``, …) don't count: they carry
+      no validation behavior in either dialect, so their presence changes nothing.
+
+    Checked recursively — any of the three can be nested arbitrarily deep — but ONLY through
     positions the JSON Schema grammar actually declares as sub-schemas
     (`_SCHEMA_KEYWORDS`/`_SCHEMA_LIST_KEYWORDS`/`_SCHEMA_NAME_MAP_KEYWORDS`). A naive
     "recurse into every dict value" walk would descend into a `properties` map and mistake a
@@ -336,6 +364,8 @@ def _has_incompatible_draft07_construct(schema: object) -> bool:
     if not isinstance(schema, dict):
         return False
     if isinstance(schema.get("items"), list) or "dependencies" in schema:
+        return True
+    if "$ref" in schema and any(k not in _ANNOTATION_ONLY_KEYWORDS for k in schema if k != "$ref"):
         return True
     for key in _SCHEMA_KEYWORDS:
         if key in schema and _has_incompatible_draft07_construct(schema[key]):
