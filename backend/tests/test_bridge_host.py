@@ -768,3 +768,87 @@ def test_tool_transform_reads_normalize_schema_dialect_from_spec():
     """Unit-level: the spec key reaches the transform's constructor flag."""
     assert host._tool_transform({})._normalize_schema_dialect is False
     assert host._tool_transform({"normalize_schema_dialect": True})._normalize_schema_dialect is True
+
+
+# --- schema dialect normalization: don't mis-declare an incompatible construct ---
+#
+# Some draft-07 keywords change MEANING under 2020-12 rather than just being renamed.
+# Relabeling `$schema` alone on a schema using one of them would silently invalidate or
+# drop a constraint rather than merely fix the dialect pointer (review on PR #124).
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_skips_tuple_typed_items():
+    """An array-valued `items` is draft-07 positional TUPLE validation — not a valid
+    `items` shape in 2020-12 (tuples moved to `prefixItems`). Left as draft-07 rather
+    than mislabeled as 2020-12 while still speaking draft-07's tuple syntax."""
+    tool = _tool_with_schemas(
+        parameters={
+            "type": "array",
+            "items": [{"type": "string"}, {"type": "integer"}],
+            "$schema": _DRAFT_07,
+        }
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DRAFT_07
+    assert served.inputSchema["items"] == [{"type": "string"}, {"type": "integer"}]
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_skips_dependencies_keyword():
+    """`dependencies` has no 2020-12 keyword of that name (split into
+    `dependentRequired`/`dependentSchemas`) — a 2020-12 validator would just ignore it,
+    silently dropping the constraint. Left under draft-07 instead."""
+    tool = _tool_with_schemas(
+        parameters={
+            "type": "object",
+            "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+            "dependencies": {"a": ["b"]},
+            "$schema": _DRAFT_07,
+        }
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DRAFT_07
+    assert served.inputSchema["dependencies"] == {"a": ["b"]}
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_skips_nested_tuple_items():
+    """The incompatible construct can be buried inside a property's own schema, not
+    just at the top level — checked recursively so a top-level-clean schema with a
+    nested tuple isn't waved through."""
+    tool = _tool_with_schemas(
+        parameters={
+            "type": "object",
+            "properties": {
+                "pair": {"type": "array", "items": [{"type": "string"}, {"type": "string"}]}
+            },
+            "$schema": _DRAFT_07,
+        }
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DRAFT_07
+
+
+def test_has_incompatible_draft07_construct():
+    assert host._has_incompatible_draft07_construct({"items": [{"type": "string"}]}) is True
+    assert host._has_incompatible_draft07_construct({"dependencies": {"a": ["b"]}}) is True
+    # A single-schema `items` (the ordinary, dialect-portable list-validation shape) is fine.
+    assert host._has_incompatible_draft07_construct({"items": {"type": "string"}}) is False
+    assert host._has_incompatible_draft07_construct({"type": "object", "properties": {}}) is False
+    assert host._has_incompatible_draft07_construct("not a schema") is False
