@@ -336,11 +336,14 @@ _SCHEMA_NAME_MAP_KEYWORDS = ("properties", "patternProperties", "$defs", "defini
 # too: they're inert reusable-schema containers, not constraints on the node they sit in — a
 # nested incompatibility inside one is still caught separately, via `_SCHEMA_NAME_MAP_KEYWORDS`
 # recursing into their values regardless of this set (#124 review).
-# `format` belongs here for the SAME reason it isn't globally guarded (see the module note
-# below `_POST_DRAFT_07_ASSERTION_KEYWORDS`): 2020-12's default vocabulary treats it as an
-# annotation, so evaluating it as a `$ref` sibling has no effect on the validation OUTCOME —
-# identical to draft-07 ignoring it as a sibling. `contentEncoding`/`contentMediaType` are
-# annotation-only in both dialects unconditionally, no judgment call needed. `contentSchema`
+# `format`, `contentEncoding`, and `contentMediaType` belong here for the SAME judgment call,
+# not three different ones: draft-07's own spec permits all three as OPTIONAL, disableable
+# validation assertions (verified against the draft-07 meta-schema, not assumed), while
+# 2020-12's default vocabulary makes all three annotation-only. Evaluating an annotation as a
+# `$ref` sibling has no effect on the validation OUTCOME — identical to draft-07 ignoring it as
+# a sibling — so the `$ref`-sibling question doesn't turn on whether draft-07 COULD have
+# asserted it, only on what 2020-12 does with it. See the module note below
+# `_POST_DRAFT_07_ASSERTION_KEYWORDS` for the fuller version of this argument. `contentSchema`
 # is deliberately NOT here: it's schema-VALUED, with its own shape and nested-incompatibility
 # handling via `_SCHEMA_KEYWORDS`/`_POST_DRAFT_07_VALUE_SHAPES`, so it earns its own review
 # rather than riding on this list (#124 review).

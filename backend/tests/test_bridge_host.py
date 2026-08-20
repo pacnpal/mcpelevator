@@ -974,10 +974,16 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
         True,
         "min-contains-with-contains",
     ),
+    (
+        {"type": "array", "contains": {"type": "string"}, "maxContains": 2},
+        True,
+        "max-contains-with-contains",
+    ),
     # ...and a value that would fail 2020-12 meta-validation is never portable.
     ({"type": "array", "minContains": "two"}, True, "min-contains-non-integer"),
     ({"type": "array", "minContains": -1}, True, "min-contains-negative"),
     ({"type": "array", "minContains": True}, True, "min-contains-bool"),
+    ({"type": "array", "maxContains": -1}, True, "max-contains-negative"),
     # A post-draft-07 keyword's VALUE is never inspected by draft-07 (unknown keyword), so a
     # shape 2020-12 rejects is free until the relabel makes the name meaningful — at which
     # point the schema is meta-invalid and the client refuses it over that instead (#124).
@@ -1158,14 +1164,14 @@ for _kw in host._SCHEMA_KEYWORDS:
     _INCOMPATIBLE_CONSTRUCT_CASES.append(
         ({_kw: _NESTED_INCOMPATIBILITY}, True, f"nested-under-{_kw}")
     )
-for _kw in host._SCHEMA_LIST_KEYWORDS:
-    _INCOMPATIBLE_CONSTRUCT_CASES.append(
-        ({_kw: [_NESTED_INCOMPATIBILITY]}, True, f"nested-under-{_kw}")
-    )
-for _kw in host._SCHEMA_NAME_MAP_KEYWORDS:
-    _INCOMPATIBLE_CONSTRUCT_CASES.append(
-        ({_kw: {"x": _NESTED_INCOMPATIBILITY}}, True, f"nested-under-{_kw}")
-    )
+_INCOMPATIBLE_CONSTRUCT_CASES.extend(
+    ({_kw: [_NESTED_INCOMPATIBILITY]}, True, f"nested-under-{_kw}")
+    for _kw in host._SCHEMA_LIST_KEYWORDS
+)
+_INCOMPATIBLE_CONSTRUCT_CASES.extend(
+    ({_kw: {"x": _NESTED_INCOMPATIBILITY}}, True, f"nested-under-{_kw}")
+    for _kw in host._SCHEMA_NAME_MAP_KEYWORDS
+)
 
 
 def test_post_draft07_keyword_table_is_fully_exercised():
@@ -1199,14 +1205,17 @@ def test_shallow_nesting_is_unaffected_by_the_depth_bound():
 
 def test_every_value_shape_keyword_is_exercised():
     """Same guarantee for `_POST_DRAFT_07_VALUE_SHAPES`: every keyword whose value the guard
-    meta-validates must appear in a case above, so extending the table can't ship untested."""
-    covered = {
+    meta-validates must appear in a REJECTING case above, so extending the table can't ship
+    untested. Presence alone isn't enough — a keyword that only ever appears in a portable
+    case never exercises its predicate's negative branch (review on #124: `maxContains`
+    appeared only in portable cases, leaving its own rejection paths unverified)."""
+    rejected = {
         key
-        for schema, _expected, _id in _INCOMPATIBLE_CONSTRUCT_CASES
-        if isinstance(schema, dict)
+        for schema, expected, _id in _INCOMPATIBLE_CONSTRUCT_CASES
+        if expected and isinstance(schema, dict)
         for key in schema
     }
-    assert set(host._POST_DRAFT_07_VALUE_SHAPES) <= covered
+    assert set(host._POST_DRAFT_07_VALUE_SHAPES) <= rejected
 
 
 @pytest.mark.parametrize(
