@@ -517,6 +517,25 @@ def _has_non_portable_value(schema: dict) -> bool:
     )
 
 
+def _ref_targets_a_walked_container(value: object) -> bool:
+    """Whether a `$ref` fragment points somewhere `_has_incompatible_draft07_construct` is
+    GUARANTEED to have inspected regardless of whether anything references it — a `$defs`/
+    `definitions` member, which `_SCHEMA_NAME_MAP_KEYWORDS` walks unconditionally.
+
+    This function does NOT resolve JSON Pointers in general — no cycle handling, no walking
+    the document by the referenced path. It only recognizes the ONE idiomatic shape every real
+    generator (including the MCP TypeScript SDK) produces. Anything else — a pointer into a
+    position this module doesn't independently walk, an external reference, a bare `#` — is
+    treated as unverifiable and therefore incompatible: an unreferenced sibling like `default`
+    can itself hold a schema that only becomes load-bearing through such a `$ref`, and the
+    small cost of leaving those rare shapes under draft-07 buys real safety against a full
+    resolver's complexity (recursive-schema cycles, escaping, external documents) for a case
+    that essentially never occurs in generated tool schemas (#124 review)."""
+    return isinstance(value, str) and (
+        value.startswith("#/$defs/") or value.startswith("#/definitions/")
+    )
+
+
 def _shifts_reference_resolution(schema: dict, *, is_root: bool) -> bool:
     """Whether relabeling could make a reference resolve somewhere else, or leave behind an
     identifier 2020-12 rejects. See the ``$id`` and ``$anchor`` bullets in
@@ -525,10 +544,15 @@ def _shifts_reference_resolution(schema: dict, *, is_root: bool) -> bool:
         return True
     if "$id" in schema and (not is_root or "$ref" in schema or not _id_is_portable(schema["$id"])):
         return True
+    if "$ref" not in schema:
+        return False
     # draft-07 ignores every sibling of `$ref`; 2020-12 evaluates them.
-    return "$ref" in schema and any(
-        key not in _ANNOTATION_ONLY_KEYWORDS for key in schema if key != "$ref"
-    )
+    if any(key not in _ANNOTATION_ONLY_KEYWORDS for key in schema if key != "$ref"):
+        return True
+    # A sibling can be clean and the rewrite still unsafe: the REFERENCED schema might carry
+    # an incompatibility this walk never inspected, because normally nothing but `$ref`
+    # resolution makes an arbitrary JSON Pointer target load-bearing as a schema.
+    return not _ref_targets_a_walked_container(schema["$ref"])
 
 
 def _activates_a_dormant_assertion(schema: dict) -> bool:
@@ -630,6 +654,14 @@ def _has_incompatible_draft07_construct(
       draft-07 never inspects an unknown keyword's value, so the wrong shape costs nothing
       until the relabel makes the name meaningful — then the schema is meta-invalid and the
       strict client refuses it over THAT instead. A swapped complaint, not the promised fix.
+    * A ``$ref`` whose TARGET this walk can't vouch for. Clean siblings aren't enough: a
+      reference makes an arbitrary JSON Pointer target load-bearing as a schema, and that
+      target may sit somewhere nothing else inspects (``{"$ref": "#/default", "default":
+      {"dependencies": …}}`` — a real draft-07 constraint that 2020-12 would silently drop).
+      Only ``#/$defs/…`` and ``#/definitions/…`` are trusted, because those containers are
+      walked unconditionally whether or not anything points at them; every other target is
+      unverifiable and stays under draft-07. Deliberately NOT a JSON Pointer resolver — see
+      ``_ref_targets_a_walked_container``.
 
     Checked recursively — any of these can be nested arbitrarily deep — but ONLY through
     positions the JSON Schema grammar actually declares as sub-schemas

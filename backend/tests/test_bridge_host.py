@@ -1046,6 +1046,29 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
         True,
         "ref-with-malformed-recursive-anchor-sibling",
     ),
+    # A `$ref` with clean siblings is not enough on its own — the REFERENCED schema might
+    # carry an incompatibility this walk never inspected, since normally nothing but `$ref`
+    # resolution makes an arbitrary JSON Pointer target load-bearing as a schema. Only
+    # `#/$defs/...`/`#/definitions/...` targets are trusted, because those containers are
+    # walked unconditionally regardless of whether anything references them; anything else —
+    # here, a pointer at a sibling `default` value that happens to hold a schema — is left
+    # under draft-07 rather than guessed at (#124 review).
+    (
+        {"$ref": "#/default", "default": {"dependencies": {"a": ["b"]}}},
+        True,
+        "ref-to-unwalked-position-with-hidden-incompatibility",
+    ),
+    # Same shape, but nothing hidden — still left alone, since the module can't tell the
+    # difference without actually resolving the pointer, which it deliberately doesn't do.
+    (
+        {"$ref": "#/default", "default": {"type": "string"}},
+        True,
+        "ref-to-unwalked-position-even-when-harmless",
+    ),
+    # A bare `#` (whole-document self-reference) is likewise not on the trusted list, despite
+    # being provably safe by construction (the walk already checked the root on its way here)
+    # — the simpler, unconditional rule is preferred over relying on evaluation order.
+    ({"$ref": "#"}, True, "bare-hash-self-reference"),
     # `$defs` MEMBERS must each be a schema under 2020-12; draft-07 doesn't know `$defs` at all,
     # so a scalar member is free there and only turns the schema meta-invalid on relabel. The
     # walk alone can't catch it — it descends into members and skips non-dicts (#124 review).
