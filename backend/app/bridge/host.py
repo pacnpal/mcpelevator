@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Sequence
 
 from fastmcp import Client, FastMCP
@@ -365,19 +366,34 @@ _POST_DRAFT_07_ASSERTION_KEYWORDS = frozenset(
         "unevaluatedItems",
         "dependentRequired",
         "dependentSchemas",
-        "minContains",
-        "maxContains",
         # 2020-12
         "prefixItems",
         "$dynamicRef",
     }
 )
-# NOT here, deliberately: `$recursiveRef`/`$recursiveAnchor` are 2019-09-only — 2020-12
-# REPLACED them with `$dynamicRef`/`$dynamicAnchor` rather than keeping them, so they're
-# unrecognized (and therefore inert) under BOTH draft-07 and 2020-12. Relabeling can't
-# activate what neither dialect defines, and skipping them would leave the strict client
-# still refusing a tool this toggle could have fixed — a false negative, not caution
-# (#124 review).
+
+# 2020-12's ANCHOR-NAME shape (`meta/core#/$defs/anchorString`), and the non-negative integer
+# the validation vocabulary requires of the `contains` bounds. Both are used to tell a value
+# that survives the relabel from one that only ever passed because draft-07 wasn't looking.
+_ANCHOR_STRING_RE = re.compile(r"[A-Za-z_][-A-Za-z0-9._]*\Z")
+
+
+def _is_anchor_string(value: object) -> bool:
+    return isinstance(value, str) and _ANCHOR_STRING_RE.match(value) is not None
+
+
+def _is_non_negative_int(value: object) -> bool:
+    # `bool` is an `int` subclass and `True` is not a valid `nonNegativeInteger` here.
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+# NOT here, deliberately: `$recursiveRef`/`$recursiveAnchor` carry no EVALUATION behavior
+# after the relabel — 2020-12 superseded them with `$dynamicRef`/`$dynamicAnchor` — so
+# blanket-skipping them would leave the strict client refusing a tool this toggle could have
+# fixed. But 2020-12's ROOT meta-schema does still list both as deprecated keywords and
+# CONSTRAINS THEIR SHAPE (`$recursiveAnchor` → an anchor string, `$recursiveRef` → a
+# URI-reference string), so a value that only ever passed because draft-07 treated the name as
+# unknown (`$recursiveAnchor: true`) turns the schema meta-invalid once relabeled. They're
+# therefore checked BY VALUE in `_has_incompatible_draft07_construct` rather than by presence
+# (#124 review). Same for the `contains` bounds, which live there for a second reason too.
 #
 # `format` is ALSO deliberately not guarded, and this one is a judgement call worth stating
 # (#124 review). The delta is real: 2020-12's default meta-schema requires the
@@ -448,13 +464,24 @@ def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True)
       same in both dialects) is the only form left alone — and then only without a NON-EMPTY
       fragment, since draft-07's plain-name anchor form (``".../tool#thing"``) is invalid
       under 2020-12, where that role moved to ``$anchor`` (``_id_has_legacy_fragment``).
-    * ``$anchor``/``$dynamicAnchor`` anywhere. Both postdate draft-07, so it ignores them as
-      unknown keywords — meaning their VALUE is never syntax-checked and they name nothing.
-      After the relabel 2020-12 both constrains their syntax (``"bad anchor"`` is a valid
-      unknown keyword under draft-07 and an invalid anchor under 2020-12, so a strict client
-      goes on refusing the tool) and lets them participate in reference resolution, which can
-      retarget a ``$ref`` that previously resolved elsewhere. Same wrong-schema family as
-      ``$id``, which is why they're checked beside it rather than as assertions.
+    * ``$anchor``/``$dynamicAnchor``/``$vocabulary`` anywhere. All postdate draft-07, so it
+      ignores them as unknown keywords — meaning their VALUE is never syntax-checked and they
+      name nothing. After the relabel 2020-12 constrains their syntax (``"bad anchor"`` is a
+      valid unknown keyword under draft-07 and an invalid anchor under 2020-12; ``$vocabulary``
+      must be an object), so a strict client goes on refusing the tool — and the anchors also
+      begin participating in reference resolution, which can retarget a ``$ref``. Same
+      wrong-schema family as ``$id``, which is why they're checked beside it.
+    * A DEPRECATED-BUT-RETAINED name whose value wouldn't survive meta-validation.
+      ``$recursiveAnchor``/``$recursiveRef`` have no evaluation behavior under 2020-12 (it
+      superseded them), so their mere presence is harmless and normalizing is the right call —
+      but 2020-12's root meta-schema still lists both and constrains their shape, so
+      ``{"$recursiveAnchor": true}`` is a valid draft-07 schema (unknown keyword) and an
+      invalid 2020-12 one. Checked by VALUE, not by presence.
+    * ``minContains``/``maxContains``, but only when they'd actually bite: 2020-12 gives them
+      no effect without a sibling ``contains``, so a bare ``{"minContains": 0}`` is inert in
+      both dialects and portable. With a ``contains`` present the relabel switches on a bound
+      draft-07 ignored (over-enforcement), and a non-integer value would fail 2020-12
+      meta-validation — either way, left under draft-07.
 
     Checked recursively — any of these can be nested arbitrarily deep — but ONLY through
     positions the JSON Schema grammar actually declares as sub-schemas
@@ -476,8 +503,15 @@ def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True)
         not is_root or "$ref" in schema or _id_has_legacy_fragment(schema["$id"])
     ):
         return True
-    if "$anchor" in schema or "$dynamicAnchor" in schema:
+    if "$anchor" in schema or "$dynamicAnchor" in schema or "$vocabulary" in schema:
         return True
+    if "$recursiveAnchor" in schema and not _is_anchor_string(schema["$recursiveAnchor"]):
+        return True
+    if "$recursiveRef" in schema and not isinstance(schema["$recursiveRef"], str):
+        return True
+    for key in ("minContains", "maxContains"):
+        if key in schema and ("contains" in schema or not _is_non_negative_int(schema[key])):
+            return True
     if "$ref" in schema and any(k not in _ANNOTATION_ONLY_KEYWORDS for k in schema if k != "$ref"):
         return True
     for key in _SCHEMA_KEYWORDS:

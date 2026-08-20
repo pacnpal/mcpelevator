@@ -951,12 +951,33 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
     ({"type": "object", "$anchor": "bad anchor"}, True, "anchor-invalid-under-2020-12"),
     ({"type": "object", "$dynamicAnchor": "meta"}, True, "dynamic-anchor"),
     ({"properties": {"inner": {"$anchor": "thing"}}}, True, "nested-anchor"),
-    # `$recursiveRef`/`$recursiveAnchor` are 2019-09-ONLY — 2020-12 replaced them with
-    # `$dynamicRef`/`$dynamicAnchor` rather than keeping them, so they're unrecognized (and
-    # inert) under BOTH dialects. Relabeling can't activate what neither one defines, so
-    # skipping these would refuse a tool the toggle could have fixed (review on #124).
-    ({"type": "object", "$recursiveRef": "#"}, False, "recursive-ref-is-inert-in-both"),
-    ({"type": "object", "$recursiveAnchor": True}, False, "recursive-anchor-is-inert-in-both"),
+    # `$recursiveRef`/`$recursiveAnchor` carry no EVALUATION behavior after the relabel —
+    # 2020-12 superseded them — so a portable value normalizes rather than being refused.
+    ({"type": "object", "$recursiveRef": "#"}, False, "recursive-ref-portable-value"),
+    ({"type": "object", "$recursiveAnchor": "meta"}, False, "recursive-anchor-portable-value"),
+    # ...but 2020-12's ROOT meta-schema still lists both as deprecated and constrains their
+    # SHAPE, so a value that only passed because draft-07 treated the name as unknown turns
+    # the schema meta-invalid once relabeled (review on #124).
+    ({"type": "object", "$recursiveAnchor": True}, True, "recursive-anchor-non-string"),
+    ({"type": "object", "$recursiveAnchor": "bad anchor"}, True, "recursive-anchor-bad-syntax"),
+    ({"type": "object", "$recursiveRef": 7}, True, "recursive-ref-non-string"),
+    # `$vocabulary` must be an object under 2020-12; draft-07 ignores it entirely.
+    ({"type": "object", "$vocabulary": "custom"}, True, "vocabulary-string"),
+    ({"type": "object", "$vocabulary": {}}, True, "vocabulary-object"),
+    # `minContains`/`maxContains` have NO effect in 2020-12 without a sibling `contains`, and
+    # draft-07 ignores them outright — so a bare, well-shaped bound is portable both ways.
+    ({"type": "array", "minContains": 0}, False, "min-contains-without-contains"),
+    ({"type": "array", "maxContains": 3}, False, "max-contains-without-contains"),
+    # With `contains` present the relabel switches on a bound draft-07 ignored...
+    (
+        {"type": "array", "contains": {"type": "string"}, "minContains": 2},
+        True,
+        "min-contains-with-contains",
+    ),
+    # ...and a value that would fail 2020-12 meta-validation is never portable.
+    ({"type": "array", "minContains": "two"}, True, "min-contains-non-integer"),
+    ({"type": "array", "minContains": -1}, True, "min-contains-negative"),
+    ({"type": "array", "minContains": True}, True, "min-contains-bool"),
     # `contentSchema` postdates draft-07, so draft-07 never meta-validates its value as a
     # schema and 2020-12 does — a draft-07-only construct hiding in there would turn the
     # client's "unsupported dialect" error into an "invalid schema" one. Walked, so skipped.
@@ -989,8 +1010,6 @@ _POST_DRAFT_07_SAMPLE_VALUES = {
     "unevaluatedItems": False,
     "dependentRequired": {"credit_card": ["billing_address"]},
     "dependentSchemas": {"credit_card": {"type": "object"}},
-    "minContains": 1,
-    "maxContains": 3,
     "prefixItems": [{"type": "string"}],
     "$dynamicRef": "#meta",
 }
