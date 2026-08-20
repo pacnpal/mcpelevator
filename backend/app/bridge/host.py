@@ -296,7 +296,6 @@ _DRAFT_07_SCHEMA_URIS = frozenset(
 # structure) — a construct nested under one of these still needs checking.
 _SCHEMA_KEYWORDS = (
     "additionalProperties",
-    "additionalItems",
     "unevaluatedProperties",
     "unevaluatedItems",
     "items",  # only when NOT list-valued — the list-valued (tuple) case is the construct itself
@@ -314,6 +313,13 @@ _SCHEMA_KEYWORDS = (
     # is annotation-only in 2020-12, so its presence alone asserts nothing and is not listed
     # in `_POST_DRAFT_07_ASSERTION_KEYWORDS`.
     "contentSchema",
+    # `additionalItems` is deliberately NOT here (removed on review, #124). It's only
+    # meaningful in draft-07 beside a TUPLE-form `items` — a shape the parent-node check above
+    # already disqualifies unconditionally, so by the time this table is consulted `items` is
+    # always absent or single-schema, where draft-07 itself says implementations SHOULD ignore
+    # `additionalItems`. It's also not a recognized 2020-12 applicator keyword at all. Walking
+    # it therefore never protects against a REAL behavior change in the only branch that's
+    # reachable — it only produces false positives, refusing a schema that's fully portable.
 )
 # Keyword positions whose value is a LIST of sub-schemas. `prefixItems` is deliberately NOT
 # here: it postdates draft-07, so its mere presence is itself an incompatibility (see
@@ -330,6 +336,14 @@ _SCHEMA_NAME_MAP_KEYWORDS = ("properties", "patternProperties", "$defs", "defini
 # too: they're inert reusable-schema containers, not constraints on the node they sit in — a
 # nested incompatibility inside one is still caught separately, via `_SCHEMA_NAME_MAP_KEYWORDS`
 # recursing into their values regardless of this set (#124 review).
+# `format` belongs here for the SAME reason it isn't globally guarded (see the module note
+# below `_POST_DRAFT_07_ASSERTION_KEYWORDS`): 2020-12's default vocabulary treats it as an
+# annotation, so evaluating it as a `$ref` sibling has no effect on the validation OUTCOME —
+# identical to draft-07 ignoring it as a sibling. `contentEncoding`/`contentMediaType` are
+# annotation-only in both dialects unconditionally, no judgment call needed. `contentSchema`
+# is deliberately NOT here: it's schema-VALUED, with its own shape and nested-incompatibility
+# handling via `_SCHEMA_KEYWORDS`/`_POST_DRAFT_07_VALUE_SHAPES`, so it earns its own review
+# rather than riding on this list (#124 review).
 #
 # `$id` is deliberately NOT here. It carries no ASSERTION, but it is an identifier that steers
 # reference RESOLUTION, and that resolution differs across the boundary — see
@@ -347,6 +361,9 @@ _ANNOTATION_ONLY_KEYWORDS = frozenset(
         "writeOnly",
         "definitions",
         "$defs",
+        "format",
+        "contentEncoding",
+        "contentMediaType",
     }
 )
 
@@ -375,6 +392,12 @@ _POST_DRAFT_07_ASSERTION_KEYWORDS = frozenset(
 # 2020-12's ANCHOR-NAME shape (`meta/core#/$defs/anchorString`), and the non-negative integer
 # the validation vocabulary requires of the `contains` bounds. Both are used to tell a value
 # that survives the relabel from one that only ever passed because draft-07 wasn't looking.
+# Nesting depth past which the walk gives up and reports "incompatible" instead of recursing
+# further. Two Python frames per schema level, so this stays an order of magnitude clear of the
+# default interpreter limit while sitting far above any real tool schema (the deepest thing a
+# generator plausibly emits is a handful of levels).
+_MAX_SCHEMA_DEPTH = 100
+
 _ANCHOR_STRING_RE = re.compile(r"[A-Za-z_][-A-Za-z0-9._]*\Z")
 # `meta/core`'s own `$id` pattern, verbatim: no fragment, or an empty one.
 _ID_PORTABLE_RE = re.compile(r"[^#]*#?\Z")
@@ -494,27 +517,32 @@ def _activates_a_dormant_assertion(schema: dict) -> bool:
     return "contains" in schema and ("minContains" in schema or "maxContains" in schema)
 
 
-def _has_incompatible_child(schema: dict) -> bool:
+def _has_incompatible_child(schema: dict, depth: int) -> bool:
     """Recurse, but ONLY through positions the JSON Schema grammar declares as sub-schemas."""
     for key in _SCHEMA_KEYWORDS:
-        if key in schema and _has_incompatible_draft07_construct(schema[key], is_root=False):
+        if key in schema and _has_incompatible_draft07_construct(
+            schema[key], is_root=False, depth=depth
+        ):
             return True
     for key in _SCHEMA_LIST_KEYWORDS:
         sub = schema.get(key)
         if isinstance(sub, list) and any(
-            _has_incompatible_draft07_construct(v, is_root=False) for v in sub
+            _has_incompatible_draft07_construct(v, is_root=False, depth=depth) for v in sub
         ):
             return True
     for key in _SCHEMA_NAME_MAP_KEYWORDS:
         sub = schema.get(key)
         if isinstance(sub, dict) and any(
-            _has_incompatible_draft07_construct(v, is_root=False) for v in sub.values()
+            _has_incompatible_draft07_construct(v, is_root=False, depth=depth)
+            for v in sub.values()
         ):
             return True
     return False
 
 
-def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True) -> bool:
+def _has_incompatible_draft07_construct(
+    schema: object, *, is_root: bool = True, depth: int = 0
+) -> bool:
     """Whether ``schema`` (a JSON Schema node) uses a keyword whose MEANING changed between
     draft-07 and 2020-12 — so relabeling `$schema` alone would silently mis-declare it, not
     just rename it. The cases below (mcpelevator/mcpelevator#123 and #124 review), each
@@ -587,9 +615,18 @@ def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True)
     PROPERTY NAME that happens to read `dependencies` for the keyword itself (review on #124),
     both missing real matches hidden behind other keywords this function doesn't yet know
     about and reporting one that isn't there.
+
+    Past `_MAX_SCHEMA_DEPTH` the answer is "incompatible" rather than a `RecursionError`. An
+    upstream is untrusted input, and a deeply nested schema is shallow enough to decode as JSON
+    long before this walk would blow the interpreter stack — so without the bound, turning the
+    toggle on would let one pathological tool take `tools/list` down for the WHOLE server
+    (#124 review). Failing to the safe answer keeps that schema under draft-07, which is
+    exactly what this guard does for every other case it can't clear.
     """
     if not isinstance(schema, dict):
         return False
+    if depth >= _MAX_SCHEMA_DEPTH:
+        return True
     # A REMOVED-OR-CHANGED draft-07 construct: tuple-form `items`, and `dependencies` (which
     # 2020-12's root meta-schema still accepts as deprecated, so this is about lost SEMANTICS
     # rather than meta-validity).
@@ -599,7 +636,7 @@ def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True)
         _activates_a_dormant_assertion(schema)
         or _shifts_reference_resolution(schema, is_root=is_root)
         or _has_non_portable_value(schema)
-        or _has_incompatible_child(schema)
+        or _has_incompatible_child(schema, depth + 1)
     )
 
 

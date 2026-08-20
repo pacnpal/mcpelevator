@@ -993,6 +993,23 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
     # A root `$id` with a SECOND `#` fails `meta/core`'s `^[^#]*#?$` just as a plain-name
     # anchor does — a hand-rolled "ends with #" check waved this one through (#124 review).
     ({"$id": "a#b#", "type": "object"}, True, "root-id-double-fragment"),
+    # `format` beside `$ref` is portable for the same reason it isn't globally guarded:
+    # 2020-12's default vocabulary makes it an annotation, so evaluating it as a sibling
+    # changes no validation OUTCOME (#124 review).
+    ({"$ref": "#/definitions/T", "format": "date-time"}, False, "ref-with-format-sibling"),
+    (
+        {"$ref": "#/definitions/T", "contentMediaType": "application/json"},
+        False,
+        "ref-with-content-annotation-sibling",
+    ),
+    # `additionalItems` is only meaningful in draft-07 beside a TUPLE-form `items`, which the
+    # parent-node check already disqualifies outright — so in every branch this table can
+    # reach, it's inert in both dialects and must not block normalization (#124 review).
+    (
+        {"items": {"type": "string"}, "additionalItems": {"dependencies": {"a": ["b"]}}},
+        False,
+        "additional-items-is-inert-beside-single-schema-items",
+    ),
     # `contentSchema` postdates draft-07, so draft-07 never meta-validates its value as a
     # schema and 2020-12 does — a draft-07-only construct hiding in there would turn the
     # client's "unsupported dialect" error into an "invalid schema" one. Walked, so skipped.
@@ -1061,6 +1078,29 @@ def test_post_draft07_keyword_table_is_fully_exercised():
     """The sample-value table above must cover every keyword the guard catalogues — adding a
     keyword to `_POST_DRAFT_07_ASSERTION_KEYWORDS` without a case here would ship untested."""
     assert set(_POST_DRAFT_07_SAMPLE_VALUES) == set(host._POST_DRAFT_07_ASSERTION_KEYWORDS)
+
+
+def test_deeply_nested_schema_does_not_blow_the_stack():
+    """An upstream is untrusted input. A schema nested past `_MAX_SCHEMA_DEPTH` decodes as JSON
+    long before this walk would exhaust the interpreter stack, so without a bound one
+    pathological tool would take `tools/list` down for the whole server once the toggle is on
+    (#124 review). The bound answers "incompatible" — the same safe answer every other
+    can't-clear-it case gets — instead of raising."""
+    deep: dict = {"type": "object"}
+    for _ in range(5_000):
+        deep = {"not": deep}
+    assert host._has_incompatible_draft07_construct(deep) is True
+    # And the schema is therefore left under its original dialect rather than crashing.
+    schema = {"$schema": _DRAFT_07, **deep}
+    assert host._ToolTransform._normalized_schema(schema) is schema
+
+
+def test_shallow_nesting_is_unaffected_by_the_depth_bound():
+    """The bound must not turn ordinary nesting into a false positive."""
+    nested: dict = {"type": "string"}
+    for _ in range(10):
+        nested = {"properties": {"inner": nested}}
+    assert host._has_incompatible_draft07_construct(nested) is False
 
 
 def test_every_value_shape_keyword_is_exercised():
