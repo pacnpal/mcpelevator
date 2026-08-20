@@ -1258,8 +1258,8 @@
 					Rewrite each tool's advertised <code class="font-mono text-[var(--color-ink-muted)]">$schema</code>
 					from draft-07 to 2020-12 — common for servers built on the MCP TypeScript SDK, which
 					always declares draft-07. Turn this on if a client rejects tools from this server
-					with an "unsupported dialect" error. A schema using a draft-07 construct that
-					doesn't translate safely to 2020-12 is left as-is rather than rewritten wrong, so a
+					with an "unsupported dialect" error. A schema using a construct that doesn't mean
+					the same thing under 2020-12 is left as-is rather than rewritten wrong, so a
 					handful of tools may still be refused.
 				</span>
 			</span>

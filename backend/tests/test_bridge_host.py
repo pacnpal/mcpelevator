@@ -910,6 +910,50 @@ def test_has_incompatible_draft07_construct():
         )
         is False
     )
+    # A `definitions`/`$defs` CONTAINER beside `$ref` is not an assertion — it constrains
+    # nothing about the instance, and the reference resolves to the same target either way.
+    # The extremely common "$ref to a local definition" shape must still normalize (review
+    # on #124: treating every unlisted keyword as an assertion wrongly skipped it).
+    assert (
+        host._has_incompatible_draft07_construct(
+            {"$ref": "#/definitions/Thing", "definitions": {"Thing": {"type": "object"}}}
+        )
+        is False
+    )
+    assert (
+        host._has_incompatible_draft07_construct(
+            {"$ref": "#/$defs/Thing", "$defs": {"Thing": {"type": "object"}}}
+        )
+        is False
+    )
+    # ...but a real incompatibility INSIDE that container is still caught, since the walk
+    # recurses through `definitions`/`$defs` independently of the `$ref`-sibling rule.
+    assert (
+        host._has_incompatible_draft07_construct(
+            {"$ref": "#/definitions/Thing", "definitions": {"Thing": {"items": [{"type": "string"}]}}}
+        )
+        is True
+    )
+    # `unevaluatedProperties`/`unevaluatedItems` don't exist in draft-07 (2019-09+), so a
+    # draft-07 validator IGNORES them; relabeled to 2020-12 they start being enforced, and
+    # arguments the upstream tool accepted can begin failing (review on #124).
+    assert (
+        host._has_incompatible_draft07_construct(
+            {"type": "object", "unevaluatedProperties": False}
+        )
+        is True
+    )
+    assert (
+        host._has_incompatible_draft07_construct({"type": "array", "unevaluatedItems": False})
+        is True
+    )
+    # Nested just as deeply as the others.
+    assert (
+        host._has_incompatible_draft07_construct(
+            {"properties": {"inner": {"unevaluatedProperties": False}}}
+        )
+        is True
+    )
 
 
 def test_normalized_schema_only_touches_draft07():
@@ -926,3 +970,14 @@ def test_normalized_schema_only_touches_draft07():
     # An unrecognized/custom dialect URI is likewise left alone.
     custom = {"$schema": "https://example.test/my-dialect", "type": "object"}
     assert host._ToolTransform._normalized_schema(custom) is custom
+
+
+def test_normalized_schema_tolerates_a_non_string_dialect():
+    """An untrusted upstream can advertise a malformed `$schema` (list, dict, number). A
+    set-membership test against those raises `TypeError: unhashable type`, which would take
+    `tools/list` down for the whole server — turning an opt-in compatibility toggle into an
+    outage, where the default-off path merely passes the malformed schema through for the
+    client to reject (review on #124). An unrecognized SHAPE is treated like an unrecognized
+    STRING: left exactly as declared."""
+    for bad in ({"$schema": ["draft-07"]}, {"$schema": {"uri": "x"}}, {"$schema": 7}):
+        assert host._ToolTransform._normalized_schema(bad) is bad

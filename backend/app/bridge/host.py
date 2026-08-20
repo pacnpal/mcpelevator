@@ -314,7 +314,10 @@ _SCHEMA_NAME_MAP_KEYWORDS = ("properties", "patternProperties", "$defs", "defini
 
 # Pure annotations: keywords that carry no validation behavior in EITHER dialect, so their
 # presence beside `$ref` is never the sibling-semantics hazard below — only an ASSERTION
-# keyword sitting next to `$ref` changes meaning across the dialect boundary.
+# keyword sitting next to `$ref` changes meaning across the dialect boundary. `definitions`/
+# `$defs` belong here too: they're inert reusable-schema containers, not constraints on the
+# node they sit in — a nested incompatibility inside one is still caught separately, via
+# `_SCHEMA_NAME_MAP_KEYWORDS` recursing into their values regardless of this set (#124 review).
 _ANNOTATION_ONLY_KEYWORDS = frozenset(
     {
         "$schema",
@@ -327,6 +330,8 @@ _ANNOTATION_ONLY_KEYWORDS = frozenset(
         "deprecated",
         "readOnly",
         "writeOnly",
+        "definitions",
+        "$defs",
     }
 )
 
@@ -334,7 +339,7 @@ _ANNOTATION_ONLY_KEYWORDS = frozenset(
 def _has_incompatible_draft07_construct(schema: object) -> bool:
     """Whether ``schema`` (a JSON Schema node) uses a keyword whose MEANING changed between
     draft-07 and 2020-12 — so relabeling `$schema` alone would silently mis-declare it, not
-    just rename it. Three known cases (mcpelevator/mcpelevator#123 and #124 review):
+    just rename it. Four known cases (mcpelevator/mcpelevator#123 and #124 review):
 
     * An array-valued ``items`` means positional TUPLE validation in draft-07, but ``items``
       must be a single schema in 2020-12 (tuples moved to ``prefixItems``) — left as
@@ -350,10 +355,16 @@ def _has_incompatible_draft07_construct(schema: object) -> bool:
       it STRICTER — arguments the upstream tool previously accepted (because the sibling was
       silently ignored) can start failing validation post-proxy (over-enforcement, the
       mirror image of the ``dependencies`` case). Pure-annotation siblings
-      (``_ANNOTATION_ONLY_KEYWORDS`` — ``title``, ``description``, …) don't count: they carry
-      no validation behavior in either dialect, so their presence changes nothing.
+      (``_ANNOTATION_ONLY_KEYWORDS`` — ``title``, ``description``, ``definitions``/``$defs``,
+      …) don't count: they carry no validation behavior in either dialect, so their presence
+      changes nothing.
+    * ``unevaluatedProperties``/``unevaluatedItems`` don't exist in draft-07 at all (both are
+      2019-09+), so a draft-07 validator ignores them as unrecognized keywords; relabeled to
+      2020-12 they gain real teeth (``unevaluatedProperties: false`` starts rejecting
+      properties it previously let through) — the same over-enforcement hazard as the
+      ``$ref``-sibling case above, just via an unknown-rather-than-ignored-sibling keyword.
 
-    Checked recursively — any of the three can be nested arbitrarily deep — but ONLY through
+    Checked recursively — any of the four can be nested arbitrarily deep — but ONLY through
     positions the JSON Schema grammar actually declares as sub-schemas
     (`_SCHEMA_KEYWORDS`/`_SCHEMA_LIST_KEYWORDS`/`_SCHEMA_NAME_MAP_KEYWORDS`). A naive
     "recurse into every dict value" walk would descend into a `properties` map and mistake a
@@ -363,7 +374,12 @@ def _has_incompatible_draft07_construct(schema: object) -> bool:
     """
     if not isinstance(schema, dict):
         return False
-    if isinstance(schema.get("items"), list) or "dependencies" in schema:
+    if (
+        isinstance(schema.get("items"), list)
+        or "dependencies" in schema
+        or "unevaluatedProperties" in schema
+        or "unevaluatedItems" in schema
+    ):
         return True
     if "$ref" in schema and any(k not in _ANNOTATION_ONLY_KEYWORDS for k in schema if k != "$ref"):
         return True
@@ -419,12 +435,14 @@ class _ToolTransform(ToolTransform):
       2020-12, independent of the hide/rename policy above — a server whose SDK hardcodes
       draft-07 (issue #123) would otherwise have every tool refused by a strict client,
       whether or not the operator has touched its name or description. Two things stop
-      that rewrite: a schema using a construct whose MEANING changed between the two
-      dialects (an array-valued ``items`` — draft-07 tuple validation, invalid shape in
-      2020-12; ``dependencies`` — no 2020-12 keyword of that name) is left under draft-07
-      instead, since relabeling only the pointer there would silently invalidate or drop a
-      constraint; and a schema declaring any OTHER dialect (draft-04, draft-06, a custom
-      URI) is left untouched entirely, since this bridge only catalogues draft-07's
+      that rewrite: a schema using a construct whose MEANING changed across the two
+      dialects (see ``_has_incompatible_draft07_construct`` — tuple-form ``items``,
+      ``dependencies``, an asserting ``$ref`` sibling, or a keyword like
+      ``unevaluatedProperties`` that draft-07 ignores and 2020-12 enforces) is left under
+      draft-07 instead, since relabeling only the pointer there would silently invalidate a
+      constraint, drop one, or start enforcing one that was never active; and a schema
+      declaring any OTHER dialect (draft-04, draft-06, a custom URI, a malformed non-string
+      value) is left untouched entirely, since this bridge only catalogues draft-07's
       specific incompatibilities.
     """
 
@@ -468,7 +486,12 @@ class _ToolTransform(ToolTransform):
         actually moved."""
         if not isinstance(schema, dict):
             return schema
-        if schema.get("$schema") not in _DRAFT_07_SCHEMA_URIS:
+        dialect = schema.get("$schema")
+        # A malformed upstream schema can declare `$schema` as a list/dict/etc — `in` against
+        # the frozenset would raise `TypeError: unhashable type` for those, taking tools/list
+        # down for the whole server; an unrecognized SHAPE is just another dialect we don't
+        # touch, same as an unrecognized STRING (#124 review).
+        if not isinstance(dialect, str) or dialect not in _DRAFT_07_SCHEMA_URIS:
             return schema
         if _has_incompatible_draft07_construct(schema):
             return schema
