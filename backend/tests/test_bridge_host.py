@@ -11,7 +11,7 @@ to an empty list instead of surfacing that error.
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch, sentinel
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastmcp import Client, FastMCP
@@ -1033,6 +1033,49 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
         {"$ref": "#/definitions/T", "additionalItems": False, "required": ["x"]},
         True,
         "ref-with-additional-items-and-real-assertion-siblings",
+    ),
+    # `dependencies` is the guard's flagship under-enforcement case ANYWHERE ELSE, but beside a
+    # `$ref` draft-07 was already ignoring it along with every other sibling, so the relabel
+    # drops no constraint that was live — and no 2020-12 vocabulary evaluates it either
+    # (#124 review).
+    (
+        {
+            "$ref": "#/definitions/T",
+            "dependencies": {"a": ["b"]},
+            "definitions": {"T": {"type": "object"}},
+        },
+        False,
+        "ref-with-dependencies-sibling",
+    ),
+    # The exemption is `$ref`-only: the same node without one is the ordinary dropped-constraint
+    # case, so the two must not collapse into each other.
+    (
+        {"dependencies": {"a": ["b"]}, "definitions": {"T": {"type": "object"}}},
+        True,
+        "dependencies-without-ref-still-blocks",
+    ),
+    # ...and the exemption does not extend to the members: 2020-12's root meta-schema constrains
+    # a SCHEMA-valued member via `$dynamicRef: "#meta"`, so one that only meta-validates under
+    # draft-07 would swap the client's complaint rather than clear it.
+    (
+        {
+            "$ref": "#/definitions/T",
+            "dependencies": {"a": {"deprecated": "yes"}},
+            "definitions": {"T": {"type": "object"}},
+        },
+        True,
+        "ref-with-dependencies-sibling-holding-a-non-portable-member",
+    ),
+    # A well-shaped schema-valued member is still fine, so the walk above isn't just rejecting
+    # every schema-valued member out of hand.
+    (
+        {
+            "$ref": "#/definitions/T",
+            "dependencies": {"a": {"type": "string"}},
+            "definitions": {"T": {"type": "object"}},
+        },
+        False,
+        "ref-with-dependencies-sibling-holding-a-portable-member",
     ),
     # `$recursiveAnchor`/`$recursiveRef` carry no evaluation behavior under 2020-12 either, so
     # they're inert beside `$ref` for the same reason (#124 review).

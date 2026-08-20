@@ -328,7 +328,20 @@ _SCHEMA_LIST_KEYWORDS = ("allOf", "anyOf", "oneOf")
 # Keyword positions whose value is a MAP OF ARBITRARY NAME -> sub-schema — the keys are
 # property/definition NAMES, never schema keywords, so they must never be checked as if they
 # were one (a property literally named "dependencies" is not the `dependencies` keyword).
-_SCHEMA_NAME_MAP_KEYWORDS = ("properties", "patternProperties", "$defs", "definitions")
+# `dependencies` is a member because its own values are schemas too (a member may instead be a
+# string ARRAY — the property-dependency form — and a non-dict member simply walks to "no
+# construct found", so the mixed shape needs no special case). It's walked because 2020-12's
+# root meta-schema constrains those members via `$dynamicRef: "#meta"`, so a member that is
+# meta-valid under draft-07 but not under 2020-12 would still swap the client's complaint
+# rather than fix it — see `_ANNOTATION_ONLY_KEYWORDS` for why the keyword is nonetheless an
+# acceptable `$ref` sibling (#124 review).
+_SCHEMA_NAME_MAP_KEYWORDS = (
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependencies",
+)
 
 # Pure annotations: keywords that carry no validation behavior in EITHER dialect, so their
 # presence beside `$ref` is never the sibling-semantics hazard below — only a keyword that
@@ -352,7 +365,7 @@ _SCHEMA_NAME_MAP_KEYWORDS = ("properties", "patternProperties", "$defs", "defini
 # reference RESOLUTION, and that resolution differs across the boundary — see
 # `_has_incompatible_draft07_construct` (#124 review).
 #
-# The last three entries are here for a DIFFERENT reason than the annotations above: they
+# The last four entries are here for a DIFFERENT reason than the annotations above: they
 # aren't annotations under 2020-12, they carry no EVALUATION behavior there at all, which makes
 # them equally inert beside `$ref` either side of the relabel. `additionalItems` is absent from
 # every 2020-12 meta-schema — not even in the deprecated-but-retained block — so it's outright
@@ -361,6 +374,15 @@ _SCHEMA_NAME_MAP_KEYWORDS = ("properties", "patternProperties", "$defs", "defini
 # them. That shape check still applies here: it lives in `_POST_DRAFT_07_VALUE_SHAPES`, which
 # runs on every node regardless of `$ref`, so exempting them as siblings can't smuggle a
 # malformed value past (#124 review).
+#
+# `dependencies` joins them on the same footing, and ONLY as a `$ref` sibling. Away from a
+# `$ref` it is the flagship under-enforcement case this whole guard exists for (draft-07
+# asserts it, 2020-12 does not — see `_has_incompatible_draft07_construct`), so it stays an
+# unconditional rejection there. Beside a `$ref` that asymmetry disappears: draft-07 ignores
+# EVERY `$ref` sibling, so the constraint was already dead under the declared dialect and the
+# relabel drops nothing. Verified against the published meta-schemas rather than assumed —
+# 2020-12 lists `dependencies` in its ROOT schema's `properties` only, inside no `$vocabulary`
+# member, which is exactly what "shape-checked, never evaluated" looks like (#124 review).
 _ANNOTATION_ONLY_KEYWORDS = frozenset(
     {
         "$schema",
@@ -380,6 +402,7 @@ _ANNOTATION_ONLY_KEYWORDS = frozenset(
         "additionalItems",
         "$recursiveAnchor",
         "$recursiveRef",
+        "dependencies",
     }
 )
 
@@ -405,15 +428,14 @@ _POST_DRAFT_07_ASSERTION_KEYWORDS = frozenset(
     }
 )
 
-# 2020-12's ANCHOR-NAME shape (`meta/core#/$defs/anchorString`), and the non-negative integer
-# the validation vocabulary requires of the `contains` bounds. Both are used to tell a value
-# that survives the relabel from one that only ever passed because draft-07 wasn't looking.
 # Nesting depth past which the walk gives up and reports "incompatible" instead of recursing
 # further. Two Python frames per schema level, so this stays an order of magnitude clear of the
 # default interpreter limit while sitting far above any real tool schema (the deepest thing a
 # generator plausibly emits is a handful of levels).
 _MAX_SCHEMA_DEPTH = 100
 
+# 2020-12's ANCHOR-NAME shape (`meta/core#/$defs/anchorString`), used to tell a value that
+# survives the relabel from one that only ever passed because draft-07 wasn't looking.
 _ANCHOR_STRING_RE = re.compile(r"[A-Za-z_][-A-Za-z0-9._]*\Z")
 # `meta/core`'s own `$id` pattern, verbatim: no fragment, or an empty one.
 _ID_PORTABLE_RE = re.compile(r"[^#]*#?\Z")
@@ -619,10 +641,13 @@ def _has_incompatible_draft07_construct(
       must be a single schema in 2020-12 (tuples moved to ``prefixItems``) — left as
       array-valued under a 2020-12 label, a strict validator either rejects the schema
       outright or silently stops enforcing the per-position types.
-    * ``dependencies`` (property/schema dependencies) has no keyword of that name in 2020-12
-      at all (split into ``dependentRequired``/``dependentSchemas``) — left in place, it
-      would just be ignored, silently DROPPING whatever constraint the upstream author
-      intended (under-enforcement).
+    * ``dependencies`` (property/schema dependencies) is evaluated by no 2020-12 vocabulary
+      (it split into ``dependentRequired``/``dependentSchemas``, and survives only as a
+      deprecated shape in the root meta-schema) — left in place, it would just be ignored,
+      silently DROPPING whatever constraint the upstream author intended
+      (under-enforcement). The one exception is ``dependencies`` beside a ``$ref``, where
+      draft-07 was already ignoring it along with every other sibling: nothing is dropped
+      because nothing was being asserted, so that shape stays normalizable (#124 review).
     * ``$ref`` alongside an ASSERTION keyword (``required``, ``minLength``, a sibling
       ``properties``, …): draft-07 ignores every sibling of ``$ref`` and validates only the
       referenced schema; 2020-12 evaluates the siblings too. Relabeling such a schema makes
@@ -704,8 +729,12 @@ def _has_incompatible_draft07_construct(
         return True
     # A REMOVED-OR-CHANGED draft-07 construct: tuple-form `items`, and `dependencies` (which
     # 2020-12's root meta-schema still accepts as deprecated, so this is about lost SEMANTICS
-    # rather than meta-validity).
-    if isinstance(schema.get("items"), list) or "dependencies" in schema:
+    # rather than meta-validity). `dependencies` is exempt beside a `$ref`, where draft-07 was
+    # already ignoring it and there is no semantic left to lose — the `$ref` sibling rules below
+    # take over from there.
+    if isinstance(schema.get("items"), list) or (
+        "dependencies" in schema and "$ref" not in schema
+    ):
         return True
     return (
         _activates_a_dormant_assertion(schema)
