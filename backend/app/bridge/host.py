@@ -305,6 +305,14 @@ _SCHEMA_KEYWORDS = (
     "if",
     "then",
     "else",
+    # `contentSchema` postdates draft-07, so draft-07 doesn't treat its value as a schema at
+    # all and never meta-validates it. After the relabel 2020-12 DOES, so a draft-07-only
+    # construct hiding in there (a tuple-form `items`, say) would turn the client's
+    # "unsupported dialect" complaint into an "invalid schema" one — a different error, not a
+    # fix. Walking it means such a schema is skipped instead (#124 review). The keyword itself
+    # is annotation-only in 2020-12, so its presence alone asserts nothing and is not listed
+    # in `_POST_DRAFT_07_ASSERTION_KEYWORDS`.
+    "contentSchema",
 )
 # Keyword positions whose value is a LIST of sub-schemas. `prefixItems` is deliberately NOT
 # here: it postdates draft-07, so its mere presence is itself an incompatibility (see
@@ -370,6 +378,23 @@ _POST_DRAFT_07_ASSERTION_KEYWORDS = frozenset(
 # activate what neither dialect defines, and skipping them would leave the strict client
 # still refusing a tool this toggle could have fixed — a false negative, not caution
 # (#124 review).
+#
+# `format` is ALSO deliberately not guarded, and this one is a judgement call worth stating
+# (#124 review). The delta is real: 2020-12's default meta-schema requires the
+# `format-annotation` vocabulary, so `format` is annotation-only there, while draft-07 lets an
+# implementation assert it — a client that asserted formats under draft-07 and honours
+# vocabularies under 2020-12 would stop rejecting a malformed `email`. It is excluded anyway
+# because draft-07 never GUARANTEED assertion: its own spec makes format-as-assertion
+# optional, opt-outable implementation behavior, so the relabel drops something the declared
+# dialect only ever said MAY happen. That is categorically different from `dependencies` (a
+# guaranteed constraint that silently vanishes) or `unevaluatedProperties` (a guaranteed
+# constraint that silently switches on), which is the line this guard draws: it protects
+# semantics the dialect promises, not behaviors an implementation was free to skip. The
+# practical stake is the whole feature — `format` appears in a large share of real
+# TypeScript-SDK tool schemas, so guarding it would refuse to normalize most of the tools
+# issue #123 is about, and the operator would be left with the unsupported-dialect error the
+# toggle exists to clear. The toggle's help text names this explicitly so the choice is the
+# operator's, not a silent one.
 
 
 def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True) -> bool:

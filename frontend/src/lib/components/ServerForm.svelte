@@ -1260,7 +1260,10 @@
 					always declares draft-07. Turn this on if a client rejects tools from this server
 					with an "unsupported dialect" error. A schema using a construct that doesn't mean
 					the same thing under 2020-12 is left as-is rather than rewritten wrong, so a
-					handful of tools may still be refused.
+					handful of tools may still be refused. One deliberate exception:
+					<code class="font-mono text-[var(--color-ink-muted)]">format</code> is annotation-only
+					under 2020-12, so a client that enforced formats may stop doing so for rewritten
+					tools.
 				</span>
 			</span>
 			<input type="checkbox" bind:checked={normalizeSchemaDialect} class="peer sr-only" />

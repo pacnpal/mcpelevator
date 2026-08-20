@@ -937,6 +937,26 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
     # skipping these would refuse a tool the toggle could have fixed (review on #124).
     ({"type": "object", "$recursiveRef": "#"}, False, "recursive-ref-is-inert-in-both"),
     ({"type": "object", "$recursiveAnchor": True}, False, "recursive-anchor-is-inert-in-both"),
+    # `contentSchema` postdates draft-07, so draft-07 never meta-validates its value as a
+    # schema and 2020-12 does — a draft-07-only construct hiding in there would turn the
+    # client's "unsupported dialect" error into an "invalid schema" one. Walked, so skipped.
+    (
+        {"type": "string", "contentSchema": {"items": [{"type": "string"}]}},
+        True,
+        "incompatibility-inside-contentSchema",
+    ),
+    # A portable `contentSchema` is not itself a reason to skip.
+    (
+        {"type": "string", "contentSchema": {"type": "object"}},
+        False,
+        "portable-contentSchema",
+    ),
+    # `format` is a DELIBERATE exclusion, not an oversight — see the rationale beside
+    # `_POST_DRAFT_07_ASSERTION_KEYWORDS`. draft-07 never guaranteed format-as-assertion (its
+    # own spec makes it optional and opt-outable), so the relabel drops nothing the declared
+    # dialect promised, and guarding it would refuse most real TypeScript-SDK tool schemas —
+    # the very tools #123 is about. Pinned so the trade-off can't be reversed by accident.
+    ({"type": "string", "format": "email"}, False, "format-is-deliberately-allowed"),
 ]
 
 # Every post-draft-07 ASSERTION keyword, at the root and nested under a `properties` value.
