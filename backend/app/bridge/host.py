@@ -448,6 +448,13 @@ def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True)
       same in both dialects) is the only form left alone — and then only without a NON-EMPTY
       fragment, since draft-07's plain-name anchor form (``".../tool#thing"``) is invalid
       under 2020-12, where that role moved to ``$anchor`` (``_id_has_legacy_fragment``).
+    * ``$anchor``/``$dynamicAnchor`` anywhere. Both postdate draft-07, so it ignores them as
+      unknown keywords — meaning their VALUE is never syntax-checked and they name nothing.
+      After the relabel 2020-12 both constrains their syntax (``"bad anchor"`` is a valid
+      unknown keyword under draft-07 and an invalid anchor under 2020-12, so a strict client
+      goes on refusing the tool) and lets them participate in reference resolution, which can
+      retarget a ``$ref`` that previously resolved elsewhere. Same wrong-schema family as
+      ``$id``, which is why they're checked beside it rather than as assertions.
 
     Checked recursively — any of these can be nested arbitrarily deep — but ONLY through
     positions the JSON Schema grammar actually declares as sub-schemas
@@ -468,6 +475,8 @@ def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True)
     if "$id" in schema and (
         not is_root or "$ref" in schema or _id_has_legacy_fragment(schema["$id"])
     ):
+        return True
+    if "$anchor" in schema or "$dynamicAnchor" in schema:
         return True
     if "$ref" in schema and any(k not in _ANNOTATION_ONLY_KEYWORDS for k in schema if k != "$ref"):
         return True

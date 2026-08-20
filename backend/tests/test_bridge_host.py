@@ -943,6 +943,14 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
         "root-id-plain-name-anchor",
     ),
     ({"$id": "#thing", "type": "object"}, True, "root-id-bare-anchor"),
+    # `$anchor`/`$dynamicAnchor` postdate draft-07, so it ignores them as unknown keywords —
+    # their value is never syntax-checked and they name nothing. 2020-12 both constrains their
+    # syntax AND lets them take part in reference resolution, so the relabel can turn a valid
+    # draft-07 schema into an invalid 2020-12 one, or retarget a `$ref` (review on #124).
+    ({"type": "object", "$anchor": "thing"}, True, "anchor"),
+    ({"type": "object", "$anchor": "bad anchor"}, True, "anchor-invalid-under-2020-12"),
+    ({"type": "object", "$dynamicAnchor": "meta"}, True, "dynamic-anchor"),
+    ({"properties": {"inner": {"$anchor": "thing"}}}, True, "nested-anchor"),
     # `$recursiveRef`/`$recursiveAnchor` are 2019-09-ONLY — 2020-12 replaced them with
     # `$dynamicRef`/`$dynamicAnchor` rather than keeping them, so they're unrecognized (and
     # inert) under BOTH dialects. Relabeling can't activate what neither one defines, so
