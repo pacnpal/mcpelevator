@@ -1010,6 +1010,24 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
         False,
         "additional-items-is-inert-beside-single-schema-items",
     ),
+    # `additionalItems` is unrecognized under 2020-12 — absent from every 2020-12 meta-schema,
+    # unlike `dependencies`/`$recursiveAnchor`/`$recursiveRef` — so it's exactly as inert
+    # beside `$ref` there as draft-07's blanket sibling-ignoring makes it (#124 review).
+    (
+        {
+            "$ref": "#/definitions/T",
+            "additionalItems": False,
+            "definitions": {"T": {"type": "array"}},
+        },
+        False,
+        "ref-with-additional-items-sibling",
+    ),
+    # ...but a REAL assertion sibling alongside it still blocks, same as any other case.
+    (
+        {"$ref": "#/definitions/T", "additionalItems": False, "required": ["x"]},
+        True,
+        "ref-with-additional-items-and-real-assertion-siblings",
+    ),
     # `contentSchema` postdates draft-07, so draft-07 never meta-validates its value as a
     # schema and 2020-12 does — a draft-07-only construct hiding in there would turn the
     # client's "unsupported dialect" error into an "invalid schema" one. Walked, so skipped.

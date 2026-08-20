@@ -348,6 +348,14 @@ _SCHEMA_NAME_MAP_KEYWORDS = ("properties", "patternProperties", "$defs", "defini
 # `$id` is deliberately NOT here. It carries no ASSERTION, but it is an identifier that steers
 # reference RESOLUTION, and that resolution differs across the boundary — see
 # `_has_incompatible_draft07_construct` (#124 review).
+#
+# `additionalItems` belongs here for a DIFFERENT reason than the rest: it isn't an annotation
+# under 2020-12 at all — it's absent from every 2020-12 meta-schema, not even in the
+# deprecated-but-retained block `definitions`/`dependencies`/`$recursiveAnchor`/`$recursiveRef`
+# get — so it's simply UNRECOGNIZED there. An unrecognized keyword asserts nothing regardless
+# of its position, so beside `$ref` it's exactly as inert under 2020-12 as under draft-07's
+# blanket sibling-ignoring. Same conclusion as excluding it from `_SCHEMA_KEYWORDS`, reached
+# for the `$ref`-sibling case specifically rather than assumed to carry over (#124 review).
 _ANNOTATION_ONLY_KEYWORDS = frozenset(
     {
         "$schema",
@@ -364,6 +372,7 @@ _ANNOTATION_ONLY_KEYWORDS = frozenset(
         "format",
         "contentEncoding",
         "contentMediaType",
+        "additionalItems",
     }
 )
 
