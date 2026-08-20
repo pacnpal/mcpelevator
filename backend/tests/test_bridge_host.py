@@ -1069,6 +1069,31 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
     # being provably safe by construction (the walk already checked the root on its way here)
     # — the simpler, unconditional rule is preferred over relying on evaluation order.
     ({"$ref": "#"}, True, "bare-hash-self-reference"),
+    # A pointer BELOW a walked member is aimed somewhere unexamined just as much as a
+    # top-level one: the walk inspects `T` as a schema, which doesn't mean it descended into
+    # every JSON value inside `T` — `T`'s own `default` is an annotation it has no reason to
+    # enter. A prefix test would have waved this through (#124 review).
+    (
+        {
+            "$ref": "#/definitions/T/default",
+            "definitions": {"T": {"default": {"dependencies": {"a": ["b"]}}}},
+        },
+        True,
+        "ref-below-a-walked-member",
+    ),
+    # The member itself is still trusted.
+    (
+        {"$ref": "#/$defs/T", "$defs": {"T": {"type": "string"}}},
+        False,
+        "ref-at-a-walked-member",
+    ),
+    # JSON Schema's `integer` is a MATHEMATICAL property, so a bound encoded as `0.0`/`1e0`
+    # (a `float` after decoding) is meta-valid and must normalize (#124 review).
+    ({"type": "array", "minContains": 0.0}, False, "min-contains-integral-float"),
+    ({"type": "array", "maxContains": 1e0}, False, "max-contains-exponent-float"),
+    # ...but a genuinely fractional or negative one still fails 2020-12 meta-validation.
+    ({"type": "array", "minContains": 1.5}, True, "min-contains-fractional-float"),
+    ({"type": "array", "minContains": -1.0}, True, "min-contains-negative-float"),
     # `$defs` MEMBERS must each be a schema under 2020-12; draft-07 doesn't know `$defs` at all,
     # so a scalar member is free there and only turns the schema meta-invalid on relabel. The
     # walk alone can't catch it — it descends into members and skips non-dicts (#124 review).

@@ -414,6 +414,11 @@ _MAX_SCHEMA_DEPTH = 100
 _ANCHOR_STRING_RE = re.compile(r"[A-Za-z_][-A-Za-z0-9._]*\Z")
 # `meta/core`'s own `$id` pattern, verbatim: no fragment, or an empty one.
 _ID_PORTABLE_RE = re.compile(r"[^#]*#?\Z")
+# A `$ref` at a `$defs`/`definitions` MEMBER and nothing deeper — `[^/]+` stops at the member,
+# so `#/$defs/T` matches and `#/$defs/T/default` does not. See `_ref_targets_a_walked_container`
+# for why depth matters. (`[^/]+` is also correct for JSON Pointer escaping: a member name
+# containing a slash is encoded `~1`, which carries no literal `/`.)
+_WALKED_REF_TARGET_RE = re.compile(r"#/(?:\$defs|definitions)/[^/]+\Z")
 
 
 def _is_anchor_string(value: object) -> bool:
@@ -421,8 +426,16 @@ def _is_anchor_string(value: object) -> bool:
 
 
 def _is_non_negative_int(value: object) -> bool:
-    # `bool` is an `int` subclass and `True` is not a valid `nonNegativeInteger` here.
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    """2020-12's ``nonNegativeInteger``. JSON Schema's ``integer`` is a MATHEMATICAL property,
+    not a syntactic one — "a number with a zero fractional part" — so an upstream that encoded
+    a bound as ``0.0`` or ``1e0`` (both `float` after JSON decoding) is meta-valid and must not
+    be refused (#124 review). `bool` is excluded despite subclassing `int`; `inf`/`nan` fall out
+    of `is_integer()` on their own."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 0
+    return isinstance(value, float) and value.is_integer() and value >= 0
 
 
 def _is_object(value: object) -> bool:
@@ -522,6 +535,12 @@ def _ref_targets_a_walked_container(value: object) -> bool:
     GUARANTEED to have inspected regardless of whether anything references it — a `$defs`/
     `definitions` member, which `_SCHEMA_NAME_MAP_KEYWORDS` walks unconditionally.
 
+    The match is the member ITSELF and nothing below it: `#/$defs/T` yes, `#/$defs/T/default`
+    no. The walk inspects `T` as a schema, which does NOT mean it inspected every JSON value
+    inside `T` — `T`'s own `default` is an annotation the walk has no reason to descend into,
+    so a pointer aimed there is aimed somewhere unexamined, exactly like the top-level case
+    (#124 review). A prefix test would have waved that through.
+
     This function does NOT resolve JSON Pointers in general — no cycle handling, no walking
     the document by the referenced path. It only recognizes the ONE idiomatic shape every real
     generator (including the MCP TypeScript SDK) produces. Anything else — a pointer into a
@@ -531,9 +550,7 @@ def _ref_targets_a_walked_container(value: object) -> bool:
     small cost of leaving those rare shapes under draft-07 buys real safety against a full
     resolver's complexity (recursive-schema cycles, escaping, external documents) for a case
     that essentially never occurs in generated tool schemas (#124 review)."""
-    return isinstance(value, str) and (
-        value.startswith("#/$defs/") or value.startswith("#/definitions/")
-    )
+    return isinstance(value, str) and _WALKED_REF_TARGET_RE.fullmatch(value) is not None
 
 
 def _shifts_reference_resolution(schema: dict, *, is_root: bool) -> bool:
