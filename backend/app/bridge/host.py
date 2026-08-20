@@ -295,6 +295,7 @@ _DRAFT_07_SCHEMA_URIS = frozenset(
 # structure) — a construct nested under one of these still needs checking.
 _SCHEMA_KEYWORDS = (
     "additionalProperties",
+    "additionalItems",
     "unevaluatedProperties",
     "unevaluatedItems",
     "items",  # only when NOT list-valued — the list-valued (tuple) case is the construct itself
@@ -305,8 +306,10 @@ _SCHEMA_KEYWORDS = (
     "then",
     "else",
 )
-# Keyword positions whose value is a LIST of sub-schemas.
-_SCHEMA_LIST_KEYWORDS = ("allOf", "anyOf", "oneOf", "prefixItems")
+# Keyword positions whose value is a LIST of sub-schemas. `prefixItems` is deliberately NOT
+# here: it postdates draft-07, so its mere presence is itself an incompatibility (see
+# `_POST_DRAFT_07_ASSERTION_KEYWORDS`) and the walk stops at that node rather than descending.
+_SCHEMA_LIST_KEYWORDS = ("allOf", "anyOf", "oneOf")
 # Keyword positions whose value is a MAP OF ARBITRARY NAME -> sub-schema — the keys are
 # property/definition NAMES, never schema keywords, so they must never be checked as if they
 # were one (a property literally named "dependencies" is not the `dependencies` keyword).
@@ -335,6 +338,31 @@ _ANNOTATION_ONLY_KEYWORDS = frozenset(
     }
 )
 
+# Keywords INTRODUCED AFTER draft-07 (2019-09 and 2020-12) that carry validation behavior. A
+# draft-07 validator doesn't recognize them, and an unrecognized keyword is IGNORED — so under
+# the declared dialect they assert nothing. Relabeling the schema to 2020-12 switches every one
+# of them on, and arguments the upstream tool accepted can start being rejected. That's the
+# same over-enforcement hazard as an asserting `$ref` sibling, reached by a different route,
+# and it's a CLASS rather than a list of one-offs: `unevaluatedProperties`, then
+# `dependentRequired`, then `prefixItems` each arrived as its own review round on #124, so the
+# whole class is catalogued here at once. Purely-annotational post-draft-07 additions
+# (`deprecated`, `contentSchema`) are NOT here — they assert nothing in either dialect.
+_POST_DRAFT_07_ASSERTION_KEYWORDS = frozenset(
+    {
+        # 2019-09
+        "unevaluatedProperties",
+        "unevaluatedItems",
+        "dependentRequired",
+        "dependentSchemas",
+        "minContains",
+        "maxContains",
+        "$recursiveRef",
+        # 2020-12
+        "prefixItems",
+        "$dynamicRef",
+    }
+)
+
 
 def _has_incompatible_draft07_construct(schema: object) -> bool:
     """Whether ``schema`` (a JSON Schema node) uses a keyword whose MEANING changed between
@@ -358,11 +386,13 @@ def _has_incompatible_draft07_construct(schema: object) -> bool:
       (``_ANNOTATION_ONLY_KEYWORDS`` — ``title``, ``description``, ``definitions``/``$defs``,
       …) don't count: they carry no validation behavior in either dialect, so their presence
       changes nothing.
-    * ``unevaluatedProperties``/``unevaluatedItems`` don't exist in draft-07 at all (both are
-      2019-09+), so a draft-07 validator ignores them as unrecognized keywords; relabeled to
-      2020-12 they gain real teeth (``unevaluatedProperties: false`` starts rejecting
-      properties it previously let through) — the same over-enforcement hazard as the
-      ``$ref``-sibling case above, just via an unknown-rather-than-ignored-sibling keyword.
+    * Any keyword ADDED AFTER draft-07 that asserts something
+      (``_POST_DRAFT_07_ASSERTION_KEYWORDS`` — ``unevaluatedProperties``,
+      ``dependentRequired``, ``prefixItems``, ``minContains``, …). draft-07 ignores what it
+      doesn't recognize, so under the declared dialect these assert nothing; the relabel
+      switches them on, and arguments the upstream tool accepted can start being rejected —
+      the same over-enforcement hazard as the ``$ref``-sibling case, reached by a different
+      route.
 
     Checked recursively — any of the four can be nested arbitrarily deep — but ONLY through
     positions the JSON Schema grammar actually declares as sub-schemas
@@ -377,8 +407,7 @@ def _has_incompatible_draft07_construct(schema: object) -> bool:
     if (
         isinstance(schema.get("items"), list)
         or "dependencies" in schema
-        or "unevaluatedProperties" in schema
-        or "unevaluatedItems" in schema
+        or not _POST_DRAFT_07_ASSERTION_KEYWORDS.isdisjoint(schema)
     ):
         return True
     if "$ref" in schema and any(k not in _ANNOTATION_ONLY_KEYWORDS for k in schema if k != "$ref"):

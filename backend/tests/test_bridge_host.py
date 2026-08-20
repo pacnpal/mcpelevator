@@ -863,97 +863,102 @@ async def test_normalize_schema_dialect_skips_nested_tuple_items():
     assert served.inputSchema["$schema"] == _DRAFT_07
 
 
-def test_has_incompatible_draft07_construct():
-    assert host._has_incompatible_draft07_construct({"items": [{"type": "string"}]}) is True
-    assert host._has_incompatible_draft07_construct({"dependencies": {"a": ["b"]}}) is True
+# (schema, expected, id) — one row per behaviour, so a regression names the exact case and
+# the remaining cases still run.
+_INCOMPATIBLE_CONSTRUCT_CASES = [
+    ({"items": [{"type": "string"}]}, True, "tuple-form-items"),
+    ({"dependencies": {"a": ["b"]}}, True, "dependencies"),
     # A single-schema `items` (the ordinary, dialect-portable list-validation shape) is fine.
-    assert host._has_incompatible_draft07_construct({"items": {"type": "string"}}) is False
-    assert host._has_incompatible_draft07_construct({"type": "object", "properties": {}}) is False
-    assert host._has_incompatible_draft07_construct("not a schema") is False
+    ({"items": {"type": "string"}}, False, "single-schema-items"),
+    ({"type": "object", "properties": {}}, False, "plain-object"),
+    ("not a schema", False, "not-a-dict"),
     # A PROPERTY NAMED "dependencies" is not the `dependencies` KEYWORD — `properties`' keys
     # are arbitrary names, never schema keywords (review on #124: a naive "recurse into every
     # dict value" walk mistook this for the incompatible construct).
-    assert (
-        host._has_incompatible_draft07_construct(
-            {"type": "object", "properties": {"dependencies": {"type": "string"}}}
-        )
-        is False
-    )
+    (
+        {"type": "object", "properties": {"dependencies": {"type": "string"}}},
+        False,
+        "property-named-dependencies",
+    ),
     # Same for a property literally named "items" holding an array-valued schema keyword one
     # level down inside ITS OWN `items` — a real nested tuple, correctly still caught.
-    assert (
-        host._has_incompatible_draft07_construct(
-            {"properties": {"items": {"type": "array", "items": [{"type": "string"}]}}}
-        )
-        is True
-    )
-    # Genuinely nested through a real schema position (`items`, a single sub-schema) is caught.
-    assert (
-        host._has_incompatible_draft07_construct({"type": "array", "items": {"dependencies": {}}})
-        is True
-    )
+    (
+        {"properties": {"items": {"type": "array", "items": [{"type": "string"}]}}},
+        True,
+        "real-tuple-under-property-named-items",
+    ),
+    # Genuinely nested through a real schema position (`items`, a single sub-schema).
+    ({"type": "array", "items": {"dependencies": {}}}, True, "nested-dependencies"),
     # `$ref` next to an ASSERTION sibling (`required`): draft-07 ignores the sibling and
     # validates only the reference; 2020-12 evaluates both — relabeling would make the schema
     # STRICTER than the upstream author intended (review on #124).
-    assert (
-        host._has_incompatible_draft07_construct(
-            {"$ref": "#/$defs/Thing", "required": ["name"]}
-        )
-        is True
-    )
+    ({"$ref": "#/$defs/Thing", "required": ["name"]}, True, "ref-with-assertion-sibling"),
     # A bare `$ref` (nothing else) has no sibling to change meaning.
-    assert host._has_incompatible_draft07_construct({"$ref": "#/$defs/Thing"}) is False
+    ({"$ref": "#/$defs/Thing"}, False, "bare-ref"),
     # `$ref` beside PURE ANNOTATIONS (no validation behavior in either dialect) is fine.
-    assert (
-        host._has_incompatible_draft07_construct(
-            {"$ref": "#/$defs/Thing", "$schema": "http://json-schema.org/draft-07/schema#", "title": "Thing"}
-        )
-        is False
-    )
+    (
+        {"$ref": "#/$defs/Thing", "$schema": _DRAFT_07, "title": "Thing"},
+        False,
+        "ref-with-annotation-siblings",
+    ),
     # A `definitions`/`$defs` CONTAINER beside `$ref` is not an assertion — it constrains
     # nothing about the instance, and the reference resolves to the same target either way.
     # The extremely common "$ref to a local definition" shape must still normalize (review
     # on #124: treating every unlisted keyword as an assertion wrongly skipped it).
-    assert (
-        host._has_incompatible_draft07_construct(
-            {"$ref": "#/definitions/Thing", "definitions": {"Thing": {"type": "object"}}}
-        )
-        is False
-    )
-    assert (
-        host._has_incompatible_draft07_construct(
-            {"$ref": "#/$defs/Thing", "$defs": {"Thing": {"type": "object"}}}
-        )
-        is False
-    )
+    (
+        {"$ref": "#/definitions/Thing", "definitions": {"Thing": {"type": "object"}}},
+        False,
+        "ref-with-definitions-container",
+    ),
+    (
+        {"$ref": "#/$defs/Thing", "$defs": {"Thing": {"type": "object"}}},
+        False,
+        "ref-with-defs-container",
+    ),
     # ...but a real incompatibility INSIDE that container is still caught, since the walk
     # recurses through `definitions`/`$defs` independently of the `$ref`-sibling rule.
-    assert (
-        host._has_incompatible_draft07_construct(
-            {"$ref": "#/definitions/Thing", "definitions": {"Thing": {"items": [{"type": "string"}]}}}
-        )
-        is True
+    (
+        {"$ref": "#/definitions/T", "definitions": {"T": {"items": [{"type": "string"}]}}},
+        True,
+        "incompatibility-inside-definitions",
+    ),
+]
+
+# Every post-draft-07 ASSERTION keyword, at the root and nested under a `properties` value.
+# draft-07 ignores what it doesn't recognize, so these assert nothing under the declared
+# dialect; the relabel switches them on and can start rejecting arguments the upstream tool
+# accepted (successive review rounds on #124 surfaced these one at a time — the guard now
+# catalogues the whole class, and this table pins every member of it).
+_POST_DRAFT_07_SAMPLE_VALUES = {
+    "unevaluatedProperties": False,
+    "unevaluatedItems": False,
+    "dependentRequired": {"credit_card": ["billing_address"]},
+    "dependentSchemas": {"credit_card": {"type": "object"}},
+    "minContains": 1,
+    "maxContains": 3,
+    "prefixItems": [{"type": "string"}],
+    "$recursiveRef": "#",
+    "$dynamicRef": "#meta",
+}
+for _kw, _value in _POST_DRAFT_07_SAMPLE_VALUES.items():
+    _INCOMPATIBLE_CONSTRUCT_CASES.append(({"type": "object", _kw: _value}, True, f"root-{_kw}"))
+    _INCOMPATIBLE_CONSTRUCT_CASES.append(
+        ({"properties": {"inner": {_kw: _value}}}, True, f"nested-{_kw}")
     )
-    # `unevaluatedProperties`/`unevaluatedItems` don't exist in draft-07 (2019-09+), so a
-    # draft-07 validator IGNORES them; relabeled to 2020-12 they start being enforced, and
-    # arguments the upstream tool accepted can begin failing (review on #124).
-    assert (
-        host._has_incompatible_draft07_construct(
-            {"type": "object", "unevaluatedProperties": False}
-        )
-        is True
-    )
-    assert (
-        host._has_incompatible_draft07_construct({"type": "array", "unevaluatedItems": False})
-        is True
-    )
-    # Nested just as deeply as the others.
-    assert (
-        host._has_incompatible_draft07_construct(
-            {"properties": {"inner": {"unevaluatedProperties": False}}}
-        )
-        is True
-    )
+
+
+def test_post_draft07_keyword_table_is_fully_exercised():
+    """The sample-value table above must cover every keyword the guard catalogues — adding a
+    keyword to `_POST_DRAFT_07_ASSERTION_KEYWORDS` without a case here would ship untested."""
+    assert set(_POST_DRAFT_07_SAMPLE_VALUES) == set(host._POST_DRAFT_07_ASSERTION_KEYWORDS)
+
+
+@pytest.mark.parametrize(
+    ("schema", "expected"),
+    [pytest.param(s, e, id=i) for s, e, i in _INCOMPATIBLE_CONSTRUCT_CASES],
+)
+def test_has_incompatible_draft07_construct(schema, expected):
+    assert host._has_incompatible_draft07_construct(schema) is expected
 
 
 def test_normalized_schema_only_touches_draft07():
@@ -970,6 +975,17 @@ def test_normalized_schema_only_touches_draft07():
     # An unrecognized/custom dialect URI is likewise left alone.
     custom = {"$schema": "https://example.test/my-dialect", "type": "object"}
     assert host._ToolTransform._normalized_schema(custom) is custom
+
+
+@pytest.mark.parametrize("uri", sorted(host._DRAFT_07_SCHEMA_URIS))
+def test_normalized_schema_accepts_every_draft07_spelling(uri):
+    """The set exists to tolerate generator variation (http vs https, with vs without the
+    trailing `#` fragment). Each spelling must normalize, or the tolerance is fiction — only
+    one of the four was exercised before (review on #124)."""
+    schema = {"$schema": uri, "type": "object", "properties": {}}
+    assert (
+        host._ToolTransform._normalized_schema(schema)["$schema"] == host._SCHEMA_DIALECT_2020_12
+    )
 
 
 def test_normalized_schema_tolerates_a_non_string_dialect():
