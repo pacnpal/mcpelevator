@@ -1028,6 +1028,34 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
         True,
         "ref-with-additional-items-and-real-assertion-siblings",
     ),
+    # `$recursiveAnchor`/`$recursiveRef` carry no evaluation behavior under 2020-12 either, so
+    # they're inert beside `$ref` for the same reason (#124 review).
+    (
+        {
+            "$ref": "#/definitions/T",
+            "$recursiveRef": "#",
+            "definitions": {"T": {"type": "string"}},
+        },
+        False,
+        "ref-with-recursive-ref-sibling",
+    ),
+    # Exempting them as siblings must NOT smuggle a malformed value past the shape check,
+    # which runs on every node regardless of `$ref`.
+    (
+        {"$ref": "#/definitions/T", "$recursiveAnchor": True},
+        True,
+        "ref-with-malformed-recursive-anchor-sibling",
+    ),
+    # `$defs` MEMBERS must each be a schema under 2020-12; draft-07 doesn't know `$defs` at all,
+    # so a scalar member is free there and only turns the schema meta-invalid on relabel. The
+    # walk alone can't catch it — it descends into members and skips non-dicts (#124 review).
+    ({"type": "object", "$defs": {"T": 7}}, True, "defs-member-scalar"),
+    ({"type": "object", "$defs": {"T": {"type": "string"}}}, False, "defs-member-object"),
+    # A boolean IS a schema, so it's a legal member.
+    ({"type": "object", "$defs": {"T": True}}, False, "defs-member-boolean"),
+    # `definitions` is the non-equivalent case: draft-07 constrains its members to schemas too,
+    # so a malformed one is invalid either side of the relabel — not relabel-induced.
+    ({"type": "object", "definitions": {"T": 7}}, False, "definitions-member-scalar"),
     # `contentSchema` postdates draft-07, so draft-07 never meta-validates its value as a
     # schema and 2020-12 does — a draft-07-only construct hiding in there would turn the
     # client's "unsupported dialect" error into an "invalid schema" one. Walked, so skipped.

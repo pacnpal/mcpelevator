@@ -349,13 +349,15 @@ _SCHEMA_NAME_MAP_KEYWORDS = ("properties", "patternProperties", "$defs", "defini
 # reference RESOLUTION, and that resolution differs across the boundary — see
 # `_has_incompatible_draft07_construct` (#124 review).
 #
-# `additionalItems` belongs here for a DIFFERENT reason than the rest: it isn't an annotation
-# under 2020-12 at all — it's absent from every 2020-12 meta-schema, not even in the
-# deprecated-but-retained block `definitions`/`dependencies`/`$recursiveAnchor`/`$recursiveRef`
-# get — so it's simply UNRECOGNIZED there. An unrecognized keyword asserts nothing regardless
-# of its position, so beside `$ref` it's exactly as inert under 2020-12 as under draft-07's
-# blanket sibling-ignoring. Same conclusion as excluding it from `_SCHEMA_KEYWORDS`, reached
-# for the `$ref`-sibling case specifically rather than assumed to carry over (#124 review).
+# The last three entries are here for a DIFFERENT reason than the annotations above: they
+# aren't annotations under 2020-12, they carry no EVALUATION behavior there at all, which makes
+# them equally inert beside `$ref` either side of the relabel. `additionalItems` is absent from
+# every 2020-12 meta-schema — not even in the deprecated-but-retained block — so it's outright
+# unrecognized; `$recursiveAnchor`/`$recursiveRef` are listed but deprecated, superseded by
+# `$dynamicAnchor`/`$dynamicRef`, so 2020-12 meta-validates their SHAPE without ever acting on
+# them. That shape check still applies here: it lives in `_POST_DRAFT_07_VALUE_SHAPES`, which
+# runs on every node regardless of `$ref`, so exempting them as siblings can't smuggle a
+# malformed value past (#124 review).
 _ANNOTATION_ONLY_KEYWORDS = frozenset(
     {
         "$schema",
@@ -373,6 +375,8 @@ _ANNOTATION_ONLY_KEYWORDS = frozenset(
         "contentEncoding",
         "contentMediaType",
         "additionalItems",
+        "$recursiveAnchor",
+        "$recursiveRef",
     }
 )
 
@@ -432,6 +436,14 @@ def _is_bool(value: object) -> bool:
 def _is_schema_value(value: object) -> bool:
     """2020-12 models a schema as ``["object", "boolean"]``."""
     return isinstance(value, dict | bool)
+
+
+def _is_schema_map(value: object) -> bool:
+    """An object whose every member is itself a schema — 2020-12's shape for ``$defs``. The
+    MEMBERS matter as much as the container: the walk descends into them looking for
+    incompatible constructs, but a non-dict member is simply skipped there (there's nothing to
+    inspect), so a scalar would slip past on the outer check alone (#124 review)."""
+    return isinstance(value, dict) and all(_is_schema_value(member) for member in value.values())
 # NOT here, deliberately: `$recursiveRef`/`$recursiveAnchor` carry no EVALUATION behavior
 # after the relabel — 2020-12 superseded them with `$dynamicRef`/`$dynamicAnchor` — so
 # blanket-skipping them would leave the strict client refusing a tool this toggle could have
@@ -454,8 +466,10 @@ _POST_DRAFT_07_VALUE_SHAPES: dict[str, Callable[[object], bool]] = {
     # Deprecated-but-retained in the 2020-12 ROOT meta-schema, which still constrains them.
     "$recursiveAnchor": _is_anchor_string,
     "$recursiveRef": lambda value: isinstance(value, str),
-    # 2019-09+ keywords whose shape 2020-12 pins.
-    "$defs": _is_object,
+    # 2019-09+ keywords whose shape 2020-12 pins. `definitions` is NOT the equivalent case:
+    # draft-07 constrains its members to schemas too, so a malformed one is invalid either
+    # side of the relabel.
+    "$defs": _is_schema_map,
     "contentSchema": _is_schema_value,
     "deprecated": _is_bool,
     "minContains": _is_non_negative_int,
