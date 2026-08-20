@@ -316,15 +316,18 @@ _SCHEMA_LIST_KEYWORDS = ("allOf", "anyOf", "oneOf")
 _SCHEMA_NAME_MAP_KEYWORDS = ("properties", "patternProperties", "$defs", "definitions")
 
 # Pure annotations: keywords that carry no validation behavior in EITHER dialect, so their
-# presence beside `$ref` is never the sibling-semantics hazard below — only an ASSERTION
-# keyword sitting next to `$ref` changes meaning across the dialect boundary. `definitions`/
-# `$defs` belong here too: they're inert reusable-schema containers, not constraints on the
-# node they sit in — a nested incompatibility inside one is still caught separately, via
-# `_SCHEMA_NAME_MAP_KEYWORDS` recursing into their values regardless of this set (#124 review).
+# presence beside `$ref` is never the sibling-semantics hazard below — only a keyword that
+# changes MEANING across the dialect boundary matters there. `definitions`/`$defs` belong here
+# too: they're inert reusable-schema containers, not constraints on the node they sit in — a
+# nested incompatibility inside one is still caught separately, via `_SCHEMA_NAME_MAP_KEYWORDS`
+# recursing into their values regardless of this set (#124 review).
+#
+# `$id` is deliberately NOT here. It carries no ASSERTION, but it is an identifier that steers
+# reference RESOLUTION, and that resolution differs across the boundary — see
+# `_has_incompatible_draft07_construct` (#124 review).
 _ANNOTATION_ONLY_KEYWORDS = frozenset(
     {
         "$schema",
-        "$id",
         "$comment",
         "title",
         "description",
@@ -356,18 +359,23 @@ _POST_DRAFT_07_ASSERTION_KEYWORDS = frozenset(
         "dependentSchemas",
         "minContains",
         "maxContains",
-        "$recursiveRef",
         # 2020-12
         "prefixItems",
         "$dynamicRef",
     }
 )
+# NOT here, deliberately: `$recursiveRef`/`$recursiveAnchor` are 2019-09-only — 2020-12
+# REPLACED them with `$dynamicRef`/`$dynamicAnchor` rather than keeping them, so they're
+# unrecognized (and therefore inert) under BOTH draft-07 and 2020-12. Relabeling can't
+# activate what neither dialect defines, and skipping them would leave the strict client
+# still refusing a tool this toggle could have fixed — a false negative, not caution
+# (#124 review).
 
 
-def _has_incompatible_draft07_construct(schema: object) -> bool:
+def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True) -> bool:
     """Whether ``schema`` (a JSON Schema node) uses a keyword whose MEANING changed between
     draft-07 and 2020-12 — so relabeling `$schema` alone would silently mis-declare it, not
-    just rename it. Four known cases (mcpelevator/mcpelevator#123 and #124 review):
+    just rename it. Five known cases (mcpelevator/mcpelevator#123 and #124 review):
 
     * An array-valued ``items`` means positional TUPLE validation in draft-07, but ``items``
       must be a single schema in 2020-12 (tuples moved to ``prefixItems``) — left as
@@ -393,8 +401,17 @@ def _has_incompatible_draft07_construct(schema: object) -> bool:
       switches them on, and arguments the upstream tool accepted can start being rejected —
       the same over-enforcement hazard as the ``$ref``-sibling case, reached by a different
       route.
+    * ``$id`` in a SUBSCHEMA, or beside a ``$ref``. ``$id`` asserts nothing, but it steers
+      reference RESOLUTION, and resolution is exactly what moved across this boundary. Beside
+      a ``$ref``, draft-07 ignores it (the reference resolves against the INHERITED base URI)
+      while 2020-12 honours it, so the same ``$ref`` can resolve to a DIFFERENT schema after
+      the relabel. And in any subschema, 2019-09 redefined ``$id`` from "change the base URI
+      within this document" to "declare an EMBEDDED, independent schema resource". Either way
+      the relabel can silently retarget a reference — a wrong-schema hazard, not a
+      stricter-or-looser one, which is why a root-level ``$id`` (plain resource identity, the
+      same in both dialects) is the only form left alone.
 
-    Checked recursively — any of the four can be nested arbitrarily deep — but ONLY through
+    Checked recursively — any of these can be nested arbitrarily deep — but ONLY through
     positions the JSON Schema grammar actually declares as sub-schemas
     (`_SCHEMA_KEYWORDS`/`_SCHEMA_LIST_KEYWORDS`/`_SCHEMA_NAME_MAP_KEYWORDS`). A naive
     "recurse into every dict value" walk would descend into a `properties` map and mistake a
@@ -410,18 +427,24 @@ def _has_incompatible_draft07_construct(schema: object) -> bool:
         or not _POST_DRAFT_07_ASSERTION_KEYWORDS.isdisjoint(schema)
     ):
         return True
+    if "$id" in schema and (not is_root or "$ref" in schema):
+        return True
     if "$ref" in schema and any(k not in _ANNOTATION_ONLY_KEYWORDS for k in schema if k != "$ref"):
         return True
     for key in _SCHEMA_KEYWORDS:
-        if key in schema and _has_incompatible_draft07_construct(schema[key]):
+        if key in schema and _has_incompatible_draft07_construct(schema[key], is_root=False):
             return True
     for key in _SCHEMA_LIST_KEYWORDS:
         sub = schema.get(key)
-        if isinstance(sub, list) and any(_has_incompatible_draft07_construct(v) for v in sub):
+        if isinstance(sub, list) and any(
+            _has_incompatible_draft07_construct(v, is_root=False) for v in sub
+        ):
             return True
     for key in _SCHEMA_NAME_MAP_KEYWORDS:
         sub = schema.get(key)
-        if isinstance(sub, dict) and any(_has_incompatible_draft07_construct(v) for v in sub.values()):
+        if isinstance(sub, dict) and any(
+            _has_incompatible_draft07_construct(v, is_root=False) for v in sub.values()
+        ):
             return True
     return False
 

@@ -922,6 +922,21 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
         True,
         "incompatibility-inside-definitions",
     ),
+    # `$id` beside `$ref`: draft-07 ignores the sibling, so the reference resolves against the
+    # INHERITED base URI; 2020-12 honours it and resolves beneath `sub/` — the same `$ref` can
+    # reach a DIFFERENT schema after the relabel (review on #124).
+    ({"$id": "sub/", "$ref": "thing"}, True, "ref-with-id-sibling"),
+    # A SUBSCHEMA `$id` alone is enough: 2019-09 redefined it from "change the base URI within
+    # this document" to "declare an embedded, independent schema resource".
+    ({"properties": {"inner": {"$id": "sub/", "type": "object"}}}, True, "nested-id"),
+    # ...but a ROOT `$id` is plain resource identity, and means the same in both dialects.
+    ({"$id": "https://example.test/tool", "type": "object"}, False, "root-id"),
+    # `$recursiveRef`/`$recursiveAnchor` are 2019-09-ONLY — 2020-12 replaced them with
+    # `$dynamicRef`/`$dynamicAnchor` rather than keeping them, so they're unrecognized (and
+    # inert) under BOTH dialects. Relabeling can't activate what neither one defines, so
+    # skipping these would refuse a tool the toggle could have fixed (review on #124).
+    ({"type": "object", "$recursiveRef": "#"}, False, "recursive-ref-is-inert-in-both"),
+    ({"type": "object", "$recursiveAnchor": True}, False, "recursive-anchor-is-inert-in-both"),
 ]
 
 # Every post-draft-07 ASSERTION keyword, at the root and nested under a `properties` value.
@@ -937,7 +952,6 @@ _POST_DRAFT_07_SAMPLE_VALUES = {
     "minContains": 1,
     "maxContains": 3,
     "prefixItems": [{"type": "string"}],
-    "$recursiveRef": "#",
     "$dynamicRef": "#meta",
 }
 for _kw, _value in _POST_DRAFT_07_SAMPLE_VALUES.items():
