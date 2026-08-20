@@ -978,6 +978,21 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
     ({"type": "array", "minContains": "two"}, True, "min-contains-non-integer"),
     ({"type": "array", "minContains": -1}, True, "min-contains-negative"),
     ({"type": "array", "minContains": True}, True, "min-contains-bool"),
+    # A post-draft-07 keyword's VALUE is never inspected by draft-07 (unknown keyword), so a
+    # shape 2020-12 rejects is free until the relabel makes the name meaningful — at which
+    # point the schema is meta-invalid and the client refuses it over that instead (#124).
+    ({"type": "string", "contentSchema": 7}, True, "content-schema-scalar"),
+    ({"type": "object", "$defs": "not-an-object"}, True, "defs-non-object"),
+    ({"type": "object", "deprecated": "yes"}, True, "deprecated-non-boolean"),
+    # ...and the portable forms of each still normalize.
+    ({"type": "string", "contentSchema": True}, False, "content-schema-boolean"),
+    ({"type": "object", "deprecated": True}, False, "deprecated-boolean"),
+    # `definitions` is NOT in the value-shape table: draft-07 constrains it to an object too,
+    # so a malformed one is equally invalid before and after — not a relabel-induced change.
+    ({"type": "object", "definitions": "not-an-object"}, False, "definitions-non-object"),
+    # A root `$id` with a SECOND `#` fails `meta/core`'s `^[^#]*#?$` just as a plain-name
+    # anchor does — a hand-rolled "ends with #" check waved this one through (#124 review).
+    ({"$id": "a#b#", "type": "object"}, True, "root-id-double-fragment"),
     # `contentSchema` postdates draft-07, so draft-07 never meta-validates its value as a
     # schema and 2020-12 does — a draft-07-only construct hiding in there would turn the
     # client's "unsupported dialect" error into an "invalid schema" one. Walked, so skipped.
@@ -1020,10 +1035,44 @@ for _kw, _value in _POST_DRAFT_07_SAMPLE_VALUES.items():
     )
 
 
+# One nested case per declared sub-schema position, so a typo in any recursion table fails the
+# suite instead of silently disabling that path (#124 review). `items` is excluded because its
+# list form IS the construct and its single-schema form is covered above; the keywords that are
+# also in the assertion class are excluded because presence alone already decides them, so a
+# nested case would pass without exercising the recursion at all.
+_NESTED_INCOMPATIBILITY = {"dependencies": {"a": ["b"]}}
+for _kw in host._SCHEMA_KEYWORDS:
+    if _kw == "items" or _kw in host._POST_DRAFT_07_ASSERTION_KEYWORDS:
+        continue
+    _INCOMPATIBLE_CONSTRUCT_CASES.append(
+        ({_kw: _NESTED_INCOMPATIBILITY}, True, f"nested-under-{_kw}")
+    )
+for _kw in host._SCHEMA_LIST_KEYWORDS:
+    _INCOMPATIBLE_CONSTRUCT_CASES.append(
+        ({_kw: [_NESTED_INCOMPATIBILITY]}, True, f"nested-under-{_kw}")
+    )
+for _kw in host._SCHEMA_NAME_MAP_KEYWORDS:
+    _INCOMPATIBLE_CONSTRUCT_CASES.append(
+        ({_kw: {"x": _NESTED_INCOMPATIBILITY}}, True, f"nested-under-{_kw}")
+    )
+
+
 def test_post_draft07_keyword_table_is_fully_exercised():
     """The sample-value table above must cover every keyword the guard catalogues — adding a
     keyword to `_POST_DRAFT_07_ASSERTION_KEYWORDS` without a case here would ship untested."""
     assert set(_POST_DRAFT_07_SAMPLE_VALUES) == set(host._POST_DRAFT_07_ASSERTION_KEYWORDS)
+
+
+def test_every_value_shape_keyword_is_exercised():
+    """Same guarantee for `_POST_DRAFT_07_VALUE_SHAPES`: every keyword whose value the guard
+    meta-validates must appear in a case above, so extending the table can't ship untested."""
+    covered = {
+        key
+        for schema, _expected, _id in _INCOMPATIBLE_CONSTRUCT_CASES
+        if isinstance(schema, dict)
+        for key in schema
+    }
+    assert set(host._POST_DRAFT_07_VALUE_SHAPES) <= covered
 
 
 @pytest.mark.parametrize(

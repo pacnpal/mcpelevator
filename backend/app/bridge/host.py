@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
@@ -376,15 +376,30 @@ _POST_DRAFT_07_ASSERTION_KEYWORDS = frozenset(
 # the validation vocabulary requires of the `contains` bounds. Both are used to tell a value
 # that survives the relabel from one that only ever passed because draft-07 wasn't looking.
 _ANCHOR_STRING_RE = re.compile(r"[A-Za-z_][-A-Za-z0-9._]*\Z")
+# `meta/core`'s own `$id` pattern, verbatim: no fragment, or an empty one.
+_ID_PORTABLE_RE = re.compile(r"[^#]*#?\Z")
 
 
 def _is_anchor_string(value: object) -> bool:
-    return isinstance(value, str) and _ANCHOR_STRING_RE.match(value) is not None
+    return isinstance(value, str) and _ANCHOR_STRING_RE.fullmatch(value) is not None
 
 
 def _is_non_negative_int(value: object) -> bool:
     # `bool` is an `int` subclass and `True` is not a valid `nonNegativeInteger` here.
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_object(value: object) -> bool:
+    return isinstance(value, dict)
+
+
+def _is_bool(value: object) -> bool:
+    return isinstance(value, bool)
+
+
+def _is_schema_value(value: object) -> bool:
+    """2020-12 models a schema as ``["object", "boolean"]``."""
+    return isinstance(value, dict | bool)
 # NOT here, deliberately: `$recursiveRef`/`$recursiveAnchor` carry no EVALUATION behavior
 # after the relabel — 2020-12 superseded them with `$dynamicRef`/`$dynamicAnchor` — so
 # blanket-skipping them would leave the strict client refusing a tool this toggle could have
@@ -395,6 +410,26 @@ def _is_non_negative_int(value: object) -> bool:
 # therefore checked BY VALUE in `_has_incompatible_draft07_construct` rather than by presence
 # (#124 review). Same for the `contains` bounds, which live there for a second reason too.
 #
+# Keywords 2020-12 KNOWS and draft-07 does NOT, whose VALUE 2020-12's meta-schema constrains,
+# mapped to the predicate that says "this value survives the relabel". draft-07 never inspects
+# an unknown keyword's value, so a wrong-shaped one is free today and only becomes a problem
+# once the relabel makes the name meaningful — at which point the schema is meta-invalid and
+# the strict client refuses it over THAT instead. Shapes taken from the 2020-12 meta-schemas
+# directly (`meta/core`, `meta/validation`, `meta/content`, `meta/meta-data`) rather than from
+# memory. `definitions` is absent on purpose: draft-07 constrains it to an object too, so a
+# malformed one is equally invalid before and after — not a relabel-induced change (#124 review).
+_POST_DRAFT_07_VALUE_SHAPES: dict[str, Callable[[object], bool]] = {
+    # Deprecated-but-retained in the 2020-12 ROOT meta-schema, which still constrains them.
+    "$recursiveAnchor": _is_anchor_string,
+    "$recursiveRef": lambda value: isinstance(value, str),
+    # 2019-09+ keywords whose shape 2020-12 pins.
+    "$defs": _is_object,
+    "contentSchema": _is_schema_value,
+    "deprecated": _is_bool,
+    "minContains": _is_non_negative_int,
+    "maxContains": _is_non_negative_int,
+}
+
 # `format` is ALSO deliberately not guarded, and this one is a judgement call worth stating
 # (#124 review). The delta is real: 2020-12's default meta-schema requires the
 # `format-annotation` vocabulary, so `format` is annotation-only there, while draft-07 lets an
@@ -413,21 +448,77 @@ def _is_non_negative_int(value: object) -> bool:
 # operator's, not a silent one.
 
 
-def _id_has_legacy_fragment(value: object) -> bool:
-    """Whether ``$id`` carries a NON-EMPTY fragment — draft-07's plain-name anchor form
-    (``"https://example.test/tool#thing"``), which 2020-12 does not allow: there ``$id`` may
-    have no fragment or an empty one, and the anchor role moved to ``$anchor``. Relabeling
-    such a root would leave behind an ``$id`` the 2020-12 meta-schema rejects, so the strict
-    client goes on refusing the tool — swapping its complaint rather than resolving it
-    (#124 review). A non-string ``$id`` is malformed rather than legacy, and is left to the
-    same pass-through the malformed-``$schema`` case gets."""
-    return isinstance(value, str) and "#" in value and not value.endswith("#")
+def _id_is_portable(value: object) -> bool:
+    """Whether ``$id`` would still satisfy 2020-12, whose ``meta/core`` constrains it with
+    ``^[^#]*#?$``: no fragment, or an empty one (kept for backward compatibility). draft-07's
+    plain-name anchor form (``"https://example.test/tool#thing"``) is out — that role moved to
+    ``$anchor`` — and so is anything with a second ``#``. The meta-schema's own pattern is used
+    verbatim rather than approximated, since a hand-rolled version missed ``"a#b#"`` (#124
+    review). A non-string ``$id`` is malformed rather than legacy; it reports portable here and
+    is left to the same pass-through the malformed-``$schema`` case gets."""
+    return not isinstance(value, str) or _ID_PORTABLE_RE.fullmatch(value) is not None
+
+
+def _has_non_portable_value(schema: dict) -> bool:
+    """Whether any keyword 2020-12 knows — and draft-07 does NOT — carries a value that
+    2020-12's meta-schema would reject. draft-07 never looks at an unknown keyword's value, so
+    such a value costs nothing today and only bites once the relabel makes the name meaningful:
+    the schema becomes meta-invalid and the strict client refuses the tool over that instead,
+    which is a swapped complaint rather than the fix the toggle promises (#124 review)."""
+    return any(
+        key in schema and not is_portable(schema[key])
+        for key, is_portable in _POST_DRAFT_07_VALUE_SHAPES.items()
+    )
+
+
+def _shifts_reference_resolution(schema: dict, *, is_root: bool) -> bool:
+    """Whether relabeling could make a reference resolve somewhere else, or leave behind an
+    identifier 2020-12 rejects. See the ``$id`` and ``$anchor`` bullets in
+    ``_has_incompatible_draft07_construct``."""
+    if "$anchor" in schema or "$dynamicAnchor" in schema or "$vocabulary" in schema:
+        return True
+    if "$id" in schema and (not is_root or "$ref" in schema or not _id_is_portable(schema["$id"])):
+        return True
+    # draft-07 ignores every sibling of `$ref`; 2020-12 evaluates them.
+    return "$ref" in schema and any(
+        key not in _ANNOTATION_ONLY_KEYWORDS for key in schema if key != "$ref"
+    )
+
+
+def _activates_a_dormant_assertion(schema: dict) -> bool:
+    """Whether relabeling would switch ON a constraint draft-07 ignored — the whole
+    ``_POST_DRAFT_07_ASSERTION_KEYWORDS`` class, plus the ``contains`` bounds, which only bite
+    when a sibling ``contains`` gives them something to apply to."""
+    if not _POST_DRAFT_07_ASSERTION_KEYWORDS.isdisjoint(schema):
+        return True
+    return "contains" in schema and ("minContains" in schema or "maxContains" in schema)
+
+
+def _has_incompatible_child(schema: dict) -> bool:
+    """Recurse, but ONLY through positions the JSON Schema grammar declares as sub-schemas."""
+    for key in _SCHEMA_KEYWORDS:
+        if key in schema and _has_incompatible_draft07_construct(schema[key], is_root=False):
+            return True
+    for key in _SCHEMA_LIST_KEYWORDS:
+        sub = schema.get(key)
+        if isinstance(sub, list) and any(
+            _has_incompatible_draft07_construct(v, is_root=False) for v in sub
+        ):
+            return True
+    for key in _SCHEMA_NAME_MAP_KEYWORDS:
+        sub = schema.get(key)
+        if isinstance(sub, dict) and any(
+            _has_incompatible_draft07_construct(v, is_root=False) for v in sub.values()
+        ):
+            return True
+    return False
 
 
 def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True) -> bool:
     """Whether ``schema`` (a JSON Schema node) uses a keyword whose MEANING changed between
     draft-07 and 2020-12 — so relabeling `$schema` alone would silently mis-declare it, not
-    just rename it. Five known cases (mcpelevator/mcpelevator#123 and #124 review):
+    just rename it. The cases below (mcpelevator/mcpelevator#123 and #124 review), each
+    delegated to a named predicate so the families stay separable:
 
     * An array-valued ``items`` means positional TUPLE validation in draft-07, but ``items``
       must be a single schema in 2020-12 (tuples moved to ``prefixItems``) — left as
@@ -448,7 +539,8 @@ def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True)
       changes nothing.
     * Any keyword ADDED AFTER draft-07 that asserts something
       (``_POST_DRAFT_07_ASSERTION_KEYWORDS`` — ``unevaluatedProperties``,
-      ``dependentRequired``, ``prefixItems``, ``minContains``, …). draft-07 ignores what it
+      ``dependentRequired``, ``prefixItems``, ``$dynamicRef``, …; ``minContains``/
+      ``maxContains`` are deliberately NOT members, see below). draft-07 ignores what it
       doesn't recognize, so under the declared dialect these assert nothing; the relabel
       switches them on, and arguments the upstream tool accepted can start being rejected —
       the same over-enforcement hazard as the ``$ref``-sibling case, reached by a different
@@ -480,8 +572,13 @@ def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True)
     * ``minContains``/``maxContains``, but only when they'd actually bite: 2020-12 gives them
       no effect without a sibling ``contains``, so a bare ``{"minContains": 0}`` is inert in
       both dialects and portable. With a ``contains`` present the relabel switches on a bound
-      draft-07 ignored (over-enforcement), and a non-integer value would fail 2020-12
-      meta-validation — either way, left under draft-07.
+      draft-07 ignored (over-enforcement) — left under draft-07.
+    * A keyword 2020-12 knows and draft-07 doesn't, carrying a VALUE 2020-12's meta-schema
+      rejects (``_POST_DRAFT_07_VALUE_SHAPES`` — ``{"contentSchema": 7}``, ``{"$defs": "x"}``,
+      ``{"deprecated": "yes"}``, ``{"minContains": -1}``, ``{"$recursiveAnchor": true}``).
+      draft-07 never inspects an unknown keyword's value, so the wrong shape costs nothing
+      until the relabel makes the name meaningful — then the schema is meta-invalid and the
+      strict client refuses it over THAT instead. A swapped complaint, not the promised fix.
 
     Checked recursively — any of these can be nested arbitrarily deep — but ONLY through
     positions the JSON Schema grammar actually declares as sub-schemas
@@ -493,43 +590,17 @@ def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True)
     """
     if not isinstance(schema, dict):
         return False
-    if (
-        isinstance(schema.get("items"), list)
-        or "dependencies" in schema
-        or not _POST_DRAFT_07_ASSERTION_KEYWORDS.isdisjoint(schema)
-    ):
+    # A REMOVED-OR-CHANGED draft-07 construct: tuple-form `items`, and `dependencies` (which
+    # 2020-12's root meta-schema still accepts as deprecated, so this is about lost SEMANTICS
+    # rather than meta-validity).
+    if isinstance(schema.get("items"), list) or "dependencies" in schema:
         return True
-    if "$id" in schema and (
-        not is_root or "$ref" in schema or _id_has_legacy_fragment(schema["$id"])
-    ):
-        return True
-    if "$anchor" in schema or "$dynamicAnchor" in schema or "$vocabulary" in schema:
-        return True
-    if "$recursiveAnchor" in schema and not _is_anchor_string(schema["$recursiveAnchor"]):
-        return True
-    if "$recursiveRef" in schema and not isinstance(schema["$recursiveRef"], str):
-        return True
-    for key in ("minContains", "maxContains"):
-        if key in schema and ("contains" in schema or not _is_non_negative_int(schema[key])):
-            return True
-    if "$ref" in schema and any(k not in _ANNOTATION_ONLY_KEYWORDS for k in schema if k != "$ref"):
-        return True
-    for key in _SCHEMA_KEYWORDS:
-        if key in schema and _has_incompatible_draft07_construct(schema[key], is_root=False):
-            return True
-    for key in _SCHEMA_LIST_KEYWORDS:
-        sub = schema.get(key)
-        if isinstance(sub, list) and any(
-            _has_incompatible_draft07_construct(v, is_root=False) for v in sub
-        ):
-            return True
-    for key in _SCHEMA_NAME_MAP_KEYWORDS:
-        sub = schema.get(key)
-        if isinstance(sub, dict) and any(
-            _has_incompatible_draft07_construct(v, is_root=False) for v in sub.values()
-        ):
-            return True
-    return False
+    return (
+        _activates_a_dormant_assertion(schema)
+        or _shifts_reference_resolution(schema, is_root=is_root)
+        or _has_non_portable_value(schema)
+        or _has_incompatible_child(schema)
+    )
 
 
 class _ToolTransform(ToolTransform):
