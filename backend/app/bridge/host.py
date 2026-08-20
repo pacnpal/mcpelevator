@@ -397,6 +397,17 @@ _POST_DRAFT_07_ASSERTION_KEYWORDS = frozenset(
 # operator's, not a silent one.
 
 
+def _id_has_legacy_fragment(value: object) -> bool:
+    """Whether ``$id`` carries a NON-EMPTY fragment — draft-07's plain-name anchor form
+    (``"https://example.test/tool#thing"``), which 2020-12 does not allow: there ``$id`` may
+    have no fragment or an empty one, and the anchor role moved to ``$anchor``. Relabeling
+    such a root would leave behind an ``$id`` the 2020-12 meta-schema rejects, so the strict
+    client goes on refusing the tool — swapping its complaint rather than resolving it
+    (#124 review). A non-string ``$id`` is malformed rather than legacy, and is left to the
+    same pass-through the malformed-``$schema`` case gets."""
+    return isinstance(value, str) and "#" in value and not value.endswith("#")
+
+
 def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True) -> bool:
     """Whether ``schema`` (a JSON Schema node) uses a keyword whose MEANING changed between
     draft-07 and 2020-12 — so relabeling `$schema` alone would silently mis-declare it, not
@@ -434,7 +445,9 @@ def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True)
       within this document" to "declare an EMBEDDED, independent schema resource". Either way
       the relabel can silently retarget a reference — a wrong-schema hazard, not a
       stricter-or-looser one, which is why a root-level ``$id`` (plain resource identity, the
-      same in both dialects) is the only form left alone.
+      same in both dialects) is the only form left alone — and then only without a NON-EMPTY
+      fragment, since draft-07's plain-name anchor form (``".../tool#thing"``) is invalid
+      under 2020-12, where that role moved to ``$anchor`` (``_id_has_legacy_fragment``).
 
     Checked recursively — any of these can be nested arbitrarily deep — but ONLY through
     positions the JSON Schema grammar actually declares as sub-schemas
@@ -452,7 +465,9 @@ def _has_incompatible_draft07_construct(schema: object, *, is_root: bool = True)
         or not _POST_DRAFT_07_ASSERTION_KEYWORDS.isdisjoint(schema)
     ):
         return True
-    if "$id" in schema and (not is_root or "$ref" in schema):
+    if "$id" in schema and (
+        not is_root or "$ref" in schema or _id_has_legacy_fragment(schema["$id"])
+    ):
         return True
     if "$ref" in schema and any(k not in _ANNOTATION_ONLY_KEYWORDS for k in schema if k != "$ref"):
         return True

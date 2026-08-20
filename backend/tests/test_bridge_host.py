@@ -931,6 +931,18 @@ _INCOMPATIBLE_CONSTRUCT_CASES = [
     ({"properties": {"inner": {"$id": "sub/", "type": "object"}}}, True, "nested-id"),
     # ...but a ROOT `$id` is plain resource identity, and means the same in both dialects.
     ({"$id": "https://example.test/tool", "type": "object"}, False, "root-id"),
+    # An empty fragment is still allowed under 2020-12, so it's equally safe.
+    ({"$id": "https://example.test/tool#", "type": "object"}, False, "root-id-empty-fragment"),
+    # A NON-EMPTY fragment is draft-07's plain-name anchor form, which 2020-12 forbids on
+    # `$id` (that role moved to `$anchor`) — relabeling would leave an `$id` the 2020-12
+    # meta-schema rejects, so the strict client keeps refusing the tool with a different
+    # complaint instead of accepting it (review on #124).
+    (
+        {"$id": "https://example.test/tool#thing", "type": "object"},
+        True,
+        "root-id-plain-name-anchor",
+    ),
+    ({"$id": "#thing", "type": "object"}, True, "root-id-bare-anchor"),
     # `$recursiveRef`/`$recursiveAnchor` are 2019-09-ONLY — 2020-12 replaced them with
     # `$dynamicRef`/`$dynamicAnchor` rather than keeping them, so they're unrecognized (and
     # inert) under BOTH dialects. Relabeling can't activate what neither one defines, so
