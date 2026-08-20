@@ -41,6 +41,10 @@ class ProcessSpec:
     # replacement name and/or description. Empty = serve every tool as declared.
     disabled_tools: list[str] = field(default_factory=list)
     tool_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Rewrite a legacy `$schema` dialect (draft-07, …) on every proxied tool's
+    # inputSchema/outputSchema to 2020-12 before advertising it — see
+    # app.bridge.host._tool_transform and Server.normalize_schema_dialect.
+    normalize_schema_dialect: bool = False
     transport: str = "stdio"  # stdio | streamable-http | sse
     # For a remote runner that authenticates via OAuth: the config the bridge needs to
     # build an OAuth httpx auth on the upstream transport (server id -> token file,
@@ -84,4 +88,5 @@ def passthrough(server: Server) -> ProcessSpec:
         setup_script=server.setup_script or "",
         disabled_tools=list(server.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
+        normalize_schema_dialect=bool(server.normalize_schema_dialect),
     )

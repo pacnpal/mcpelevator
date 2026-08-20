@@ -21,7 +21,7 @@ BRIDGE_SPEC_MAX_BYTES = 128 * 1024 - len(BRIDGE_SPEC_ENV_KEY) - 2
 
 def bridge_payload(spec, name: str, *, mcp_http: bool, rest_openapi: bool) -> dict:
     """The JSON the bridge process reads out of its environment."""
-    return {
+    payload = {
         "command": spec.command,
         "args": spec.args,
         "env": spec.env,
@@ -35,6 +35,19 @@ def bridge_payload(spec, name: str, *, mcp_http: bool, rest_openapi: bool) -> di
         "mcp_http": mcp_http,
         "rest_openapi": rest_openapi,
     }
+    # Omitted (not merely `False`) when off, unlike every other field above: those are either
+    # required or already always present at whatever schema version wrote them, but this key
+    # is NEW. Always including it — even as `False` — would grow every already-persisted spec
+    # by a few bytes on the next reconcile; a spec that was accepted right up against
+    # BRIDGE_SPEC_MAX_BYTES before this field existed could cross it on upgrade alone, and the
+    # startup hash backfill (unlike a live write) never re-runs `_require_launchable_spec` — so
+    # a previously-valid, already-enabled server would reach `create_subprocess_exec` and die
+    # with `E2BIG` instead of failing the write that grew it. `_tool_transform` already reads a
+    # missing key as falsy (`spec.get("normalize_schema_dialect")`), so omitting it when unset
+    # is a no-op for the bridge, not a behavior change.
+    if spec.normalize_schema_dialect:
+        payload["normalize_schema_dialect"] = True
+    return payload
 
 
 def serialize(payload: dict) -> str:

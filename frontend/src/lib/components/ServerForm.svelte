@@ -151,6 +151,7 @@
 			pinMcp1: init.pin_mcp1 ?? false,
 			mcpHttp: init.mcp_http ?? true,
 			restOpenapi: init.rest_openapi ?? false,
+			normalizeSchemaDialect: init.normalize_schema_dialect ?? false,
 			// Blank = inherit the global default (null); "0" pins the server always-on.
 			idleTimeoutText:
 				init.idle_timeout_s === null || init.idle_timeout_s === undefined
@@ -215,6 +216,7 @@
 	let pinMcp1 = $state(seed.pinMcp1);
 	let mcpHttp = $state(seed.mcpHttp);
 	let restOpenapi = $state(seed.restOpenapi);
+	let normalizeSchemaDialect = $state(seed.normalizeSchemaDialect);
 	let idleTimeoutText = $state(seed.idleTimeoutText);
 	let authProvider = $state<ServerAuthProvider>(seed.authProvider);
 	let startAfter = $state(seed.startAfter);
@@ -425,6 +427,7 @@
 			pin_mcp1: runner === 'uvx' && pinMcp1,
 			mcp_http: mcpHttp,
 			rest_openapi: restOpenapi,
+			normalize_schema_dialect: normalizeSchemaDialect,
 			idle_timeout_s: idleTimeoutText.trim() === '' ? null : Number(idleTimeoutText.trim()),
 			auth_provider: authProvider,
 			// Upstream OAuth only applies to remote; the backend forces it off elsewhere,
@@ -1238,6 +1241,39 @@
 				<span
 					class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
 					style={restOpenapi ? 'transform: translateX(16px);' : ''}
+				></span>
+			</span>
+		</label>
+		<!-- Compatibility escape hatch: the MCP TypeScript SDK hardcodes a draft-07
+		     $schema with no config option, which a strict client's 2020-12-only
+		     validator refuses outright (issue #123). -->
+		<label
+			class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
+		>
+			<span class="flex flex-col gap-0.5">
+				<span class="text-sm font-medium text-[var(--color-ink)]">
+					Normalize schema dialect <span class="font-normal text-[var(--color-ink-dim)]">(compatibility)</span>
+				</span>
+				<span class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+					Rewrite each tool's advertised <code class="font-mono text-[var(--color-ink-muted)]">$schema</code>
+					from draft-07 to 2020-12 — common for servers built on the MCP TypeScript SDK, which
+					always declares draft-07. Turn this on if a client rejects tools from this server
+					with an "unsupported dialect" error. A schema using a construct that doesn't mean
+					the same thing under 2020-12 is left as-is rather than rewritten wrong, so a
+					handful of tools may still be refused. One deliberate exception:
+					<code class="font-mono text-[var(--color-ink-muted)]">format</code> is annotation-only
+					under 2020-12, so a client that enforced formats may stop doing so for rewritten
+					tools.
+				</span>
+			</span>
+			<input type="checkbox" bind:checked={normalizeSchemaDialect} class="peer sr-only" />
+			<span
+				class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
+				style="background-color: {normalizeSchemaDialect ? '' : 'var(--color-line-strong)'};"
+			>
+				<span
+					class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
+					style={normalizeSchemaDialect ? 'transform: translateX(16px);' : ''}
 				></span>
 			</span>
 		</label>

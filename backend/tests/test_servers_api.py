@@ -87,6 +87,33 @@ def test_disabled_tools_api_round_trip():
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
+def test_normalize_schema_dialect_api_round_trip():
+    """normalize_schema_dialect defaults false, is accepted on create, echoed on GET,
+    and PATCH-able independent of runner (issue #123)."""
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Draft07", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["normalize_schema_dialect"] is False
+
+            patched = c.patch(
+                f"/api/servers/{server_id}",
+                json={"normalize_schema_dialect": True},
+                headers=LOOPBACK,
+            )
+            assert patched.status_code == 200, patched.text
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["normalize_schema_dialect"] is True
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
 def test_tool_overrides_api_round_trip():
     """tool_overrides is accepted on create, normalized, echoed on GET, replaceable via
     PATCH ({} restores the upstream labels), and an unusable rename is a 400."""

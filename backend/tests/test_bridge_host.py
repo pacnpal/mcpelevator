@@ -11,7 +11,7 @@ to an empty list instead of surfacing that error.
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch, sentinel
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastmcp import Client, FastMCP
@@ -631,3 +631,677 @@ async def test_override_keeps_a_dynamic_schema_tool_callable():
             result = await client.call_tool(exposed, {"a": 7}, raise_on_error=False)
         assert result.is_error is False, policy
         assert result.structured_content == {"a": 7}, policy
+
+
+# --- schema dialect normalization (issue #123) -----------------------------------
+#
+# The MCP TypeScript SDK hardcodes a draft-07 `$schema` into every generated tool
+# schema with no config option; a strict client whose validator only supports
+# 2020-12 refuses every such tool outright. `normalize_schema_dialect` rewrites just
+# the dialect pointer so the schema's actual keywords (which the upstream server, not
+# this bridge, is responsible for) are left untouched.
+
+_DRAFT_07 = "http://json-schema.org/draft-07/schema#"
+_DIALECT_2020_12 = host._SCHEMA_DIALECT_2020_12
+
+
+def _tool_with_schemas(*, parameters=None, output_schema=None):
+    def fn(x: int) -> int:
+        """Upstream tool."""
+        return x
+
+    update = {}
+    if parameters is not None:
+        update["parameters"] = parameters
+    if output_schema is not None:
+        update["output_schema"] = output_schema
+    return FastMCPTool.from_function(fn, name="tasky").model_copy(update=update)
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_off_by_default_leaves_draft07_untouched():
+    """Opt-in: without the flag, a draft-07 dialect passes through unchanged — this
+    bridge must not silently rewrite what the upstream literally declared."""
+    tool = _tool_with_schemas(
+        parameters={"type": "object", "properties": {"x": {"type": "integer"}}, "$schema": _DRAFT_07},
+        output_schema={"type": "integer", "$schema": _DRAFT_07},
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t"})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DRAFT_07
+    assert served.outputSchema["$schema"] == _DRAFT_07
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_rewrites_input_and_output_schema():
+    """Enabled: a legacy dialect on EITHER schema is rewritten to 2020-12, and nothing
+    else about the schema (its actual keywords) moves."""
+    tool = _tool_with_schemas(
+        parameters={"type": "object", "properties": {"x": {"type": "integer"}}, "$schema": _DRAFT_07},
+        output_schema={"type": "integer", "$schema": _DRAFT_07},
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DIALECT_2020_12
+    assert served.inputSchema["properties"] == {"x": {"type": "integer"}}
+    assert served.outputSchema["$schema"] == _DIALECT_2020_12
+    assert served.outputSchema["type"] == "integer"
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_does_not_invent_a_dialect():
+    """A schema declaring no `$schema` at all must not have one injected — normalizing
+    is a rewrite of an existing (wrong) dialect, not an assertion of a new one."""
+    tool = _tool_with_schemas(parameters={"type": "object", "properties": {}})
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert "$schema" not in served.inputSchema
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_leaves_2020_12_alone():
+    """Already the target dialect: rewritten to the same value, i.e. a no-op."""
+    tool = _tool_with_schemas(
+        parameters={"type": "object", "properties": {}, "$schema": _DIALECT_2020_12}
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DIALECT_2020_12
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_applies_without_any_hide_or_rename_policy():
+    """The dialect rewrite is orthogonal to disabled_tools/tool_overrides — it must fire
+    on a tool that carries neither, not only on tools an operator has otherwise touched."""
+    tool = _tool_with_schemas(
+        parameters={"type": "object", "properties": {}, "$schema": _DRAFT_07}
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DIALECT_2020_12
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_combines_with_rename():
+    """A renamed tool still gets its dialect rewritten — the two controls compose."""
+    tool = _tool_with_schemas(
+        parameters={"type": "object", "properties": {}, "$schema": _DRAFT_07}
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy(
+            {
+                "command": "x",
+                "name": "t",
+                "normalize_schema_dialect": True,
+                "tool_overrides": {"tasky": {"name": "renamed"}},
+            }
+        )
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.name == "renamed"
+    assert served.inputSchema["$schema"] == _DIALECT_2020_12
+
+
+def test_tool_transform_reads_normalize_schema_dialect_from_spec():
+    """Unit-level: the spec key reaches the transform's constructor flag."""
+    assert host._tool_transform({})._normalize_schema_dialect is False
+    assert host._tool_transform({"normalize_schema_dialect": True})._normalize_schema_dialect is True
+
+
+# --- schema dialect normalization: don't mis-declare an incompatible construct ---
+#
+# Some draft-07 keywords change MEANING under 2020-12 rather than just being renamed.
+# Relabeling `$schema` alone on a schema using one of them would silently invalidate or
+# drop a constraint rather than merely fix the dialect pointer (review on PR #124).
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_skips_tuple_typed_items():
+    """An array-valued `items` is draft-07 positional TUPLE validation — not a valid
+    `items` shape in 2020-12 (tuples moved to `prefixItems`). Left as draft-07 rather
+    than mislabeled as 2020-12 while still speaking draft-07's tuple syntax."""
+    tool = _tool_with_schemas(
+        parameters={
+            "type": "array",
+            "items": [{"type": "string"}, {"type": "integer"}],
+            "$schema": _DRAFT_07,
+        }
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DRAFT_07
+    assert served.inputSchema["items"] == [{"type": "string"}, {"type": "integer"}]
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_skips_dependencies_keyword():
+    """`dependencies` has no 2020-12 keyword of that name (split into
+    `dependentRequired`/`dependentSchemas`) — a 2020-12 validator would just ignore it,
+    silently dropping the constraint. Left under draft-07 instead."""
+    tool = _tool_with_schemas(
+        parameters={
+            "type": "object",
+            "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+            "dependencies": {"a": ["b"]},
+            "$schema": _DRAFT_07,
+        }
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DRAFT_07
+    assert served.inputSchema["dependencies"] == {"a": ["b"]}
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_skips_ref_with_assertion_sibling():
+    """draft-07 ignores every sibling of `$ref`; 2020-12 evaluates them. Relabeling would
+    make the schema STRICTER — an argument the upstream tool previously accepted (the
+    sibling `required` was silently ignored) could start failing validation post-proxy."""
+    tool = _tool_with_schemas(
+        parameters={"$ref": "#/$defs/Thing", "required": ["name"], "$schema": _DRAFT_07}
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DRAFT_07
+    assert served.inputSchema["required"] == ["name"]
+
+
+@pytest.mark.asyncio
+async def test_normalize_schema_dialect_skips_nested_tuple_items():
+    """The incompatible construct can be buried inside a property's own schema, not
+    just at the top level — checked recursively so a top-level-clean schema with a
+    nested tuple isn't waved through."""
+    tool = _tool_with_schemas(
+        parameters={
+            "type": "object",
+            "properties": {
+                "pair": {"type": "array", "items": [{"type": "string"}, {"type": "string"}]}
+            },
+            "$schema": _DRAFT_07,
+        }
+    )
+    with patch.object(
+        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
+    ):
+        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
+    async with Client(proxy) as client:
+        served = (await client.list_tools())[0]
+    assert served.inputSchema["$schema"] == _DRAFT_07
+
+
+# (schema, expected, id) — one row per behaviour, so a regression names the exact case and
+# the remaining cases still run.
+_INCOMPATIBLE_CONSTRUCT_CASES = [
+    ({"items": [{"type": "string"}]}, True, "tuple-form-items"),
+    ({"dependencies": {"a": ["b"]}}, True, "dependencies"),
+    # A single-schema `items` (the ordinary, dialect-portable list-validation shape) is fine.
+    ({"items": {"type": "string"}}, False, "single-schema-items"),
+    ({"type": "object", "properties": {}}, False, "plain-object"),
+    ("not a schema", False, "not-a-dict"),
+    # A PROPERTY NAMED "dependencies" is not the `dependencies` KEYWORD — `properties`' keys
+    # are arbitrary names, never schema keywords (review on #124: a naive "recurse into every
+    # dict value" walk mistook this for the incompatible construct).
+    (
+        {"type": "object", "properties": {"dependencies": {"type": "string"}}},
+        False,
+        "property-named-dependencies",
+    ),
+    # Same for a property literally named "items" holding an array-valued schema keyword one
+    # level down inside ITS OWN `items` — a real nested tuple, correctly still caught.
+    (
+        {"properties": {"items": {"type": "array", "items": [{"type": "string"}]}}},
+        True,
+        "real-tuple-under-property-named-items",
+    ),
+    # Genuinely nested through a real schema position (`items`, a single sub-schema).
+    ({"type": "array", "items": {"dependencies": {}}}, True, "nested-dependencies"),
+    # `$ref` next to an ASSERTION sibling (`required`): draft-07 ignores the sibling and
+    # validates only the reference; 2020-12 evaluates both — relabeling would make the schema
+    # STRICTER than the upstream author intended (review on #124).
+    ({"$ref": "#/$defs/Thing", "required": ["name"]}, True, "ref-with-assertion-sibling"),
+    # A bare `$ref` (nothing else) has no sibling to change meaning.
+    ({"$ref": "#/$defs/Thing"}, False, "bare-ref"),
+    # `$ref` beside PURE ANNOTATIONS (no validation behavior in either dialect) is fine.
+    (
+        {"$ref": "#/$defs/Thing", "$schema": _DRAFT_07, "title": "Thing"},
+        False,
+        "ref-with-annotation-siblings",
+    ),
+    # A `definitions`/`$defs` CONTAINER beside `$ref` is not an assertion — it constrains
+    # nothing about the instance, and the reference resolves to the same target either way.
+    # The extremely common "$ref to a local definition" shape must still normalize (review
+    # on #124: treating every unlisted keyword as an assertion wrongly skipped it).
+    (
+        {"$ref": "#/definitions/Thing", "definitions": {"Thing": {"type": "object"}}},
+        False,
+        "ref-with-definitions-container",
+    ),
+    (
+        {"$ref": "#/$defs/Thing", "$defs": {"Thing": {"type": "object"}}},
+        False,
+        "ref-with-defs-container",
+    ),
+    # ...but a real incompatibility INSIDE that container is still caught, since the walk
+    # recurses through `definitions`/`$defs` independently of the `$ref`-sibling rule.
+    (
+        {"$ref": "#/definitions/T", "definitions": {"T": {"items": [{"type": "string"}]}}},
+        True,
+        "incompatibility-inside-definitions",
+    ),
+    # `$id` beside `$ref`: draft-07 ignores the sibling, so the reference resolves against the
+    # INHERITED base URI; 2020-12 honours it and resolves beneath `sub/` — the same `$ref` can
+    # reach a DIFFERENT schema after the relabel (review on #124).
+    ({"$id": "sub/", "$ref": "thing"}, True, "ref-with-id-sibling"),
+    # A SUBSCHEMA `$id` alone is enough: 2019-09 redefined it from "change the base URI within
+    # this document" to "declare an embedded, independent schema resource".
+    ({"properties": {"inner": {"$id": "sub/", "type": "object"}}}, True, "nested-id"),
+    # ...but a ROOT `$id` is plain resource identity, and means the same in both dialects.
+    ({"$id": "https://example.test/tool", "type": "object"}, False, "root-id"),
+    # An empty fragment is still allowed under 2020-12, so it's equally safe.
+    ({"$id": "https://example.test/tool#", "type": "object"}, False, "root-id-empty-fragment"),
+    # A NON-EMPTY fragment is draft-07's plain-name anchor form, which 2020-12 forbids on
+    # `$id` (that role moved to `$anchor`) — relabeling would leave an `$id` the 2020-12
+    # meta-schema rejects, so the strict client keeps refusing the tool with a different
+    # complaint instead of accepting it (review on #124).
+    (
+        {"$id": "https://example.test/tool#thing", "type": "object"},
+        True,
+        "root-id-plain-name-anchor",
+    ),
+    ({"$id": "#thing", "type": "object"}, True, "root-id-bare-anchor"),
+    # `$anchor`/`$dynamicAnchor` postdate draft-07, so it ignores them as unknown keywords —
+    # their value is never syntax-checked and they name nothing. 2020-12 both constrains their
+    # syntax AND lets them take part in reference resolution, so the relabel can turn a valid
+    # draft-07 schema into an invalid 2020-12 one, or retarget a `$ref` (review on #124).
+    ({"type": "object", "$anchor": "thing"}, True, "anchor"),
+    ({"type": "object", "$anchor": "bad anchor"}, True, "anchor-invalid-under-2020-12"),
+    ({"type": "object", "$dynamicAnchor": "meta"}, True, "dynamic-anchor"),
+    ({"properties": {"inner": {"$anchor": "thing"}}}, True, "nested-anchor"),
+    # `$recursiveRef`/`$recursiveAnchor` carry no EVALUATION behavior after the relabel —
+    # 2020-12 superseded them — so a portable value normalizes rather than being refused.
+    ({"type": "object", "$recursiveRef": "#"}, False, "recursive-ref-portable-value"),
+    ({"type": "object", "$recursiveAnchor": "meta"}, False, "recursive-anchor-portable-value"),
+    # ...but 2020-12's ROOT meta-schema still lists both as deprecated and constrains their
+    # SHAPE, so a value that only passed because draft-07 treated the name as unknown turns
+    # the schema meta-invalid once relabeled (review on #124).
+    ({"type": "object", "$recursiveAnchor": True}, True, "recursive-anchor-non-string"),
+    ({"type": "object", "$recursiveAnchor": "bad anchor"}, True, "recursive-anchor-bad-syntax"),
+    ({"type": "object", "$recursiveRef": 7}, True, "recursive-ref-non-string"),
+    # `$vocabulary` must be an object under 2020-12; draft-07 ignores it entirely.
+    ({"type": "object", "$vocabulary": "custom"}, True, "vocabulary-string"),
+    ({"type": "object", "$vocabulary": {}}, True, "vocabulary-object"),
+    # `minContains`/`maxContains` have NO effect in 2020-12 without a sibling `contains`, and
+    # draft-07 ignores them outright — so a bare, well-shaped bound is portable both ways.
+    ({"type": "array", "minContains": 0}, False, "min-contains-without-contains"),
+    ({"type": "array", "maxContains": 3}, False, "max-contains-without-contains"),
+    # With `contains` present the relabel switches on a bound draft-07 ignored...
+    (
+        {"type": "array", "contains": {"type": "string"}, "minContains": 2},
+        True,
+        "min-contains-with-contains",
+    ),
+    (
+        {"type": "array", "contains": {"type": "string"}, "maxContains": 2},
+        True,
+        "max-contains-with-contains",
+    ),
+    # ...and a value that would fail 2020-12 meta-validation is never portable.
+    ({"type": "array", "minContains": "two"}, True, "min-contains-non-integer"),
+    ({"type": "array", "minContains": -1}, True, "min-contains-negative"),
+    ({"type": "array", "minContains": True}, True, "min-contains-bool"),
+    ({"type": "array", "maxContains": -1}, True, "max-contains-negative"),
+    # A post-draft-07 keyword's VALUE is never inspected by draft-07 (unknown keyword), so a
+    # shape 2020-12 rejects is free until the relabel makes the name meaningful — at which
+    # point the schema is meta-invalid and the client refuses it over that instead (#124).
+    ({"type": "string", "contentSchema": 7}, True, "content-schema-scalar"),
+    ({"type": "object", "$defs": "not-an-object"}, True, "defs-non-object"),
+    ({"type": "object", "deprecated": "yes"}, True, "deprecated-non-boolean"),
+    # ...and the portable forms of each still normalize.
+    ({"type": "string", "contentSchema": True}, False, "content-schema-boolean"),
+    ({"type": "object", "deprecated": True}, False, "deprecated-boolean"),
+    # `definitions` is NOT in the value-shape table: draft-07 constrains it to an object too,
+    # so a malformed one is equally invalid before and after — not a relabel-induced change.
+    ({"type": "object", "definitions": "not-an-object"}, False, "definitions-non-object"),
+    # A root `$id` with a SECOND `#` fails `meta/core`'s `^[^#]*#?$` just as a plain-name
+    # anchor does — a hand-rolled "ends with #" check waved this one through (#124 review).
+    ({"$id": "a#b#", "type": "object"}, True, "root-id-double-fragment"),
+    # `format` beside `$ref` is portable for the same reason it isn't globally guarded:
+    # 2020-12's default vocabulary makes it an annotation, so evaluating it as a sibling
+    # changes no validation OUTCOME (#124 review).
+    ({"$ref": "#/definitions/T", "format": "date-time"}, False, "ref-with-format-sibling"),
+    (
+        {"$ref": "#/definitions/T", "contentMediaType": "application/json"},
+        False,
+        "ref-with-content-annotation-sibling",
+    ),
+    # `additionalItems` is only meaningful in draft-07 beside a TUPLE-form `items`, which the
+    # parent-node check already disqualifies outright — so in every branch this table can
+    # reach, it's inert in both dialects and must not block normalization (#124 review).
+    (
+        {"items": {"type": "string"}, "additionalItems": {"dependencies": {"a": ["b"]}}},
+        False,
+        "additional-items-is-inert-beside-single-schema-items",
+    ),
+    # `additionalItems` is unrecognized under 2020-12 — absent from every 2020-12 meta-schema,
+    # unlike `dependencies`/`$recursiveAnchor`/`$recursiveRef` — so it's exactly as inert
+    # beside `$ref` there as draft-07's blanket sibling-ignoring makes it (#124 review).
+    (
+        {
+            "$ref": "#/definitions/T",
+            "additionalItems": False,
+            "definitions": {"T": {"type": "array"}},
+        },
+        False,
+        "ref-with-additional-items-sibling",
+    ),
+    # ...but a REAL assertion sibling alongside it still blocks, same as any other case.
+    (
+        {"$ref": "#/definitions/T", "additionalItems": False, "required": ["x"]},
+        True,
+        "ref-with-additional-items-and-real-assertion-siblings",
+    ),
+    # `dependencies` is the guard's flagship under-enforcement case ANYWHERE ELSE, but beside a
+    # `$ref` draft-07 was already ignoring it along with every other sibling, so the relabel
+    # drops no constraint that was live — and no 2020-12 vocabulary evaluates it either
+    # (#124 review).
+    (
+        {
+            "$ref": "#/definitions/T",
+            "dependencies": {"a": ["b"]},
+            "definitions": {"T": {"type": "object"}},
+        },
+        False,
+        "ref-with-dependencies-sibling",
+    ),
+    # The exemption is `$ref`-only: the same node without one is the ordinary dropped-constraint
+    # case, so the two must not collapse into each other.
+    (
+        {"dependencies": {"a": ["b"]}, "definitions": {"T": {"type": "object"}}},
+        True,
+        "dependencies-without-ref-still-blocks",
+    ),
+    # ...and the exemption does not extend to the members: 2020-12's root meta-schema constrains
+    # a SCHEMA-valued member via `$dynamicRef: "#meta"`, so one that only meta-validates under
+    # draft-07 would swap the client's complaint rather than clear it.
+    (
+        {
+            "$ref": "#/definitions/T",
+            "dependencies": {"a": {"deprecated": "yes"}},
+            "definitions": {"T": {"type": "object"}},
+        },
+        True,
+        "ref-with-dependencies-sibling-holding-a-non-portable-member",
+    ),
+    # A well-shaped schema-valued member is still fine, so the walk above isn't just rejecting
+    # every schema-valued member out of hand.
+    (
+        {
+            "$ref": "#/definitions/T",
+            "dependencies": {"a": {"type": "string"}},
+            "definitions": {"T": {"type": "object"}},
+        },
+        False,
+        "ref-with-dependencies-sibling-holding-a-portable-member",
+    ),
+    # `$recursiveAnchor`/`$recursiveRef` carry no evaluation behavior under 2020-12 either, so
+    # they're inert beside `$ref` for the same reason (#124 review).
+    (
+        {
+            "$ref": "#/definitions/T",
+            "$recursiveRef": "#",
+            "definitions": {"T": {"type": "string"}},
+        },
+        False,
+        "ref-with-recursive-ref-sibling",
+    ),
+    # Exempting them as siblings must NOT smuggle a malformed value past the shape check,
+    # which runs on every node regardless of `$ref`.
+    (
+        {"$ref": "#/definitions/T", "$recursiveAnchor": True},
+        True,
+        "ref-with-malformed-recursive-anchor-sibling",
+    ),
+    # A `$ref` with clean siblings is not enough on its own — the REFERENCED schema might
+    # carry an incompatibility this walk never inspected, since normally nothing but `$ref`
+    # resolution makes an arbitrary JSON Pointer target load-bearing as a schema. Only
+    # `#/$defs/...`/`#/definitions/...` targets are trusted, because those containers are
+    # walked unconditionally regardless of whether anything references them; anything else —
+    # here, a pointer at a sibling `default` value that happens to hold a schema — is left
+    # under draft-07 rather than guessed at (#124 review).
+    (
+        {"$ref": "#/default", "default": {"dependencies": {"a": ["b"]}}},
+        True,
+        "ref-to-unwalked-position-with-hidden-incompatibility",
+    ),
+    # Same shape, but nothing hidden — still left alone, since the module can't tell the
+    # difference without actually resolving the pointer, which it deliberately doesn't do.
+    (
+        {"$ref": "#/default", "default": {"type": "string"}},
+        True,
+        "ref-to-unwalked-position-even-when-harmless",
+    ),
+    # A bare `#` (whole-document self-reference) is likewise not on the trusted list, despite
+    # being provably safe by construction (the walk already checked the root on its way here)
+    # — the simpler, unconditional rule is preferred over relying on evaluation order.
+    ({"$ref": "#"}, True, "bare-hash-self-reference"),
+    # A pointer BELOW a walked member is aimed somewhere unexamined just as much as a
+    # top-level one: the walk inspects `T` as a schema, which doesn't mean it descended into
+    # every JSON value inside `T` — `T`'s own `default` is an annotation it has no reason to
+    # enter. A prefix test would have waved this through (#124 review).
+    (
+        {
+            "$ref": "#/definitions/T/default",
+            "definitions": {"T": {"default": {"dependencies": {"a": ["b"]}}}},
+        },
+        True,
+        "ref-below-a-walked-member",
+    ),
+    # The member itself is still trusted.
+    (
+        {"$ref": "#/$defs/T", "$defs": {"T": {"type": "string"}}},
+        False,
+        "ref-at-a-walked-member",
+    ),
+    # JSON Schema's `integer` is a MATHEMATICAL property, so a bound encoded as `0.0`/`1e0`
+    # (a `float` after decoding) is meta-valid and must normalize (#124 review).
+    ({"type": "array", "minContains": 0.0}, False, "min-contains-integral-float"),
+    ({"type": "array", "maxContains": 1e0}, False, "max-contains-exponent-float"),
+    # ...but a genuinely fractional or negative one still fails 2020-12 meta-validation.
+    ({"type": "array", "minContains": 1.5}, True, "min-contains-fractional-float"),
+    ({"type": "array", "minContains": -1.0}, True, "min-contains-negative-float"),
+    # `$defs` MEMBERS must each be a schema under 2020-12; draft-07 doesn't know `$defs` at all,
+    # so a scalar member is free there and only turns the schema meta-invalid on relabel. The
+    # walk alone can't catch it — it descends into members and skips non-dicts (#124 review).
+    ({"type": "object", "$defs": {"T": 7}}, True, "defs-member-scalar"),
+    ({"type": "object", "$defs": {"T": {"type": "string"}}}, False, "defs-member-object"),
+    # A boolean IS a schema, so it's a legal member.
+    ({"type": "object", "$defs": {"T": True}}, False, "defs-member-boolean"),
+    # `definitions` is the non-equivalent case: draft-07 constrains its members to schemas too,
+    # so a malformed one is invalid either side of the relabel — not relabel-induced.
+    ({"type": "object", "definitions": {"T": 7}}, False, "definitions-member-scalar"),
+    # `contentSchema` postdates draft-07, so draft-07 never meta-validates its value as a
+    # schema and 2020-12 does — a draft-07-only construct hiding in there would turn the
+    # client's "unsupported dialect" error into an "invalid schema" one. Walked, so skipped.
+    (
+        {"type": "string", "contentSchema": {"items": [{"type": "string"}]}},
+        True,
+        "incompatibility-inside-contentSchema",
+    ),
+    # A portable `contentSchema` is not itself a reason to skip.
+    (
+        {"type": "string", "contentSchema": {"type": "object"}},
+        False,
+        "portable-contentSchema",
+    ),
+    # `format` is a DELIBERATE exclusion, not an oversight — see the rationale beside
+    # `_POST_DRAFT_07_ASSERTION_KEYWORDS`. draft-07 never guaranteed format-as-assertion (its
+    # own spec makes it optional and opt-outable), so the relabel drops nothing the declared
+    # dialect promised, and guarding it would refuse most real TypeScript-SDK tool schemas —
+    # the very tools #123 is about. Pinned so the trade-off can't be reversed by accident.
+    ({"type": "string", "format": "email"}, False, "format-is-deliberately-allowed"),
+]
+
+# Every post-draft-07 ASSERTION keyword, at the root and nested under a `properties` value.
+# draft-07 ignores what it doesn't recognize, so these assert nothing under the declared
+# dialect; the relabel switches them on and can start rejecting arguments the upstream tool
+# accepted (successive review rounds on #124 surfaced these one at a time — the guard now
+# catalogues the whole class, and this table pins every member of it).
+_POST_DRAFT_07_SAMPLE_VALUES = {
+    "unevaluatedProperties": False,
+    "unevaluatedItems": False,
+    "dependentRequired": {"credit_card": ["billing_address"]},
+    "dependentSchemas": {"credit_card": {"type": "object"}},
+    "prefixItems": [{"type": "string"}],
+    "$dynamicRef": "#meta",
+}
+for _kw, _value in _POST_DRAFT_07_SAMPLE_VALUES.items():
+    _INCOMPATIBLE_CONSTRUCT_CASES.append(({"type": "object", _kw: _value}, True, f"root-{_kw}"))
+    _INCOMPATIBLE_CONSTRUCT_CASES.append(
+        ({"properties": {"inner": {_kw: _value}}}, True, f"nested-{_kw}")
+    )
+
+
+# One nested case per declared sub-schema position, so a typo in any recursion table fails the
+# suite instead of silently disabling that path (#124 review). `items` is excluded because its
+# list form IS the construct and its single-schema form is covered above; the keywords that are
+# also in the assertion class are excluded because presence alone already decides them, so a
+# nested case would pass without exercising the recursion at all.
+_NESTED_INCOMPATIBILITY = {"dependencies": {"a": ["b"]}}
+for _kw in host._SCHEMA_KEYWORDS:
+    if _kw == "items" or _kw in host._POST_DRAFT_07_ASSERTION_KEYWORDS:
+        continue
+    _INCOMPATIBLE_CONSTRUCT_CASES.append(
+        ({_kw: _NESTED_INCOMPATIBILITY}, True, f"nested-under-{_kw}")
+    )
+_INCOMPATIBLE_CONSTRUCT_CASES.extend(
+    ({_kw: [_NESTED_INCOMPATIBILITY]}, True, f"nested-under-{_kw}")
+    for _kw in host._SCHEMA_LIST_KEYWORDS
+)
+_INCOMPATIBLE_CONSTRUCT_CASES.extend(
+    ({_kw: {"x": _NESTED_INCOMPATIBILITY}}, True, f"nested-under-{_kw}")
+    for _kw in host._SCHEMA_NAME_MAP_KEYWORDS
+)
+
+
+def test_post_draft07_keyword_table_is_fully_exercised():
+    """The sample-value table above must cover every keyword the guard catalogues — adding a
+    keyword to `_POST_DRAFT_07_ASSERTION_KEYWORDS` without a case here would ship untested."""
+    assert set(_POST_DRAFT_07_SAMPLE_VALUES) == set(host._POST_DRAFT_07_ASSERTION_KEYWORDS)
+
+
+def test_deeply_nested_schema_does_not_blow_the_stack():
+    """An upstream is untrusted input. A schema nested past `_MAX_SCHEMA_DEPTH` decodes as JSON
+    long before this walk would exhaust the interpreter stack, so without a bound one
+    pathological tool would take `tools/list` down for the whole server once the toggle is on
+    (#124 review). The bound answers "incompatible" — the same safe answer every other
+    can't-clear-it case gets — instead of raising."""
+    deep: dict = {"type": "object"}
+    for _ in range(5_000):
+        deep = {"not": deep}
+    assert host._has_incompatible_draft07_construct(deep) is True
+    # And the schema is therefore left under its original dialect rather than crashing.
+    schema = {"$schema": _DRAFT_07, **deep}
+    assert host._ToolTransform._normalized_schema(schema) is schema
+
+
+def test_shallow_nesting_is_unaffected_by_the_depth_bound():
+    """The bound must not turn ordinary nesting into a false positive."""
+    nested: dict = {"type": "string"}
+    for _ in range(10):
+        nested = {"properties": {"inner": nested}}
+    assert host._has_incompatible_draft07_construct(nested) is False
+
+
+def test_every_value_shape_keyword_is_exercised():
+    """Same guarantee for `_POST_DRAFT_07_VALUE_SHAPES`: every keyword whose value the guard
+    meta-validates must appear in a REJECTING case above, so extending the table can't ship
+    untested. Presence alone isn't enough — a keyword that only ever appears in a portable
+    case never exercises its predicate's negative branch (review on #124: `maxContains`
+    appeared only in portable cases, leaving its own rejection paths unverified)."""
+    rejected = {
+        key
+        for schema, expected, _id in _INCOMPATIBLE_CONSTRUCT_CASES
+        if expected and isinstance(schema, dict)
+        for key in schema
+    }
+    assert set(host._POST_DRAFT_07_VALUE_SHAPES) <= rejected
+
+
+@pytest.mark.parametrize(
+    ("schema", "expected"),
+    [pytest.param(s, e, id=i) for s, e, i in _INCOMPATIBLE_CONSTRUCT_CASES],
+)
+def test_has_incompatible_draft07_construct(schema, expected):
+    assert host._has_incompatible_draft07_construct(schema) is expected
+
+
+def test_normalized_schema_only_touches_draft07():
+    """draft-04's boolean-form `exclusiveMinimum` (superseded by draft-06's numeric form,
+    which draft-07 keeps) is a real, different incompatibility this module doesn't
+    catalogue — review on #124. Left untouched: normalization is scoped to draft-07 only,
+    not "anything that isn't already 2020-12"."""
+    draft04 = {
+        "$schema": "http://json-schema.org/draft-04/schema#",
+        "minimum": 0,
+        "exclusiveMinimum": True,
+    }
+    assert host._ToolTransform._normalized_schema(draft04) is draft04
+    # An unrecognized/custom dialect URI is likewise left alone.
+    custom = {"$schema": "https://example.test/my-dialect", "type": "object"}
+    assert host._ToolTransform._normalized_schema(custom) is custom
+
+
+@pytest.mark.parametrize("uri", sorted(host._DRAFT_07_SCHEMA_URIS))
+def test_normalized_schema_accepts_every_draft07_spelling(uri):
+    """The set exists to tolerate generator variation (http vs https, with vs without the
+    trailing `#` fragment). Each spelling must normalize, or the tolerance is fiction — only
+    one of the four was exercised before (review on #124)."""
+    schema = {"$schema": uri, "type": "object", "properties": {}}
+    assert (
+        host._ToolTransform._normalized_schema(schema)["$schema"] == host._SCHEMA_DIALECT_2020_12
+    )
+
+
+def test_normalized_schema_tolerates_a_non_string_dialect():
+    """An untrusted upstream can advertise a malformed `$schema` (list, dict, number). A
+    set-membership test against those raises `TypeError: unhashable type`, which would take
+    `tools/list` down for the whole server — turning an opt-in compatibility toggle into an
+    outage, where the default-off path merely passes the malformed schema through for the
+    client to reject (review on #124). An unrecognized SHAPE is treated like an unrecognized
+    STRING: left exactly as declared."""
+    for bad in ({"$schema": ["draft-07"]}, {"$schema": {"uri": "x"}}, {"$schema": 7}):
+        assert host._ToolTransform._normalized_schema(bad) is bad

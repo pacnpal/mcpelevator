@@ -265,6 +265,7 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         idle_timeout_s=server.idle_timeout_s,
         disabled_tools=list(server.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
+        normalize_schema_dialect=bool(server.normalize_schema_dialect),
         config_hash=server.config_hash,
         source=server.source,
         mcpb_exportable=mcpb.exportable(server),

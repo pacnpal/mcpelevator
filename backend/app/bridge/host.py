@@ -32,7 +32,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Sequence
+import re
+from collections.abc import Callable, Sequence
 
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
@@ -267,6 +268,481 @@ def _build_oauth_auth(oauth: dict):
 # and FastMCP's.
 UPSTREAM_META_KEY = "io.mcpelevator/upstream"
 
+# `normalize_schema_dialect` rewrites a `$schema` declaring exactly draft-07 — the dialect
+# the MCP TypeScript SDK hardcodes with no config option (mcpelevator/mcpelevator#123) — to
+# this one. 2020-12 is what the MCP spec itself targets and what a strict client's default
+# validator expects; rewriting only the dialect pointer (never the schema's actual keywords)
+# is safe for the common case a proxied tool schema is in — plain type/properties/required
+# with nothing draft-07-specific — PROVIDED the source dialect really is draft-07: an older
+# dialect (draft-04's boolean-form `exclusiveMinimum`/`exclusiveMaximum`, for one) has its
+# own incompatibilities this module doesn't catalogue, so normalization intentionally covers
+# ONLY draft-07's known-safe-when-guarded case (see `_DRAFT_07_SCHEMA_URIS`,
+# `_has_incompatible_draft07_construct`) and leaves every other dialect — including one we've
+# simply never seen — exactly as declared.
+_SCHEMA_DIALECT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
+
+# Every `$schema` string form draft-07 is plausibly declared with (with/without the trailing
+# `#` fragment some generators omit; http vs the https json-schema.org now also serves).
+_DRAFT_07_SCHEMA_URIS = frozenset(
+    {
+        "http://json-schema.org/draft-07/schema#",
+        "http://json-schema.org/draft-07/schema",
+        "https://json-schema.org/draft-07/schema#",
+        "https://json-schema.org/draft-07/schema",
+    }
+)
+
+# Keyword positions whose value is DIRECTLY a sub-schema (not a schema wrapped in another
+# structure) — a construct nested under one of these still needs checking.
+_SCHEMA_KEYWORDS = (
+    "additionalProperties",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "items",  # only when NOT list-valued — the list-valued (tuple) case is the construct itself
+    "contains",
+    "propertyNames",
+    "not",
+    "if",
+    "then",
+    "else",
+    # `contentSchema` postdates draft-07, so draft-07 doesn't treat its value as a schema at
+    # all and never meta-validates it. After the relabel 2020-12 DOES, so a draft-07-only
+    # construct hiding in there (a tuple-form `items`, say) would turn the client's
+    # "unsupported dialect" complaint into an "invalid schema" one — a different error, not a
+    # fix. Walking it means such a schema is skipped instead (#124 review). The keyword itself
+    # is annotation-only in 2020-12, so its presence alone asserts nothing and is not listed
+    # in `_POST_DRAFT_07_ASSERTION_KEYWORDS`.
+    "contentSchema",
+    # `additionalItems` is deliberately NOT here (removed on review, #124). It's only
+    # meaningful in draft-07 beside a TUPLE-form `items` — a shape the parent-node check above
+    # already disqualifies unconditionally, so by the time this table is consulted `items` is
+    # always absent or single-schema, where draft-07 itself says implementations SHOULD ignore
+    # `additionalItems`. It's also not a recognized 2020-12 applicator keyword at all. Walking
+    # it therefore never protects against a REAL behavior change in the only branch that's
+    # reachable — it only produces false positives, refusing a schema that's fully portable.
+)
+# Keyword positions whose value is a LIST of sub-schemas. `prefixItems` is deliberately NOT
+# here: it postdates draft-07, so its mere presence is itself an incompatibility (see
+# `_POST_DRAFT_07_ASSERTION_KEYWORDS`) and the walk stops at that node rather than descending.
+_SCHEMA_LIST_KEYWORDS = ("allOf", "anyOf", "oneOf")
+# Keyword positions whose value is a MAP OF ARBITRARY NAME -> sub-schema — the keys are
+# property/definition NAMES, never schema keywords, so they must never be checked as if they
+# were one (a property literally named "dependencies" is not the `dependencies` keyword).
+# `dependencies` is a member because its own values are schemas too (a member may instead be a
+# string ARRAY — the property-dependency form — and a non-dict member simply walks to "no
+# construct found", so the mixed shape needs no special case). It's walked because 2020-12's
+# root meta-schema constrains those members via `$dynamicRef: "#meta"`, so a member that is
+# meta-valid under draft-07 but not under 2020-12 would still swap the client's complaint
+# rather than fix it — see `_ANNOTATION_ONLY_KEYWORDS` for why the keyword is nonetheless an
+# acceptable `$ref` sibling (#124 review).
+_SCHEMA_NAME_MAP_KEYWORDS = (
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependencies",
+)
+
+# Pure annotations: keywords that carry no validation behavior in EITHER dialect, so their
+# presence beside `$ref` is never the sibling-semantics hazard below — only a keyword that
+# changes MEANING across the dialect boundary matters there. `definitions`/`$defs` belong here
+# too: they're inert reusable-schema containers, not constraints on the node they sit in — a
+# nested incompatibility inside one is still caught separately, via `_SCHEMA_NAME_MAP_KEYWORDS`
+# recursing into their values regardless of this set (#124 review).
+# `format`, `contentEncoding`, and `contentMediaType` belong here for the SAME judgment call,
+# not three different ones: draft-07's own spec permits all three as OPTIONAL, disableable
+# validation assertions (verified against the draft-07 meta-schema, not assumed), while
+# 2020-12's default vocabulary makes all three annotation-only. Evaluating an annotation as a
+# `$ref` sibling has no effect on the validation OUTCOME — identical to draft-07 ignoring it as
+# a sibling — so the `$ref`-sibling question doesn't turn on whether draft-07 COULD have
+# asserted it, only on what 2020-12 does with it. See the module note below
+# `_POST_DRAFT_07_ASSERTION_KEYWORDS` for the fuller version of this argument. `contentSchema`
+# is deliberately NOT here: it's schema-VALUED, with its own shape and nested-incompatibility
+# handling via `_SCHEMA_KEYWORDS`/`_POST_DRAFT_07_VALUE_SHAPES`, so it earns its own review
+# rather than riding on this list (#124 review).
+#
+# `$id` is deliberately NOT here. It carries no ASSERTION, but it is an identifier that steers
+# reference RESOLUTION, and that resolution differs across the boundary — see
+# `_has_incompatible_draft07_construct` (#124 review).
+#
+# The last four entries are here for a DIFFERENT reason than the annotations above: they
+# aren't annotations under 2020-12, they carry no EVALUATION behavior there at all, which makes
+# them equally inert beside `$ref` either side of the relabel. `additionalItems` is absent from
+# every 2020-12 meta-schema — not even in the deprecated-but-retained block — so it's outright
+# unrecognized; `$recursiveAnchor`/`$recursiveRef` are listed but deprecated, superseded by
+# `$dynamicAnchor`/`$dynamicRef`, so 2020-12 meta-validates their SHAPE without ever acting on
+# them. That shape check still applies here: it lives in `_POST_DRAFT_07_VALUE_SHAPES`, which
+# runs on every node regardless of `$ref`, so exempting them as siblings can't smuggle a
+# malformed value past (#124 review).
+#
+# `dependencies` joins them on the same footing, and ONLY as a `$ref` sibling. Away from a
+# `$ref` it is the flagship under-enforcement case this whole guard exists for (draft-07
+# asserts it, 2020-12 does not — see `_has_incompatible_draft07_construct`), so it stays an
+# unconditional rejection there. Beside a `$ref` that asymmetry disappears: draft-07 ignores
+# EVERY `$ref` sibling, so the constraint was already dead under the declared dialect and the
+# relabel drops nothing. Verified against the published meta-schemas rather than assumed —
+# 2020-12 lists `dependencies` in its ROOT schema's `properties` only, inside no `$vocabulary`
+# member, which is exactly what "shape-checked, never evaluated" looks like (#124 review).
+_ANNOTATION_ONLY_KEYWORDS = frozenset(
+    {
+        "$schema",
+        "$comment",
+        "title",
+        "description",
+        "default",
+        "examples",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+        "definitions",
+        "$defs",
+        "format",
+        "contentEncoding",
+        "contentMediaType",
+        "additionalItems",
+        "$recursiveAnchor",
+        "$recursiveRef",
+        "dependencies",
+    }
+)
+
+# Keywords INTRODUCED AFTER draft-07 (2019-09 and 2020-12) that carry validation behavior. A
+# draft-07 validator doesn't recognize them, and an unrecognized keyword is IGNORED — so under
+# the declared dialect they assert nothing. Relabeling the schema to 2020-12 switches every one
+# of them on, and arguments the upstream tool accepted can start being rejected. That's the
+# same over-enforcement hazard as an asserting `$ref` sibling, reached by a different route,
+# and it's a CLASS rather than a list of one-offs: `unevaluatedProperties`, then
+# `dependentRequired`, then `prefixItems` each arrived as its own review round on #124, so the
+# whole class is catalogued here at once. Purely-annotational post-draft-07 additions
+# (`deprecated`, `contentSchema`) are NOT here — they assert nothing in either dialect.
+_POST_DRAFT_07_ASSERTION_KEYWORDS = frozenset(
+    {
+        # 2019-09
+        "unevaluatedProperties",
+        "unevaluatedItems",
+        "dependentRequired",
+        "dependentSchemas",
+        # 2020-12
+        "prefixItems",
+        "$dynamicRef",
+    }
+)
+
+# Nesting depth past which the walk gives up and reports "incompatible" instead of recursing
+# further. Two Python frames per schema level, so this stays an order of magnitude clear of the
+# default interpreter limit while sitting far above any real tool schema (the deepest thing a
+# generator plausibly emits is a handful of levels).
+_MAX_SCHEMA_DEPTH = 100
+
+# 2020-12's ANCHOR-NAME shape (`meta/core#/$defs/anchorString`), used to tell a value that
+# survives the relabel from one that only ever passed because draft-07 wasn't looking.
+_ANCHOR_STRING_RE = re.compile(r"[A-Za-z_][-A-Za-z0-9._]*\Z")
+# `meta/core`'s own `$id` pattern, verbatim: no fragment, or an empty one.
+_ID_PORTABLE_RE = re.compile(r"[^#]*#?\Z")
+# A `$ref` at a `$defs`/`definitions` MEMBER and nothing deeper — `[^/]+` stops at the member,
+# so `#/$defs/T` matches and `#/$defs/T/default` does not. See `_ref_targets_a_walked_container`
+# for why depth matters. (`[^/]+` is also correct for JSON Pointer escaping: a member name
+# containing a slash is encoded `~1`, which carries no literal `/`.)
+_WALKED_REF_TARGET_RE = re.compile(r"#/(?:\$defs|definitions)/[^/]+\Z")
+
+
+def _is_anchor_string(value: object) -> bool:
+    return isinstance(value, str) and _ANCHOR_STRING_RE.fullmatch(value) is not None
+
+
+def _is_non_negative_int(value: object) -> bool:
+    """2020-12's ``nonNegativeInteger``. JSON Schema's ``integer`` is a MATHEMATICAL property,
+    not a syntactic one — "a number with a zero fractional part" — so an upstream that encoded
+    a bound as ``0.0`` or ``1e0`` (both `float` after JSON decoding) is meta-valid and must not
+    be refused (#124 review). `bool` is excluded despite subclassing `int`; `inf`/`nan` fall out
+    of `is_integer()` on their own."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 0
+    return isinstance(value, float) and value.is_integer() and value >= 0
+
+
+def _is_object(value: object) -> bool:
+    return isinstance(value, dict)
+
+
+def _is_bool(value: object) -> bool:
+    return isinstance(value, bool)
+
+
+def _is_schema_value(value: object) -> bool:
+    """2020-12 models a schema as ``["object", "boolean"]``."""
+    return isinstance(value, dict | bool)
+
+
+def _is_schema_map(value: object) -> bool:
+    """An object whose every member is itself a schema — 2020-12's shape for ``$defs``. The
+    MEMBERS matter as much as the container: the walk descends into them looking for
+    incompatible constructs, but a non-dict member is simply skipped there (there's nothing to
+    inspect), so a scalar would slip past on the outer check alone (#124 review)."""
+    return isinstance(value, dict) and all(_is_schema_value(member) for member in value.values())
+# NOT here, deliberately: `$recursiveRef`/`$recursiveAnchor` carry no EVALUATION behavior
+# after the relabel — 2020-12 superseded them with `$dynamicRef`/`$dynamicAnchor` — so
+# blanket-skipping them would leave the strict client refusing a tool this toggle could have
+# fixed. But 2020-12's ROOT meta-schema does still list both as deprecated keywords and
+# CONSTRAINS THEIR SHAPE (`$recursiveAnchor` → an anchor string, `$recursiveRef` → a
+# URI-reference string), so a value that only ever passed because draft-07 treated the name as
+# unknown (`$recursiveAnchor: true`) turns the schema meta-invalid once relabeled. They're
+# therefore checked BY VALUE in `_has_incompatible_draft07_construct` rather than by presence
+# (#124 review). Same for the `contains` bounds, which live there for a second reason too.
+#
+# Keywords 2020-12 KNOWS and draft-07 does NOT, whose VALUE 2020-12's meta-schema constrains,
+# mapped to the predicate that says "this value survives the relabel". draft-07 never inspects
+# an unknown keyword's value, so a wrong-shaped one is free today and only becomes a problem
+# once the relabel makes the name meaningful — at which point the schema is meta-invalid and
+# the strict client refuses it over THAT instead. Shapes taken from the 2020-12 meta-schemas
+# directly (`meta/core`, `meta/validation`, `meta/content`, `meta/meta-data`) rather than from
+# memory. `definitions` is absent on purpose: draft-07 constrains it to an object too, so a
+# malformed one is equally invalid before and after — not a relabel-induced change (#124 review).
+_POST_DRAFT_07_VALUE_SHAPES: dict[str, Callable[[object], bool]] = {
+    # Deprecated-but-retained in the 2020-12 ROOT meta-schema, which still constrains them.
+    "$recursiveAnchor": _is_anchor_string,
+    "$recursiveRef": lambda value: isinstance(value, str),
+    # 2019-09+ keywords whose shape 2020-12 pins. `definitions` is NOT the equivalent case:
+    # draft-07 constrains its members to schemas too, so a malformed one is invalid either
+    # side of the relabel.
+    "$defs": _is_schema_map,
+    "contentSchema": _is_schema_value,
+    "deprecated": _is_bool,
+    "minContains": _is_non_negative_int,
+    "maxContains": _is_non_negative_int,
+}
+
+# `format` is ALSO deliberately not guarded, and this one is a judgement call worth stating
+# (#124 review). The delta is real: 2020-12's default meta-schema requires the
+# `format-annotation` vocabulary, so `format` is annotation-only there, while draft-07 lets an
+# implementation assert it — a client that asserted formats under draft-07 and honours
+# vocabularies under 2020-12 would stop rejecting a malformed `email`. It is excluded anyway
+# because draft-07 never GUARANTEED assertion: its own spec makes format-as-assertion
+# optional, opt-outable implementation behavior, so the relabel drops something the declared
+# dialect only ever said MAY happen. That is categorically different from `dependencies` (a
+# guaranteed constraint that silently vanishes) or `unevaluatedProperties` (a guaranteed
+# constraint that silently switches on), which is the line this guard draws: it protects
+# semantics the dialect promises, not behaviors an implementation was free to skip. The
+# practical stake is the whole feature — `format` appears in a large share of real
+# TypeScript-SDK tool schemas, so guarding it would refuse to normalize most of the tools
+# issue #123 is about, and the operator would be left with the unsupported-dialect error the
+# toggle exists to clear. The toggle's help text names this explicitly so the choice is the
+# operator's, not a silent one.
+
+
+def _id_is_portable(value: object) -> bool:
+    """Whether ``$id`` would still satisfy 2020-12, whose ``meta/core`` constrains it with
+    ``^[^#]*#?$``: no fragment, or an empty one (kept for backward compatibility). draft-07's
+    plain-name anchor form (``"https://example.test/tool#thing"``) is out — that role moved to
+    ``$anchor`` — and so is anything with a second ``#``. The meta-schema's own pattern is used
+    verbatim rather than approximated, since a hand-rolled version missed ``"a#b#"`` (#124
+    review). A non-string ``$id`` is malformed rather than legacy; it reports portable here and
+    is left to the same pass-through the malformed-``$schema`` case gets."""
+    return not isinstance(value, str) or _ID_PORTABLE_RE.fullmatch(value) is not None
+
+
+def _has_non_portable_value(schema: dict) -> bool:
+    """Whether any keyword 2020-12 knows — and draft-07 does NOT — carries a value that
+    2020-12's meta-schema would reject. draft-07 never looks at an unknown keyword's value, so
+    such a value costs nothing today and only bites once the relabel makes the name meaningful:
+    the schema becomes meta-invalid and the strict client refuses the tool over that instead,
+    which is a swapped complaint rather than the fix the toggle promises (#124 review)."""
+    return any(
+        key in schema and not is_portable(schema[key])
+        for key, is_portable in _POST_DRAFT_07_VALUE_SHAPES.items()
+    )
+
+
+def _ref_targets_a_walked_container(value: object) -> bool:
+    """Whether a `$ref` fragment points somewhere `_has_incompatible_draft07_construct` is
+    GUARANTEED to have inspected regardless of whether anything references it — a `$defs`/
+    `definitions` member, which `_SCHEMA_NAME_MAP_KEYWORDS` walks unconditionally.
+
+    The match is the member ITSELF and nothing below it: `#/$defs/T` yes, `#/$defs/T/default`
+    no. The walk inspects `T` as a schema, which does NOT mean it inspected every JSON value
+    inside `T` — `T`'s own `default` is an annotation the walk has no reason to descend into,
+    so a pointer aimed there is aimed somewhere unexamined, exactly like the top-level case
+    (#124 review). A prefix test would have waved that through.
+
+    This function does NOT resolve JSON Pointers in general — no cycle handling, no walking
+    the document by the referenced path. It only recognizes the ONE idiomatic shape every real
+    generator (including the MCP TypeScript SDK) produces. Anything else — a pointer into a
+    position this module doesn't independently walk, an external reference, a bare `#` — is
+    treated as unverifiable and therefore incompatible: an unreferenced sibling like `default`
+    can itself hold a schema that only becomes load-bearing through such a `$ref`, and the
+    small cost of leaving those rare shapes under draft-07 buys real safety against a full
+    resolver's complexity (recursive-schema cycles, escaping, external documents) for a case
+    that essentially never occurs in generated tool schemas (#124 review)."""
+    return isinstance(value, str) and _WALKED_REF_TARGET_RE.fullmatch(value) is not None
+
+
+def _shifts_reference_resolution(schema: dict, *, is_root: bool) -> bool:
+    """Whether relabeling could make a reference resolve somewhere else, or leave behind an
+    identifier 2020-12 rejects. See the ``$id`` and ``$anchor`` bullets in
+    ``_has_incompatible_draft07_construct``."""
+    if "$anchor" in schema or "$dynamicAnchor" in schema or "$vocabulary" in schema:
+        return True
+    if "$id" in schema and (not is_root or "$ref" in schema or not _id_is_portable(schema["$id"])):
+        return True
+    if "$ref" not in schema:
+        return False
+    # draft-07 ignores every sibling of `$ref`; 2020-12 evaluates them.
+    if any(key not in _ANNOTATION_ONLY_KEYWORDS for key in schema if key != "$ref"):
+        return True
+    # A sibling can be clean and the rewrite still unsafe: the REFERENCED schema might carry
+    # an incompatibility this walk never inspected, because normally nothing but `$ref`
+    # resolution makes an arbitrary JSON Pointer target load-bearing as a schema.
+    return not _ref_targets_a_walked_container(schema["$ref"])
+
+
+def _activates_a_dormant_assertion(schema: dict) -> bool:
+    """Whether relabeling would switch ON a constraint draft-07 ignored — the whole
+    ``_POST_DRAFT_07_ASSERTION_KEYWORDS`` class, plus the ``contains`` bounds, which only bite
+    when a sibling ``contains`` gives them something to apply to."""
+    if not _POST_DRAFT_07_ASSERTION_KEYWORDS.isdisjoint(schema):
+        return True
+    return "contains" in schema and ("minContains" in schema or "maxContains" in schema)
+
+
+def _has_incompatible_child(schema: dict, depth: int) -> bool:
+    """Recurse, but ONLY through positions the JSON Schema grammar declares as sub-schemas."""
+    for key in _SCHEMA_KEYWORDS:
+        if key in schema and _has_incompatible_draft07_construct(
+            schema[key], is_root=False, depth=depth
+        ):
+            return True
+    for key in _SCHEMA_LIST_KEYWORDS:
+        sub = schema.get(key)
+        if isinstance(sub, list) and any(
+            _has_incompatible_draft07_construct(v, is_root=False, depth=depth) for v in sub
+        ):
+            return True
+    for key in _SCHEMA_NAME_MAP_KEYWORDS:
+        sub = schema.get(key)
+        if isinstance(sub, dict) and any(
+            _has_incompatible_draft07_construct(v, is_root=False, depth=depth)
+            for v in sub.values()
+        ):
+            return True
+    return False
+
+
+def _has_incompatible_draft07_construct(
+    schema: object, *, is_root: bool = True, depth: int = 0
+) -> bool:
+    """Whether ``schema`` (a JSON Schema node) uses a keyword whose MEANING changed between
+    draft-07 and 2020-12 — so relabeling `$schema` alone would silently mis-declare it, not
+    just rename it. The cases below (mcpelevator/mcpelevator#123 and #124 review), each
+    delegated to a named predicate so the families stay separable:
+
+    * An array-valued ``items`` means positional TUPLE validation in draft-07, but ``items``
+      must be a single schema in 2020-12 (tuples moved to ``prefixItems``) — left as
+      array-valued under a 2020-12 label, a strict validator either rejects the schema
+      outright or silently stops enforcing the per-position types.
+    * ``dependencies`` (property/schema dependencies) is evaluated by no 2020-12 vocabulary
+      (it split into ``dependentRequired``/``dependentSchemas``, and survives only as a
+      deprecated shape in the root meta-schema) — left in place, it would just be ignored,
+      silently DROPPING whatever constraint the upstream author intended
+      (under-enforcement). The one exception is ``dependencies`` beside a ``$ref``, where
+      draft-07 was already ignoring it along with every other sibling: nothing is dropped
+      because nothing was being asserted, so that shape stays normalizable (#124 review).
+    * ``$ref`` alongside an ASSERTION keyword (``required``, ``minLength``, a sibling
+      ``properties``, …): draft-07 ignores every sibling of ``$ref`` and validates only the
+      referenced schema; 2020-12 evaluates the siblings too. Relabeling such a schema makes
+      it STRICTER — arguments the upstream tool previously accepted (because the sibling was
+      silently ignored) can start failing validation post-proxy (over-enforcement, the
+      mirror image of the ``dependencies`` case). Pure-annotation siblings
+      (``_ANNOTATION_ONLY_KEYWORDS`` — ``title``, ``description``, ``definitions``/``$defs``,
+      …) don't count: they carry no validation behavior in either dialect, so their presence
+      changes nothing.
+    * Any keyword ADDED AFTER draft-07 that asserts something
+      (``_POST_DRAFT_07_ASSERTION_KEYWORDS`` — ``unevaluatedProperties``,
+      ``dependentRequired``, ``prefixItems``, ``$dynamicRef``, …; ``minContains``/
+      ``maxContains`` are deliberately NOT members, see below). draft-07 ignores what it
+      doesn't recognize, so under the declared dialect these assert nothing; the relabel
+      switches them on, and arguments the upstream tool accepted can start being rejected —
+      the same over-enforcement hazard as the ``$ref``-sibling case, reached by a different
+      route.
+    * ``$id`` in a SUBSCHEMA, or beside a ``$ref``. ``$id`` asserts nothing, but it steers
+      reference RESOLUTION, and resolution is exactly what moved across this boundary. Beside
+      a ``$ref``, draft-07 ignores it (the reference resolves against the INHERITED base URI)
+      while 2020-12 honours it, so the same ``$ref`` can resolve to a DIFFERENT schema after
+      the relabel. And in any subschema, 2019-09 redefined ``$id`` from "change the base URI
+      within this document" to "declare an EMBEDDED, independent schema resource". Either way
+      the relabel can silently retarget a reference — a wrong-schema hazard, not a
+      stricter-or-looser one, which is why a root-level ``$id`` (plain resource identity, the
+      same in both dialects) is the only form left alone — and then only without a NON-EMPTY
+      fragment, since draft-07's plain-name anchor form (``".../tool#thing"``) is invalid
+      under 2020-12, where that role moved to ``$anchor`` (``_id_has_legacy_fragment``).
+    * ``$anchor``/``$dynamicAnchor``/``$vocabulary`` anywhere. All postdate draft-07, so it
+      ignores them as unknown keywords — meaning their VALUE is never syntax-checked and they
+      name nothing. After the relabel 2020-12 constrains their syntax (``"bad anchor"`` is a
+      valid unknown keyword under draft-07 and an invalid anchor under 2020-12; ``$vocabulary``
+      must be an object), so a strict client goes on refusing the tool — and the anchors also
+      begin participating in reference resolution, which can retarget a ``$ref``. Same
+      wrong-schema family as ``$id``, which is why they're checked beside it.
+    * A DEPRECATED-BUT-RETAINED name whose value wouldn't survive meta-validation.
+      ``$recursiveAnchor``/``$recursiveRef`` have no evaluation behavior under 2020-12 (it
+      superseded them), so their mere presence is harmless and normalizing is the right call —
+      but 2020-12's root meta-schema still lists both and constrains their shape, so
+      ``{"$recursiveAnchor": true}`` is a valid draft-07 schema (unknown keyword) and an
+      invalid 2020-12 one. Checked by VALUE, not by presence.
+    * ``minContains``/``maxContains``, but only when they'd actually bite: 2020-12 gives them
+      no effect without a sibling ``contains``, so a bare ``{"minContains": 0}`` is inert in
+      both dialects and portable. With a ``contains`` present the relabel switches on a bound
+      draft-07 ignored (over-enforcement) — left under draft-07.
+    * A keyword 2020-12 knows and draft-07 doesn't, carrying a VALUE 2020-12's meta-schema
+      rejects (``_POST_DRAFT_07_VALUE_SHAPES`` — ``{"contentSchema": 7}``, ``{"$defs": "x"}``,
+      ``{"deprecated": "yes"}``, ``{"minContains": -1}``, ``{"$recursiveAnchor": true}``).
+      draft-07 never inspects an unknown keyword's value, so the wrong shape costs nothing
+      until the relabel makes the name meaningful — then the schema is meta-invalid and the
+      strict client refuses it over THAT instead. A swapped complaint, not the promised fix.
+    * A ``$ref`` whose TARGET this walk can't vouch for. Clean siblings aren't enough: a
+      reference makes an arbitrary JSON Pointer target load-bearing as a schema, and that
+      target may sit somewhere nothing else inspects (``{"$ref": "#/default", "default":
+      {"dependencies": …}}`` — a real draft-07 constraint that 2020-12 would silently drop).
+      Only ``#/$defs/…`` and ``#/definitions/…`` are trusted, because those containers are
+      walked unconditionally whether or not anything points at them; every other target is
+      unverifiable and stays under draft-07. Deliberately NOT a JSON Pointer resolver — see
+      ``_ref_targets_a_walked_container``.
+
+    Checked recursively — any of these can be nested arbitrarily deep — but ONLY through
+    positions the JSON Schema grammar actually declares as sub-schemas
+    (`_SCHEMA_KEYWORDS`/`_SCHEMA_LIST_KEYWORDS`/`_SCHEMA_NAME_MAP_KEYWORDS`). A naive
+    "recurse into every dict value" walk would descend into a `properties` map and mistake a
+    PROPERTY NAME that happens to read `dependencies` for the keyword itself (review on #124),
+    both missing real matches hidden behind other keywords this function doesn't yet know
+    about and reporting one that isn't there.
+
+    Past `_MAX_SCHEMA_DEPTH` the answer is "incompatible" rather than a `RecursionError`. An
+    upstream is untrusted input, and a deeply nested schema is shallow enough to decode as JSON
+    long before this walk would blow the interpreter stack — so without the bound, turning the
+    toggle on would let one pathological tool take `tools/list` down for the WHOLE server
+    (#124 review). Failing to the safe answer keeps that schema under draft-07, which is
+    exactly what this guard does for every other case it can't clear.
+    """
+    if not isinstance(schema, dict):
+        return False
+    if depth >= _MAX_SCHEMA_DEPTH:
+        return True
+    # A REMOVED-OR-CHANGED draft-07 construct: tuple-form `items`, and `dependencies` (which
+    # 2020-12's root meta-schema still accepts as deprecated, so this is about lost SEMANTICS
+    # rather than meta-validity). `dependencies` is exempt beside a `$ref`, where draft-07 was
+    # already ignoring it and there is no semantic left to lose — the `$ref` sibling rules below
+    # take over from there.
+    if isinstance(schema.get("items"), list) or (
+        "dependencies" in schema and "$ref" not in schema
+    ):
+        return True
+    return (
+        _activates_a_dormant_assertion(schema)
+        or _shifts_reference_resolution(schema, is_root=is_root)
+        or _has_non_portable_value(schema)
+        or _has_incompatible_child(schema, depth + 1)
+    )
+
 
 class _ToolTransform(ToolTransform):
     """FastMCP's ``ToolTransform`` with the gaps that matter to elevation closed.
@@ -299,9 +775,30 @@ class _ToolTransform(ToolTransform):
       UI a false identity to key policy off — the operator would disable one row and a
       different tool would stay exposed. The key is stripped from every upstream tool, so
       only this transform can ever put it there.
+
+    * **A draft-07 schema dialect can be normalized — but never mis-declared, and never
+      guessed at for a dialect this bridge doesn't know.** ``normalize_schema_dialect``
+      rewrites a tool's ``$schema`` (parameters/output schema) from EXACTLY draft-07 to
+      2020-12, independent of the hide/rename policy above — a server whose SDK hardcodes
+      draft-07 (issue #123) would otherwise have every tool refused by a strict client,
+      whether or not the operator has touched its name or description. Two things stop
+      that rewrite: a schema using a construct whose MEANING changed across the two
+      dialects (see ``_has_incompatible_draft07_construct`` — tuple-form ``items``,
+      ``dependencies``, an asserting ``$ref`` sibling, or a keyword like
+      ``unevaluatedProperties`` that draft-07 ignores and 2020-12 enforces) is left under
+      draft-07 instead, since relabeling only the pointer there would silently invalidate a
+      constraint, drop one, or start enforcing one that was never active; and a schema
+      declaring any OTHER dialect (draft-04, draft-06, a custom URI, a malformed non-string
+      value) is left untouched entirely, since this bridge only catalogues draft-07's
+      specific incompatibilities.
     """
 
-    def __init__(self, transforms: dict[str, ToolTransformConfig]) -> None:
+    def __init__(
+        self,
+        transforms: dict[str, ToolTransformConfig],
+        *,
+        normalize_schema_dialect: bool = False,
+    ) -> None:
         # Own the reverse map rather than inheriting it: a HIDDEN tool exposes no name, so
         # it must not reserve one. FastMCP's constructor reserves a target for every entry
         # and raises on a duplicate, which made "hide `b`, rename `a` to `b`" — a
@@ -316,6 +813,7 @@ class _ToolTransform(ToolTransform):
         # `x` that doesn't exist — advertised and uncallable, the exact split this class
         # exists to prevent.
         self._transforms = transforms
+        self._normalize_schema_dialect = normalize_schema_dialect
         self._name_reverse = {}
         for source, config in transforms.items():
             if not config.enabled or not config.name or config.name == source:
@@ -323,14 +821,44 @@ class _ToolTransform(ToolTransform):
             self._name_reverse[config.name] = source
 
     @staticmethod
-    def _scrub(tool: Tool) -> Tool:
-        """Drop our reserved identity key from an upstream tool (see the class docstring)."""
+    def _normalized_schema(schema: dict | None) -> dict | None:
+        """Rewrite ``schema``'s ``$schema`` to 2020-12, if — and only if — it declares
+        EXACTLY draft-07 (``_DRAFT_07_SCHEMA_URIS``) and doesn't use a construct the
+        dialect bump alone would silently mis-declare (see
+        ``_has_incompatible_draft07_construct``). Absent, already 2020-12, or any OTHER
+        dialect (draft-04, draft-06, a custom URI, …) is left exactly as declared — this
+        function only knows draft-07's specific incompatibilities, so normalizing a
+        dialect it hasn't catalogued would be a guess, not a fix. Returns the input
+        unchanged (same object) otherwise, so callers can cheaply tell whether anything
+        actually moved."""
+        if not isinstance(schema, dict):
+            return schema
+        dialect = schema.get("$schema")
+        # A malformed upstream schema can declare `$schema` as a list/dict/etc — `in` against
+        # the frozenset would raise `TypeError: unhashable type` for those, taking tools/list
+        # down for the whole server; an unrecognized SHAPE is just another dialect we don't
+        # touch, same as an unrecognized STRING (#124 review).
+        if not isinstance(dialect, str) or dialect not in _DRAFT_07_SCHEMA_URIS:
+            return schema
+        if _has_incompatible_draft07_construct(schema):
+            return schema
+        return {**schema, "$schema": _SCHEMA_DIALECT_2020_12}
+
+    def _scrub(self, tool: Tool) -> Tool:
+        """Drop our reserved identity key, and — when enabled — normalize the schema
+        dialect, on an upstream tool (see the class docstring)."""
         meta = tool.meta or {}
-        if UPSTREAM_META_KEY not in meta:
-            return tool
-        return tool.model_copy(
-            update={"meta": {k: v for k, v in meta.items() if k != UPSTREAM_META_KEY}}
-        )
+        update: dict = {}
+        if UPSTREAM_META_KEY in meta:
+            update["meta"] = {k: v for k, v in meta.items() if k != UPSTREAM_META_KEY}
+        if self._normalize_schema_dialect:
+            parameters = self._normalized_schema(tool.parameters)
+            if parameters is not tool.parameters:
+                update["parameters"] = parameters
+            output_schema = self._normalized_schema(tool.output_schema)
+            if output_schema is not tool.output_schema:
+                update["output_schema"] = output_schema
+        return tool.model_copy(update=update) if update else tool
 
     def _hides(self, name: str) -> bool:
         config = self._transforms.get(name)
@@ -453,6 +981,11 @@ def _tool_transform(spec: dict) -> ToolTransform:
     what clients see, and the UI maps those names back to their upstream keys via the same
     overrides it holds in the DB row.
 
+    A third, orthogonal control also rides this transform: ``normalize_schema_dialect``
+    (issue #123) rewrites a legacy ``$schema`` dialect declaration on every tool's
+    parameters/output schema to 2020-12, regardless of whether that tool carries any
+    hide/rename policy — see ``_ToolTransform._scrub``.
+
     Always returns a transform, even with an empty policy: ``_ToolTransform`` also strips our
     reserved identity key from upstream tools, and a server can forge that key whether or not
     anyone has set a policy on it. A key naming a tool the upstream doesn't (or no longer)
@@ -480,7 +1013,9 @@ def _tool_transform(spec: dict) -> ToolTransform:
             fields["enabled"] = False
         if fields:
             configs[tool] = ToolTransformConfig(**fields)
-    return _ToolTransform(configs)
+    return _ToolTransform(
+        configs, normalize_schema_dialect=bool(spec.get("normalize_schema_dialect"))
+    )
 
 
 def _build_transport(spec: dict):
