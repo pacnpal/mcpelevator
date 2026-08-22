@@ -94,6 +94,57 @@ curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/jso
 
 Then point any MCP client at `http://127.0.0.1:8080/s/memory/mcp`.
 
+### Connect from a stdio-only MCP client
+
+Some MCP clients can only launch a local command over stdio. On Windows, macOS,
+or Linux, install [Node.js](https://nodejs.org/) (which includes `npm` and `npx`),
+then add [mcp-remote](https://github.com/geelen/mcp-remote) as the local bridge in
+the client's `mcpServers` config:
+
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://mcp.example.com/s/memory/mcp"]
+    }
+  }
+}
+```
+
+For a group, replace the server URL with its `/g/<name>/mcp` URL. If the endpoint
+uses plain HTTP, append `"--allow-http"` to `args` only for loopback or a trusted
+private network. Clients that support Streamable HTTP natively should use the
+mcpelevator URL directly and do not need this bridge.
+
+For a bearer-protected server or group, use the environment-variable header form:
+
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://mcp.example.com/s/memory/mcp",
+        "--header",
+        "Authorization:${AUTH_HEADER}"
+      ],
+      "env": { "AUTH_HEADER": "Bearer <YOUR_TOKEN>" }
+    }
+  }
+}
+```
+
+Keeping the space-containing header value in `env` avoids argument-quoting bugs in
+Windows clients. The token is still stored in the client config, so protect that
+file. To diagnose an unauthenticated endpoint independently of the host client, run:
+
+```bash
+npx -p mcp-remote@latest mcp-remote-client https://mcp.example.com/s/memory/mcp
+```
+
 ### Per-server setup and startup retries
 
 `setup_script` is optional and supported only by the `npx`, `uvx`, and `command`
