@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-08-22-generic-stdio-client-bridge-design.md
+  s_4233db8c4d44fd::t_0666c1eb72be7c 1-28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "0d19ad7c9e5132f2c2e3a77157549647c8a30a17",
+  "prompts": {},
+  "sessions": {
+    "s_4233db8c4d44fd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02b57-f4e4-75e1-8014-f2b673d7ae99",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "pacnpal <183241239+pacnpal@users.noreply.github.com>"
+    }
+  }
+}
