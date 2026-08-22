@@ -1,0 +1,22 @@
+README.md
+  s_4233db8c4d44fd::t_492dbfae13c598 97-147
+docs/superpowers/plans/2026-08-22-generic-stdio-client-bridge.md
+  s_4233db8c4d44fd::t_7ef13fcffa7047 1-31,33-76,78-86,88-96,98-107,109-114
+  s_4233db8c4d44fd::t_64236e1eca3fe5 32,77,87,97,108
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "c4b5fc9df1175aca68bb9bf3418b757e54d8d29f",
+  "prompts": {},
+  "sessions": {
+    "s_4233db8c4d44fd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02b57-f4e4-75e1-8014-f2b673d7ae99",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "pacnpal <183241239+pacnpal@users.noreply.github.com>"
+    }
+  }
+}
