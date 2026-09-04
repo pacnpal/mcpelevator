@@ -14,10 +14,6 @@ from __future__ import annotations
 import json
 from typing import Iterable
 
-# Traffic that isn't a tool call at all (initialize, tools/list, the SSE GET) is
-# counted under this sentinel tool name — see db.models.UsageBucket.
-NOT_A_TOOL = ""
-
 # Bodies above this are not parsed for a tool name. A JSON-RPC envelope is small;
 # something this large is a payload (an inlined image, a pasted file), and parsing
 # it would cost more than the count is worth. Such a request still counts as

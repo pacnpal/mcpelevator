@@ -45,6 +45,10 @@ _Avoid_: Cold start, lazy start
 The count of calls one Server's one tool received in one UTC hour — the unit every usage figure is summed from. A bucket holds a number, never a call's arguments or result. Buckets whose hour is older than the retention window are pruned, so a usage figure never reaches further back than that.
 _Avoid_: Metric, event, log line
 
+**Usage window**:
+The trailing span a usage view reports on, ending at the current, still-filling bucket. It never reaches further back than retention has kept buckets, and its width decides the bucket size: hours for a day or two, whole days beyond that.
+_Avoid_: Range, period, timeframe
+
 **Tool call (counted)**:
 A request that named a tool and reached a running bridge, whichever surface carried it — the MCP endpoint, the REST mirror, or a group, where it counts against the member that owns the tool rather than the group. A request refused before a bridge was picked is not one, and neither is a dashboard playground invocation; a tool that answers with an error still is.
 _Avoid_: Hit, invocation, transaction

@@ -102,4 +102,50 @@ expect filesystem running
 expect sequential-thinking stopped
 expect hf-co running
 
+# Real traffic through the real proxy, so the usage screens capture actual counters
+# instead of an empty first-run state. Every call below is a genuine MCP call to a
+# running bridge — nothing is written into the usage tables directly. Best-effort:
+# a tool this package renamed upstream must not fail the screenshot job, and the
+# handshakes alone still register a server as reached.
+echo "==> Driving demo traffic (real MCP calls through /s/<slug>/mcp)"
+pushd backend >/dev/null
+MCPE_SCREENSHOT_BASE="${BASE}" uv run python - <<'PY' || echo "    (traffic step skipped)"
+import anyio, os
+from fastmcp import Client
+
+BASE = os.environ["MCPE_SCREENSHOT_BASE"]
+# (slug, tool, arguments, repetitions) — uneven on purpose so the charts have a shape.
+PLAN = [
+    ("time", "get_current_time", {"timezone": "UTC"}, 5),
+    ("time", "convert_time", {"source_timezone": "UTC", "time": "12:00", "target_timezone": "Europe/Berlin"}, 2),
+    ("memory", "read_graph", {}, 4),
+    ("memory", "create_entities", {"entities": [{"name": "demo", "entityType": "note", "observations": ["seeded"]}]}, 1),
+    ("filesystem", "list_allowed_directories", {}, 3),
+]
+
+
+async def main() -> None:
+    for slug in ("time", "memory", "filesystem", "hf-co"):
+        try:
+            async with Client(f"{BASE}/s/{slug}/mcp") as client:
+                await client.list_tools()
+        except Exception as exc:  # a server that won't talk is not fatal here
+            print(f"    {slug}: handshake failed ({exc.__class__.__name__})")
+    for slug, tool, args, times in PLAN:
+        done = 0
+        try:
+            async with Client(f"{BASE}/s/{slug}/mcp") as client:
+                for _ in range(times):
+                    await client.call_tool(tool, args)
+                    done += 1
+        except Exception as exc:
+            print(f"    {slug}.{tool}: {done}/{times} ({exc.__class__.__name__})")
+        else:
+            print(f"    {slug}.{tool}: {done}/{times}")
+
+
+anyio.run(main)
+PY
+popd >/dev/null
+
 echo "==> Backend ready at ${BASE} (states: ${states})"

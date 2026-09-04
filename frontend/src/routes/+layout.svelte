@@ -24,6 +24,7 @@
 
 	const onSettings = $derived(page.url.pathname.startsWith('/settings'));
 	const onCatalog = $derived(page.url.pathname.startsWith('/catalog'));
+	const onUsage = $derived(page.url.pathname.startsWith('/usage'));
 
 	// Auth guard: when the control plane enforces auth and this client isn't
 	// authenticated, bounce to /login. Re-runs on navigation (page.url is reactive);
@@ -99,6 +100,32 @@
 						<path d="m21 21-4.3-4.3" />
 					</svg>
 					<span class="hidden sm:inline">Browse</span>
+				</a>
+				<a
+					href="/usage"
+					aria-label="Usage"
+					aria-current={onUsage ? 'page' : undefined}
+					class="inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium transition active:translate-y-px"
+					style={onUsage
+						? 'border-color: color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+						: 'border-color: var(--color-line); color: var(--color-ink-muted); background-color: var(--color-surface);'}
+				>
+					<svg
+						class="size-4"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="M3 3v18h18" />
+						<rect x="7" y="12" width="3" height="6" />
+						<rect x="12" y="8" width="3" height="10" />
+						<rect x="17" y="4" width="3" height="14" />
+					</svg>
+					<span class="hidden sm:inline">Usage</span>
 				</a>
 				<a
 					href="/settings"

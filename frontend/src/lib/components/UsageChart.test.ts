@@ -7,10 +7,10 @@ import UsageChart from './UsageChart.svelte';
 let host: HTMLElement | null = null;
 let component: Record<string, unknown> | null = null;
 
-function render(series: UsagePoint[], bucketSeconds = 3600) {
+function render(series: UsagePoint[], bucketSeconds = 3600, mode: 'bars' | 'line' = 'bars') {
 	host = document.createElement('div');
 	document.body.appendChild(host);
-	component = mount(UsageChart, { target: host, props: { series, bucketSeconds } });
+	component = mount(UsageChart, { target: host, props: { series, bucketSeconds, mode } });
 	return host;
 }
 
@@ -41,8 +41,10 @@ describe('UsageChart', () => {
 
 	it('scales bars against the busiest bucket', () => {
 		const target = render([point('2026-09-01T10:00:00Z', 10), point('2026-09-01T11:00:00Z', 5)]);
+		// The mark sits inside the width-capped column wrapper (columns are capped so a
+		// short window leaves air between marks rather than drawing slabs).
 		const [tallest, half] = [...target.querySelectorAll('[data-testid="usage-bar"]')].map(
-			(bar) => (bar.firstElementChild as HTMLElement).style.height
+			(bar) => (bar.querySelector(':scope > div > div') as HTMLElement).style.height
 		);
 		expect(tallest).toContain('100%');
 		expect(half).toContain('50%');
@@ -62,6 +64,29 @@ describe('UsageChart', () => {
 		);
 		// The caption shows the window's edges; a daily bucket must not read as a clock time.
 		expect(target.querySelector('figcaption')?.textContent).not.toMatch(/\d:\d\d/);
+	});
+
+	it('draws a polyline instead of bars in line mode', () => {
+		const target = render(
+			[point('2026-09-01T10:00:00Z', 4, 1), point('2026-09-01T11:00:00Z', 0, 2)],
+			3600,
+			'line'
+		);
+		expect(target.querySelector('[data-testid="usage-line"]')).not.toBeNull();
+		expect(target.querySelector('[data-testid="usage-bar"]')).toBeNull();
+		// Both quantities are plotted: tool calls and the total including other traffic.
+		expect(target.querySelectorAll('polyline').length).toBe(3);
+	});
+
+	it('keeps the same summary in either style', () => {
+		const series = [point('2026-09-01T10:00:00Z', 2), point('2026-09-01T11:00:00Z', 4)];
+		const bars = render(series).querySelector('[role="img"]')?.getAttribute('aria-label');
+		if (component) unmount(component);
+		host?.remove();
+		const line = render(series, 3600, 'line')
+			.querySelector('[role="img"]')
+			?.getAttribute('aria-label');
+		expect(line).toBe(bars);
 	});
 
 	it('renders an all-quiet window without dividing by zero', () => {

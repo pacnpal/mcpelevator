@@ -186,6 +186,13 @@ class ServerRuntime(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+# The ``UsageBucket.tool`` value standing for data-plane traffic that isn't a tool
+# call at all. Defined beside the column so both the recording rules
+# (app.usage.attribution) and the aggregate queries (app.db.repo) read the sentinel
+# from one place instead of each spelling the empty string themselves.
+NOT_A_TOOL = ""
+
+
 class UsageBucket(SQLModel, table=True):
     """Data-plane usage counters, pre-aggregated per (server, tool, UTC hour).
 

@@ -125,6 +125,72 @@ export interface ServerUsage {
 	series: UsagePoint[];
 }
 
+/** One server's totals in the instance-wide view (GET /api/usage). Present even
+ * at zero — "which of my servers is nothing using?" is half of what it answers. */
+export interface UsageServerRow {
+	server_id: string;
+	slug: string;
+	name: string;
+	tool_calls: number;
+	other_requests: number;
+	last_call_at: string | null;
+	/** Distinct tools called in the window, against how many the server currently
+	 * exposes (0 while it isn't running — nothing has been discovered). */
+	tools_called: number;
+	tools_known: number;
+}
+
+/** One tool's calls in the instance-wide view, carrying the server it belongs to.
+ * A discovered tool nothing called appears at `calls: 0`; a tool called under a
+ * name its server no longer exposes appears with `known: false`. */
+export interface UsageToolRow {
+	server_id: string;
+	slug: string;
+	tool: string;
+	calls: number;
+	last_call_at: string | null;
+	known: boolean;
+}
+
+/** One server's call series inside the stacked view. `points` is aligned
+ * index-for-index with `InstanceUsage.series` — the timestamps live there and
+ * aren't repeated. `server_id` is null on the single "Other" band the servers
+ * past the top few fold into. */
+export interface UsageBand {
+	server_id: string | null;
+	slug: string;
+	name: string;
+	points: number[];
+}
+
+/** Tool calls in one UTC hour. Always hourly whatever width the main series was
+ * rolled up to, and sparse — quiet hours are absent, not zero rows. */
+export interface UsageHour {
+	bucket: string;
+	calls: number;
+}
+
+/** Usage across every server the caller can see (GET /api/usage). Listings come
+ * back whole — bounded by servers x tools — so the dashboard filters and sorts in
+ * the browser instead of round-tripping per keystroke. */
+export interface InstanceUsage {
+	since: string;
+	bucket_seconds: number;
+	tool_calls: number;
+	other_requests: number;
+	last_call_at: string | null;
+	/** Servers with any traffic in the window, out of `servers.length`. */
+	active_servers: number;
+	servers: UsageServerRow[];
+	tools: UsageToolRow[];
+	series: UsagePoint[];
+	/** The same window split by server, for the stacked view. */
+	series_by_server: UsageBand[];
+	/** Hourly call counts (UTC) for an activity-by-hour view the client buckets
+	 * into the reader's own timezone. */
+	hourly: UsageHour[];
+}
+
 /** Upstream-OAuth state for a remote server (GET /api/servers/{id}). */
 export interface OAuthStatus {
 	/** Is this server configured to authenticate upstream via OAuth? */

@@ -17,6 +17,15 @@ Hourly buckets (rolled up to days for long windows) keep a busy server's row cou
 bounded; retention (`usage_retention_days`, default 30) prunes the rest, so a usage
 window never reaches further back than the operator's retention.
 
+The read side rolls up in SQL and ships whole listings (bounded by servers x tools),
+so the dashboard filters and sorts in the browser rather than round-tripping per
+keystroke, and both the per-server panel and the instance-wide view derive their
+window from the same code — "the last 7 days" cannot mean two things depending on
+which page you opened. Views obey the product's design system rather than importing
+a charting one: it locks a single accent and declares no categorical palette, so the
+split-by-server view is rendered as small multiples instead of a stacked multi-hue
+chart, and the activity grid uses one sequential ramp of that same accent.
+
 Only counts are stored — a server id, a tool name, an hour, a number. Arguments and
 results are never recorded, so a usage row can't become a shadow copy of the traffic it
 summarizes. Non-tool traffic is counted separately rather than discarded: distinguishing

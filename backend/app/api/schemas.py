@@ -174,6 +174,80 @@ class ServerUsage(BaseModel):
     series: list[UsagePoint] = []
 
 
+class UsageServerRow(BaseModel):
+    """One server's totals in the instance-wide view. Present even at zero — "which
+    of my servers is nothing using?" is half of what that view answers."""
+
+    server_id: str
+    slug: str
+    name: str
+    tool_calls: int
+    other_requests: int
+    last_call_at: Optional[datetime] = None
+    # Distinct tools called in the window, against how many the server currently
+    # exposes (0 while it isn't running — nothing has been discovered).
+    tools_called: int = 0
+    tools_known: int = 0
+
+
+class UsageToolRow(BaseModel):
+    """One tool's calls in the instance-wide view, carrying the server it belongs
+    to. A discovered tool nothing called appears at ``calls: 0``; a tool called
+    under a name its server no longer exposes appears with ``known: false``."""
+
+    server_id: str
+    slug: str
+    tool: str
+    calls: int
+    last_call_at: Optional[datetime] = None
+    known: bool = True
+
+
+class UsageBand(BaseModel):
+    """One server's call series inside the split-by-server view.
+
+    ``points`` is aligned index-for-index with ``InstanceUsage.series`` — the
+    timestamps live there and aren't repeated per band. ``server_id`` is null on
+    the single "Other" band that the servers past the top few fold into."""
+
+    server_id: Optional[str] = None
+    slug: str
+    name: str
+    points: list[int] = []
+
+
+class UsageHour(BaseModel):
+    """Tool calls in one UTC hour. Always hourly whatever width the main series
+    was rolled up to, and SPARSE — quiet hours are absent, not zero rows."""
+
+    bucket: datetime
+    calls: int
+
+
+class InstanceUsage(BaseModel):
+    """Usage across every server the caller can see (admins: all of them).
+
+    The listings are returned whole rather than pre-filtered: they are bounded by
+    servers x tools, and a dashboard that filters and sorts in the browser answers
+    instantly instead of round-tripping per keystroke."""
+
+    since: datetime
+    bucket_seconds: int
+    tool_calls: int
+    other_requests: int
+    last_call_at: Optional[datetime] = None
+    # Servers with any traffic at all in the window, out of len(servers).
+    active_servers: int = 0
+    servers: list[UsageServerRow] = []
+    tools: list[UsageToolRow] = []
+    series: list[UsagePoint] = []
+    # The same window split by server, for the per-server view.
+    series_by_server: list[UsageBand] = []
+    # Hourly call counts for an activity-by-hour view, in UTC for the client to
+    # re-bucket locally.
+    hourly: list[UsageHour] = []
+
+
 class ServerDetail(ServerSummary):
     command: str
     args: list[str] = []

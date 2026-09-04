@@ -11,11 +11,20 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import delete, update
+from sqlalchemy import case, delete, func, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session, select
 
-from app.db.models import Server, ServerRuntime, Setting, Token, UsageBucket, User, utcnow
+from app.db.models import (
+    NOT_A_TOOL,
+    Server,
+    ServerRuntime,
+    Setting,
+    Token,
+    UsageBucket,
+    User,
+    utcnow,
+)
 
 # --------------------------------------------------------------------------- #
 # servers (desired state)
@@ -106,6 +115,12 @@ def get_runtime(session: Session, server_id: str) -> Optional[ServerRuntime]:
     return session.get(ServerRuntime, server_id)
 
 
+def list_runtimes(session: Session) -> list[ServerRuntime]:
+    """Every observed-runtime row, in one query. For instance-wide views that need
+    each server's cached tool list without a point lookup per server."""
+    return list(session.exec(select(ServerRuntime)).all())
+
+
 def upsert_runtime(session: Session, server_id: str, **fields: Any) -> ServerRuntime:
     runtime = session.get(ServerRuntime, server_id)
     if runtime is None:
@@ -178,6 +193,92 @@ def usage_since(session: Session, server_id: str, since: datetime) -> list[Usage
             .order_by(UsageBucket.bucket)
         ).all()
     )
+
+
+# Aggregates. Instance-wide views span every server, so folding raw buckets in
+# Python would scale with servers x tools x hours; these roll up in SQL instead,
+# and each returns at most (hours), (servers) or (servers x tools) rows.
+_TOOL_CALLS = func.coalesce(
+    func.sum(case((UsageBucket.tool != NOT_A_TOOL, UsageBucket.calls), else_=0)), 0
+)
+_OTHER_REQUESTS = func.coalesce(
+    func.sum(case((UsageBucket.tool == NOT_A_TOOL, UsageBucket.calls), else_=0)), 0
+)
+# Latest TOOL call only: a server's "last call" must not be freshened by an
+# `initialize` that called nothing.
+_LAST_TOOL_CALL = func.max(
+    case((UsageBucket.tool != NOT_A_TOOL, UsageBucket.last_call_at), else_=None)
+)
+
+
+def _usage_window(statement, since: datetime, server_ids: Optional[list[str]]):
+    """Scope an aggregate to the window and, when given, an explicit server set.
+    ``server_ids=None`` means every server; an EMPTY list means none (the honest
+    reading of "this principal can see no servers") and short-circuits to no rows."""
+    statement = statement.where(UsageBucket.bucket >= since)
+    if server_ids is not None:
+        statement = statement.where(UsageBucket.server_id.in_(server_ids))
+    return statement
+
+
+def usage_series(
+    session: Session, *, since: datetime, server_ids: Optional[list[str]] = None
+) -> list[tuple[datetime, int, int]]:
+    """``(hour, tool_calls, other_requests)`` summed across the servers, oldest first."""
+    statement = _usage_window(
+        select(UsageBucket.bucket, _TOOL_CALLS, _OTHER_REQUESTS), since, server_ids
+    )
+    rows = session.execute(statement.group_by(UsageBucket.bucket).order_by(UsageBucket.bucket))
+    return [(bucket, int(calls), int(other)) for bucket, calls, other in rows]
+
+
+def usage_by_server(
+    session: Session, *, since: datetime, server_ids: Optional[list[str]] = None
+) -> list[tuple[str, int, int, Optional[datetime]]]:
+    """``(server_id, tool_calls, other_requests, last_call_at)`` per server."""
+    statement = _usage_window(
+        select(UsageBucket.server_id, _TOOL_CALLS, _OTHER_REQUESTS, _LAST_TOOL_CALL),
+        since,
+        server_ids,
+    )
+    rows = session.execute(statement.group_by(UsageBucket.server_id))
+    return [(sid, int(calls), int(other), last) for sid, calls, other, last in rows]
+
+
+def usage_series_by_server(
+    session: Session, *, since: datetime, server_ids: Optional[list[str]] = None
+) -> list[tuple[str, datetime, int]]:
+    """``(server_id, hour, tool_calls)`` — the series split by server.
+
+    Tool calls only: a stacked "who is this traffic" view compares work done, and
+    folding each server's `initialize` handshakes into the same stack would make
+    a server look busy for connecting."""
+    statement = _usage_window(
+        select(UsageBucket.server_id, UsageBucket.bucket, func.sum(UsageBucket.calls)),
+        since,
+        server_ids,
+    ).where(UsageBucket.tool != NOT_A_TOOL)
+    rows = session.execute(statement.group_by(UsageBucket.server_id, UsageBucket.bucket))
+    return [(server_id, bucket, int(calls)) for server_id, bucket, calls in rows]
+
+
+def usage_by_tool(
+    session: Session, *, since: datetime, server_ids: Optional[list[str]] = None
+) -> list[tuple[str, str, int, datetime]]:
+    """``(server_id, tool, calls, last_call_at)`` per tool. Tool rows only — the
+    non-tool sentinel is traffic, not a tool, and would sort into every listing."""
+    statement = _usage_window(
+        select(
+            UsageBucket.server_id,
+            UsageBucket.tool,
+            func.sum(UsageBucket.calls),
+            func.max(UsageBucket.last_call_at),
+        ),
+        since,
+        server_ids,
+    ).where(UsageBucket.tool != NOT_A_TOOL)
+    rows = session.execute(statement.group_by(UsageBucket.server_id, UsageBucket.tool))
+    return [(sid, tool, int(calls), last) for sid, tool, calls, last in rows]
 
 
 def prune_usage(session: Session, before: datetime) -> int:

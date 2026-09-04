@@ -27,6 +27,7 @@ from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
 from app.api import tokens as tokens_api
+from app.api import usage as usage_api
 from app.api import users as users_api
 from app.auth.control_plane import (
     ensure_control_token,
@@ -225,6 +226,7 @@ def create_app() -> FastAPI:
     app.include_router(catalog_api.router, prefix="/api", dependencies=gated)
     app.include_router(tokens_api.router, prefix="/api", dependencies=gated)
     app.include_router(settings_api.router, prefix="/api", dependencies=gated)
+    app.include_router(usage_api.router, prefix="/api", dependencies=gated)
     # Groups and user management are global, admin-owned surfaces (their routers
     # also declare require_admin themselves — defense in depth at include time).
     app.include_router(groups_api.router, prefix="/api", dependencies=gated)

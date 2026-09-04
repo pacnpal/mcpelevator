@@ -25,9 +25,8 @@ from typing import Iterable
 from sqlmodel import Session
 
 from app.db import get_engine, repo
-from app.db.models import utcnow
+from app.db.models import NOT_A_TOOL, utcnow
 from app.registry import settings as runtime_settings
-from app.usage.attribution import NOT_A_TOOL
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,7 @@ def record(server_id: str, tools: Iterable[str] = ()) -> None:
 
     Each tool the request invoked is counted under its own name; a request that
     invoked none (``initialize``, ``tools/list``, an SSE GET) counts as plain
-    traffic under the :data:`~app.usage.attribution.NOT_A_TOOL` sentinel. Every
+    traffic under the :data:`~app.db.models.NOT_A_TOOL` sentinel. Every
     request therefore contributes exactly one call — a batch, one per element —
     so a server's total is the sum of its rows.
 

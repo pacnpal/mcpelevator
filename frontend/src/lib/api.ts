@@ -20,6 +20,7 @@ import type {
 	GroupMembers,
 	HealthResponse,
 	ImportResult,
+	InstanceUsage,
 	ServerCreate,
 	ServerDetail,
 	ServerSummary,
@@ -150,6 +151,18 @@ export function getServer(id: string): Promise<ServerDetail> {
 export function getServerUsage(id: string, days = 7): Promise<ServerUsage> {
 	const q = new URLSearchParams({ days: String(days) });
 	return request<ServerUsage>(`/servers/${encodeURIComponent(id)}/usage?${q.toString()}`);
+}
+
+/**
+ * Instance-wide usage: totals, a series to chart, and per-server / per-tool
+ * rollups across every server the caller can see.
+ *
+ * @param days - Trailing window in days.
+ * @returns Usage for the whole instance over that window.
+ */
+export function getInstanceUsage(days = 7): Promise<InstanceUsage> {
+	const q = new URLSearchParams({ days: String(days) });
+	return request<InstanceUsage>(`/usage?${q.toString()}`);
 }
 
 export function createServer(body: ServerCreate): Promise<ServerSummary> {

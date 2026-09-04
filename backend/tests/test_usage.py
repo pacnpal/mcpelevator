@@ -396,6 +396,220 @@ def test_usage_endpoint_flushes_pending_counts_first():
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 
 
+# --- instance-wide view (the dashboard's read model) -------------------------- #
+
+
+def test_instance_usage_totals_across_servers():
+    with TestClient(app) as client:
+        a = create_server(client, name="usage-inst-a", auth="none")
+        b = create_server(client, name="usage-inst-b", auth="none")
+        try:
+            recorder.record(a["id"], ["search"])
+            recorder.record(a["id"], ["search"])
+            recorder.record(b["id"], ["fetch"])
+            recorder.record(b["id"])  # non-tool traffic
+            recorder.flush_sync()
+            body = client.get("/api/usage?days=1", headers=LOOPBACK).json()
+            assert body["tool_calls"] == 3
+            assert body["other_requests"] == 1
+            assert body["active_servers"] == 2
+            rows = {r["server_id"]: r for r in body["servers"]}
+            assert rows[a["id"]]["tool_calls"] == 2 and rows[a["id"]]["other_requests"] == 0
+            assert rows[b["id"]]["tool_calls"] == 1 and rows[b["id"]]["other_requests"] == 1
+            assert rows[a["id"]]["slug"] == a["slug"]
+            tools = {(t["slug"], t["tool"]): t for t in body["tools"]}
+            assert tools[(a["slug"], "search")]["calls"] == 2
+            assert tools[(b["slug"], "fetch")]["calls"] == 1
+            assert sum(p["calls"] for p in body["series"]) == 3
+        finally:
+            for srv in (a, b):
+                client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_instance_usage_lists_untouched_servers_at_zero():
+    """"Which of my servers is nothing using?" is half of what this view answers,
+    so a server with no traffic must be listed, not omitted."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-inst-quiet", auth="none")
+        try:
+            body = client.get("/api/usage?days=1", headers=LOOPBACK).json()
+            row = next(r for r in body["servers"] if r["server_id"] == srv["id"])
+            assert (row["tool_calls"], row["other_requests"]) == (0, 0)
+            assert row["last_call_at"] is None
+            assert body["active_servers"] == 0
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_instance_usage_includes_discovered_tools_never_called():
+    """A discovered tool nothing has called is the row the operator is looking for,
+    so it appears at zero rather than being absent."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-inst-known", auth="none")
+        try:
+            with Session(get_engine()) as session:
+                repo.upsert_runtime(
+                    session,
+                    srv["id"],
+                    state="running",
+                    tools=[{"name": "used"}, {"name": "never_used"}],
+                )
+            recorder.record(srv["id"], ["used"])
+            recorder.flush_sync()
+            body = client.get("/api/usage?days=1", headers=LOOPBACK).json()
+            rows = {t["tool"]: t for t in body["tools"] if t["server_id"] == srv["id"]}
+            assert rows["used"]["calls"] == 1 and rows["used"]["known"] is True
+            assert rows["never_used"]["calls"] == 0 and rows["never_used"]["known"] is True
+            assert rows["never_used"]["last_call_at"] is None
+            row = next(r for r in body["servers"] if r["server_id"] == srv["id"])
+            assert (row["tools_called"], row["tools_known"]) == (1, 2)
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_instance_usage_marks_a_tool_the_server_no_longer_exposes():
+    """Traffic to a name that is no longer discovered (renamed, hidden, gone
+    upstream) is still real — it stays listed, flagged."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-inst-retired", auth="none")
+        try:
+            with Session(get_engine()) as session:
+                repo.upsert_runtime(session, srv["id"], state="running", tools=[{"name": "kept"}])
+            recorder.record(srv["id"], ["gone"])
+            recorder.flush_sync()
+            body = client.get("/api/usage?days=1", headers=LOOPBACK).json()
+            rows = {t["tool"]: t for t in body["tools"] if t["server_id"] == srv["id"]}
+            assert rows["gone"]["calls"] == 1 and rows["gone"]["known"] is False
+            assert rows["kept"]["calls"] == 0 and rows["kept"]["known"] is True
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_instance_usage_is_scoped_to_what_the_caller_can_see():
+    """A member's totals sum over the servers they own — never a whole-instance
+    number leaked through an aggregate."""
+    from test_ownership import _mk, _reset, _setup
+
+    _reset()
+    try:
+        with TestClient(app) as client:
+            admin, member, _ = _setup(client)
+            mine = _mk(client, member, "member-owned")
+            theirs = _mk(client, admin, "admin-owned")
+            recorder.record(mine["id"], ["search"])
+            recorder.record(theirs["id"], ["secret_tool"])
+            recorder.record(theirs["id"], ["secret_tool"])
+            recorder.flush_sync()
+
+            body = client.get("/api/usage?days=1", headers=member).json()
+            assert body["tool_calls"] == 1
+            assert [r["server_id"] for r in body["servers"]] == [mine["id"]]
+            assert all(t["server_id"] == mine["id"] for t in body["tools"])
+            assert sum(p["calls"] for p in body["series"]) == 1
+
+            everything = client.get("/api/usage?days=1", headers=admin).json()
+            assert everything["tool_calls"] == 3
+            assert {r["server_id"] for r in everything["servers"]} == {mine["id"], theirs["id"]}
+    finally:
+        _reset()
+
+
+def test_instance_usage_is_empty_but_valid_with_no_servers():
+    with TestClient(app) as client:
+        for existing in client.get("/api/servers", headers=LOOPBACK).json():
+            client.delete(f"/api/servers/{existing['id']}", headers=LOOPBACK)
+        body = client.get("/api/usage", headers=LOOPBACK).json()
+        assert body["servers"] == [] and body["tools"] == []
+        assert (body["tool_calls"], body["other_requests"], body["active_servers"]) == (0, 0, 0)
+        assert len(body["series"]) == 7 and body["bucket_seconds"] == 86400
+
+
+def test_instance_usage_splits_the_series_by_server():
+    """The stacked view's bands line up index-for-index with the series, so the
+    client can zip them without re-deriving buckets."""
+    with TestClient(app) as client:
+        a = create_server(client, name="usage-band-a", auth="none")
+        b = create_server(client, name="usage-band-b", auth="none")
+        try:
+            recorder.record(a["id"], ["search"])
+            recorder.record(a["id"], ["search"])
+            recorder.record(b["id"], ["fetch"])
+            recorder.record(b["id"])  # non-tool traffic: never in a band
+            recorder.flush_sync()
+            body = client.get("/api/usage?days=1", headers=LOOPBACK).json()
+            bands = {band["slug"]: band for band in body["series_by_server"]}
+            assert set(bands) == {a["slug"], b["slug"]}
+            for band in bands.values():
+                assert len(band["points"]) == len(body["series"])
+            assert sum(bands[a["slug"]]["points"]) == 2
+            assert sum(bands[b["slug"]]["points"]) == 1
+            # every band summed equals the series' tool calls — nothing lost, nothing double
+            assert sum(sum(b["points"]) for b in body["series_by_server"]) == body["tool_calls"]
+        finally:
+            for srv in (a, b):
+                client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_instance_usage_folds_the_split_tail_into_one_other_band():
+    """Past the cap the tail folds server-side, so the payload stays bounded and no
+    client has to decide which servers to drop."""
+    with TestClient(app) as client:
+        servers = [
+            create_server(client, name=f"usage-stack-{i}", auth="none")
+            for i in range(stats.SPLIT_SERIES_LIMIT + 2)
+        ]
+        try:
+            # Descending call counts, so the fold is deterministic: the two smallest
+            # land in "Other".
+            for rank, srv in enumerate(servers):
+                for _ in range(len(servers) - rank):
+                    recorder.record(srv["id"], ["tool"])
+            recorder.flush_sync()
+            body = client.get("/api/usage?days=1", headers=LOOPBACK).json()
+            bands = body["series_by_server"]
+            assert len(bands) == stats.SPLIT_SERIES_LIMIT + 1
+            other = bands[-1]
+            assert other["server_id"] is None and other["name"] == "Other"
+            assert sum(other["points"]) == 1 + 2  # the two smallest servers
+            assert sum(sum(b["points"]) for b in bands) == body["tool_calls"]
+        finally:
+            for srv in servers:
+                client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_instance_usage_keeps_hourly_resolution_for_a_long_window():
+    """The main series rolls up to days past 48h; the activity-by-hour view still
+    needs the hour back (and the browser needs UTC to re-bucket it locally)."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-hourly", auth="none")
+        try:
+            now = datetime.now(timezone.utc)
+            with Session(get_engine()) as session:
+                repo.bump_usage(
+                    session,
+                    {
+                        (srv["id"], "search", recorder.current_bucket(now)): 2,
+                        (srv["id"], "search", recorder.current_bucket(now - timedelta(hours=5))): 1,
+                        # non-tool traffic is not activity for this view
+                        (srv["id"], usage.NOT_A_TOOL, recorder.current_bucket(now)): 4,
+                    },
+                )
+            body = client.get("/api/usage?days=30", headers=LOOPBACK).json()
+            assert body["bucket_seconds"] == 86400  # the main series rolled up...
+            hourly = body["hourly"]
+            assert len(hourly) == 2  # ...while this kept both hours, and dropped the quiet ones
+            assert sum(h["calls"] for h in hourly) == 3
+            assert all(h["bucket"].endswith("Z") or "+00:00" in h["bucket"] for h in hourly)
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_instance_usage_rejects_an_out_of_range_window():
+    with TestClient(app) as client:
+        for days in (0, usage.MAX_DAYS + 1):
+            assert client.get(f"/api/usage?days={days}", headers=LOOPBACK).status_code == 422
+
+
 # --- windowing / rollup ------------------------------------------------------- #
 
 

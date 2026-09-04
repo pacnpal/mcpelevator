@@ -66,6 +66,17 @@
       await new Promise(r => setTimeout(r, 800));
     })()
 
+# Usage dashboard — totals, the series, the activity grid and the breakdown.
+# The demo traffic driven by screenshots-serve.sh is what fills it; wait for a
+# non-zero total so a capture can't land before the counters are read back.
+- output: docs/screenshots/usage.png
+  url: http://localhost:8080/usage
+  width: 1440
+  wait_for: |
+    document.body.innerText.includes('tool calls') &&
+    !document.body.innerText.includes('Loading usage')
+  wait: 600
+
 # Settings — access tokens and the network-security controls.
 - output: docs/screenshots/settings.png
   url: http://localhost:8080/settings

@@ -39,6 +39,9 @@ Add a server, press start, copy the URL. The dashboard supervises each one — l
     <td><img src="docs/screenshots/add-server.png" alt="Add a server form"><br><b>Add a server</b> — npx, uvx, a command, or a remote URL.</td>
     <td><img src="docs/screenshots/settings.png" alt="Settings — access tokens and network security"><br><b>Settings</b> — access tokens, bind mode, and the LAN gate.</td>
   </tr>
+  <tr>
+    <td colspan="2"><img src="docs/screenshots/usage.png" alt="Usage dashboard — totals, calls over time, an activity grid, and a per-tool breakdown"><br><b>Usage</b> — what every server and tool is actually being called, and what never is.</td>
+  </tr>
 </table>
 
 <details>
@@ -248,9 +251,17 @@ the API: `PATCH /api/servers/<id>` with
 
 ### Usage stats (per server, per tool)
 
-Every server's detail page has a **Usage** panel answering the question a rename is
-usually made against: *has anything actually called this tool?* It shows, over a
-**24h / 7d / 30d** window:
+**Usage** in the header opens the instance-wide dashboard: totals across every server
+you can see, calls over time (bars, a line, or split per server as small multiples), an
+activity grid showing which weekday hours the traffic actually lands in — in your own
+timezone — and a breakdown you can search, sort (most calls, **least** calls, recently
+used, name), filter to used-only, and read as a table or as proportional bars. Sorting
+by *least calls* is the fast way to the tools nothing is calling. Every row links to
+its server.
+
+Each server's detail page carries the same panel scoped to that one server, answering
+the question a rename is usually made against: *has anything actually called this tool?*
+Both show, over a **24h / 7d / 30d** window (the dashboard adds 90d):
 
 - **Tool calls** and **other requests** — traffic that wasn't a tool call
   (`initialize`, `tools/list`, the SSE stream). The split is the useful part: a
@@ -276,7 +287,9 @@ written every few seconds, so a hard crash can lose the last few seconds of coun
 Retention is **Settings → Security → Usage retention** (`usage_retention_days`,
 default `30`, `0` keeps them forever); older buckets are pruned automatically, and a
 window never reaches further back than the retention. Over the API:
-`GET /api/servers/<id>/usage?days=7`.
+`GET /api/usage?days=7` for the instance-wide view and
+`GET /api/servers/<id>/usage?days=7` for one server. Both are scoped to what the
+caller can see — a member's totals sum over the servers they own, never the whole box.
 
 ### Per-server REST/OpenAPI surface
 

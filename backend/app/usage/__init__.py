@@ -10,15 +10,19 @@ Counts only: a usage row holds a server id, a tool name, an hour and a number.
 Tool arguments and results are never inspected or stored.
 """
 
-from app.usage.attribution import NOT_A_TOOL, proxy_tools, split_namespaced, tools_from_body
+# The non-tool sentinel is defined with the column it lives in (db.models), and
+# re-exported here so callers read the whole usage vocabulary from one module.
+from app.db.models import NOT_A_TOOL
+from app.usage.attribution import proxy_tools, split_namespaced, tools_from_body
 from app.usage.recorder import flush, flush_sync, record, run_forever
-from app.usage.stats import MAX_DAYS, server_usage
+from app.usage.stats import MAX_DAYS, instance_usage, server_usage
 
 __all__ = [
     "MAX_DAYS",
     "NOT_A_TOOL",
     "flush",
     "flush_sync",
+    "instance_usage",
     "proxy_tools",
     "record",
     "run_forever",

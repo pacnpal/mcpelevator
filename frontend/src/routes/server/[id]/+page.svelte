@@ -1464,7 +1464,15 @@
 			class="flex flex-col gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
 		>
 			<div class="flex flex-wrap items-center justify-between gap-2">
-				<h2 class="text-sm font-semibold text-[var(--color-ink)]">Usage</h2>
+				<h2 class="flex items-baseline gap-2 text-sm font-semibold text-[var(--color-ink)]">
+					Usage
+					<a
+						href="/usage"
+						class="text-xs font-normal text-[var(--color-ink-dim)] underline-offset-2 hover:text-[var(--color-ink)] hover:underline"
+					>
+						all servers →
+					</a>
+				</h2>
 				<div class="flex items-center gap-1" role="group" aria-label="Usage window">
 					{#each USAGE_RANGES as range (range.days)}
 						<button
