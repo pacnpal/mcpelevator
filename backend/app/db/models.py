@@ -194,9 +194,15 @@ NOT_A_TOOL = ""
 
 # Where calls to tool names past the per-bucket cardinality cap are pooled. NOT the
 # `NOT_A_TOOL` sentinel: these ARE tool calls, and folding them into plain traffic
-# would move real calls out of `tool_calls` and into `other_requests`. Deliberately
-# not a legal MCP tool name (which is an identifier), so it can never collide with
-# a real one — a server genuinely exposing this name is not representable.
+# would move real calls out of `tool_calls` and into `other_requests`.
+#
+# Not a legal MCP tool name (which is an identifier), so no server can ADVERTISE
+# it and it can never displace a discovered tool. A CLIENT can still send it —
+# the counter is keyed on the name the caller asked for, and callers may ask for
+# anything — in which case its calls merge into this row. That is the correct
+# outcome, not a collision to defend against: a call to a name the server does not
+# expose is unrecognised traffic, which is exactly what this row counts. Treating
+# it specially would make one nonexistent name behave unlike every other.
 OVERFLOW_TOOL = "(other tools)"
 
 

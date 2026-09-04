@@ -270,7 +270,13 @@ def bump_usage(session: Session, counts: dict[tuple[str, str, datetime], int]) -
         # are budgeted, so a flood can pad the counters but never displace a real
         # tool's row or push its calls into the overflow pool.
         if tool and tool not in seen and tool not in exposed.get(server_id, ()):
-            unknown_stored = len(seen - exposed.get(server_id, set()))
+            # The budget counts UNKNOWN TOOL NAMES. The two sentinels are neither:
+            # they are never in `exposed`, so leaving them in would spend a slot on
+            # plain traffic and one on the pool itself, folding the last couple of
+            # genuine unknown names early.
+            unknown_stored = len(
+                seen - exposed.get(server_id, set()) - {NOT_A_TOOL, OVERFLOW_TOOL}
+            )
             if unknown_stored >= MAX_UNKNOWN_TOOLS_PER_BUCKET:
                 tool = OVERFLOW_TOOL  # still a tool call, just pooled
         seen.add(tool)

@@ -71,9 +71,14 @@ _last_prune: float | None = None
 
 
 def _tracked_keys() -> int:
-    """Distinct keys the recorder is holding: pending plus mid-flight. Call under
-    `_lock`."""
-    return len(_pending) + len(_inflight)
+    """DISTINCT keys the recorder is holding: pending plus mid-flight, counted as a
+    union. Call under `_lock`.
+
+    A key sits in both maps whenever it is recorded again while its own flush is
+    writing, so summing the two lengths double-counts it — and the ceiling would
+    then bite early, refusing new keys while the real distinct count is still well
+    under the budget."""
+    return len(_pending.keys() | _inflight.keys())
 
 
 def current_bucket(now: datetime | None = None) -> datetime:

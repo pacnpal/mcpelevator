@@ -387,6 +387,7 @@ async def test_hub_reswaps_when_a_replacement_reuses_slug_and_port(clean_setting
     `members`, attributing every later group call to a row `bump_usage` drops."""
     with Session(get_engine()) as session:
         first = _mk_server(session, "Recycled")
+    second = None  # bound before the try: the finally cleans up whatever exists
     _write_groups({"g": "*"})
     hub = _hub_for({"up-recycled": _make_upstream("s", "t")})
     try:
@@ -404,9 +405,15 @@ async def test_hub_reswaps_when_a_replacement_reuses_slug_and_port(clean_setting
             "the instance still names the deleted server"
         )
     finally:
-        await hub.close()
-        with Session(get_engine()) as session:
-            repo.delete_server(session, second.id)
+        # Cleanup runs even if hub.close() raises, and never masks the real failure
+        # with an UnboundLocalError from a test that failed before `second` existed.
+        try:
+            await hub.close()
+        finally:
+            with Session(get_engine()) as session:
+                for created in (first, second):
+                    if created is not None:
+                        repo.delete_server(session, created.id)
 
 
 async def test_auth_transition_blocks_reconcile_and_serves_no_stale_bundle(clean_settings):
