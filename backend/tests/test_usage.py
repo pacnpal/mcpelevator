@@ -24,7 +24,7 @@ from conftest import LOOPBACK, create_server
 
 from app import usage
 from app.db import get_engine, repo
-from app.db.models import UsageBucket
+from app.db.models import Server, UsageBucket
 from app.main import app
 from app.registry import settings as runtime_settings
 from app.usage import attribution, recorder, stats
@@ -33,15 +33,40 @@ from app.usage import attribution, recorder, stats
 # --- fixtures / helpers ------------------------------------------------------- #
 
 
+# The unit-level recorder/stats tests count against this id rather than standing up
+# a server through the API. The row has to EXIST, though: the flush drops counts for
+# servers that don't (see repo.bump_usage), which is what stops a deleted server's
+# rows from coming back.
+SYNTHETIC_ID = "srv"
+
+
 @pytest.fixture(autouse=True)
 def _clean_usage():
     """Counters are process-global; start and finish every test with none pending
     and no stored rows, so ordering can't leak counts between tests."""
     recorder.reset()
     _clear_rows()
+    _ensure_synthetic_server()
     yield
     recorder.reset()
     _clear_rows()
+    with Session(get_engine()) as session:
+        repo.delete_server(session, SYNTHETIC_ID)
+
+
+def _ensure_synthetic_server() -> None:
+    with Session(get_engine()) as session:
+        if repo.get_server(session, SYNTHETIC_ID) is None:
+            repo.create_server(
+                session,
+                Server(
+                    id=SYNTHETIC_ID,
+                    slug="synthetic-usage-target",
+                    name="Synthetic usage target",
+                    args=[],
+                    env={},
+                ),
+            )
 
 
 def _clear_rows() -> None:
@@ -126,6 +151,31 @@ def test_oversized_body_is_not_parsed():
     assert attribution.tools_from_body(huge) == []
 
 
+def test_deeply_nested_body_does_not_raise():
+    """json.loads raises RecursionError — not a ValueError — on a payload nested
+    deeply enough to exhaust the parser's stack, and it can be far under the size
+    cap. Observing a request must never be able to fail it."""
+    body = b"[" * 2000 + b"0" + b"]" * 2000
+    assert len(body) < attribution.MAX_PARSE_BYTES
+    assert attribution.tools_from_body(body) == []
+
+
+def test_absurd_tool_names_are_refused():
+    """The name is client-controlled, so what gets past attribution bounds what a
+    counter row can hold."""
+    long_name = "x" * (attribution.MAX_TOOL_NAME + 1)
+    assert attribution.tools_from_body(json.dumps(_call(long_name)).encode()) == []
+    ok = "x" * attribution.MAX_TOOL_NAME
+    assert attribution.tools_from_body(json.dumps(_call(ok)).encode()) == [ok]
+
+
+def test_a_batch_cannot_mint_unbounded_names():
+    batch = [_call(f"tool{i}") for i in range(attribution.MAX_BATCH_NAMES + 20)]
+    assert len(attribution.tools_from_body(json.dumps(batch).encode())) == (
+        attribution.MAX_BATCH_NAMES
+    )
+
+
 def test_proxy_tools_reads_mcp_body_and_rest_path():
     body = json.dumps(_call("search")).encode()
     assert attribution.proxy_tools("POST", "mcp", body) == ["search"]
@@ -182,6 +232,38 @@ def test_flush_accumulates_across_flushes():
 def test_flush_is_a_noop_without_pending_counts():
     assert recorder.flush_sync() == 0
     assert _rows("srv") == {}
+
+
+def test_pending_keys_are_bounded_without_starving_real_tools():
+    """A caller can name tools that were never advertised, and each distinct name
+    is a key here and a row in storage — which time-based retention doesn't bound.
+    New keys stop at the ceiling; keys already being tracked keep counting."""
+    recorder.record("srv", ["real"])
+    for i in range(recorder.MAX_PENDING_KEYS + 50):
+        recorder.record("srv", [f"invented{i}"])
+    recorder.record("srv", ["real"])  # an established key is never refused
+
+    with recorder._lock:
+        pending = dict(recorder._pending)
+    assert len(pending) == recorder.MAX_PENDING_KEYS
+    assert pending[("srv", "real", recorder.current_bucket())] == 2
+
+
+def test_a_failed_write_keeps_the_counts_for_the_next_flush(monkeypatch):
+    """The batch is detached before the write, so a transient database error must
+    put it back rather than silently drop an interval of traffic."""
+    recorder.record("srv", ["search"])
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(repo, "bump_usage", boom)
+    with pytest.raises(RuntimeError):
+        recorder.flush_sync()
+    monkeypatch.undo()
+
+    assert recorder.flush_sync() == 1
+    assert _rows("srv") == {"search": 1}
 
 
 # --- recording site: the /s proxy --------------------------------------------- #
@@ -270,11 +352,16 @@ async def _echo_body_inner(scope, receive, send):
     await JSONResponse({"body": chunks.decode()})(scope, receive, send)
 
 
-def _stub_group(client: TestClient, name: str, inner) -> None:
+def _stub_group(client: TestClient, name: str, inner, mounted: set[str] | None = None) -> None:
+    """Route a group to a fake inner app, and declare which member slugs the hub is
+    currently serving (``mounted``), which is what attribution keys off."""
     client.app.state.supervisor.on_converged = None
     hub = client.app.state.groups
-    prev = hub.app_for
-    hub.app_for = lambda n, _prev=prev: inner if n == name else _prev(n)
+    prev_app, prev_mounted = hub.app_for, hub.mounted_slugs
+    hub.app_for = lambda n, _prev=prev_app: inner if n == name else _prev(n)
+    hub.mounted_slugs = (
+        lambda n, _prev=prev_mounted: (mounted or set()) if n == name else _prev(n)
+    )
 
 
 def test_group_call_counts_against_the_member_that_owns_the_tool():
@@ -285,7 +372,7 @@ def test_group_call_counts_against_the_member_that_owns_the_tool():
         try:
             with Session(get_engine()) as session:
                 runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
-            _stub_group(client, "team", _echo_body_inner)
+            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]})
             payload = _call(f"{srv['slug']}_search")
             r = client.post("/g/team/mcp", json=payload, headers=LOOPBACK)
             assert r.status_code == 200, r.text
@@ -306,11 +393,50 @@ def test_group_non_tool_traffic_is_not_charged_to_members():
         try:
             with Session(get_engine()) as session:
                 runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
-            _stub_group(client, "team", _echo_body_inner)
+            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]})
             client.post(
                 "/g/team/mcp",
                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
                 headers=LOOPBACK,
+            )
+            assert _rows(srv["id"]) == {}
+        finally:
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"groups": {}})
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_group_call_to_an_unmounted_member_is_not_counted():
+    """Registry membership is not the same as what the bundle serves: a member that
+    is stopped, has mcp_http off, or is excluded by the anti-downgrade rule has no
+    provider mounted, so the call gets a tool-not-found. Crediting it would let any
+    caller inflate a server the request never reached."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-group-unmounted", auth="none")
+        try:
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
+            # configured member, but the hub is serving nothing for it
+            _stub_group(client, "team", _echo_body_inner, mounted=set())
+            client.post("/g/team/mcp", json=_call(f"{srv['slug']}_search"), headers=LOOPBACK)
+            assert _rows(srv["id"]) == {}
+        finally:
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"groups": {}})
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_group_traffic_off_the_mcp_endpoint_is_not_counted():
+    """The bundle is mounted at /mcp alone, so a POST anywhere else under the group
+    404s there and served nothing — it must not show up as a member's call."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-group-subpath", auth="none")
+        try:
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
+            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]})
+            client.post(
+                "/g/team/not-mcp", json=_call(f"{srv['slug']}_search"), headers=LOOPBACK
             )
             assert _rows(srv["id"]) == {}
         finally:
@@ -660,6 +786,50 @@ def test_retention_setting_rejects_a_bad_value():
                 runtime_settings.write(session, {"usage_retention_days": bad})
 
 
+def test_retention_setting_is_bounded_above():
+    """The prune builds `utcnow() - timedelta(days=value)`. A value large enough to
+    underflow datetime would raise OverflowError there, breaking every flush — and
+    the usage endpoints, which flush — until the setting was changed back."""
+    with Session(get_engine()) as session:
+        with pytest.raises(ValueError):
+            runtime_settings.write(
+                session,
+                {"usage_retention_days": runtime_settings.MAX_USAGE_RETENTION_DAYS + 1},
+            )
+        try:
+            runtime_settings.write(
+                session, {"usage_retention_days": runtime_settings.MAX_USAGE_RETENTION_DAYS}
+            )
+            # the ceiling itself must be safe to actually prune with
+            recorder.reset()
+            recorder.flush_sync()
+        finally:
+            runtime_settings.write(session, {"usage_retention_days": 30})
+
+
+def test_a_window_is_clamped_to_what_retention_kept():
+    """Past the retention cutoff the buckets were deleted, so reporting them as
+    dense zeroes would draw discarded history as genuine quiet."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-clamp", auth="none")
+        try:
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"usage_retention_days": 5})
+            body = client.get(f"/api/servers/{srv['id']}/usage?days=90", headers=LOOPBACK).json()
+            assert len(body["series"]) == 5  # not 90
+            since = datetime.fromisoformat(body["since"].replace("Z", "+00:00"))
+            assert (datetime.now(timezone.utc) - since).days <= 5
+            # 0 (keep forever) imposes no clamp
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"usage_retention_days": 0})
+            body = client.get(f"/api/servers/{srv['id']}/usage?days=90", headers=LOOPBACK).json()
+            assert len(body["series"]) == 90
+        finally:
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"usage_retention_days": 30})
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
 def test_retention_zero_keeps_everything():
     """0 is the operator's explicit opt-out, not 'delete immediately'."""
     now = datetime.now(timezone.utc)
@@ -672,6 +842,25 @@ def test_retention_zero_keeps_everything():
             assert len(repo.usage_since(session, "srv", now - timedelta(days=90))) == 1
         finally:
             runtime_settings.write(session, {"usage_retention_days": 30})
+
+
+def test_counts_pending_at_delete_never_come_back_as_orphan_rows():
+    """A flush lands up to an interval after the calls it counts. If a server is
+    deleted in that window, neither the pending counts nor a request finishing
+    mid-delete may write rows back — SQLite foreign keys are off, so nothing
+    downstream would reject them and retention 0 would keep them forever."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-delete-race", auth="none")
+        recorder.record(srv["id"], ["search"])  # pending, not yet flushed
+        assert client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK).status_code == 204
+        # The delete drops the pending counts...
+        with recorder._lock:
+            assert not [key for key in recorder._pending if key[0] == srv["id"]]
+        # ...and a count that slipped in anyway (an in-flight request) is refused
+        # by the write itself, which is the half that can't be raced.
+        recorder.record(srv["id"], ["search"])
+        recorder.flush_sync()
+        assert _rows(srv["id"]) == {}
 
 
 def test_deleting_a_server_drops_its_usage_rows():

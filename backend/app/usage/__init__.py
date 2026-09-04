@@ -6,15 +6,15 @@ Three small pieces, kept apart so each is testable on its own:
 - ``recorder`` — the in-memory counter and its periodic flush into hourly buckets.
 - ``stats`` — the read side, folding stored buckets into a chartable shape.
 
-Counts only: a usage row holds a server id, a tool name, an hour and a number.
-Tool arguments and results are never inspected or stored.
+A usage row holds a server id, a tool name, an hour, a count, and when that count
+was last written. Tool arguments and results are never inspected or stored.
 """
 
 # The non-tool sentinel is defined with the column it lives in (db.models), and
 # re-exported here so callers read the whole usage vocabulary from one module.
 from app.db.models import NOT_A_TOOL
 from app.usage.attribution import proxy_tools, split_namespaced, tools_from_body
-from app.usage.recorder import flush, flush_sync, record, run_forever
+from app.usage.recorder import flush, flush_sync, forget, record, run_forever
 from app.usage.stats import MAX_DAYS, instance_usage, server_usage
 
 __all__ = [
@@ -22,6 +22,7 @@ __all__ = [
     "NOT_A_TOOL",
     "flush",
     "flush_sync",
+    "forget",
     "instance_usage",
     "proxy_tools",
     "record",

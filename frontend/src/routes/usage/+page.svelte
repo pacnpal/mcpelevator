@@ -310,8 +310,8 @@
 		</div>
 
 		<p class="text-[11px] text-[var(--color-ink-dim)]">
-			Counts only — arguments and results are never recorded. The window reaches back no
-			further than the usage retention set in
+			Call counts and when each was last seen — arguments and results are never recorded.
+			The window reaches back no further than the usage retention set in
 			<a href="/settings" class="underline underline-offset-2">Settings</a>. A server's
 			tools are listed while it is running.
 		</p>

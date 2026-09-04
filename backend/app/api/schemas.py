@@ -159,8 +159,8 @@ class UsagePoint(BaseModel):
 class ServerUsage(BaseModel):
     """Usage for one server over a trailing window.
 
-    Counts only — never arguments or results. The window reaches back no further
-    than the ``usage_retention_days`` setting has kept buckets."""
+    Counts and a last-written timestamp — never arguments or results. The window
+    reaches back no further than ``usage_retention_days`` has kept buckets."""
 
     server_id: str
     since: datetime

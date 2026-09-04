@@ -111,7 +111,8 @@ export interface UsagePoint {
 }
 
 /** Usage for one server over a trailing window (GET /api/servers/{id}/usage).
- * Counts only — arguments and results are never recorded. */
+ * Counts and last-call timestamps only — arguments and results are never
+ * recorded. */
 export interface ServerUsage {
 	server_id: string;
 	since: string;

@@ -164,11 +164,26 @@ def bump_usage(session: Session, counts: dict[tuple[str, str, datetime], int]) -
     The recorder accumulates in memory and hands the whole flush here, so a busy
     proxy costs one short write per flush interval rather than a write per
     request. Upsert (not read-modify-write) so two flushes — or a flush racing
-    the retention prune — can't lose an increment."""
+    the retention prune — can't lose an increment.
+
+    Counts for servers that no longer exist are DROPPED. A flush lands up to an
+    interval after the requests it counts, so a server deleted in that window
+    would otherwise have its rows written back after ``delete_server`` removed
+    them — and SQLite foreign keys are off, so nothing downstream would reject
+    them. Checked here, inside the write, because that is the only place the
+    check can't be raced."""
     if not counts:
         return
+    live = {
+        server_id
+        for (server_id,) in session.execute(
+            select(Server.id).where(Server.id.in_({key[0] for key in counts}))
+        )
+    }
     now = utcnow()
     for (server_id, tool, bucket), calls in counts.items():
+        if server_id not in live:
+            continue
         statement = sqlite_insert(UsageBucket).values(
             server_id=server_id, tool=tool, bucket=bucket, calls=calls, last_call_at=now
         )

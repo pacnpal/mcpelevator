@@ -1574,9 +1574,10 @@
 				<legend class="text-sm font-medium text-[var(--color-ink)]">Usage retention</legend>
 				<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
 					How long to keep per-server and per-tool call counts, shown on each server's
-					Usage panel. Counts only — arguments and results are never recorded.
+					Usage panel — counts and when each was last seen, never arguments or results.
 					<code class="font-mono text-[var(--color-ink-muted)]">0</code> keeps them forever;
-					a usage window never reaches further back than this.
+					a usage window never reaches further back than this, so lowering it shortens what
+					the charts can show.
 				</p>
 				<form class="flex items-center gap-2" onsubmit={saveUsageRetention}>
 					<input

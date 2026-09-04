@@ -26,9 +26,10 @@ a charting one: it locks a single accent and declares no categorical palette, so
 split-by-server view is rendered as small multiples instead of a stacked multi-hue
 chart, and the activity grid uses one sequential ramp of that same accent.
 
-Only counts are stored — a server id, a tool name, an hour, a number. Arguments and
-results are never recorded, so a usage row can't become a shadow copy of the traffic it
-summarizes. Non-tool traffic is counted separately rather than discarded: distinguishing
+A bucket stores a server id, a tool name, an hour, a count, and the time that count
+was last written — no arguments and no results, so a usage row can't become a shadow
+copy of the traffic it summarizes, and the one timestamp it does keep expires with the
+bucket. Non-tool traffic is counted separately rather than discarded: distinguishing
 "clients connect but call nothing" from "nothing reaches this server" is the signal that
 makes a tool rename or description rewrite worth trying. Traffic that never reached a
 bridge (unknown slug, refused auth, nothing running) is not counted at all, matching the

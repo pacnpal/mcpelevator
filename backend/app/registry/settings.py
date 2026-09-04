@@ -89,6 +89,11 @@ def read_all(session: Session) -> dict[str, Any]:
     return {key: repo.setting_get(session, key, default) for key, default in DEFAULTS.items()}
 
 
+# Ceiling for `usage_retention_days` (a century). Retention is turned into a
+# `timedelta` to build the prune cutoff, so the stored value must stay inside what
+# `datetime` arithmetic can represent — see the validation in write().
+MAX_USAGE_RETENTION_DAYS = 36500
+
 _MODES = {"local", "expose"}
 _PROVIDERS = {"none", "bearer", "oauth"}
 _CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
@@ -221,8 +226,19 @@ def write(
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"invalid idle_timeout_s: {value!r} (seconds, ≥ 0)")
         if key == "usage_retention_days":
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"invalid usage_retention_days: {value!r} (days, ≥ 0)")
+            # Bounded above, not just below: the prune builds `utcnow() -
+            # timedelta(days=value)`, and a value big enough to underflow datetime
+            # raises OverflowError there — which would break every flush (and the
+            # usage endpoints, which flush) until the setting was changed back.
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= MAX_USAGE_RETENTION_DAYS
+            ):
+                raise ValueError(
+                    f"invalid usage_retention_days: {value!r} "
+                    f"(days, 0–{MAX_USAGE_RETENTION_DAYS}; 0 keeps forever)"
+                )
         if key == "oauth_scopes":
             if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
                 raise ValueError(f"invalid oauth_scopes: {value!r}")

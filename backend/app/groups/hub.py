@@ -145,6 +145,18 @@ class GroupHub:
         instance = self._instances.get(name)
         return instance.app if instance is not None else None
 
+    def mounted_slugs(self, name: str) -> set[str]:
+        """The slugs this group is CURRENTLY serving tools for.
+
+        Registry membership is not the same set: a member that isn't running, has
+        `mcp_http` off, or is excluded by the anti-downgrade rule is configured but
+        not mounted, so the bundle has no provider for its namespace. Callers that
+        reason about what a group can actually serve — usage attribution, say —
+        must ask this, not the registry, or a namespaced call to a tool the bundle
+        rejects would be credited to a member that never saw it."""
+        instance = self._instances.get(name)
+        return {slug for slug, _host, _port in instance.key} if instance is not None else set()
+
     async def sync(self, supervisor) -> None:
         """Converge every group's mounted set to (registry x running units). Called
         after every reconcile pass; serialized so overlapping syncs can't race a

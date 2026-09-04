@@ -44,7 +44,7 @@ from app.usage import attribution
 
 
 async def _record_group_usage(
-    request: Request, receive: Receive, member_ids: list[str]
+    request: Request, receive: Receive, mounted_slugs: set[str]
 ) -> Receive:
     """Count a tool called through the bundle against the MEMBER that owns it,
     and return the receive channel the inner app should read.
@@ -56,11 +56,17 @@ async def _record_group_usage(
     fans out to every member, and charging each one would invent traffic none of
     them individually received.
 
+    Attribution is resolved against the slugs the hub is CURRENTLY serving, not
+    the group's configured membership: a member that is stopped, has `mcp_http`
+    off, or is excluded by the anti-downgrade rule is in the registry but has no
+    provider in the bundle, so a call naming its namespace gets a tool-not-found —
+    crediting it would let any caller inflate a server the request never reached.
+
     Reading the body consumes the ASGI stream, so the buffered bytes are replayed
     to the inner app. A body of unknown length (chunked) or above the parse cap is
     left untouched — usage accounting never buffers a body it can't bound, and
     never changes what the group serves."""
-    if request.method != "POST" or not member_ids:
+    if request.method != "POST" or not mounted_slugs:
         return receive
     raw_length = request.headers.get("content-length")
     try:
@@ -90,9 +96,12 @@ async def _record_group_usage(
 
     names = attribution.tools_from_body(body)
     if names:
-        members = set(member_ids)
         with Session(get_engine()) as session:
-            slugs = {s.slug: s.id for s in repo.list_servers(session) if s.id in members}
+            slugs = {
+                server.slug: server.id
+                for server in repo.list_servers(session)
+                if server.slug in mounted_slugs
+            }
         for name in names:
             hit = attribution.split_namespaced(name, slugs)
             if hit is not None:
@@ -124,7 +133,7 @@ class GroupDispatch:
         route_scope = dict(scope)
         route_scope["root_path"] = routing_root_path
         route_path = get_route_path(route_scope)  # -> "/<name>/<rest>"
-        name, _, _ = route_path.lstrip("/").partition("/")
+        name, _, subpath = route_path.lstrip("/").partition("/")
         if not name:
             await Response("unknown group", status_code=404)(scope, receive, send)
             return
@@ -155,8 +164,13 @@ class GroupDispatch:
             return
 
         # Authenticated and about to be served: count the tool calls it carries
-        # (see _record_group_usage), which may consume + replay the body.
-        receive = await _record_group_usage(request, receive, member_ids)
+        # (see _record_group_usage), which may consume + replay the body. Only the
+        # bundle's own endpoint counts — the inner app is mounted at "/mcp" alone,
+        # so a POST to any other subpath 404s there and served nothing.
+        if subpath.strip("/") == "mcp":
+            receive = await _record_group_usage(
+                request, receive, self._hub.mounted_slugs(name)
+            )
 
         # Delegate to the group's inner app. Extend the routing root by the group name
         # so the inner app (built with path="/mcp") resolves the remainder to "/mcp".

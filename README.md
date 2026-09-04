@@ -280,8 +280,10 @@ rejected token, a server that isn't running — is never counted, and neither is
 dashboard playground: the panel reports what *clients* did, not what you did while
 testing.
 
-Only counts are stored: a server id, a tool name, an hour, and a number. Tool
-arguments and results are never recorded. Counters accumulate in memory and are
+Each bucket stores a server id, a tool name, an hour, a count, and when that
+count was last written (the "last call" the panels show, which is the flush time
+rather than the exact call time). Tool arguments and results are never recorded,
+and a bucket's timestamp is dropped with the bucket at the retention cutoff. Counters accumulate in memory and are
 written every few seconds, so a hard crash can lose the last few seconds of counts.
 
 Retention is **Settings → Security → Usage retention** (`usage_retention_days`,

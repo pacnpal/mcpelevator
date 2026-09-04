@@ -564,7 +564,14 @@ def _prune_then_delete(session: Session, server_id: str, principal: Principal) -
         if fresh is None or not policy.can_view_server(fresh, current):
             return False
         group_registry.prune_server(session, server_id)
-        return service.delete_server(session, server_id)
+        deleted = service.delete_server(session, server_id)
+    if deleted:
+        # Counters for this server are still accumulating in memory; drop them so
+        # the next flush doesn't write back rows the delete just removed. (The
+        # flush itself also refuses rows for servers that no longer exist — this
+        # is the cheap half, that one closes the race.)
+        usage.forget(server_id)
+    return deleted
 
 
 @router.delete("/servers/{server_id}", status_code=204)

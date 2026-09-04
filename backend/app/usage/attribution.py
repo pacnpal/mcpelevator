@@ -20,6 +20,14 @@ from typing import Iterable
 # traffic, just not against a tool.
 MAX_PARSE_BYTES = 1 << 20  # 1 MiB
 
+# The tool name is CLIENT-controlled — a caller may name a tool that was never
+# advertised — so what gets past this function bounds what the counters can hold.
+# A real MCP tool name is a function identifier; anything longer is not one, and
+# storing it would let a caller choose the size of a stored row.
+MAX_TOOL_NAME = 128
+# A batch is counted per element, so cap how many elements one body may contribute.
+MAX_BATCH_NAMES = 64
+
 _REST_PREFIX = "rest/"
 # The REST surface's own non-tool routes (bridge.host.build_rest_routes).
 _REST_NON_TOOL = {"openapi.json"}
@@ -30,23 +38,31 @@ def tools_from_body(body: bytes) -> list[str]:
 
     Tolerates a batch array (a list of envelopes) even though MCP 2025-06-18
     dropped batching: an older client may still send one, and counting each
-    element beats counting the batch as a single call. A body that isn't JSON,
-    isn't an envelope, or is oversized yields no names rather than raising —
-    usage accounting must never be able to fail a request."""
+    element beats counting the batch as a single call — bounded by
+    :data:`MAX_BATCH_NAMES` so one request can't mint an unbounded number of
+    counter keys.
+
+    A body that isn't JSON, isn't an envelope, is oversized, or is nested deeply
+    enough to exhaust the parser's stack yields no names rather than raising:
+    usage accounting must never be able to fail a request it only observes, and
+    ``json.loads`` raises ``RecursionError`` — not a ``ValueError`` — on a
+    deeply nested payload that is still well under the size cap."""
     if not body or len(body) > MAX_PARSE_BYTES:
         return []
     try:
         payload = json.loads(body)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return []
     entries = payload if isinstance(payload, list) else [payload]
     names: list[str] = []
     for entry in entries:
+        if len(names) >= MAX_BATCH_NAMES:
+            break
         if not isinstance(entry, dict) or entry.get("method") != "tools/call":
             continue
         params = entry.get("params")
         name = params.get("name") if isinstance(params, dict) else None
-        if isinstance(name, str) and name:
+        if isinstance(name, str) and 0 < len(name) <= MAX_TOOL_NAME:
             names.append(name)
     return names
 

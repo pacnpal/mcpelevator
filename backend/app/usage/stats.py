@@ -23,6 +23,7 @@ from sqlmodel import Session
 
 from app.db import repo
 from app.db.models import Server, utcnow
+from app.registry import settings as runtime_settings
 
 HOUR_S = 3600
 DAY_S = 86400
@@ -46,10 +47,17 @@ def _floor(value: datetime, step_s: int) -> datetime:
     return datetime.fromtimestamp(epoch_s - epoch_s % step_s, tz=timezone.utc)
 
 
-def _window(days: int) -> tuple[datetime, int, int]:
+def _window(days: int, *, retention_days: int = 0) -> tuple[datetime, int, int]:
     """``(since, bucket_width, point_count)`` for a trailing window of ``days``.
-    The last point is the current, still-filling bucket."""
+    The last point is the current, still-filling bucket.
+
+    The window is CLAMPED to retention when one is set (``0`` = keep forever).
+    Past the retention cutoff the buckets were deleted, so reporting them as dense
+    zeroes would draw discarded history as genuine quiet — asking for a year on a
+    30-day retention must return 30 days, and say so through ``since``."""
     days = max(1, min(days, MAX_DAYS))
+    if retention_days > 0:
+        days = min(days, retention_days)
     step_s = HOUR_S if days <= HOURLY_MAX_DAYS else DAY_S
     points = days * 24 if step_s == HOUR_S else days
     end = _floor(utcnow(), step_s)
@@ -147,8 +155,10 @@ def server_usage(session: Session, server_id: str, *, days: int) -> dict[str, An
     """Usage for one server over the trailing ``days``.
 
     The window reaches back only as far as the ``usage_retention_days`` setting
-    has kept rows."""
-    since, step_s, points = _window(days)
+    has kept rows — asking for more returns the shorter window, not zeroes."""
+    since, step_s, points = _window(
+        days, retention_days=runtime_settings.usage_retention_days(session)
+    )
     scope = [server_id]
 
     tool_calls = other_requests = 0
@@ -206,8 +216,12 @@ def instance_usage(session: Session, servers: Sequence[Server], *, days: int) ->
     because "which of my servers is nothing using?" is half the question this
     view answers. Likewise ``tools`` carries a zero row for every discovered tool
     nothing called, and a row for a tool called under a name its server no longer
-    exposes (``known: False``), so neither disappears from the listing."""
-    since, step_s, points = _window(days)
+    exposes (``known: False``), so neither disappears from the listing.
+
+    The window is clamped to retention exactly as :func:`server_usage` clamps it."""
+    since, step_s, points = _window(
+        days, retention_days=runtime_settings.usage_retention_days(session)
+    )
     scope = [server.id for server in servers]
 
     by_server = {

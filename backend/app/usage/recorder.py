@@ -34,6 +34,13 @@ logger = logging.getLogger(__name__)
 FLUSH_INTERVAL_S = 15.0
 # How often retention is applied (a delete per flush would be pure overhead).
 PRUNE_INTERVAL_S = 3600.0
+# Ceiling on DISTINCT (server, tool, hour) keys held between flushes. Tool names
+# come from the caller, so on an open server a client can name tools that were
+# never advertised — and each distinct name is a key here and a row in storage,
+# which time-based retention does not bound. Past the ceiling, counts for keys
+# not already being tracked are dropped (a flush clears it, and no legitimate
+# instance mints thousands of distinct tool names in one interval).
+MAX_PENDING_KEYS = 5000
 
 # (server_id, tool, hour) -> calls. Guarded by _lock: increments run on the event
 # loop, the flush swaps the dict, and the write itself happens in a worker thread.
@@ -64,7 +71,13 @@ def record(server_id: str, tools: Iterable[str] = ()) -> None:
     bucket = current_bucket()
     with _lock:
         for name in names:
-            _pending[(server_id, name, bucket)] += 1
+            key = (server_id, name, bucket)
+            # An already-tracked key always keeps counting; only NEW keys are
+            # refused at the ceiling, so a flood of invented tool names can't
+            # cost the real ones their counts.
+            if key not in _pending and len(_pending) >= MAX_PENDING_KEYS:
+                continue
+            _pending[key] += 1
 
 
 def _take() -> dict[tuple[str, str, datetime], int]:
@@ -74,6 +87,25 @@ def _take() -> dict[tuple[str, str, datetime], int]:
         batch = dict(_pending)
         _pending.clear()
     return batch
+
+
+def _restore(batch: dict[tuple[str, str, datetime], int]) -> None:
+    """Merge a detached batch back after a failed write, so a transient database
+    error costs a retry rather than the counts themselves. Merged (not assigned)
+    because requests kept arriving while the write was in flight."""
+    with _lock:
+        for key, calls in batch.items():
+            _pending[key] += calls
+
+
+def forget(server_id: str) -> None:
+    """Drop every pending count for a server. Called when one is deleted: the
+    delete removes stored rows, and without this the next flush would write the
+    interval's counts straight back as rows no server owns (SQLite foreign keys
+    are off, so nothing else would stop it)."""
+    with _lock:
+        for key in [key for key in _pending if key[0] == server_id]:
+            del _pending[key]
 
 
 def _prune_if_due(session: Session) -> None:
@@ -95,7 +127,14 @@ def flush_sync() -> int:
     loop never blocks on the write); tests call it directly."""
     batch = _take()
     with Session(get_engine()) as session:
-        repo.bump_usage(session, batch)
+        try:
+            repo.bump_usage(session, batch)
+        except Exception:
+            # The write is the only step whose failure loses data — put the batch
+            # back so the next tick retries it. A prune failure AFTER this point
+            # is not restored: those counts are already stored.
+            _restore(batch)
+            raise
         _prune_if_due(session)
     return len(batch)
 

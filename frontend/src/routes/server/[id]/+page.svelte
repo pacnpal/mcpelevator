@@ -685,24 +685,28 @@
 
 	// Every exposed tool joined with its call count. A tool NOTHING has called stays in
 	// the table at zero rather than being absent — that row is the whole point of the
-	// panel (it's the one whose name or description is worth rewriting). Counts are keyed
-	// by the EXPOSED name, which is what a client actually called.
+	// panel (it's the one whose name or description is worth rewriting).
+	//
+	// Keyed off the tool's DISCOVERED name — what the running bridge actually serves,
+	// and therefore what usage was recorded under — not off `exposedName()`, which
+	// reflects edits STAGED in the editor above. A staged rename doesn't reach the
+	// bridge until Apply restarts it, so keying on it would relabel history the moment
+	// you typed: existing traffic would read as `retired` and the new name as `never`.
+	// The bridge also refuses a rename onto a name a live tool already holds, so the
+	// configured target isn't always what gets served even after Apply.
 	const usageRows = $derived.by(() => {
 		if (!usageStats) return [];
 		const counts = new Map(usageStats.tools.map((t) => [t.tool, t]));
-		const rows = toolRows
-			.filter((row) => row.enabled && row.discovered)
-			.map((row) => {
-				const name = exposedName(row.key);
-				const hit = counts.get(name);
-				counts.delete(name);
-				return {
-					name,
-					calls: hit?.calls ?? 0,
-					lastCall: hit?.last_call_at ?? null,
-					retired: false
-				};
-			});
+		const rows = (server?.tools ?? []).map((tool) => {
+			const hit = counts.get(tool.name);
+			counts.delete(tool.name);
+			return {
+				name: tool.name,
+				calls: hit?.calls ?? 0,
+				lastCall: hit?.last_call_at ?? null,
+				retired: false
+			};
+		});
 		// What's left was called under a name this server no longer exposes (renamed,
 		// hidden, or gone upstream). Still real traffic — show it, marked.
 		const retired = [...counts.values()].map((t) => ({
