@@ -649,24 +649,35 @@
 	let usageLoading = $state(false);
 	let usageError = $state<string | null>(null);
 
-	/** Fetch one window's usage for the server on screen. Carries the same
-	 * stale-response guard as load(): this component is reused across same-route
-	 * navigations, so a response can outlive the server it was requested for and
-	 * must not be installed against a different one. */
+	// Both guards are needed, and neither covers the other. The GENERATION orders
+	// overlapping loads: this component is reused across same-route navigations, so
+	// A → B → A leaves two requests for A in flight, and an id check passes for both
+	// — letting the slower one install over the newer one's data, at whatever window
+	// was selected when it was issued. The ID check covers the case no generation is
+	// minted at all: the effect below clears state without starting a load when the
+	// server is absent, and a response still in flight from the previous server must
+	// not land in that gap.
+	let usageGeneration = 0;
+
+	/** Fetch one window's usage for the server on screen. Every branch re-checks
+	 * both guards before touching state, so a superseded request can neither install
+	 * stale data nor clear the spinner a newer one is still using. */
 	async function loadUsage(days: number) {
 		const requestedId = id;
+		const mine = ++usageGeneration;
+		const current = () => mine === usageGeneration && requestedId === id;
 		usageLoading = true;
 		try {
 			const result = await getServerUsage(requestedId, days);
-			if (requestedId !== id) return;
+			if (!current()) return;
 			usageStats = result;
 			usageError = null;
 		} catch (err) {
-			if (requestedId !== id) return;
+			if (!current()) return;
 			usageStats = null;
 			usageError = errorMessage(err);
 		} finally {
-			if (requestedId === id) usageLoading = false;
+			if (current()) usageLoading = false;
 		}
 	}
 
