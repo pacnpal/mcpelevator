@@ -32,6 +32,8 @@
 	// by nothing.
 	const peak = $derived(facetPeak(bands));
 
+	/** A band's own total, for its caption. Summed from the plotted points rather
+	 * than taken from the server row, so the caption always matches the facet. */
 	function total(band: UsageBand): number {
 		return band.points.reduce((sum, value) => sum + value, 0);
 	}

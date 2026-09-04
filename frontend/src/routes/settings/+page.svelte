@@ -538,6 +538,10 @@
 			Number(usageRetentionText.trim()) !== settings.usage_retention_days
 	);
 
+	/** Persist the retention window, then resync the field from the settings the
+	 * server returned. The backend REJECTS an out-of-range value rather than
+	 * clamping it, so on a rejected save this snaps the input back to the setting
+	 * still in force instead of leaving a number that was never accepted. */
 	async function saveUsageRetention(e: SubmitEvent) {
 		e.preventDefault();
 		if (!settings || !usageRetentionValid || savingField) return;

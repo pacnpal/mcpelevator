@@ -23,6 +23,9 @@
 
 	const peak = $derived(peakCalls(rows));
 
+	/** Last-call cell text. "never" is a real answer here — an untouched tool is
+	 * the row the panel exists to surface — and an unparseable value is shown raw
+	 * rather than swallowed into "never", which would misreport it as unused. */
 	function formatLastCall(iso: string | null): string {
 		if (!iso) return 'never';
 		const at = new Date(iso);

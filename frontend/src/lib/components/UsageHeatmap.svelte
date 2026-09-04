@@ -34,6 +34,8 @@
 		return `color-mix(in oklab, var(--color-accent) ${mix}%, var(--color-surface-2))`;
 	}
 
+	/** The cell's hover/screen-reader text. Names the hour as a half-open range
+	 * ("14:00–15:00") so a bucket's span is unambiguous, and wraps midnight. */
 	function cellTitle(row: number, hour: number, value: number): string {
 		const end = (hour + 1) % 24;
 		return `${dayLabels[row]} ${String(hour).padStart(2, '0')}:00–${String(end).padStart(

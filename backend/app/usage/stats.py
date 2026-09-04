@@ -43,6 +43,11 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def _floor(value: datetime, step_s: int) -> datetime:
+    """Snap a time down to the start of its `step_s` bucket, in UTC.
+
+    Floors on the epoch second rather than by replacing calendar fields, so it
+    works for any step (hour or day) with one expression and lands on the same
+    boundaries the stored buckets use."""
     epoch_s = int(value.timestamp())
     return datetime.fromtimestamp(epoch_s - epoch_s % step_s, tz=timezone.utc)
 
@@ -145,6 +150,11 @@ def _split_by_server(
 
 
 def _newest(current: Optional[datetime], candidate: Optional[datetime]) -> Optional[datetime]:
+    """Fold one more `last_call_at` into a running maximum, `None` meaning absent.
+
+    Normalizes through `_as_utc` first: SQLite hands datetimes back naive, so
+    comparing a fresh read against an already-normalized aware value would raise
+    rather than order."""
     if candidate is None:
         return current
     candidate = _as_utc(candidate)

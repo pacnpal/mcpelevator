@@ -188,6 +188,8 @@ export function toolRows(usage: InstanceUsage): UsageRow[] {
 	}));
 }
 
+/** Search predicate: matches a row's own name OR the server it belongs to, so
+ * typing a server slug narrows the tool listing to that server's tools. */
 function matches(row: UsageRow, needle: string): boolean {
 	return (
 		row.label.toLowerCase().includes(needle) ||
@@ -195,10 +197,14 @@ function matches(row: UsageRow, needle: string): boolean {
 	);
 }
 
+/** Name order, tie-broken on the server, so two servers exposing the same tool
+ * name keep a stable relative position instead of swapping between renders. */
 function byName(a: UsageRow, b: UsageRow): number {
 	return a.label.localeCompare(b.label) || (a.sublabel ?? '').localeCompare(b.sublabel ?? '');
 }
 
+/** Sort key for "recently used". Never-called and unparseable timestamps both
+ * collapse to -Infinity, which puts them last under a descending sort. */
 function lastCallValue(row: UsageRow): number {
 	if (!row.lastCall) return -Infinity; // never called sorts last under "recent"
 	const at = Date.parse(row.lastCall);

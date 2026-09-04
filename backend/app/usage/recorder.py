@@ -81,6 +81,13 @@ def record(server_id: str, tools: Iterable[str] = ()) -> None:
 
 
 def _take() -> dict[tuple[str, str, datetime], int]:
+    """Detach the whole pending batch under the lock, leaving `_pending` empty.
+
+    Detaching rather than reading-then-clearing is what lets a request record a
+    count while a flush is mid-write: the concurrent increment lands in the fresh
+    map and belongs to the NEXT batch, so it can neither be double-written nor
+    dropped when this one commits. A failed write hands the batch back via
+    `_restore`."""
     with _lock:
         if not _pending:
             return {}
@@ -109,6 +116,12 @@ def forget(server_id: str) -> None:
 
 
 def _prune_if_due(session: Session) -> None:
+    """Drop rows past the retention window, at most once per `PRUNE_INTERVAL_S`.
+
+    Rate-limited on a monotonic clock rather than run every flush: pruning is a
+    range delete over the whole table, and at the flush cadence it would be
+    almost entirely wasted work. Runs off the back of a flush instead of its own
+    task so retention needs no second scheduler."""
     global _last_prune
     now = time.monotonic()
     if _last_prune is not None and now - _last_prune < PRUNE_INTERVAL_S:
@@ -140,6 +153,9 @@ def flush_sync() -> int:
 
 
 async def flush() -> int:
+    """Await one flush, off the event loop. The write is blocking SQLite I/O, so
+    it goes to a worker thread — a read endpoint that flushes before answering
+    must not stall every other request on the loop while it commits."""
     return await asyncio.to_thread(flush_sync)
 
 

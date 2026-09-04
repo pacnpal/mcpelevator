@@ -648,9 +648,11 @@
 	let usageLoading = $state(false);
 	let usageError = $state<string | null>(null);
 
+	/** Fetch one window's usage for the server on screen. Carries the same
+	 * stale-response guard as load(): this component is reused across same-route
+	 * navigations, so a response can outlive the server it was requested for and
+	 * must not be installed against a different one. */
 	async function loadUsage(days: number) {
-		// Same stale-response guard as load(): this component is reused across
-		// same-route navigations, so a response can outlive the server it was for.
 		const requestedId = id;
 		usageLoading = true;
 		try {
@@ -667,6 +669,8 @@
 		}
 	}
 
+	/** Switch the window. Refuses a no-op re-click and a click landing on an
+	 * in-flight fetch, so the range buttons can't queue overlapping requests. */
 	function selectUsageRange(days: number) {
 		if (days === usageDays || usageLoading) return;
 		usageDays = days;
@@ -720,6 +724,8 @@
 		);
 	});
 
+	/** Last-call text for a tool row. "never" is a real answer — that row is what
+	 * the panel is for — and an unparseable value is shown raw, not as "never". */
 	function formatLastCall(iso: string | null): string {
 		if (!iso) return 'never';
 		const at = new Date(iso);

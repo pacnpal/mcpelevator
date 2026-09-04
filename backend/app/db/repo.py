@@ -91,6 +91,13 @@ def set_owner(session: Session, server_id: str, owner_id: Optional[str]) -> None
 
 
 def delete_server(session: Session, server_id: str) -> bool:
+    """Remove a server and everything keyed to it. `False` if it was already gone.
+
+    Deletes the observed-runtime row and the usage rows explicitly: neither
+    cascades on its own (SQLite foreign keys are off by default). Dropping the
+    stored counters is only half of it — the caller must also clear the
+    recorder's in-memory batch (`usage.forget`), or the next flush writes the
+    interval's counts back as rows no server owns."""
     server = session.get(Server, server_id)
     if server is None:
         return False

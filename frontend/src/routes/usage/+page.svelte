@@ -48,6 +48,9 @@
 	// result of a faster one the operator clicked afterwards.
 	let generation = 0;
 
+	/** Fetch one window's instance usage. Every branch checks its generation before
+	 * touching state, so a superseded request can neither install stale data nor
+	 * clear the spinner a newer one is still using. */
 	async function load(window: number) {
 		const mine = ++generation;
 		loading = true;
@@ -69,6 +72,8 @@
 		void load(days);
 	});
 
+	/** Switch the window. Guarded so re-clicking the active range doesn't retrigger
+	 * the effect and refetch what is already on screen. */
 	function selectRange(next: number) {
 		if (next !== days) days = next;
 	}
@@ -78,6 +83,8 @@
 	const toolsKnown = $derived(usage?.servers.reduce((n, s) => n + s.tools_known, 0) ?? 0);
 	const toolsCalled = $derived(usage?.servers.reduce((n, s) => n + s.tools_called, 0) ?? 0);
 
+	/** Last-call text for the summary tiles. "never" is a real answer; an
+	 * unparseable value is shown raw rather than misreported as unused. */
 	function formatLastCall(iso: string | null | undefined): string {
 		if (!iso) return 'never';
 		const at = new Date(iso);
@@ -93,6 +100,9 @@
 	const TAB_CLASS =
 		'flex-1 rounded-lg border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50';
 
+	/** Range-pill colours. Inline rather than classes because the accent is mixed
+	 * at two strengths from one CSS variable — the single-accent rule means there
+	 * is no second hue to select a utility class for. */
 	function pillStyle(active: boolean): string {
 		return active
 			? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 10%, transparent); color: var(--color-ink);'
