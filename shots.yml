@@ -73,7 +73,7 @@
   url: http://localhost:8080/usage
   width: 1440
   wait_for: |
-    document.body.innerText.includes('tool calls') &&
+    /[1-9]\d*\s*tool calls/.test(document.body.innerText) &&
     !document.body.innerText.includes('Loading usage')
   wait: 600
 

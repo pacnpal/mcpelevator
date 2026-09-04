@@ -191,7 +191,11 @@ class GroupDispatch:
             # which may consume + replay the body. Only the bundle's own endpoint
             # counts — the inner app is mounted at "/mcp" alone, so a POST to any
             # other subpath 404s there and served nothing.
-            if subpath.strip("/") == "mcp":
+            #
+            # Matched EXACTLY: "mcp/" and "mcp//" are 307s back to "/mcp", not
+            # calls. Stripping slashes here counted the redirect AND the request
+            # the client then followed it with, so one tool call landed twice.
+            if subpath == "mcp":
                 receive = await _record_group_usage(
                     request, receive, self._hub.mounted_slugs(name)
                 )

@@ -179,9 +179,30 @@ def test_a_batch_cannot_mint_unbounded_names():
 def test_proxy_tools_reads_mcp_body_and_rest_path():
     body = json.dumps(_call("search")).encode()
     assert attribution.proxy_tools("POST", "mcp", body) == ["search"]
-    assert attribution.proxy_tools("POST", "/mcp/", body) == ["search"]
+    assert attribution.proxy_tools("POST", "/mcp", body) == ["search"]
     # the REST mirror names the tool in the path instead
     assert attribution.proxy_tools("POST", "rest/echo", b"{}") == ["echo"]
+
+
+@pytest.mark.parametrize("path", ["mcp/", "/mcp/", "mcp//", "rest/echo/"])
+def test_a_trailing_slash_is_a_redirect_not_a_call(path):
+    """The bridge registers `/mcp` and `/rest/<tool>` exactly, so a trailing
+    slash is a 307 back to them — nothing is invoked.
+
+    Counting it would charge the redirect AND the request the client follows it
+    with, landing one call twice; a client that ignores the redirect would be
+    charged for a request nothing served. Such a request still counts as plain
+    traffic, just not against a tool."""
+    body = json.dumps(_call("search")).encode()
+    assert attribution.proxy_tools("POST", path, body) == []
+
+
+def test_a_rest_tool_name_is_bounded_like_a_json_rpc_one():
+    """The path segment is client-chosen too, so without the cap a caller picks
+    the size of a stored row."""
+    ok = "e" * attribution.MAX_TOOL_NAME
+    assert attribution.proxy_tools("POST", f"rest/{ok}", b"{}") == [ok]
+    assert attribution.proxy_tools("POST", f"rest/{ok}e", b"{}") == []
 
 
 @pytest.mark.parametrize(
@@ -247,6 +268,38 @@ def test_pending_keys_are_bounded_without_starving_real_tools():
         pending = dict(recorder._pending)
     assert len(pending) == recorder.MAX_PENDING_KEYS
     assert pending[("srv", "real", recorder.current_bucket())] == 2
+
+
+def test_keys_being_written_still_count_against_the_ceiling(monkeypatch):
+    """`_take` empties `_pending`, so without reserving the detached keys a client
+    could fill the map to the cap again while the write runs — and a failed write
+    merges the batch back, leaving twice the ceiling held. The guard exists to
+    bound memory; it has to hold across the flush too."""
+    detached = {}
+
+    def slow_write(_session, batch):
+        # Mid-write: the batch is detached, and new traffic arrives.
+        detached.update(batch)
+        for i in range(recorder.MAX_PENDING_KEYS + 50):
+            recorder.record(SYNTHETIC_ID, [f"during{i}"])
+        raise RuntimeError("database is locked")
+
+    recorder.record(SYNTHETIC_ID, ["before"])
+    monkeypatch.setattr(repo, "bump_usage", slow_write)
+    with pytest.raises(RuntimeError):
+        recorder.flush_sync()
+    monkeypatch.undo()
+
+    with recorder._lock:
+        pending = dict(recorder._pending)
+        inflight = dict(recorder._inflight)
+    assert detached, "the write should have seen the detached batch"
+    # Never more than the ceiling, batch restored on top and all.
+    assert len(pending) <= recorder.MAX_PENDING_KEYS
+    # The reservation is released once the write settles, either way.
+    assert inflight == {}
+    # The restored batch is still there — the point of restoring it.
+    assert pending[(SYNTHETIC_ID, "before", recorder.current_bucket())] == 1
 
 
 def test_a_failed_write_keeps_the_counts_for_the_next_flush(monkeypatch):
@@ -352,9 +405,33 @@ async def _echo_body_inner(scope, receive, send):
     await JSONResponse({"body": chunks.decode()})(scope, receive, send)
 
 
+@pytest.fixture(autouse=True)
+def _unstub_group_hub():
+    """Undo any `_stub_group` patching after each test.
+
+    The hub is built once when the module-level ``app`` is constructed — not per
+    lifespan — so a stub installed on it outlives the TestClient that set it.
+    Without this, a later test that uses the same group name would be served the
+    previous test's fake inner app (and its mounted set) instead of the real
+    hub's."""
+    hub = app.state.groups
+    original = (hub.__dict__.get("app_for"), hub.__dict__.get("mounted_slugs"))
+    yield
+    for attr, value in zip(("app_for", "mounted_slugs"), original):
+        if value is None:
+            # Nothing shadowed the class method before this test — drop whatever
+            # the test set so lookups fall back to the class again.
+            hub.__dict__.pop(attr, None)
+        else:
+            setattr(hub, attr, value)
+
+
 def _stub_group(client: TestClient, name: str, inner, mounted: set[str] | None = None) -> None:
     """Route a group to a fake inner app, and declare which member slugs the hub is
-    currently serving (``mounted``), which is what attribution keys off."""
+    currently serving (``mounted``), which is what attribution keys off.
+
+    Patches the shared hub instance; `_unstub_group_hub` restores it after the
+    test."""
     client.app.state.supervisor.on_converged = None
     hub = client.app.state.groups
     prev_app, prev_mounted = hub.app_for, hub.mounted_slugs
@@ -382,6 +459,41 @@ def test_group_call_counts_against_the_member_that_owns_the_tool():
         finally:
             with Session(get_engine()) as session:
                 runtime_settings.write(session, {"groups": {}})
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+@pytest.mark.parametrize("subpath", ["mcp/", "mcp//"])
+def test_group_trailing_slash_is_not_counted(subpath):
+    """The bundle is mounted at `/mcp` alone, so `/mcp/` is a 307 back to it. If
+    a slash-stripped match counted it, the redirect would be charged AND so would
+    the request the client follows it with — one call, counted twice."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-group-slash", auth="none")
+        try:
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
+            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]})
+            payload = _call(f"{srv['slug']}_search")
+            client.post(f"/g/team/{subpath}", json=payload, headers=LOOPBACK)
+            assert _rows(srv["id"]) == {}
+        finally:
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"groups": {}})
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_usage_reads_are_not_stored_by_caches():
+    """Both bodies are scoped to WHO asked — a member's totals cover only the
+    servers they own — so a cached copy could be replayed to a different
+    principal on a shared browser or by an intermediary."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-nostore", auth="none")
+        try:
+            for url in ("/api/usage", f"/api/servers/{srv['id']}/usage"):
+                r = client.get(url, headers=LOOPBACK)
+                assert r.status_code == 200, r.text
+                assert r.headers["cache-control"] == "no-store", url
+        finally:
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 
 

@@ -45,8 +45,19 @@ MAX_PENDING_KEYS = 5000
 # (server_id, tool, hour) -> calls. Guarded by _lock: increments run on the event
 # loop, the flush swaps the dict, and the write itself happens in a worker thread.
 _pending: defaultdict[tuple[str, str, datetime], int] = defaultdict(int)
+# Keys detached by a flush whose write hasn't finished. They still count against
+# MAX_PENDING_KEYS: a failed write merges them back, so without reserving them
+# the map could hold up to twice the ceiling — the one case where the guard that
+# exists to bound memory stops bounding it.
+_inflight: dict[tuple[str, str, datetime], int] = {}
 _lock = threading.Lock()
 _last_prune: float | None = None
+
+
+def _tracked_keys() -> int:
+    """Distinct keys the recorder is holding: pending plus mid-flight. Call under
+    `_lock`."""
+    return len(_pending) + len(_inflight)
 
 
 def current_bucket(now: datetime | None = None) -> datetime:
@@ -74,8 +85,13 @@ def record(server_id: str, tools: Iterable[str] = ()) -> None:
             key = (server_id, name, bucket)
             # An already-tracked key always keeps counting; only NEW keys are
             # refused at the ceiling, so a flood of invented tool names can't
-            # cost the real ones their counts.
-            if key not in _pending and len(_pending) >= MAX_PENDING_KEYS:
+            # cost the real ones their counts. "Tracked" spans the in-flight
+            # batch too — a key being written is still one this process holds.
+            if (
+                key not in _pending
+                and key not in _inflight
+                and _tracked_keys() >= MAX_PENDING_KEYS
+            ):
                 continue
             _pending[key] += 1
 
@@ -87,32 +103,58 @@ def _take() -> dict[tuple[str, str, datetime], int]:
     count while a flush is mid-write: the concurrent increment lands in the fresh
     map and belongs to the NEXT batch, so it can neither be double-written nor
     dropped when this one commits. A failed write hands the batch back via
-    `_restore`."""
+    `_restore`; either way `_settle` releases the reservation."""
     with _lock:
         if not _pending:
             return {}
         batch = dict(_pending)
         _pending.clear()
+        # Reserved, not released: these keys stay counted against the ceiling
+        # until the write settles, so requests arriving mid-write can't fill the
+        # map to the cap on top of a batch that may still come back.
+        _inflight.update(batch)
     return batch
+
+
+def _settle(batch: dict[tuple[str, str, datetime], int]) -> None:
+    """Release a batch's reservation once its write has settled, either way.
+    Call under `_lock`, or via `_restore` which takes it."""
+    for key in batch:
+        _inflight.pop(key, None)
 
 
 def _restore(batch: dict[tuple[str, str, datetime], int]) -> None:
     """Merge a detached batch back after a failed write, so a transient database
     error costs a retry rather than the counts themselves. Merged (not assigned)
-    because requests kept arriving while the write was in flight."""
+    because requests kept arriving while the write was in flight.
+
+    A key whose reservation is gone is NOT restored: only `forget` removes one
+    mid-write, and it means the server was deleted — putting those counts back
+    would resurrect what the delete dropped."""
     with _lock:
         for key, calls in batch.items():
+            if key not in _inflight:
+                continue
             _pending[key] += calls
+        # The reservation becomes a real pending entry — release it, or the key
+        # would be counted twice against the ceiling.
+        _settle(batch)
 
 
 def forget(server_id: str) -> None:
     """Drop every pending count for a server. Called when one is deleted: the
     delete removes stored rows, and without this the next flush would write the
     interval's counts straight back as rows no server owns (SQLite foreign keys
-    are off, so nothing else would stop it)."""
+    are off, so nothing else would stop it).
+
+    Covers the in-flight batch too: a flush already mid-write would otherwise
+    restore that server's counts on failure, resurrecting exactly what the
+    delete removed."""
     with _lock:
         for key in [key for key in _pending if key[0] == server_id]:
             del _pending[key]
+        for key in [key for key in _inflight if key[0] == server_id]:
+            del _inflight[key]
 
 
 def _prune_if_due(session: Session) -> None:
@@ -148,6 +190,9 @@ def flush_sync() -> int:
             # is not restored: those counts are already stored.
             _restore(batch)
             raise
+        # Written and committed — the reservation has done its job.
+        with _lock:
+            _settle(batch)
         _prune_if_due(session)
     return len(batch)
 
@@ -175,8 +220,10 @@ async def run_forever() -> None:
 
 
 def reset() -> None:
-    """Drop pending counters and the prune clock (tests)."""
+    """Drop pending counters, any in-flight reservation, and the prune clock
+    (tests)."""
     global _last_prune
     with _lock:
         _pending.clear()
+        _inflight.clear()
     _last_prune = None

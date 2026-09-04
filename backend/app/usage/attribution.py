@@ -72,14 +72,23 @@ def proxy_tools(method: str, path: str, body: bytes) -> list[str]:
 
     Two exposed surfaces reach the same tools, so both are attributed here:
     the MCP endpoint (``mcp``, tool named in the JSON-RPC body) and the REST
-    mirror (``POST rest/<tool>``, tool named in the path)."""
-    normalized = path.strip("/")
+    mirror (``POST rest/<tool>``, tool named in the path).
+
+    The MCP path is matched EXACTLY, not slash-stripped. The bridge registers
+    ``/mcp`` alone, so ``/mcp/`` is a 307 back to it — no tool is invoked. A
+    lenient match counts that redirect, then counts the followed request too, so
+    one call lands twice; a client that ignores the redirect gets counted for a
+    request nothing served. Neither variant is a tool call, and both still count
+    as plain traffic like any other non-tool request."""
+    normalized = path.lstrip("/")
     if normalized == "mcp":
         return tools_from_body(body)
     if method.upper() == "POST" and normalized.startswith(_REST_PREFIX):
         tool = normalized[len(_REST_PREFIX):]
+        # Bounded like a JSON-RPC name: this segment is client-chosen too, so
+        # without the cap a caller picks the size of a stored row.
         if tool and "/" not in tool and tool not in _REST_NON_TOOL:
-            return [tool]
+            return [tool] if len(tool) <= MAX_TOOL_NAME else []
     return []
 
 

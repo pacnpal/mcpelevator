@@ -355,6 +355,7 @@ async def get_server(
 @router.get("/servers/{server_id}/usage", response_model=ServerUsage)
 async def get_server_usage(
     server_id: str,
+    response: Response,
     days: int = Query(default=7, ge=1, le=usage.MAX_DAYS),
     session: Session = Depends(get_session),
     principal: Principal = Depends(current_principal),
@@ -363,9 +364,14 @@ async def get_server_usage(
 
     Pending counts are flushed first so a call made seconds ago is already
     visible — a stats page that lags its own traffic by a flush interval reads
-    as broken, and this is a rare, operator-driven read."""
+    as broken, and this is a rare, operator-driven read.
+
+    `no-store` because the body is scoped to WHO asked: a member sees only the
+    servers they own, so a cached copy could be replayed to a different
+    principal on a shared browser or by an intermediary."""
     server = _visible(principal, session, server_id)
     await usage.flush()
+    response.headers["Cache-Control"] = "no-store"
     return ServerUsage(server_id=server.id, **usage.server_usage(session, server.id, days=days))
 
 
