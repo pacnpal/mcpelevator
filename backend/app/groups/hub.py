@@ -118,12 +118,23 @@ class _AppRunner:
 class _Instance:
     """One group's live (app, runner, topology-key) triple."""
 
-    __slots__ = ("app", "runner", "key")
+    __slots__ = ("app", "runner", "key", "members")
 
-    def __init__(self, app: ASGIApp, runner: _AppRunner, key: frozenset) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        runner: _AppRunner,
+        key: frozenset,
+        members: dict[str, str] | None = None,
+    ) -> None:
         self.app = app
         self.runner = runner
         self.key = key
+        # slug -> server id for exactly the members mounted in this instance.
+        # Captured at build time from the supervisor's running set, so a caller
+        # that needs the id behind a namespace (usage attribution) reads it from
+        # here instead of querying every registered server per request.
+        self.members = members or {}
 
 
 class GroupHub:
@@ -145,17 +156,25 @@ class GroupHub:
         instance = self._instances.get(name)
         return instance.app if instance is not None else None
 
-    def mounted_slugs(self, name: str) -> set[str]:
-        """The slugs this group is CURRENTLY serving tools for.
+    def mounted_members(self, name: str) -> dict[str, str]:
+        """``{slug: server_id}`` for the members this group is CURRENTLY serving.
 
         Registry membership is not the same set: a member that isn't running, has
         `mcp_http` off, or is excluded by the anti-downgrade rule is configured but
         not mounted, so the bundle has no provider for its namespace. Callers that
         reason about what a group can actually serve — usage attribution, say —
         must ask this, not the registry, or a namespaced call to a tool the bundle
-        rejects would be credited to a member that never saw it."""
+        rejects would be credited to a member that never saw it.
+
+        Carrying the id, not just the slug, is what keeps attribution off the
+        database: resolving a namespace to a server otherwise meant loading every
+        registered server on each group call, synchronously, on the event loop."""
         instance = self._instances.get(name)
-        return {slug for slug, _host, _port in instance.key} if instance is not None else set()
+        return dict(instance.members) if instance is not None else {}
+
+    def mounted_slugs(self, name: str) -> set[str]:
+        """Just the slugs of :meth:`mounted_members`."""
+        return set(self.mounted_members(name))
 
     async def sync(self, supervisor) -> None:
         """Converge every group's mounted set to (registry x running units). Called
@@ -183,6 +202,7 @@ class GroupHub:
 
             for name, member_ids in groups.items():
                 entries: list[tuple[str, str, int]] = []
+                mounted: dict[str, str] = {}
                 members = set(member_ids or [])
                 for server_id, slug, host, port in running:
                     if server_id not in members:
@@ -202,13 +222,14 @@ class GroupHub:
                     if effective != "none" and effective != default:
                         continue
                     entries.append((slug, host, port))
+                    mounted[slug] = server_id
 
                 key = frozenset(entries)
                 current = self._instances.get(name)
                 if current is not None and current.key == key:
                     continue  # topology unchanged — keep the live instance
                 try:
-                    await self._swap(name, entries, key)
+                    await self._swap(name, entries, key, mounted)
                 except Exception:
                     # Isolate per group: one group's build/start failure must not abort the
                     # whole pass and starve every group after it in iteration order (the
@@ -236,7 +257,13 @@ class GroupHub:
             transport.forward_incoming_headers = False
         return proxy
 
-    async def _swap(self, name: str, entries: list[tuple[str, str, int]], key: frozenset) -> None:
+    async def _swap(
+        self,
+        name: str,
+        entries: list[tuple[str, str, int]],
+        key: frozenset,
+        members: dict[str, str] | None = None,
+    ) -> None:
         bundle = FastMCP(f"mcpelevator-{name}")
         for slug, host, port in sorted(entries):
             bundle.mount(self._make_proxy(slug, f"http://{host}:{port}/mcp"), namespace=slug)
@@ -250,7 +277,7 @@ class GroupHub:
         await self._teardown(name)
         runner = _AppRunner(app)
         await runner.start()
-        self._instances[name] = _Instance(app, runner, key)
+        self._instances[name] = _Instance(app, runner, key, members)
 
     async def _teardown(self, name: str) -> None:
         old = self._instances.pop(name, None)

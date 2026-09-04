@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import case, delete, func, update
@@ -164,6 +164,13 @@ def reset_all_runtime(session: Session) -> None:
 # usage counters (data-plane traffic, pre-aggregated per server/tool/hour)
 # --------------------------------------------------------------------------- #
 
+# Ceiling on DISTINCT tool names STORED for one server in one hour. Tool names are
+# client-chosen, so this is what stops a caller inventing names forever from
+# choosing how many rows the table holds. Set far above any real server — a large
+# MCP server exposes tens of tools, not hundreds — so it bounds abuse without ever
+# truncating a genuine catalogue.
+MAX_TOOLS_PER_BUCKET = 500
+
 
 def bump_usage(session: Session, counts: dict[tuple[str, str, datetime], int]) -> None:
     """Fold a batch of counted calls into the hourly buckets, in ONE transaction.
@@ -178,7 +185,19 @@ def bump_usage(session: Session, counts: dict[tuple[str, str, datetime], int]) -
     would otherwise have its rows written back after ``delete_server`` removed
     them — and SQLite foreign keys are off, so nothing downstream would reject
     them. Checked here, inside the write, because that is the only place the
-    check can't be raced."""
+    check can't be raced.
+
+    Distinct tool names per server and hour are capped at
+    :data:`MAX_TOOLS_PER_BUCKET`, and the cap is applied HERE because this is
+    where it can be durable. The recorder's in-memory ceiling bounds one flush
+    interval and then resets, so a client naming fresh tools every interval was
+    bounded in memory but not in storage — an unauthenticated server could be
+    made to persist millions of rows a day, which retention only clears if it is
+    switched on. Past the cap, a name that isn't already stored for that hour is
+    folded into the ``NOT_A_TOOL`` sentinel: the CALL is still counted (it shows
+    up as plain traffic), only the attacker-chosen name is refused a row of its
+    own. Names already stored keep their rows and keep counting, so real tools
+    can never be crowded out by a flood arriving later."""
     if not counts:
         return
     live = {
@@ -187,10 +206,35 @@ def bump_usage(session: Session, counts: dict[tuple[str, str, datetime], int]) -
             select(Server.id).where(Server.id.in_({key[0] for key in counts}))
         )
     }
+    # What each (server, hour) touched by this batch already stores, so the cap
+    # counts across flushes instead of restarting at every one. Keyed on a NAIVE
+    # bucket: SQLite hands datetimes back without a tzinfo, while the recorder's
+    # keys are aware UTC, so the two only compare after one of them is normalized
+    # (this is why the window below is a range and not an `IN` over the batch's
+    # buckets — an equality test against an aware value never matches).
+    def _naive(value: datetime) -> datetime:
+        return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
+
+    stored: dict[tuple[str, datetime], set[str]] = {}
+    for server_id, bucket, tool in session.execute(
+        select(UsageBucket.server_id, UsageBucket.bucket, UsageBucket.tool).where(
+            UsageBucket.server_id.in_({key[0] for key in counts}),
+            UsageBucket.bucket >= min(key[2] for key in counts),
+        )
+    ):
+        stored.setdefault((server_id, _naive(bucket)), set()).add(tool)
+
     now = utcnow()
-    for (server_id, tool, bucket), calls in counts.items():
+    # Sorted so which names win the cap is deterministic rather than dict order.
+    for (server_id, tool, bucket), calls in sorted(counts.items()):
         if server_id not in live:
             continue
+        seen = stored.setdefault((server_id, _naive(bucket)), set())
+        if tool not in seen:
+            if len(seen) >= MAX_TOOLS_PER_BUCKET:
+                tool = NOT_A_TOOL  # still counted, just not under its own name
+            else:
+                seen.add(tool)
         statement = sqlite_insert(UsageBucket).values(
             server_id=server_id, tool=tool, bucket=bucket, calls=calls, last_call_at=now
         )

@@ -302,6 +302,39 @@ def test_keys_being_written_still_count_against_the_ceiling(monkeypatch):
     assert pending[(SYNTHETIC_ID, "before", recorder.current_bucket())] == 1
 
 
+def test_stored_tool_names_are_capped_across_flushes():
+    """The recorder's ceiling resets every flush, so it bounds memory but not
+    storage: a client naming fresh tools each interval could persist rows
+    forever. The cap on the WRITE is what makes it durable — and the calls are
+    still counted, just folded under the plain-traffic sentinel."""
+    cap = repo.MAX_TOOLS_PER_BUCKET
+    # Two flushes, each well under the in-memory ceiling but together over the cap.
+    for flush in range(2):
+        for i in range(cap):
+            recorder.record(SYNTHETIC_ID, [f"f{flush}n{i}"])
+        recorder.flush_sync()
+
+    rows = _rows(SYNTHETIC_ID)
+    named = {tool: calls for tool, calls in rows.items() if tool}
+    assert len(named) == cap, "a later flush must not add rows past the cap"
+    # Nothing was lost: the refused names still counted as traffic.
+    assert sum(rows.values()) == 2 * cap
+    assert rows[""] == cap
+
+
+def test_a_tool_already_stored_keeps_counting_past_the_cap():
+    """The cap refuses NEW names, never an established one — a flood arriving
+    later must not cost a real tool its row."""
+    recorder.record(SYNTHETIC_ID, ["real"])
+    recorder.flush_sync()
+    for i in range(repo.MAX_TOOLS_PER_BUCKET + 10):
+        recorder.record(SYNTHETIC_ID, [f"invented{i}"])
+    recorder.record(SYNTHETIC_ID, ["real"])
+    recorder.flush_sync()
+
+    assert _rows(SYNTHETIC_ID)["real"] == 2
+
+
 def test_a_failed_write_keeps_the_counts_for_the_next_flush(monkeypatch):
     """The batch is detached before the write, so a transient database error must
     put it back rather than silently drop an interval of traffic."""
@@ -415,9 +448,9 @@ def _unstub_group_hub():
     previous test's fake inner app (and its mounted set) instead of the real
     hub's."""
     hub = app.state.groups
-    original = (hub.__dict__.get("app_for"), hub.__dict__.get("mounted_slugs"))
+    original = (hub.__dict__.get("app_for"), hub.__dict__.get("mounted_members"))
     yield
-    for attr, value in zip(("app_for", "mounted_slugs"), original):
+    for attr, value in zip(("app_for", "mounted_members"), original):
         if value is None:
             # Nothing shadowed the class method before this test — drop whatever
             # the test set so lookups fall back to the class again.
@@ -426,18 +459,21 @@ def _unstub_group_hub():
             setattr(hub, attr, value)
 
 
-def _stub_group(client: TestClient, name: str, inner, mounted: set[str] | None = None) -> None:
-    """Route a group to a fake inner app, and declare which member slugs the hub is
-    currently serving (``mounted``), which is what attribution keys off.
+def _stub_group(
+    client: TestClient, name: str, inner, mounted: dict[str, str] | None = None
+) -> None:
+    """Route a group to a fake inner app, and declare which members the hub is
+    currently serving (``mounted``: slug -> server id), which is what attribution
+    keys off.
 
     Patches the shared hub instance; `_unstub_group_hub` restores it after the
     test."""
     client.app.state.supervisor.on_converged = None
     hub = client.app.state.groups
-    prev_app, prev_mounted = hub.app_for, hub.mounted_slugs
+    prev_app, prev_members = hub.app_for, hub.mounted_members
     hub.app_for = lambda n, _prev=prev_app: inner if n == name else _prev(n)
-    hub.mounted_slugs = (
-        lambda n, _prev=prev_mounted: (mounted or set()) if n == name else _prev(n)
+    hub.mounted_members = (
+        lambda n, _prev=prev_members: dict(mounted or {}) if n == name else _prev(n)
     )
 
 
@@ -449,7 +485,7 @@ def test_group_call_counts_against_the_member_that_owns_the_tool():
         try:
             with Session(get_engine()) as session:
                 runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
-            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]})
+            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]: srv["id"]})
             payload = _call(f"{srv['slug']}_search")
             r = client.post("/g/team/mcp", json=payload, headers=LOOPBACK)
             assert r.status_code == 200, r.text
@@ -472,7 +508,7 @@ def test_group_trailing_slash_is_not_counted(subpath):
         try:
             with Session(get_engine()) as session:
                 runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
-            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]})
+            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]: srv["id"]})
             payload = _call(f"{srv['slug']}_search")
             client.post(f"/g/team/{subpath}", json=payload, headers=LOOPBACK)
             assert _rows(srv["id"]) == {}
@@ -505,7 +541,7 @@ def test_group_non_tool_traffic_is_not_charged_to_members():
         try:
             with Session(get_engine()) as session:
                 runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
-            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]})
+            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]: srv["id"]})
             client.post(
                 "/g/team/mcp",
                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
@@ -529,7 +565,7 @@ def test_group_call_to_an_unmounted_member_is_not_counted():
             with Session(get_engine()) as session:
                 runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
             # configured member, but the hub is serving nothing for it
-            _stub_group(client, "team", _echo_body_inner, mounted=set())
+            _stub_group(client, "team", _echo_body_inner, mounted={})
             client.post("/g/team/mcp", json=_call(f"{srv['slug']}_search"), headers=LOOPBACK)
             assert _rows(srv["id"]) == {}
         finally:
@@ -546,7 +582,7 @@ def test_group_traffic_off_the_mcp_endpoint_is_not_counted():
         try:
             with Session(get_engine()) as session:
                 runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
-            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]})
+            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]: srv["id"]})
             client.post(
                 "/g/team/not-mcp", json=_call(f"{srv['slug']}_search"), headers=LOOPBACK
             )
@@ -575,7 +611,7 @@ def test_group_members_are_in_flight_before_the_body_is_buffered():
         try:
             with Session(get_engine()) as session:
                 runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
-            _stub_group(client, "team", _slow_body_inner, mounted={srv["slug"]})
+            _stub_group(client, "team", _slow_body_inner, mounted={srv["slug"]: srv["id"]})
             supervisor = client.app.state.supervisor
             original = supervisor.request_started
             # Record the order: by the time the body is read for attribution, the
@@ -765,6 +801,31 @@ def test_instance_usage_includes_discovered_tools_never_called():
             assert rows["never_used"]["last_call_at"] is None
             row = next(r for r in body["servers"] if r["server_id"] == srv["id"])
             assert (row["tools_called"], row["tools_known"]) == (1, 2)
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_a_retired_tool_does_not_inflate_the_used_ratio():
+    """`tools_called/tools_known` is rendered as a ratio ("1/1 tools used"). If a
+    tool is renamed inside the window and BOTH names see traffic, counting the
+    historical one puts the numerator above the denominator — the dashboard would
+    render an impossible "2/1"."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-ratio", auth="none")
+        try:
+            with Session(get_engine()) as session:
+                repo.upsert_runtime(
+                    session, srv["id"], state="running", tools=[{"name": "after"}]
+                )
+            recorder.record(srv["id"], ["before"])  # the pre-rename name
+            recorder.record(srv["id"], ["after"])
+            recorder.flush_sync()
+            body = client.get("/api/usage?days=1", headers=LOOPBACK).json()
+            row = next(r for r in body["servers"] if r["server_id"] == srv["id"])
+            assert (row["tools_called"], row["tools_known"]) == (1, 1)
+            # ...and the retired name is still listed, so the traffic isn't hidden.
+            rows = {t["tool"]: t for t in body["tools"] if t["server_id"] == srv["id"]}
+            assert rows["before"]["calls"] == 1 and rows["before"]["known"] is False
         finally:
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 

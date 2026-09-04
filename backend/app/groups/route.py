@@ -37,14 +37,14 @@ from starlette.types import Receive, Scope, Send
 
 from app import usage
 from app.auth.middleware import enforce
-from app.db import get_engine, repo
+from app.db import get_engine
 from app.groups import registry
 from app.groups.hub import GroupHub, group_server
 from app.usage import attribution
 
 
 async def _record_group_usage(
-    request: Request, receive: Receive, mounted_slugs: set[str]
+    request: Request, receive: Receive, mounted: dict[str, str]
 ) -> Receive:
     """Count a tool called through the bundle against the MEMBER that owns it,
     and return the receive channel the inner app should read.
@@ -56,17 +56,22 @@ async def _record_group_usage(
     fans out to every member, and charging each one would invent traffic none of
     them individually received.
 
-    Attribution is resolved against the slugs the hub is CURRENTLY serving, not
+    Attribution is resolved against the members the hub is CURRENTLY serving, not
     the group's configured membership: a member that is stopped, has `mcp_http`
     off, or is excluded by the anti-downgrade rule is in the registry but has no
     provider in the bundle, so a call naming its namespace gets a tool-not-found —
     crediting it would let any caller inflate a server the request never reached.
 
+    `mounted` carries the server id with the slug, so this stays off the database:
+    resolving a namespace by loading every registered server would put O(servers)
+    of synchronous ORM work on the event loop for every group call, in the one
+    place the design keeps deliberately in-memory.
+
     Reading the body consumes the ASGI stream, so the buffered bytes are replayed
     to the inner app. A body of unknown length (chunked) or above the parse cap is
     left untouched — usage accounting never buffers a body it can't bound, and
     never changes what the group serves."""
-    if request.method != "POST" or not mounted_slugs:
+    if request.method != "POST" or not mounted:
         return receive
     raw_length = request.headers.get("content-length")
     try:
@@ -94,18 +99,10 @@ async def _record_group_usage(
             return {"type": "http.request", "body": body, "more_body": False}
         return await receive()
 
-    names = attribution.tools_from_body(body)
-    if names:
-        with Session(get_engine()) as session:
-            slugs = {
-                server.slug: server.id
-                for server in repo.list_servers(session)
-                if server.slug in mounted_slugs
-            }
-        for name in names:
-            hit = attribution.split_namespaced(name, slugs)
-            if hit is not None:
-                usage.record(slugs[hit[0]], [hit[1]])
+    for name in attribution.tools_from_body(body):
+        hit = attribution.split_namespaced(name, mounted)
+        if hit is not None:
+            usage.record(mounted[hit[0]], [hit[1]])
     return replay
 
 
@@ -197,7 +194,7 @@ class GroupDispatch:
             # the client then followed it with, so one tool call landed twice.
             if subpath == "mcp":
                 receive = await _record_group_usage(
-                    request, receive, self._hub.mounted_slugs(name)
+                    request, receive, self._hub.mounted_members(name)
                 )
             await inner(sub_scope, receive, send)
         finally:

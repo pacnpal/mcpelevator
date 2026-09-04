@@ -282,7 +282,13 @@ def instance_usage(session: Session, servers: Sequence[Server], *, days: int) ->
                 "tool_calls": calls,
                 "other_requests": other,
                 "last_call_at": _as_utc(last) if last is not None else None,
-                "tools_called": len(server_called),
+                # Counted against what the server exposes RIGHT NOW, so the pair
+                # reads as a ratio ("3/8 tools used"). A name that was called and
+                # has since been renamed, hidden, or dropped upstream stays in
+                # the per-tool listing above (marked "retired") but is not in
+                # `known` — counting it here would render "2/1 tools used" the
+                # moment both sides of a rename saw traffic in the window.
+                "tools_called": len(set(server_called) & set(server_known)),
                 "tools_known": len(server_known),
             }
         )
