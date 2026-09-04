@@ -125,6 +125,12 @@ export interface UsageRow {
 	/** Secondary identifier (a tool's server), shown next to the label. */
 	sublabel: string | null;
 	calls: number;
+	/** Traffic that wasn't a tool call (a server's `other_requests`); 0 for a tool
+	 * row. Kept separate from `calls` so "Used only" can hide a row nothing has
+	 * touched AT ALL without also hiding a server whose clients connect but never
+	 * invoke anything — which the summary counts as active, and which is one of
+	 * the states this dashboard exists to surface. */
+	other: number;
 	/** ISO timestamp of the last call, or null when nothing ever called it. */
 	lastCall: string | null;
 	/** Where clicking the row goes, when it has a destination. */
@@ -161,6 +167,21 @@ export const DEFAULT_VIEW: UsageView = {
 	hideUnused: false
 };
 
+/** A server row's secondary line: how much of its catalogue has been used, and —
+ * when it has connections but no tool calls — that it is being reached at all.
+ * Without the second half the breakdown offers no way to tell WHICH server
+ * produced the non-tool traffic the summary counts. */
+function serverMeta(server: InstanceUsage['servers'][number]): string | null {
+	const parts: string[] = [];
+	if (server.tools_known > 0) {
+		parts.push(`${server.tools_called}/${server.tools_known} tools used`);
+	}
+	if (server.tool_calls === 0 && server.other_requests > 0) {
+		parts.push(`${server.other_requests} other request${server.other_requests === 1 ? '' : 's'}`);
+	}
+	return parts.length ? parts.join(' · ') : null;
+}
+
 /** Server rows: every visible server, including the ones nothing touched. */
 export function serverRows(usage: InstanceUsage): UsageRow[] {
 	return usage.servers.map((server) => ({
@@ -168,15 +189,13 @@ export function serverRows(usage: InstanceUsage): UsageRow[] {
 		label: server.name,
 		sublabel: server.slug,
 		calls: server.tool_calls,
+		other: server.other_requests,
 		lastCall: server.last_call_at,
 		href: `/server/${encodeURIComponent(server.server_id)}`,
 		// tools_known is 0 while a server isn't running (nothing discovered), which
 		// is worth saying out loud rather than rendering a bare "0 of 0".
 		badge: server.tools_known === 0 ? 'no tools listed' : null,
-		meta:
-			server.tools_known > 0
-				? `${server.tools_called}/${server.tools_known} tools used`
-				: null
+		meta: serverMeta(server)
 	}));
 }
 
@@ -203,6 +222,7 @@ export function toolRows(usage: InstanceUsage): UsageRow[] {
 		label: tool.tool,
 		sublabel: tool.slug,
 		calls: tool.calls,
+		other: 0,
 		lastCall: tool.last_call_at,
 		href: `/server/${encodeURIComponent(tool.server_id)}`,
 		badge: toolBadge(tool.tool, tool.known),
@@ -245,7 +265,9 @@ const COMPARATORS: Record<UsageSort, (a: UsageRow, b: UsageRow) => number> = {
 export function applyView(rows: UsageRow[], view: UsageView): UsageRow[] {
 	const needle = view.search.trim().toLowerCase();
 	const filtered = rows.filter(
-		(row) => (!view.hideUnused || row.calls > 0) && (!needle || matches(row, needle))
+		(row) =>
+			(!view.hideUnused || row.calls > 0 || row.other > 0) &&
+			(!needle || matches(row, needle))
 	);
 	return [...filtered].sort(COMPARATORS[view.sort]);
 }

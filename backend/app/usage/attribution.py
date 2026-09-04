@@ -25,20 +25,18 @@ MAX_PARSE_BYTES = 1 << 20  # 1 MiB
 # A real MCP tool name is a function identifier; anything longer is not one, and
 # storing it would let a caller choose the size of a stored row.
 MAX_TOOL_NAME = 128
-# What a body may CARRY, which is not the same bound. A group call names its tool
-# qualified by the member's slug (`<slug>_<tool>`), and slugs have no length limit
-# of their own, so a qualified name can exceed MAX_TOOL_NAME while the tool part
-# that actually gets stored is well inside it. Bounding the parse at MAX_TOOL_NAME
-# dropped those calls outright — the hub advertised and served a tool that usage
-# then recorded nothing for. `recorder.record` applies the real cap to the final
-# stored name, after `split_namespaced` has taken the prefix off.
-MAX_PARSED_NAME = MAX_TOOL_NAME * 2
+# There is deliberately NO length bound at parse time. A group call names its tool
+# qualified by the member's slug (`<slug>_<tool>`) and slugs have no length limit,
+# so ANY fixed cap here eventually drops a call the hub really serves — a longer
+# cap just moves the slug length at which it happens. What bounds this is already
+# in place and does not depend on guessing: the body is capped by MAX_PARSE_BYTES,
+# the element count by MAX_BATCH_NAMES, and the STORED name by `recorder.record`,
+# which applies MAX_TOOL_NAME after `split_namespaced` has taken the prefix off.
+
 # A batch is counted per element, so cap how many elements one body may contribute.
 MAX_BATCH_NAMES = 64
 
 _REST_PREFIX = "rest/"
-# The REST surface's own non-tool routes (bridge.host.build_rest_routes).
-_REST_NON_TOOL = {"openapi.json"}
 
 
 def tools_from_body(body: bytes) -> list[str]:
@@ -78,7 +76,7 @@ def tools_from_body(body: bytes) -> list[str]:
             continue
         params = entry.get("params")
         name = params.get("name") if isinstance(params, dict) else None
-        if isinstance(name, str) and 0 < len(name) <= MAX_PARSED_NAME:
+        if isinstance(name, str) and name:
             names.append(name)
     return names
 
@@ -121,9 +119,9 @@ def proxy_tools(method: str, path: str, body: bytes, *, rest_enabled: bool = Tru
         return tools_from_body(body)
     if rest_enabled and normalized.startswith(_REST_PREFIX):
         tool = normalized[len(_REST_PREFIX):]
-        # No `_REST_NON_TOOL` exclusion here: the generated document is served on
+        # `openapi.json` is NOT excluded here. The generated document is served on
         # `GET /rest/openapi.json` and this branch is POST-only, so a POST to that
-        # path reaches the dynamic `/rest/{tool}` route like any other. Excluding
+        # path reaches the dynamic `/rest/{tool}` route like any other; excluding
         # the name would silently mis-file a server that genuinely exposes a tool
         # called `openapi.json` as plain traffic.
         if tool and "/" not in tool:

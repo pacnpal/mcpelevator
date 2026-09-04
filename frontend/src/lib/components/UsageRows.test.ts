@@ -20,6 +20,7 @@ function row(overrides: Partial<UsageRow> = {}): UsageRow {
 		label: 'tool',
 		sublabel: null,
 		calls: 0,
+		other: 0,
 		lastCall: null,
 		href: null,
 		badge: null,

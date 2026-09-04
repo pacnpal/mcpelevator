@@ -225,6 +225,17 @@ def bump_usage(session: Session, counts: dict[tuple[str, str, datetime], int]) -
       by the server itself. Without this, a caller could fill the cap early in an
       hour and every genuine tool first called later that hour would be folded —
       turning a padding attack into a corruption one.
+
+      "Currently exposes" is the discovered catalogue, which the supervisor
+      CLEARS when a server stops or fails. A batch still in memory when that
+      happens therefore judges its genuine names as unknown, and any of them not
+      already stored for that hour is pooled once the hour holds
+      :data:`MAX_UNKNOWN_TOOLS_PER_BUCKET` of them. The alternative — skipping
+      the cap whenever the catalogue is empty — is worse: an empty catalogue also
+      describes a RUNNING server whose first probe hasn't landed, and that is
+      exactly the window a flood would exploit. Names already stored that hour
+      are exempt either way, so this only reaches a tool whose first call of the
+      hour lands in that same batch.
     * Overflow pools into :data:`~app.db.models.OVERFLOW_TOOL`, not
       ``NOT_A_TOOL``. These are still tool calls; folding them into the non-tool
       sentinel would move real calls out of ``tool_calls`` and into

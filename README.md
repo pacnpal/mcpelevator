@@ -275,9 +275,11 @@ Both show, over a **24h / 7d / 30d** window (the dashboard adds 90d):
   A row named `(other tools)`, badged *unrecognised*, can appear on a server
   reachable without auth: tool names come from the caller, so the number of
   unrecognised ones kept per hour is capped and the rest pool into that row. The
-  calls are still counted as tool calls — the tools your server actually exposes
-  are never capped or pooled, and the row is distinct from a *retired* one, which
-  means a name the server used to expose and no longer does.
+  calls are still counted as tool calls — the tools a running server exposes are
+  never capped or pooled, and the row is distinct from a *retired* one, which
+  means a name the server used to expose and no longer does. (The exemption reads
+  the discovered tool list, which is cleared when a server stops, so counts still
+  in memory at that moment are judged as unrecognised.)
 
 Counting happens wherever a call is actually served, so all three exposed surfaces
 land in the same counters: `/s/<slug>/mcp`, the REST mirror `POST /s/<slug>/rest/<tool>`,

@@ -175,8 +175,13 @@ def test_absurd_tool_names_are_bounded_at_the_row():
     recorder.record(SYNTHETIC_ID, [long_name])
     assert _rows(SYNTHETIC_ID) == {OVERFLOW_TOOL: 1}
 
-    absurd = "x" * (attribution.MAX_PARSED_NAME + 1)
-    assert attribution.tools_from_body(json.dumps(_call(absurd)).encode()) == []
+    # No fixed parse cap: any would eventually drop a call the group hub serves,
+    # since slugs have no length limit. The body size and element count bound the
+    # parse; `record` bounds the row.
+    huge = "x" * 10_000
+    assert attribution.tools_from_body(json.dumps(_call(huge)).encode()) == [huge]
+    recorder.record(SYNTHETIC_ID, [huge])
+    assert _rows(SYNTHETIC_ID) == {OVERFLOW_TOOL: 2}
 
 
 def test_a_namespaced_group_name_survives_the_parse():

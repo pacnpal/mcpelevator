@@ -78,6 +78,17 @@
 		if (next !== days) days = next;
 	}
 
+	// The backend CLAMPS the window to `usage_retention_days` — asking for 90d on a
+	// 30-day retention returns 30. Without saying so, the page keeps 90d highlighted
+	// over a chart holding a third of that, presenting far more history than exists.
+	const effectiveDays = $derived.by(() => {
+		if (!usage) return null;
+		const since = new Date(usage.since);
+		if (Number.isNaN(since.getTime())) return null;
+		return Math.max(1, Math.round((Date.now() - since.getTime()) / 86_400_000));
+	});
+	const clamped = $derived(effectiveDays !== null && effectiveDays < days);
+
 	const allRows = $derived(usage ? (tab === 'servers' ? serverRows(usage) : toolRows(usage)) : []);
 	const rows = $derived(applyView(allRows, view));
 	const toolsKnown = $derived(usage?.servers.reduce((n, s) => n + s.tools_known, 0) ?? 0);
@@ -194,6 +205,13 @@
 						</span>
 					{/if}
 					<span>Last call {formatLastCall(usage.last_call_at)}</span>
+					{#if clamped}
+						<span
+							title="Usage retention is shorter than the window you picked, so there is no older data to show. Change it in Settings."
+						>
+							· showing {effectiveDays}d — limited by retention
+						</span>
+					{/if}
 				</div>
 				<div class="flex items-center gap-1" role="group" aria-label="Chart style">
 					{#each CHART_MODES as option (option.value)}
