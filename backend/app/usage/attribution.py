@@ -79,11 +79,19 @@ def proxy_tools(method: str, path: str, body: bytes) -> list[str]:
     lenient match counts that redirect, then counts the followed request too, so
     one call lands twice; a client that ignores the redirect gets counted for a
     request nothing served. Neither variant is a tool call, and both still count
-    as plain traffic like any other non-tool request."""
+    as plain traffic like any other non-tool request.
+
+    Both surfaces require POST, because only POST dispatches a call: on the MCP
+    endpoint a GET opens the event stream and a DELETE ends the session, and the
+    remaining methods are refused outright. A `tools/call`-shaped body sent with
+    any of them invokes nothing, so attributing it would let a caller inflate a
+    real tool's counter without ever running it."""
     normalized = path.lstrip("/")
+    if method.upper() != "POST":
+        return []
     if normalized == "mcp":
         return tools_from_body(body)
-    if method.upper() == "POST" and normalized.startswith(_REST_PREFIX):
+    if normalized.startswith(_REST_PREFIX):
         tool = normalized[len(_REST_PREFIX):]
         # Bounded like a JSON-RPC name: this segment is client-chosen too, so
         # without the cap a caller picks the size of a stored row.

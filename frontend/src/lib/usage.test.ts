@@ -246,9 +246,34 @@ describe('chart data', () => {
 			new Date(at).toLocaleTimeString(undefined, { hour: 'numeric' })
 		);
 		expect(tickLabel(at, false)).toBe(
-			new Date(at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+			new Date(at).toLocaleDateString(undefined, {
+				month: 'short',
+				day: 'numeric',
+				timeZone: 'UTC'
+			})
 		);
 		expect(tickLabel('not-a-date', true)).toBe('not-a-date');
+	});
+
+	it('names a daily bucket by its UTC day, not the reader’s', () => {
+		// A daily bucket is anchored at UTC midnight and holds that whole UTC day.
+		// Rendered locally, every reader west of UTC would see the day before while
+		// looking at the following day's counts.
+		const utcMidnight = '2026-09-01T00:00:00Z';
+		expect(tickLabel(utcMidnight, false)).toBe(
+			new Date(utcMidnight).toLocaleDateString(undefined, {
+				month: 'short',
+				day: 'numeric',
+				timeZone: 'UTC'
+			})
+		);
+		// Stated without pinning the runner's zone: formatting the same instant in
+		// UTC must name the 1st, whatever the local calendar day happens to be.
+		expect(
+			new Intl.DateTimeFormat('en-US', { day: 'numeric', timeZone: 'UTC' }).format(
+				new Date(utcMidnight)
+			)
+		).toBe('1');
 	});
 });
 

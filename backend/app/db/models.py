@@ -217,7 +217,11 @@ class UsageBucket(SQLModel, table=True):
 
     server_id: str = Field(primary_key=True, foreign_key="server.id")
     tool: str = Field(primary_key=True)
-    bucket: datetime = Field(primary_key=True)
+    # Indexed on its own as well as being the LAST primary-key column: retention
+    # prunes with `DELETE ... WHERE bucket < cutoff`, a global predicate SQLite
+    # cannot seek through a trailing key column, so without this every hourly
+    # prune full-scans the table inside a write transaction.
+    bucket: datetime = Field(primary_key=True, index=True)
     calls: int = 0
     last_call_at: datetime = Field(default_factory=utcnow)
 

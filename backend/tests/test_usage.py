@@ -197,6 +197,17 @@ def test_a_trailing_slash_is_a_redirect_not_a_call(path):
     assert attribution.proxy_tools("POST", path, body) == []
 
 
+@pytest.mark.parametrize("method", ["GET", "DELETE", "PUT", "PATCH", "OPTIONS"])
+def test_only_a_post_invokes_an_mcp_tool(method):
+    """A GET opens the event stream and a DELETE ends the session; the rest are
+    refused. None of them dispatch a JSON-RPC call, so a `tools/call`-shaped body
+    sent with one invokes nothing — counting it would let a caller inflate a real
+    tool's counter without ever running it."""
+    body = json.dumps(_call("search")).encode()
+    assert attribution.proxy_tools(method, "mcp", body) == []
+    assert attribution.proxy_tools("POST", "mcp", body) == ["search"]
+
+
 def test_a_rest_tool_name_is_bounded_like_a_json_rpc_one():
     """The path segment is client-chosen too, so without the cap a caller picks
     the size of a stored row."""
@@ -333,6 +344,36 @@ def test_a_tool_already_stored_keeps_counting_past_the_cap():
     recorder.flush_sync()
 
     assert _rows(SYNTHETIC_ID)["real"] == 2
+
+
+def test_overlapping_flushes_do_not_release_each_others_reservations():
+    """The periodic flush and a read endpoint's explicit flush can overlap, and a
+    key recorded between their detaches is reserved by BOTH.
+
+    Driven through the internals in the exact order that interleaving produces,
+    because a wall-clock race is too narrow to reproduce reliably. With one entry
+    per key instead of a reference count, the first flush to settle released the
+    second's reservation, and the second's failed write then dropped its counts
+    as if `forget` had cancelled them."""
+    key = (SYNTHETIC_ID, "search", recorder.current_bucket())
+
+    recorder.record(SYNTHETIC_ID, ["search"])
+    first = recorder._take()  # flush A detaches, reserving the key
+    recorder.record(SYNTHETIC_ID, ["search"])  # a call lands between the detaches
+    second = recorder._take()  # flush B detaches the SAME key
+    assert first == {key: 1} and second == {key: 1}
+
+    # A's write succeeds and settles. B still holds a reservation on the key.
+    with recorder._lock:
+        recorder._settle(first)
+    with recorder._lock:
+        assert recorder._inflight[key] == 1, "A's settle released B's reservation"
+
+    # B's write fails; its count must come back rather than being dropped.
+    recorder._restore(second)
+    with recorder._lock:
+        assert recorder._pending[key] == 1
+        assert key not in recorder._inflight
 
 
 def test_a_failed_write_keeps_the_counts_for_the_next_flush(monkeypatch):

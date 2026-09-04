@@ -56,6 +56,9 @@
 
 	// The tooltip header names the bucket the reader is hovering. Its default is a
 	// bare date, which says nothing useful about WHICH hour on an hourly window.
+	// Daily buckets are labelled in UTC for the same reason the axis ticks are:
+	// they span a UTC day, so a local rendering would name the wrong one west of
+	// UTC. Hourly buckets stay local — that's the reader's own timeline.
 	const bucketLabel = $derived((value: Date | string | number) => {
 		const at = value instanceof Date ? value : new Date(value);
 		if (Number.isNaN(at.getTime())) return String(value);
@@ -66,7 +69,12 @@
 					hour: 'numeric',
 					minute: '2-digit'
 				})
-			: at.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+			: at.toLocaleDateString(undefined, {
+					month: 'short',
+					day: 'numeric',
+					year: 'numeric',
+					timeZone: 'UTC'
+				});
 	});
 
 	// Whole numbers only: half a call doesn't exist, and the default tick

@@ -59,13 +59,19 @@ export function facetPeak(bands: UsageBand[]): number {
 	return Math.max(1, ...bands.flatMap((band) => band.points));
 }
 
-/** Axis tick text: clock time for hourly buckets, a date for daily ones. */
+/** Axis tick text: clock time for hourly buckets, a date for daily ones.
+ *
+ * A DAILY bucket is anchored at UTC midnight and spans that whole UTC day, so it
+ * is labelled in UTC. Rendered locally, every bucket west of UTC would show the
+ * previous calendar day while holding the following day's counts. An HOURLY
+ * bucket is a point on the reader's own timeline, so it stays local — 10:00Z
+ * genuinely is 6 AM to a reader at UTC-4. */
 export function tickLabel(value: Date | string | number, hourly: boolean): string {
 	const at = value instanceof Date ? value : new Date(value);
 	if (Number.isNaN(at.getTime())) return String(value);
 	return hourly
 		? at.toLocaleTimeString(undefined, { hour: 'numeric' })
-		: at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+		: at.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
 /** Weekday rows of the activity grid, Monday first — a work-week reads better

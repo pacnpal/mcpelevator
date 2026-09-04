@@ -18,7 +18,7 @@ import asyncio
 import logging
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from typing import Iterable
 
@@ -49,7 +49,14 @@ _pending: defaultdict[tuple[str, str, datetime], int] = defaultdict(int)
 # MAX_PENDING_KEYS: a failed write merges them back, so without reserving them
 # the map could hold up to twice the ceiling — the one case where the guard that
 # exists to bound memory stops bounding it.
-_inflight: dict[tuple[str, str, datetime], int] = {}
+#
+# REFERENCE-COUNTED, not a plain set. Two flushes can be in flight at once — the
+# periodic task and a read endpoint's explicit flush — and a key recorded between
+# their detaches is reserved by BOTH. With one entry per key the first to settle
+# released the other's reservation, and that flush's failed write then saw a
+# missing reservation and dropped the counts as if `forget` had cancelled them.
+# Counting the holders makes the release correct however the two interleave.
+_inflight: Counter[tuple[str, str, datetime]] = Counter()
 _lock = threading.Lock()
 _last_prune: float | None = None
 
@@ -111,16 +118,24 @@ def _take() -> dict[tuple[str, str, datetime], int]:
         _pending.clear()
         # Reserved, not released: these keys stay counted against the ceiling
         # until the write settles, so requests arriving mid-write can't fill the
-        # map to the cap on top of a batch that may still come back.
-        _inflight.update(batch)
+        # map to the cap on top of a batch that may still come back. One
+        # reference per holder — see `_inflight`.
+        for key in batch:
+            _inflight[key] += 1
     return batch
 
 
 def _settle(batch: dict[tuple[str, str, datetime], int]) -> None:
-    """Release a batch's reservation once its write has settled, either way.
-    Call under `_lock`, or via `_restore` which takes it."""
+    """Drop THIS batch's reference to each of its keys, once its write has
+    settled either way. A key another in-flight flush still holds keeps its
+    reservation. Call under `_lock`, or via `_restore` which takes it."""
     for key in batch:
-        _inflight.pop(key, None)
+        held = _inflight.get(key, 0)
+        if held > 1:
+            _inflight[key] = held - 1
+        elif held:
+            del _inflight[key]
+        # held == 0: `forget` cancelled this key mid-write — nothing to release.
 
 
 def _restore(batch: dict[tuple[str, str, datetime], int]) -> None:
@@ -179,7 +194,10 @@ def flush_sync() -> int:
     """Fold pending counters into SQLite and apply retention; returns the number
     of (server, tool, hour) rows written. Synchronous by design — the caller
     decides the thread (the background task hands it to a worker so the event
-    loop never blocks on the write); tests call it directly."""
+    loop never blocks on the write); tests call it directly.
+
+    Safe to run concurrently with another flush: each batch holds its own
+    reference to the keys it detached (see `_inflight`)."""
     batch = _take()
     with Session(get_engine()) as session:
         try:
@@ -190,7 +208,7 @@ def flush_sync() -> int:
             # is not restored: those counts are already stored.
             _restore(batch)
             raise
-        # Written and committed — the reservation has done its job.
+        # Written and committed — this batch's reservation has done its job.
         with _lock:
             _settle(batch)
         _prune_if_due(session)
