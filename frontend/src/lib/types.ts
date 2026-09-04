@@ -91,6 +91,40 @@ export interface ToolCallResult {
 	duration_ms: number;
 }
 
+/** One tool's calls inside a usage window (GET /api/servers/{id}/usage). */
+export interface ToolUsage {
+	tool: string;
+	calls: number;
+	/** When the last of those calls was flushed. Counts are batched, so this can
+	 * differ from the exact call time by up to one flush interval. */
+	last_call_at: string;
+}
+
+/** One bucket of the usage series. Present even when quiet, so a chart renders the
+ * whole window without filling gaps itself. */
+export interface UsagePoint {
+	bucket: string;
+	/** Tool invocations in this bucket. */
+	calls: number;
+	/** Data-plane traffic that wasn't a tool call (initialize, tools/list, SSE). */
+	other: number;
+}
+
+/** Usage for one server over a trailing window (GET /api/servers/{id}/usage).
+ * Counts only — arguments and results are never recorded. */
+export interface ServerUsage {
+	server_id: string;
+	since: string;
+	/** Width of each series bucket: 3600 (hourly) or 86400 (daily). */
+	bucket_seconds: number;
+	tool_calls: number;
+	other_requests: number;
+	last_call_at: string | null;
+	/** Busiest first; tools nothing has called are absent (not zero rows). */
+	tools: ToolUsage[];
+	series: UsagePoint[];
+}
+
 /** Upstream-OAuth state for a remote server (GET /api/servers/{id}). */
 export interface OAuthStatus {
 	/** Is this server configured to authenticate upstream via OAuth? */
@@ -388,6 +422,9 @@ export interface SettingsInfo {
 	oauth_scopes: string[];
 	/** Default idle quiescence in seconds for servers set to inherit (0 = off). */
 	idle_timeout_s: number;
+	/** How long per-server / per-tool usage counters are kept, in days (0 = forever).
+	 * A usage view never reaches further back than this. */
+	usage_retention_days: number;
 	/** Upstream-OAuth client identity: probed CIMD with DCR fallback, or an explicit pick. */
 	upstream_oauth_client_mode: UpstreamOauthClientMode;
 }

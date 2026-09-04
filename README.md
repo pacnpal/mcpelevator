@@ -246,6 +246,38 @@ the API: `PATCH /api/servers/<id>` with
 `{"tool_overrides": {"do_thing": {"name": "run_report", "description": "Runs the report."}}}`
 (send `{}` to restore every tool's upstream labels).
 
+### Usage stats (per server, per tool)
+
+Every server's detail page has a **Usage** panel answering the question a rename is
+usually made against: *has anything actually called this tool?* It shows, over a
+**24h / 7d / 30d** window:
+
+- **Tool calls** and **other requests** — traffic that wasn't a tool call
+  (`initialize`, `tools/list`, the SSE stream). The split is the useful part: a
+  server with other requests but zero tool calls means clients are connecting and
+  the model is choosing not to call anything, which is exactly when a better tool
+  name or description is worth trying.
+- **A bar chart** of the window (hourly buckets for 24h, daily beyond that).
+- **A per-tool table** with call counts and when each was last called. A tool
+  nothing has ever called stays in the table at `0 / never` rather than vanishing.
+
+Counting happens wherever a call is actually served, so all three exposed surfaces
+land in the same counters: `/s/<slug>/mcp`, the REST mirror `POST /s/<slug>/rest/<tool>`,
+and a group call through `/g/<name>/mcp` (attributed to the member that owns the
+tool, not to the group). Traffic that never reached a bridge — an unknown slug, a
+rejected token, a server that isn't running — is never counted, and neither is the
+dashboard playground: the panel reports what *clients* did, not what you did while
+testing.
+
+Only counts are stored: a server id, a tool name, an hour, and a number. Tool
+arguments and results are never recorded. Counters accumulate in memory and are
+written every few seconds, so a hard crash can lose the last few seconds of counts.
+
+Retention is **Settings → Security → Usage retention** (`usage_retention_days`,
+default `30`, `0` keeps them forever); older buckets are pruned automatically, and a
+window never reaches further back than the retention. Over the API:
+`GET /api/servers/<id>/usage?days=7`.
+
 ### Per-server REST/OpenAPI surface
 
 Turn on **REST / OpenAPI** in a server's Exposure section and the same supervised
@@ -464,7 +496,7 @@ When control-plane auth is enforced, the SPA shows a login screen. The admin tok
 ## Project layout
 
 ```
-backend/app/   FastAPI control plane, supervisor, bridge host, runners, auth, proxy, catalog
+backend/app/   FastAPI control plane, supervisor, bridge host, runners, auth, proxy, catalog, usage
 frontend/      SvelteKit (Svelte 5) SPA, adapter-static
 Dockerfile     multi-stage: build SPA → python+node+uv runtime
 ```

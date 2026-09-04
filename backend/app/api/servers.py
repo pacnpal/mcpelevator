@@ -14,7 +14,7 @@ import time
 from contextlib import nullcontext
 from datetime import timezone
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastmcp import Client
 from sqlmodel import Session
@@ -30,13 +30,14 @@ from app.api.schemas import (
     ServerDetail,
     ServerSummary,
     ServerUpdate,
+    ServerUsage,
     StartupStatus,
     ToolCallRequest,
     ToolCallResult,
     Transports,
     Urls,
 )
-from app import mcpb
+from app import mcpb, usage
 from app.api.util import base_url, oauth_public_base, resync_groups
 from app.auth import oauth_flow, policy
 from app.auth import principal as principal_mod
@@ -349,6 +350,23 @@ async def get_server(
 ):
     server = _visible(principal, session, server_id)
     return _detail(server, request.app.state.supervisor, session, base_url(request))
+
+
+@router.get("/servers/{server_id}/usage", response_model=ServerUsage)
+async def get_server_usage(
+    server_id: str,
+    days: int = Query(default=7, ge=1, le=usage.MAX_DAYS),
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    """Call counters for one server: totals, per tool, and a series to chart.
+
+    Pending counts are flushed first so a call made seconds ago is already
+    visible — a stats page that lags its own traffic by a flush interval reads
+    as broken, and this is a rare, operator-driven read."""
+    server = _visible(principal, session, server_id)
+    await usage.flush()
+    return ServerUsage(server_id=server.id, **usage.server_usage(session, server.id, days=days))
 
 
 @router.patch("/servers/{server_id}", response_model=ServerSummary)

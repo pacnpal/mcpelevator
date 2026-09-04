@@ -14,6 +14,10 @@ Deterministic behavior:
 - **Known but empty group** (no running members) -> the hub still builds a valid
   (tool-less) bundle, so ``initialize`` succeeds and ``tools/list`` is ``[]``.
 
+A tool called through a bundle is counted against the member that owns it, so
+group traffic shows up in the same per-server / per-tool usage as a direct ``/s``
+call (see :func:`_record_group_usage`).
+
 Scope surgery: a request to ``/g/<name>/mcp`` arrives here behind the ``/g``
 mount. ``root_path`` includes both an optional outer ``app_root_path`` and ``/g``,
 while ``path`` may omit that app prefix when a proxy already stripped it. Deriving
@@ -31,10 +35,69 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import get_route_path
 from starlette.types import Receive, Scope, Send
 
+from app import usage
 from app.auth.middleware import enforce
-from app.db import get_engine
+from app.db import get_engine, repo
 from app.groups import registry
 from app.groups.hub import GroupHub, group_server
+from app.usage import attribution
+
+
+async def _record_group_usage(
+    request: Request, receive: Receive, member_ids: list[str]
+) -> Receive:
+    """Count a tool called through the bundle against the MEMBER that owns it,
+    and return the receive channel the inner app should read.
+
+    A tool reached through a group is the same tool call a direct ``/s`` request
+    would make, so it belongs in the same counters — the hub namespaces tools by
+    slug (``<slug>_<tool>``), which is exactly the attribution this needs. Non-tool
+    group traffic (``initialize``, ``tools/list``) is deliberately NOT counted: it
+    fans out to every member, and charging each one would invent traffic none of
+    them individually received.
+
+    Reading the body consumes the ASGI stream, so the buffered bytes are replayed
+    to the inner app. A body of unknown length (chunked) or above the parse cap is
+    left untouched — usage accounting never buffers a body it can't bound, and
+    never changes what the group serves."""
+    if request.method != "POST" or not member_ids:
+        return receive
+    raw_length = request.headers.get("content-length")
+    try:
+        length = int(raw_length) if raw_length is not None else -1
+    except ValueError:
+        length = -1
+    if length < 0 or length > attribution.MAX_PARSE_BYTES:
+        return receive
+
+    try:
+        body = await request.body()
+    except Exception:
+        # The client went away (or the body couldn't be read). Nothing to count —
+        # hand back the real channel and let the inner app see the disconnect it
+        # would have seen without us.
+        return receive
+    replayed = False
+
+    async def replay():
+        # One buffered http.request, then back to the real channel so the inner
+        # app still sees http.disconnect if the client goes away mid-call.
+        nonlocal replayed
+        if not replayed:
+            replayed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await receive()
+
+    names = attribution.tools_from_body(body)
+    if names:
+        members = set(member_ids)
+        with Session(get_engine()) as session:
+            slugs = {s.slug: s.id for s in repo.list_servers(session) if s.id in members}
+        for name in names:
+            hit = attribution.split_namespaced(name, slugs)
+            if hit is not None:
+                usage.record(slugs[hit[0]], [hit[1]])
+    return replay
 
 
 class GroupDispatch:
@@ -90,6 +153,10 @@ class GroupDispatch:
         if inner is None:
             await Response("group not ready", status_code=503)(scope, receive, send)
             return
+
+        # Authenticated and about to be served: count the tool calls it carries
+        # (see _record_group_usage), which may consume + replay the body.
+        receive = await _record_group_usage(request, receive, member_ids)
 
         # Delegate to the group's inner app. Extend the routing root by the group name
         # so the inner app (built with path="/mcp") resolves the remainder to "/mcp".

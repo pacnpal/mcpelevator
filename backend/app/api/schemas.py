@@ -131,6 +131,49 @@ class ToolCallResult(BaseModel):
     duration_ms: int = 0
 
 
+# ---- Usage (per-server / per-tool call counters) -----------------------------
+
+
+class ToolUsage(BaseModel):
+    """One tool's calls inside the requested window."""
+
+    tool: str
+    calls: int
+    # When the last of those calls was FLUSHED. The recorder batches, so this can
+    # differ from the exact call time by up to one flush interval.
+    last_call_at: datetime
+
+
+class UsagePoint(BaseModel):
+    """One bucket of the series. Present even when quiet, so a chart can render
+    the window without filling gaps itself."""
+
+    bucket: datetime
+    # Tool invocations in this bucket.
+    calls: int = 0
+    # Data-plane traffic that wasn't a tool call (initialize, tools/list, the SSE
+    # GET). Separated so "connected but never called a tool" is legible.
+    other: int = 0
+
+
+class ServerUsage(BaseModel):
+    """Usage for one server over a trailing window.
+
+    Counts only — never arguments or results. The window reaches back no further
+    than the ``usage_retention_days`` setting has kept buckets."""
+
+    server_id: str
+    since: datetime
+    # Width of each series bucket: 3600 (hourly) for short windows, 86400 (daily)
+    # for longer ones. The client renders whatever it is handed.
+    bucket_seconds: int
+    tool_calls: int
+    other_requests: int
+    last_call_at: Optional[datetime] = None
+    tools: list[ToolUsage] = []
+    series: list[UsagePoint] = []
+
+
 class ServerDetail(ServerSummary):
     command: str
     args: list[str] = []
@@ -326,6 +369,8 @@ class SettingsInfo(BaseModel):
     oauth_scopes: list[str] = []
     # Default idle quiescence for servers whose idle_timeout_s is unset (0 = off).
     idle_timeout_s: int = 0
+    # How long per-server / per-tool usage counters are kept (0 = forever).
+    usage_retention_days: int = 30
     upstream_oauth_client_mode: UpstreamOauthClientMode = "auto"
 
 
@@ -349,6 +394,9 @@ class SettingsUpdate(BaseModel):
     # Global default for idle quiescence in seconds (0 disables it). StrictInt so
     # a JSON `true` can't lax-coerce to a 1-second shutdown.
     idle_timeout_s: Optional[StrictInt] = None
+    # Usage-counter retention in days (0 keeps them forever). StrictInt for the same
+    # reason as idle_timeout_s — a JSON `true` must not become a 1-day retention.
+    usage_retention_days: Optional[StrictInt] = None
     upstream_oauth_client_mode: Optional[UpstreamOauthClientMode] = None
 
 

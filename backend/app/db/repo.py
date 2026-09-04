@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import update
+from sqlalchemy import delete, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session, select
 
-from app.db.models import Server, ServerRuntime, Setting, Token, User, utcnow
+from app.db.models import Server, ServerRuntime, Setting, Token, UsageBucket, User, utcnow
 
 # --------------------------------------------------------------------------- #
 # servers (desired state)
@@ -86,6 +88,10 @@ def delete_server(session: Session, server_id: str) -> bool:
     runtime = session.get(ServerRuntime, server_id)
     if runtime is not None:
         session.delete(runtime)
+    # Usage rows carry no cascade of their own (SQLite FKs are off by default),
+    # so drop them with their server — a deleted server's counters must not
+    # outlive it as unreachable rows.
+    session.execute(delete(UsageBucket).where(UsageBucket.server_id == server_id))
     session.delete(server)
     session.commit()
     return True
@@ -130,6 +136,55 @@ def reset_all_runtime(session: Session) -> None:
         )
     )
     session.commit()
+
+
+# --------------------------------------------------------------------------- #
+# usage counters (data-plane traffic, pre-aggregated per server/tool/hour)
+# --------------------------------------------------------------------------- #
+
+
+def bump_usage(session: Session, counts: dict[tuple[str, str, datetime], int]) -> None:
+    """Fold a batch of counted calls into the hourly buckets, in ONE transaction.
+
+    The recorder accumulates in memory and hands the whole flush here, so a busy
+    proxy costs one short write per flush interval rather than a write per
+    request. Upsert (not read-modify-write) so two flushes — or a flush racing
+    the retention prune — can't lose an increment."""
+    if not counts:
+        return
+    now = utcnow()
+    for (server_id, tool, bucket), calls in counts.items():
+        statement = sqlite_insert(UsageBucket).values(
+            server_id=server_id, tool=tool, bucket=bucket, calls=calls, last_call_at=now
+        )
+        session.execute(
+            statement.on_conflict_do_update(
+                index_elements=["server_id", "tool", "bucket"],
+                set_={
+                    "calls": UsageBucket.__table__.c.calls + statement.excluded.calls,
+                    "last_call_at": statement.excluded.last_call_at,
+                },
+            )
+        )
+    session.commit()
+
+
+def usage_since(session: Session, server_id: str, since: datetime) -> list[UsageBucket]:
+    """Every bucket for one server at or after ``since``, oldest first."""
+    return list(
+        session.exec(
+            select(UsageBucket)
+            .where(UsageBucket.server_id == server_id, UsageBucket.bucket >= since)
+            .order_by(UsageBucket.bucket)
+        ).all()
+    )
+
+
+def prune_usage(session: Session, before: datetime) -> int:
+    """Drop buckets older than ``before``; returns the number of rows removed."""
+    result = session.execute(delete(UsageBucket).where(UsageBucket.bucket < before))
+    session.commit()
+    return result.rowcount or 0
 
 
 # --------------------------------------------------------------------------- #

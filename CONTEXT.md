@@ -40,3 +40,11 @@ _Avoid_: Sleep, suspend, pause
 **Wake-on-request**:
 The proxy reactivating a quiesced Server when a request arrives for it, holding that request until the new activation is ready (or its startup window lapses).
 _Avoid_: Cold start, lazy start
+
+**Usage bucket**:
+The count of calls one Server's one tool received in one UTC hour — the unit every usage figure is summed from. A bucket holds a number, never a call's arguments or result. Buckets whose hour is older than the retention window are pruned, so a usage figure never reaches further back than that.
+_Avoid_: Metric, event, log line
+
+**Tool call (counted)**:
+A request that named a tool and reached a running bridge, whichever surface carried it — the MCP endpoint, the REST mirror, or a group, where it counts against the member that owns the tool rather than the group. A request refused before a bridge was picked is not one, and neither is a dashboard playground invocation; a tool that answers with an error still is.
+_Avoid_: Hit, invocation, transaction

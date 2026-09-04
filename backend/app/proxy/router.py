@@ -9,6 +9,10 @@ Every proxied request also feeds the supervisor's idle bookkeeping: traffic mark
 the server active, and a request for a quiesced ("idle") server WAKES it — the
 proxy holds the request until the bridge is ready (bounded by the same startup
 timeout the activation itself gets) instead of bouncing the client with a 503.
+
+It is likewise where per-server and per-tool USAGE is counted (``app.usage``):
+the body is already buffered here, so naming the tool a request invoked costs a
+dict increment and no extra I/O.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from fastapi import APIRouter, Request
 from sqlmodel import Session
 from starlette.responses import Response, StreamingResponse
 
+from app import usage
 from app.auth.middleware import enforce
 from app.config import get_settings
 from app.db import get_engine, repo
@@ -122,6 +127,11 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
     except BaseException:
         sup.request_finished(server.id)
         raise
+
+    # Usage accounting: the request reached a running bridge and came back with a
+    # response, so it counts — under the tool it invoked (MCP body or REST path),
+    # else as plain traffic. In-memory only; the recorder's own task writes it.
+    usage.record(server.id, usage.proxy_tools(request.method, path, body))
 
     resp_headers = {
         k: v for k, v in upstream.headers.items()

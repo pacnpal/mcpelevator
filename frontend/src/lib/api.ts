@@ -24,6 +24,7 @@ import type {
 	ServerDetail,
 	ServerSummary,
 	ServerUpdate,
+	ServerUsage,
 	SettingsInfo,
 	TokenCreated,
 	TokenInfo,
@@ -136,6 +137,19 @@ export function listServers(): Promise<ServerSummary[]> {
 
 export function getServer(id: string): Promise<ServerDetail> {
 	return request<ServerDetail>(`/servers/${encodeURIComponent(id)}`);
+}
+
+/**
+ * Usage counters for one server: totals, per tool, and a series to chart.
+ *
+ * @param id - The server ID.
+ * @param days - Trailing window in days (the backend rolls long windows up to
+ * daily buckets and never reaches past the retention setting).
+ * @returns The server's usage over that window.
+ */
+export function getServerUsage(id: string, days = 7): Promise<ServerUsage> {
+	const q = new URLSearchParams({ days: String(days) });
+	return request<ServerUsage>(`/servers/${encodeURIComponent(id)}/usage?${q.toString()}`);
 }
 
 export function createServer(body: ServerCreate): Promise<ServerSummary> {

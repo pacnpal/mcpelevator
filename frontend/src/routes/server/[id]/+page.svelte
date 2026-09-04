@@ -10,6 +10,7 @@
 		enableServer,
 		errorMessage,
 		getServer,
+		getServerUsage,
 		retryServer,
 		startOauth,
 		updateServer
@@ -23,12 +24,13 @@
 		primaryServerAction,
 		startupPhaseLabel
 	} from '$lib/startup';
-	import type { ServerDetail, ServerTool, ToolOverride } from '$lib/types';
+	import type { ServerDetail, ServerTool, ServerUsage, ToolOverride } from '$lib/types';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
 	import StatePill from '$lib/components/StatePill.svelte';
 	import ToolRunner from '$lib/components/ToolRunner.svelte';
+	import UsageChart from '$lib/components/UsageChart.svelte';
 	import { flashToast } from '$lib/toast.svelte';
 	import { quoteIfNeeded, withPin } from '$lib/uvxPin';
 
@@ -630,6 +632,101 @@
 			.map(quoteIfNeeded)
 			.join(' ');
 	});
+
+	// ---- Usage (per-server / per-tool call counters) ----------------------------
+	// Fetched when the viewed server changes and on an explicit range click — NOT on
+	// the page's status poll, which runs every couple of seconds and would turn a
+	// read-only panel into steady traffic of its own.
+	const USAGE_RANGES = [
+		{ days: 1, label: '24h' },
+		{ days: 7, label: '7d' },
+		{ days: 30, label: '30d' }
+	];
+
+	let usageStats = $state<ServerUsage | null>(null);
+	let usageDays = $state(7);
+	let usageLoading = $state(false);
+	let usageError = $state<string | null>(null);
+
+	async function loadUsage(days: number) {
+		// Same stale-response guard as load(): this component is reused across
+		// same-route navigations, so a response can outlive the server it was for.
+		const requestedId = id;
+		usageLoading = true;
+		try {
+			const result = await getServerUsage(requestedId, days);
+			if (requestedId !== id) return;
+			usageStats = result;
+			usageError = null;
+		} catch (err) {
+			if (requestedId !== id) return;
+			usageStats = null;
+			usageError = errorMessage(err);
+		} finally {
+			if (requestedId === id) usageLoading = false;
+		}
+	}
+
+	function selectUsageRange(days: number) {
+		if (days === usageDays || usageLoading) return;
+		usageDays = days;
+		void loadUsage(days);
+	}
+
+	let usageForServerId: string | null = null;
+	$effect(() => {
+		const sid = server?.id ?? null;
+		if (sid === usageForServerId) return;
+		usageForServerId = sid;
+		usageStats = null;
+		usageError = null;
+		if (sid) void loadUsage(usageDays);
+	});
+
+	// Every exposed tool joined with its call count. A tool NOTHING has called stays in
+	// the table at zero rather than being absent — that row is the whole point of the
+	// panel (it's the one whose name or description is worth rewriting). Counts are keyed
+	// by the EXPOSED name, which is what a client actually called.
+	const usageRows = $derived.by(() => {
+		if (!usageStats) return [];
+		const counts = new Map(usageStats.tools.map((t) => [t.tool, t]));
+		const rows = toolRows
+			.filter((row) => row.enabled && row.discovered)
+			.map((row) => {
+				const name = exposedName(row.key);
+				const hit = counts.get(name);
+				counts.delete(name);
+				return {
+					name,
+					calls: hit?.calls ?? 0,
+					lastCall: hit?.last_call_at ?? null,
+					retired: false
+				};
+			});
+		// What's left was called under a name this server no longer exposes (renamed,
+		// hidden, or gone upstream). Still real traffic — show it, marked.
+		const retired = [...counts.values()].map((t) => ({
+			name: t.tool,
+			calls: t.calls,
+			lastCall: t.last_call_at,
+			retired: true
+		}));
+		return [...rows, ...retired].sort(
+			(a, b) => b.calls - a.calls || a.name.localeCompare(b.name)
+		);
+	});
+
+	function formatLastCall(iso: string | null): string {
+		if (!iso) return 'never';
+		const at = new Date(iso);
+		if (Number.isNaN(at.getTime())) return iso;
+		return at.toLocaleString(undefined, {
+			month: 'short',
+			day: 'numeric',
+			hour: 'numeric',
+			minute: '2-digit'
+		});
+	}
 
 	// Browser tab title: reflect the server being viewed (the layout otherwise leaves it a
 	// constant "mcpelevator" on every server page). Surface an OAuth server that still needs
@@ -1361,6 +1458,97 @@
 				{/if}
 			</div>
 		{/if}
+
+		<!-- Usage: what has actually been called, and what never has -->
+		<div
+			class="flex flex-col gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
+		>
+			<div class="flex flex-wrap items-center justify-between gap-2">
+				<h2 class="text-sm font-semibold text-[var(--color-ink)]">Usage</h2>
+				<div class="flex items-center gap-1" role="group" aria-label="Usage window">
+					{#each USAGE_RANGES as range (range.days)}
+						<button
+							type="button"
+							onclick={() => selectUsageRange(range.days)}
+							aria-pressed={usageDays === range.days}
+							disabled={usageLoading}
+							class="rounded-lg border px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
+							style={usageDays === range.days
+								? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 10%, transparent); color: var(--color-ink);'
+								: 'border-color: var(--color-line); background-color: var(--color-surface-2); color: var(--color-ink-muted);'}
+						>
+							{range.label}
+						</button>
+					{/each}
+				</div>
+			</div>
+
+			{#if usageError}
+				<p class="text-xs text-[var(--color-state-failed)]" role="alert">{usageError}</p>
+			{:else if !usageStats}
+				<p class="text-xs text-[var(--color-ink-dim)]">Loading usage…</p>
+			{:else}
+				<div class="flex flex-wrap gap-x-6 gap-y-1 text-xs text-[var(--color-ink-dim)]">
+					<span>
+						<span class="font-mono text-[var(--color-ink)]">{usageStats.tool_calls}</span>
+						tool calls
+					</span>
+					<span>
+						<span class="font-mono text-[var(--color-ink)]">{usageStats.other_requests}</span>
+						other requests
+					</span>
+					<span>Last call {formatLastCall(usageStats.last_call_at)}</span>
+				</div>
+
+				<UsageChart series={usageStats.series} bucketSeconds={usageStats.bucket_seconds} />
+
+				{#if usageRows.length === 0}
+					<p class="text-xs text-[var(--color-ink-dim)]">
+						{usageStats.other_requests > 0
+							? 'Clients have connected, but no tool has been called yet.'
+							: 'Nothing has reached this server in this window.'}
+					</p>
+				{:else}
+					<table class="w-full text-xs">
+						<thead>
+							<tr class="text-left text-[var(--color-ink-dim)]">
+								<th class="pb-1 font-medium">Tool</th>
+								<th class="pb-1 text-right font-medium">Calls</th>
+								<th class="pb-1 text-right font-medium">Last call</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each usageRows as row (row.name)}
+								<tr class="border-t border-[var(--color-line)]">
+									<td class="py-1.5 font-mono break-all text-[var(--color-ink)]">
+										{row.name}
+										{#if row.retired}
+											<span
+												class="ml-1 font-sans text-[10px] text-[var(--color-ink-dim)]"
+												title="Called under a name this server no longer exposes"
+											>
+												retired
+											</span>
+										{/if}
+									</td>
+									<td
+										class="py-1.5 text-right font-mono"
+										style={row.calls === 0
+											? 'color: var(--color-ink-dim);'
+											: 'color: var(--color-ink);'}
+									>
+										{row.calls}
+									</td>
+									<td class="py-1.5 text-right text-[var(--color-ink-dim)]">
+										{formatLastCall(row.lastCall)}
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				{/if}
+			{/if}
+		</div>
 
 		<!-- Logs -->
 		{#if !priorityLogs}

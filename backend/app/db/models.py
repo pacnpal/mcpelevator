@@ -186,6 +186,35 @@ class ServerRuntime(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class UsageBucket(SQLModel, table=True):
+    """Data-plane usage counters, pre-aggregated per (server, tool, UTC hour).
+
+    Answers "has anything ever actually called this tool?" — the question a
+    per-tool rename/description edit is made against. Counts only, never
+    arguments or results: a usage row must not become a shadow copy of the
+    traffic it summarizes.
+
+    ``tool`` is the EXPOSED tool name (what the client asked for, so it lines up
+    with what ``tools/list`` advertises and what the operator edits), or ``""``
+    for data-plane traffic that isn't a tool call at all — ``initialize``,
+    ``tools/list``, the SSE GET. Keeping both in one table means a server with
+    connections but no tool calls is distinguishable from one nothing ever
+    reached, which is exactly the "should I rename it?" signal.
+
+    Hourly buckets: fine enough to graph a day, coarse enough that a busy server
+    writes a bounded number of rows. Rows are pruned past the
+    ``usage_retention_days`` setting, and dropped with their server.
+    """
+
+    __tablename__ = "usage_bucket"
+
+    server_id: str = Field(primary_key=True, foreign_key="server.id")
+    tool: str = Field(primary_key=True)
+    bucket: datetime = Field(primary_key=True)
+    calls: int = 0
+    last_call_at: datetime = Field(default_factory=utcnow)
+
+
 class Setting(SQLModel, table=True):
     """Runtime-mutable key/value settings (JSON-encoded values)."""
 
