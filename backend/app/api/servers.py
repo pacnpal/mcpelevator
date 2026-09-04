@@ -367,7 +367,10 @@ async def get_server_usage(
 
     Like the instance-wide endpoint, the aggregation runs off the event loop in a
     worker with its own session: these are synchronous SQLite scans, and the same
-    loop serves `/s` proxy traffic and supervision.
+    loop serves `/s` proxy traffic and supervision. Visibility is re-checked there
+    against a REFRESHED principal, because the flush is awaited first and an owner
+    reassignment, a demotion, or a revocation of this request's own token can land
+    while it waits.
 
     `no-store` because the body is scoped to WHO asked: a member sees only the
     servers they own, so a cached copy could be replayed to a different
@@ -375,7 +378,7 @@ async def get_server_usage(
 
     def _compute() -> tuple[str, dict]:
         with Session(get_engine()) as session:
-            server = _visible(principal, session, server_id)
+            server = _visible(_fresh(session, principal), session, server_id)
             return server.id, usage.server_usage(session, server.id, days=days)
 
     await usage.flush()

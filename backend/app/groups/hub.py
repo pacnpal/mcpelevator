@@ -201,7 +201,7 @@ class GroupHub:
                     await self._teardown(name)
 
             for name, member_ids in groups.items():
-                entries: list[tuple[str, str, int]] = []
+                entries: list[tuple[str, str, str, int]] = []
                 mounted: dict[str, str] = {}
                 members = set(member_ids or [])
                 for server_id, slug, host, port in running:
@@ -221,7 +221,16 @@ class GroupHub:
                     # member is safe behind any group provider.
                     if effective != "none" and effective != default:
                         continue
-                    entries.append((slug, host, port))
+                    # The entry carries the server ID, so the topology key below
+                    # does too. Ports are runtime, not identity, and the allocator
+                    # hands back the LOWEST free one — so deleting a member and
+                    # creating a replacement with the same slug can land on the
+                    # same port and leave (slug, host, port) identical. Keyed on
+                    # that alone the swap is skipped, and the instance keeps
+                    # serving with the DELETED server's id in `members`,
+                    # attributing every later group call to a row `bump_usage`
+                    # then drops on the floor.
+                    entries.append((server_id, slug, host, port))
                     mounted[slug] = server_id
 
                 key = frozenset(entries)
@@ -260,12 +269,12 @@ class GroupHub:
     async def _swap(
         self,
         name: str,
-        entries: list[tuple[str, str, int]],
+        entries: list[tuple[str, str, str, int]],
         key: frozenset,
         members: dict[str, str] | None = None,
     ) -> None:
         bundle = FastMCP(f"mcpelevator-{name}")
-        for slug, host, port in sorted(entries):
+        for _server_id, slug, host, port in sorted(entries):
             bundle.mount(self._make_proxy(slug, f"http://{host}:{port}/mcp"), namespace=slug)
         # stateless: a fresh upstream transport per request, so swapping instances never
         # strands a session. Host/Origin protection stays OFF here — enforce() in the

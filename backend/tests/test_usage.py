@@ -590,6 +590,29 @@ def test_group_trailing_slash_is_not_counted(subpath):
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 
 
+def test_usage_reads_reauthorize_after_the_flush(monkeypatch):
+    """Both endpoints await a flush before aggregating, and authority is judged
+    AFTER that await — an admin can demote the caller or revoke the very token the
+    request authenticated with while it waits. The instance body is every server's
+    name and tool usage, so a principal that no longer resolves must fail closed
+    rather than be served on its entry-time authority."""
+    from app.auth import principal as principal_mod
+
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-revoked", auth="none")
+        try:
+            # The credential stops resolving while the request is in flight.
+            monkeypatch.setattr(principal_mod, "refresh", lambda _s, _p: None)
+            for url in ("/api/usage", f"/api/servers/{srv['id']}/usage"):
+                r = client.get(url, headers=LOOPBACK)
+                assert r.status_code == 401, f"{url} served on a stale principal"
+            monkeypatch.undo()
+            # ...and still works once it resolves again.
+            assert client.get("/api/usage", headers=LOOPBACK).status_code == 200
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
 def test_usage_reads_are_not_stored_by_caches():
     """Both bodies are scoped to WHO asked — a member's totals cover only the
     servers they own — so a cached copy could be replayed to a different

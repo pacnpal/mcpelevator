@@ -377,6 +377,38 @@ async def test_hub_unchanged_topology_is_a_noop_swap(clean_settings):
             repo.delete_server(session, a.id)
 
 
+async def test_hub_reswaps_when_a_replacement_reuses_slug_and_port(clean_settings):
+    """A member deleted and replaced by a new server on the SAME slug and port is a
+    different server, so the instance must be rebuilt.
+
+    Ports are runtime, not identity, and the allocator hands back the lowest free
+    one — so this collision is ordinary, not exotic. Keyed on (slug, host, port)
+    alone the swap was skipped and the instance kept the DELETED server's id in
+    `members`, attributing every later group call to a row `bump_usage` drops."""
+    with Session(get_engine()) as session:
+        first = _mk_server(session, "Recycled")
+    _write_groups({"g": "*"})
+    hub = _hub_for({"up-recycled": _make_upstream("s", "t")})
+    try:
+        await hub.sync(_endpoints(first))
+        assert hub.mounted_members("g") == {first.slug: first.id}
+
+        # The replacement takes the same slug and lands on the same port.
+        with Session(get_engine()) as session:
+            repo.delete_server(session, first.id)
+            second = _mk_server(session, "Recycled")
+        assert second.slug == first.slug and second.id != first.id
+
+        await hub.sync(_endpoints(second))
+        assert hub.mounted_members("g") == {second.slug: second.id}, (
+            "the instance still names the deleted server"
+        )
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, second.id)
+
+
 async def test_auth_transition_blocks_reconcile_and_serves_no_stale_bundle(clean_settings):
     with Session(get_engine()) as session:
         server = _mk_server(session, "Transition")
@@ -705,7 +737,9 @@ def test_patch_default_auth_downgrade_resyncs_group_before_returning(clean_setti
             )
             assert r.status_code == 200
             hub = client.app.state.groups
-            assert hub._instances["all"].key == frozenset({(locked.slug, "127.0.0.1", 49999)})
+            assert hub._instances["all"].key == frozenset(
+                {(locked.id, locked.slug, "127.0.0.1", 49999)}
+            )
 
             # downgrade: by the time the PATCH returns, the bearer-only member is out
             r = client.patch(
@@ -739,7 +773,9 @@ def test_patch_server_auth_tightening_resyncs_group_before_returning(clean_setti
             )
             assert r.status_code == 200
             hub = client.app.state.groups
-            assert hub._instances["all"].key == frozenset({(srv.slug, "127.0.0.1", 49998)})
+            assert hub._instances["all"].key == frozenset(
+                {(srv.id, srv.slug, "127.0.0.1", 49998)}
+            )
 
             r = client.patch(
                 f"/api/servers/{srv.id}", json={"auth_provider": "bearer"}, headers=LOOPBACK

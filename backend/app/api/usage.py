@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlmodel import Session
 
 from app import usage
 from app.api.schemas import InstanceUsage
 from app.auth import policy
+from app.auth import principal as principal_mod
 from app.auth.principal import Principal, current_principal
 from app.db import get_engine, repo
 
@@ -41,13 +42,27 @@ async def get_instance_usage(
     that same loop — one dashboard request must not stall them. The worker owns
     its own session: a session made on the loop is not the thread's to use.
 
+    Authority is RE-READ in that worker, not taken from the entry-time principal:
+    the flush is awaited first, and an admin can demote the caller or revoke the
+    very token this request authenticated with while it waits. This body is the
+    whole instance's server names and tool usage to an admin, so it fails closed
+    on a principal that no longer resolves — the same rule every other decision
+    made after an await follows (`principal.refresh`).
+
     `no-store` because the body is scoped to WHO asked: the totals are summed
     over the caller's visible servers alone, so a cached copy could be replayed
     to a different principal on a shared browser or by an intermediary."""
 
     def _compute() -> dict:
         with Session(get_engine()) as session:
-            servers = policy.visible_servers(principal, repo.list_servers(session))
+            fresh = principal_mod.refresh(session, principal)
+            if fresh is None:
+                raise HTTPException(
+                    status_code=401,
+                    detail="control-plane auth required",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            servers = policy.visible_servers(fresh, repo.list_servers(session))
             return usage.instance_usage(session, servers, days=days)
 
     await usage.flush()
