@@ -37,14 +37,20 @@
 	}
 
 	const tick = $derived((value: Date | string | number) => tickLabel(value, hourly));
+
+	// Identity for the single folded band, which has no server of its own.
+	const OTHER_KEY = '__other__';
 </script>
 
 <div class="grid gap-3 sm:grid-cols-2" data-testid="usage-sparklines">
-	{#each bands as band (band.slug)}
+	<!-- Keyed by server id, not slug: the folded remainder carries the label "other",
+	     and a real server may legitimately be slugged `other` too. Two bands with the
+	     same key is a hard Svelte error, which would take the whole view down. -->
+	{#each bands as band (band.server_id ?? OTHER_KEY)}
 		<figure
 			class="m-0 flex flex-col gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-3"
 			data-testid="usage-facet"
-			data-slug={band.slug}
+			data-slug={band.server_id ?? OTHER_KEY}
 			data-total={total(band)}
 		>
 			<figcaption class="flex items-baseline justify-between gap-2">

@@ -445,6 +445,70 @@ def test_group_traffic_off_the_mcp_endpoint_is_not_counted():
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 
 
+def test_group_members_are_in_flight_before_the_body_is_buffered():
+    """Reading a slow upload can outlast a member's idle deadline. The in-flight
+    window has to open BEFORE usage buffers the body, or the sweep could stop a
+    bridge under a request that was already accepted."""
+    started: list[str] = []
+
+    async def _slow_body_inner(scope, receive, send):
+        while True:
+            message = await receive()
+            if not message.get("more_body"):
+                break
+        await JSONResponse({"ok": True})(scope, receive, send)
+
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-group-inflight", auth="none")
+        try:
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
+            _stub_group(client, "team", _slow_body_inner, mounted={srv["slug"]})
+            supervisor = client.app.state.supervisor
+            original = supervisor.request_started
+            # Record the order: by the time the body is read for attribution, the
+            # member must already be counted as busy.
+            supervisor.request_started = lambda sid, _o=original: (
+                started.append(sid),
+                _o(sid),
+            )[1]
+            try:
+                r = client.post(
+                    "/g/team/mcp", json=_call(f"{srv['slug']}_search"), headers=LOOPBACK
+                )
+            finally:
+                supervisor.request_started = original
+            assert r.status_code == 200, r.text
+            assert srv["id"] in started
+            assert _rows(srv["id"]) == {"search": 1}
+        finally:
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"groups": {}})
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_a_failure_in_accounting_never_fails_a_served_request(monkeypatch):
+    """Accounting sits between the upstream response opening and the relay that
+    closes it, so anything escaping there would leak the response and strand the
+    server's in-flight count — silently disabling idle quiescence for it."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-guard", auth="none")
+        try:
+            _point_proxy_at_upstream(client)
+
+            def boom(*_args, **_kwargs):
+                raise RuntimeError("accounting exploded")
+
+            monkeypatch.setattr(usage, "record", boom)
+            r = client.post(f"/s/{srv['slug']}/mcp", json=_call("search"), headers=LOOPBACK)
+            assert r.status_code == 200, r.text
+            monkeypatch.undo()
+            # The counter is lost (acceptable); the bridge is not left busy forever.
+            assert client.app.state.supervisor._in_flight.get(srv["id"], 0) == 0
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
 # --- read API ----------------------------------------------------------------- #
 
 

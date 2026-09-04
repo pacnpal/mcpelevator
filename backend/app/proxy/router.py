@@ -18,6 +18,7 @@ dict increment and no extra I/O.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import httpx
 from fastapi import APIRouter, Request
@@ -28,6 +29,8 @@ from app import usage
 from app.auth.middleware import enforce
 from app.config import get_settings
 from app.db import get_engine, repo
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -131,7 +134,16 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
     # Usage accounting: the request reached a running bridge and came back with a
     # response, so it counts — under the tool it invoked (MCP body or REST path),
     # else as plain traffic. In-memory only; the recorder's own task writes it.
-    usage.record(server.id, usage.proxy_tools(request.method, path, body))
+    #
+    # Guarded, and the guard is structural rather than a belt over the parser's own
+    # promise: this sits between the upstream response opening and the relay that
+    # closes it, so anything escaping here would leak that response AND leave the
+    # server's in-flight count raised forever, quietly disabling idle quiescence for
+    # it. Losing a count is the acceptable failure; losing the bridge is not.
+    try:
+        usage.record(server.id, usage.proxy_tools(request.method, path, body))
+    except Exception:
+        logger.exception("usage accounting failed for %s", slug)
 
     resp_headers = {
         k: v for k, v in upstream.headers.items()

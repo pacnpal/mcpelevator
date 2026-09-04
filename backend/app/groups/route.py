@@ -163,15 +163,6 @@ class GroupDispatch:
             await Response("group not ready", status_code=503)(scope, receive, send)
             return
 
-        # Authenticated and about to be served: count the tool calls it carries
-        # (see _record_group_usage), which may consume + replay the body. Only the
-        # bundle's own endpoint counts — the inner app is mounted at "/mcp" alone,
-        # so a POST to any other subpath 404s there and served nothing.
-        if subpath.strip("/") == "mcp":
-            receive = await _record_group_usage(
-                request, receive, self._hub.mounted_slugs(name)
-            )
-
         # Delegate to the group's inner app. Extend the routing root by the group name
         # so the inner app (built with path="/mcp") resolves the remainder to "/mcp".
         # app_root_path remains on the scope for external URL generation.
@@ -186,15 +177,26 @@ class GroupDispatch:
         # members — the bundle mounts running members only, and remounting happens
         # on the reconcile that follows a wake.) app.state.supervisor is assigned
         # in the lifespan before any request is served — fail fast if missing.
+        #
+        # The window OPENS BEFORE usage buffers the body: reading a slow upload can
+        # take longer than a member's idle deadline, and a request already accepted
+        # must not have its bridge stopped out from under it mid-upload.
         app = scope.get("app")
-        if app is None:
-            await inner(sub_scope, receive, send)
-            return
-        supervisor = app.state.supervisor
+        supervisor = app.state.supervisor if app is not None else None
         for member_id in member_ids or []:
-            supervisor.request_started(member_id)
+            if supervisor is not None:
+                supervisor.request_started(member_id)
         try:
+            # Count the tool calls this request carries (see _record_group_usage),
+            # which may consume + replay the body. Only the bundle's own endpoint
+            # counts — the inner app is mounted at "/mcp" alone, so a POST to any
+            # other subpath 404s there and served nothing.
+            if subpath.strip("/") == "mcp":
+                receive = await _record_group_usage(
+                    request, receive, self._hub.mounted_slugs(name)
+                )
             await inner(sub_scope, receive, send)
         finally:
             for member_id in member_ids or []:
-                supervisor.request_finished(member_id)
+                if supervisor is not None:
+                    supervisor.request_finished(member_id)
