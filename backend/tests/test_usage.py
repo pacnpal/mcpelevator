@@ -740,6 +740,44 @@ def test_group_call_counts_against_the_member_that_owns_the_tool():
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 
 
+def test_group_call_counts_without_a_content_length_header():
+    """`Content-Length` is OPTIONAL — a chunked or HTTP/2 client sends none. Gating
+    attribution on it meant every group tool call from such a client was served
+    normally and counted nowhere, which is the worst shape for a statistic: silent,
+    and biased toward whichever clients happen to stream.
+
+    The request is sent with an explicit chunked body so httpx omits the header."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-group-chunked", auth="none")
+        try:
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"groups": {"team": [srv["id"]]}})
+            _stub_group(client, "team", _echo_body_inner, mounted={srv["slug"]: srv["id"]})
+            payload = _call(f"{srv['slug']}_search")
+            raw = json.dumps(payload).encode()
+
+            def _chunks():
+                # Two chunks, so the buffering loop is exercised across messages
+                # rather than landing in one.
+                yield raw[: len(raw) // 2]
+                yield raw[len(raw) // 2 :]
+
+            r = client.post(
+                "/g/team/mcp",
+                content=_chunks(),
+                headers={**LOOPBACK, "content-type": "application/json"},
+            )
+            assert r.status_code == 200, r.text
+            assert "content-length" not in {k.lower() for k in r.request.headers}
+            # The body still reached the inner app, reassembled in order.
+            assert json.loads(r.json()["body"]) == payload
+            assert _rows(srv["id"]) == {"search": 1}
+        finally:
+            with Session(get_engine()) as session:
+                runtime_settings.write(session, {"groups": {}})
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
 @pytest.mark.parametrize("subpath", ["mcp/", "mcp//"])
 def test_group_trailing_slash_is_not_counted(subpath):
     """The bundle is mounted at `/mcp` alone, so `/mcp/` is a 307 back to it. If

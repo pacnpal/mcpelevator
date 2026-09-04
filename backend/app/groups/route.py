@@ -33,7 +33,7 @@ from sqlmodel import Session
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import get_route_path
-from starlette.types import Receive, Scope, Send
+from starlette.types import Message, Receive, Scope, Send
 
 from app import usage
 from app.auth.middleware import enforce
@@ -67,42 +67,69 @@ async def _record_group_usage(
     of synchronous ORM work on the event loop for every group call, in the one
     place the design keeps deliberately in-memory.
 
-    Reading the body consumes the ASGI stream, so the buffered bytes are replayed
-    to the inner app. A body of unknown length (chunked) or above the parse cap is
-    left untouched — usage accounting never buffers a body it can't bound, and
-    never changes what the group serves."""
+    Reading the body consumes the ASGI stream, so every message pulled off it is
+    replayed to the inner app in order — usage accounting never changes what the
+    group serves.
+
+    The stream is read directly rather than through `Content-Length`, which is
+    OPTIONAL: a chunked or HTTP/2 client sends none, and gating on it meant every
+    group tool call from such a client was served normally and counted nowhere.
+    The parse cap does the bounding instead, and does it on what actually arrives
+    rather than on what a header claims: reading stops the moment the cap is
+    passed, so at most the cap plus one chunk is ever held."""
     if request.method != "POST" or not mounted:
         return receive
+    # A declared length over the cap is the one case worth short-circuiting: the
+    # body is known to be unparseable before a byte of it is buffered. An absent
+    # or unparseable header says nothing and is NOT a reason to skip.
     raw_length = request.headers.get("content-length")
     try:
-        length = int(raw_length) if raw_length is not None else -1
+        if raw_length is not None and int(raw_length) > attribution.MAX_PARSE_BYTES:
+            return receive
     except ValueError:
-        length = -1
-    if length < 0 or length > attribution.MAX_PARSE_BYTES:
-        return receive
+        pass
 
+    buffered: list[Message] = []
+    chunks: list[bytes] = []
+    size = 0
+    body: bytes | None = None
     try:
-        body = await request.body()
+        while True:
+            message = await receive()
+            buffered.append(message)
+            if message["type"] != "http.request":
+                break  # http.disconnect — nothing to count, but replay what we hold
+            chunk = message.get("body", b"")
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > attribution.MAX_PARSE_BYTES:
+                break  # over the cap: stop READING, so the buffer stays bounded
+            if not message.get("more_body", False):
+                body = b"".join(chunks)
+                break
     except Exception:
-        # The client went away (or the body couldn't be read). Nothing to count —
+        # The client went away (or the stream couldn't be read). Nothing to count —
         # hand back the real channel and let the inner app see the disconnect it
         # would have seen without us.
         return receive
-    replayed = False
+
+    index = 0
 
     async def replay():
-        # One buffered http.request, then back to the real channel so the inner
-        # app still sees http.disconnect if the client goes away mid-call.
-        nonlocal replayed
-        if not replayed:
-            replayed = True
-            return {"type": "http.request", "body": body, "more_body": False}
+        # The buffered messages in order, then back to the real channel so the
+        # inner app still sees the rest of a capped body, and any http.disconnect.
+        nonlocal index
+        if index < len(buffered):
+            message = buffered[index]
+            index += 1
+            return message
         return await receive()
 
-    for name in attribution.tools_from_body(body):
-        hit = attribution.split_namespaced(name, mounted)
-        if hit is not None:
-            usage.record(mounted[hit[0]], [hit[1]])
+    if body is not None:
+        for name in attribution.tools_from_body(body):
+            hit = attribution.split_namespaced(name, mounted)
+            if hit is not None:
+                usage.record(mounted[hit[0]], [hit[1]])
     return replay
 
 
