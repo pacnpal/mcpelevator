@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -543,6 +544,50 @@ def test_rest_traffic_is_not_a_tool_call_when_the_surface_is_off():
             client.post(f"/s/{srv['slug']}/rest/echo", json={"q": "hi"}, headers=LOOPBACK)
             # Still counted as traffic that reached the bridge, just not as a tool.
             assert _rows(srv["id"]) == {NOT_A_TOOL: 1}
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_rest_attribution_follows_the_live_bridge_not_the_pending_row():
+    """`rest_openapi` is part of config_hash, so a PATCH takes effect only once the
+    bridge restarts. Across that window the ORM row is DESIRED state while the unit
+    still serving traffic has the old surface — so attribution reads the unit.
+
+    Here the row says REST is ON and the live bridge still says OFF: that bridge
+    installs no /rest routes, so the request only collects a 404 and must not be
+    booked as a call to `echo`."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-rest-pending", auth="none")
+        try:
+            r = client.patch(
+                f"/api/servers/{srv['id']}", json={"rest_openapi": True}, headers=LOOPBACK
+            )
+            assert r.status_code == 200, r.text
+            _point_proxy_at_upstream(client)
+            # The bridge that is actually up predates the PATCH.
+            stale = SimpleNamespace(exposure={"mcp_http": True, "rest_openapi": False})
+            client.app.state.supervisor.unit_by_slug = lambda slug: stale
+
+            client.post(f"/s/{srv['slug']}/rest/echo", json={"q": "hi"}, headers=LOOPBACK)
+            assert _rows(srv["id"]) == {NOT_A_TOOL: 1}
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_rest_attribution_counts_a_call_the_live_bridge_still_serves():
+    """The converse window: REST has just been switched OFF in the row, but the
+    running bridge still exposes it and genuinely serves the call. Reading the row
+    would file a real tool call as plain traffic."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-rest-draining", auth="none")
+        try:
+            _point_proxy_at_upstream(client)
+            # Row is at its default (REST off); the live bridge still has it on.
+            live = SimpleNamespace(exposure={"mcp_http": True, "rest_openapi": True})
+            client.app.state.supervisor.unit_by_slug = lambda slug: live
+
+            client.post(f"/s/{srv['slug']}/rest/echo", json={"q": "hi"}, headers=LOOPBACK)
+            assert _rows(srv["id"]) == {"echo": 1}
         finally:
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 

@@ -278,6 +278,27 @@ export function peakCalls(rows: UsageRow[]): number {
 	return Math.max(1, ...rows.map((row) => row.calls));
 }
 
+/**
+ * How many days of history a response actually carries.
+ *
+ * Measured from the payload — `series.length` buckets of `bucket_seconds` each —
+ * and deliberately NOT from elapsed wall-clock time since `since`. The window's
+ * first daily bucket opens `days - 1` midnights ago, so elapsed time on an
+ * ordinary, unclamped 7-day response is 6 days plus however far into today it is:
+ * it rounds to 6 before noon UTC and to 7 after, which would report a full window
+ * as retention-limited for half of every day. Counting buckets is exact, needs no
+ * clock, and cannot drift with the viewer's.
+ *
+ * Null when there is no series to measure.
+ */
+export function effectiveWindowDays(usage: Pick<
+	InstanceUsage,
+	'series' | 'bucket_seconds'
+>): number | null {
+	if (!usage.series.length) return null;
+	return Math.max(1, Math.round((usage.series.length * usage.bucket_seconds) / 86_400));
+}
+
 /** "3 of 12 servers" style summary of what a filter is currently showing. */
 export function countLabel(shown: number, total: number, noun: string): string {
 	const plural = total === 1 ? noun : `${noun}s`;

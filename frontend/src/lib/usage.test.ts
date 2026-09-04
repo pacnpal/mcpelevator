@@ -6,6 +6,7 @@ import {
 	HEATMAP_DAYS,
 	applyView,
 	countLabel,
+	effectiveWindowDays,
 	facetPeak,
 	heatLevel,
 	heatmap,
@@ -373,5 +374,40 @@ describe('countLabel', () => {
 		expect(countLabel(3, 3, 'tool')).toBe('3 tools');
 		expect(countLabel(2, 7, 'tool')).toBe('2 of 7 tools');
 		expect(countLabel(1, 1, 'server')).toBe('1 server');
+	});
+});
+
+describe('effectiveWindowDays', () => {
+	const window = (points: number, bucket_seconds: number) => ({
+		bucket_seconds,
+		series: Array.from({ length: points }, () => ({
+			bucket: '2026-09-04T00:00:00Z',
+			calls: 0,
+			other: 0
+		}))
+	});
+
+	it('counts a full daily window as the range that was asked for', () => {
+		// The regression this guards: the window's FIRST daily bucket opens 6
+		// midnights ago, so reading elapsed time from `since` gives 6.x days and
+		// rounds DOWN before noon UTC — reporting an unclamped 7d window as
+		// retention-limited for half of every day. The bucket count is 7 at every
+		// hour of the day.
+		expect(effectiveWindowDays(window(7, 86_400))).toBe(7);
+		expect(effectiveWindowDays(window(30, 86_400))).toBe(30);
+		expect(effectiveWindowDays(window(90, 86_400))).toBe(90);
+	});
+
+	it('reads an hourly window in days', () => {
+		expect(effectiveWindowDays(window(24, 3_600))).toBe(1);
+	});
+
+	it('reports the clamped length when retention shortened the window', () => {
+		// 90d requested against a 30-day retention: the backend returns 30 buckets.
+		expect(effectiveWindowDays(window(30, 86_400))).toBeLessThan(90);
+	});
+
+	it('has no answer for an empty series', () => {
+		expect(effectiveWindowDays(window(0, 86_400))).toBeNull();
 	});
 });

@@ -13,6 +13,7 @@
 		USAGE_SORTS,
 		applyView,
 		countLabel,
+		effectiveWindowDays,
 		serverRows,
 		toolRows,
 		type UsageSort,
@@ -81,12 +82,7 @@
 	// The backend CLAMPS the window to `usage_retention_days` — asking for 90d on a
 	// 30-day retention returns 30. Without saying so, the page keeps 90d highlighted
 	// over a chart holding a third of that, presenting far more history than exists.
-	const effectiveDays = $derived.by(() => {
-		if (!usage) return null;
-		const since = new Date(usage.since);
-		if (Number.isNaN(since.getTime())) return null;
-		return Math.max(1, Math.round((Date.now() - since.getTime()) / 86_400_000));
-	});
+	const effectiveDays = $derived(usage ? effectiveWindowDays(usage) : null);
 	const clamped = $derived(effectiveDays !== null && effectiveDays < days);
 
 	const allRows = $derived(usage ? (tab === 'servers' ? serverRows(usage) : toolRows(usage)) : []);

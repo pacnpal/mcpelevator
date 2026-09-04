@@ -109,6 +109,20 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
         )
     host, port = endpoint
 
+    # REST attribution reads the exposure of the bridge that will actually serve this
+    # request, not the ORM row. `rest_openapi` is part of config_hash, so a PATCH takes
+    # effect only once the restart lands; until then the row is DESIRED state while the
+    # live bridge still has the old surface. Reading the row across that window counts
+    # the old bridge's 404 as a tool call when REST was just enabled, and files a call
+    # it genuinely served as plain traffic when it was just disabled. The unit resolves
+    # from the same slug `endpoint` did, so it is the one behind that host/port.
+    serving = sup.unit_by_slug(slug)
+    rest_enabled = bool(
+        serving.exposure.get("rest_openapi")
+        if serving is not None
+        else server.rest_openapi
+    )
+
     # Count the request as in flight from the moment a bridge is selected until
     # the response stream closes — covering the body read too, not just the
     # dispatch: a slow upload or a long-held Streamable-HTTP/SSE stream can each
@@ -143,9 +157,7 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
     try:
         usage.record(
             server.id,
-            usage.proxy_tools(
-                request.method, path, body, rest_enabled=bool(server.rest_openapi)
-            ),
+            usage.proxy_tools(request.method, path, body, rest_enabled=rest_enabled),
         )
     except Exception:
         logger.exception("usage accounting failed for %s", slug)
