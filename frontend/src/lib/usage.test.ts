@@ -6,10 +6,14 @@ import {
 	HEATMAP_DAYS,
 	applyView,
 	countLabel,
+	facetPeak,
 	heatLevel,
 	heatmap,
 	peakCalls,
 	serverRows,
+	tickLabel,
+	toChartPoints,
+	toFacetPoints,
 	toolRows,
 	type UsageRow
 } from './usage';
@@ -190,6 +194,61 @@ describe('peakCalls', () => {
 		expect(peakCalls([row({ calls: 0 }), row({ calls: 0 })])).toBe(1);
 		expect(peakCalls([])).toBe(1);
 		expect(peakCalls([row({ calls: 3 }), row({ calls: 9 })])).toBe(9);
+	});
+});
+
+describe('chart data', () => {
+	it('turns the API’s ISO buckets into Dates for the time axis', () => {
+		const [first] = toChartPoints([{ bucket: '2026-09-01T10:00:00Z', calls: 3, other: 1 }]);
+		expect(first.bucket).toBeInstanceOf(Date);
+		expect(first.bucket.toISOString()).toBe('2026-09-01T10:00:00.000Z');
+		expect(first).toMatchObject({ calls: 3, other: 1 });
+	});
+
+	it('positions a band by the series it is aligned to', () => {
+		const series = [
+			{ bucket: '2026-09-01T10:00:00Z', calls: 0, other: 0 },
+			{ bucket: '2026-09-01T11:00:00Z', calls: 0, other: 0 }
+		];
+		const points = toFacetPoints(
+			{ server_id: 'a', slug: 'a', name: 'A', points: [4, 2] },
+			series
+		);
+		expect(points.map((p) => [p.bucket.toISOString(), p.calls])).toEqual([
+			['2026-09-01T10:00:00.000Z', 4],
+			['2026-09-01T11:00:00.000Z', 2]
+		]);
+	});
+
+	it('truncates a band longer than the series rather than inventing times', () => {
+		const series = [{ bucket: '2026-09-01T10:00:00Z', calls: 0, other: 0 }];
+		const points = toFacetPoints(
+			{ server_id: 'a', slug: 'a', name: 'A', points: [1, 2, 3] },
+			series
+		);
+		expect(points).toHaveLength(1);
+	});
+
+	it('shares one y domain across facets, and never a zero one', () => {
+		expect(
+			facetPeak([
+				{ server_id: 'a', slug: 'a', name: 'A', points: [4, 0] },
+				{ server_id: 'b', slug: 'b', name: 'B', points: [9, 1] }
+			])
+		).toBe(9);
+		expect(facetPeak([{ server_id: 'a', slug: 'a', name: 'A', points: [0, 0] }])).toBe(1);
+		expect(facetPeak([])).toBe(1);
+	});
+
+	it('labels ticks as clock times or dates by bucket width', () => {
+		const at = '2026-09-01T10:00:00Z';
+		expect(tickLabel(at, true)).toBe(
+			new Date(at).toLocaleTimeString(undefined, { hour: 'numeric' })
+		);
+		expect(tickLabel(at, false)).toBe(
+			new Date(at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+		);
+		expect(tickLabel('not-a-date', true)).toBe('not-a-date');
 	});
 });
 

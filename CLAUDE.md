@@ -97,7 +97,12 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
 - **Catalog** (`catalog/`): backend proxies public MCP directories (official registry, Glama) into
   reviewable launch specs; the SPA stays same-origin.
 - **Frontend** (`frontend/src/`): SvelteKit (Svelte 5) SPA, `adapter-static`, no SSR — rendered
-  entirely in the browser, served by the backend catch-all.
+  entirely in the browser, served by the backend catch-all. Charts are
+  [LayerChart](https://layerchart.com) (the Svelte 5 charting library shadcn-svelte's charts
+  are built on); it takes its colours from CSS variables, which `app.css` maps onto this
+  app's tokens (`.lc-root-container` / `.lc-tooltip-root`) so charts inherit the one-accent
+  design system rather than importing a second one. Fixed-geometry visuals (the usage
+  punchcard, proportional row bars) stay plain DOM — a charting library adds nothing there.
 
 ## Conventions
 

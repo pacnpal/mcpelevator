@@ -21,10 +21,15 @@ The read side rolls up in SQL and ships whole listings (bounded by servers x too
 so the dashboard filters and sorts in the browser rather than round-tripping per
 keystroke, and both the per-server panel and the instance-wide view derive their
 window from the same code — "the last 7 days" cannot mean two things depending on
-which page you opened. Views obey the product's design system rather than importing
-a charting one: it locks a single accent and declares no categorical palette, so the
-split-by-server view is rendered as small multiples instead of a stacked multi-hue
-chart, and the activity grid uses one sequential ramp of that same accent.
+which page you opened. Charts are LayerChart (the Svelte 5 library shadcn-svelte's own charts are built
+on), so scales, axes, tick formatting, hover tooltips and resize come from the
+ecosystem rather than from hand-rolled geometry — but the product's design system
+still decides how they look: LayerChart reads its colours from CSS variables, which
+`app.css` points at mcpelevator's zinc surfaces and single emerald accent. That
+system locks one accent and declares no categorical palette, so the split-by-server
+view is small multiples on a shared scale rather than a stacked multi-hue chart, and
+the activity grid — a fixed 7x24 punchcard, where a charting library would add
+nothing over a DOM grid — uses one sequential ramp of the same accent.
 
 A bucket stores a server id, a tool name, an hour, a count, and the time that count
 was last written — no arguments and no results, so a usage row can't become a shadow

@@ -1,22 +1,26 @@
 <script lang="ts">
-	// A dependency-free chart for a usage series, in two view styles.
+	// The usage series, drawn with LayerChart — the Svelte 5 charting library
+	// (runes + snippets) that shadcn-svelte's own chart components are built on.
+	// It brings the parts that are tedious and easy to get subtly wrong by hand:
+	// d3 scales, real axes with tick formatting, a hover crosshair with a tooltip,
+	// and responsive resize — while still rendering plain SVG we style with the
+	// app's tokens (see the `.lc-*` mapping in app.css, which points LayerChart's
+	// surface/primary variables at mcpelevator's zinc + emerald palette).
 	//
-	// The backend hands over a DENSE series (quiet buckets included) already rolled
-	// up to the right width, so this only maps counts to geometry — no windowing or
-	// gap-filling in the browser. Both styles show the same two quantities: tool
-	// calls (accent) and non-tool traffic (muted), because "connected but called
-	// nothing" is the comparison the whole panel exists to make.
-	//
-	// `bars` reads a short window bucket-by-bucket; `line` reads a long one as a
-	// shape. Neither needs a charting library: bars are flex children, the line is
-	// one inline SVG polyline pair.
+	// Two quantities, always: tool calls and the non-tool traffic underneath them,
+	// because "connected but called nothing" is the comparison the panel exists to
+	// make. `bars` stacks them per bucket; `area` reads a long window as a shape.
+	import { AreaChart, BarChart } from 'layerchart';
+
 	import type { UsagePoint } from '$lib/types';
+	import { tickLabel, toChartPoints } from '$lib/usage';
 
 	let {
 		series,
 		bucketSeconds,
 		mode = 'bars',
-		height = 'h-24'
+		height = 'h-24',
+		axis = true
 	}: {
 		series: UsagePoint[];
 		/** 3600 = hourly buckets, 86400 = daily. Decides how ticks are labelled. */
@@ -24,117 +28,85 @@
 		mode?: 'bars' | 'line';
 		/** Tailwind height class for the plot area. */
 		height?: string;
+		/** Axes and grid off for a sparkline-sized chart. */
+		axis?: boolean;
 	} = $props();
 
 	const hourly = $derived(bucketSeconds < 86400);
-	// Never divide by zero, and keep an all-quiet window flat rather than making a
-	// single stray request look like a full-height spike.
-	const peak = $derived(Math.max(1, ...series.map((p) => p.calls + p.other)));
-	const totalCalls = $derived(series.reduce((sum, p) => sum + p.calls, 0));
 
-	// Line mode: an SVG viewBox in series coordinates, stretched by CSS. Points are
-	// placed at bucket centres so the first and last aren't clipped at the edges.
-	const VIEW_W = 100;
-	const VIEW_H = 40;
-	const points = $derived(
-		series.map((point, i) => ({
-			x: series.length > 1 ? (i / (series.length - 1)) * VIEW_W : VIEW_W / 2,
-			calls: VIEW_H - (point.calls / peak) * VIEW_H,
-			total: VIEW_H - ((point.calls + point.other) / peak) * VIEW_H
-		}))
-	);
-	const callsPath = $derived(points.map((p) => `${p.x},${p.calls}`).join(' '));
-	const totalPath = $derived(points.map((p) => `${p.x},${p.total}`).join(' '));
-	const callsArea = $derived(
-		points.length ? `${points[0].x},${VIEW_H} ${callsPath} ${points[points.length - 1].x},${VIEW_H}` : ''
-	);
+	// LayerChart wants real Dates for a time axis; the API hands over ISO strings.
+	const data = $derived(toChartPoints(series));
 
-	function label(iso: string): string {
-		const at = new Date(iso);
-		if (Number.isNaN(at.getTime())) return iso;
+	const chartSeries = $derived([
+		{
+			key: 'calls',
+			label: 'Tool calls',
+			value: (d: { calls: number }) => d.calls,
+			color: 'var(--color-accent)'
+		},
+		{
+			key: 'other',
+			label: 'Other requests',
+			value: (d: { other: number }) => d.other,
+			color: 'color-mix(in oklab, var(--color-ink-dim) 45%, transparent)'
+		}
+	]);
+
+	const tick = $derived((value: Date | string | number) => tickLabel(value, hourly));
+
+	// The tooltip header names the bucket the reader is hovering. Its default is a
+	// bare date, which says nothing useful about WHICH hour on an hourly window.
+	const bucketLabel = $derived((value: Date | string | number) => {
+		const at = value instanceof Date ? value : new Date(value);
+		if (Number.isNaN(at.getTime())) return String(value);
 		return hourly
-			? at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-			: at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-	}
+			? at.toLocaleString(undefined, {
+					month: 'short',
+					day: 'numeric',
+					hour: 'numeric',
+					minute: '2-digit'
+				})
+			: at.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+	});
 
-	function tooltip(point: UsagePoint): string {
-		const calls = `${point.calls} tool call${point.calls === 1 ? '' : 's'}`;
-		return `${label(point.bucket)} — ${calls}, ${point.other} other`;
-	}
-
-	function barHeight(value: number): string {
-		return `${(value / peak) * 100}%`;
-	}
-
-	const ariaLabel = $derived(
-		`${totalCalls} tool calls across ${series.length} ${hourly ? 'hourly' : 'daily'} buckets`
-	);
+	// Whole numbers only: half a call doesn't exist, and the default tick
+	// generator will happily offer 0.5 on a quiet window.
+	const wholeNumbers = { format: (v: number) => (Number.isInteger(v) ? String(v) : '') };
 </script>
 
-<figure class="m-0 flex flex-col gap-1.5">
+<div class={height}>
 	{#if mode === 'line'}
-		<div class={height} role="img" aria-label={ariaLabel} data-testid="usage-line">
-			<svg
-				viewBox="0 0 {VIEW_W} {VIEW_H}"
-				preserveAspectRatio="none"
-				class="h-full w-full overflow-visible"
-				aria-hidden="true"
-			>
-				<polyline
-					points={callsArea}
-					fill="color-mix(in oklab, var(--color-accent) 18%, transparent)"
-					stroke="none"
-				/>
-				<polyline
-					points={totalPath}
-					fill="none"
-					stroke="color-mix(in oklab, var(--color-ink-dim) 45%, transparent)"
-					stroke-width="0.6"
-					vector-effect="non-scaling-stroke"
-					stroke-linejoin="round"
-				/>
-				<polyline
-					points={callsPath}
-					fill="none"
-					stroke="var(--color-accent)"
-					stroke-width="1.2"
-					vector-effect="non-scaling-stroke"
-					stroke-linejoin="round"
-				/>
-			</svg>
-		</div>
+		<AreaChart
+			{data}
+			x="bucket"
+			series={chartSeries}
+			seriesLayout="stack"
+			{axis}
+			grid={axis}
+			legend={false}
+			props={{
+				xAxis: { format: tick, ticks: 6 },
+				yAxis: wholeNumbers,
+				tooltip: { header: { format: bucketLabel } },
+				area: { line: { class: 'stroke-2' }, 'fill-opacity': 0.15 }
+			}}
+		/>
 	{:else}
-		<div class="{height} flex items-end gap-px" role="img" aria-label={ariaLabel}>
-			{#each series as point (point.bucket)}
-				<!-- The bottom border doubles as the axis, so a quiet bucket still shows a
-				     tick instead of a gap. The column is capped rather than filling its
-				     slot: a short window should leave air between marks, not draw slabs. -->
-				<div
-					class="flex h-full min-w-0 flex-1 justify-center border-b border-[var(--color-line)]"
-					title={tooltip(point)}
-					data-testid="usage-bar"
-					data-calls={point.calls}
-				>
-					<div class="flex h-full w-full max-w-6 flex-col justify-end gap-[2px]">
-						{#if point.calls > 0}
-							<div
-								class="min-h-[3px] rounded-t-[4px]"
-								style={`height: ${barHeight(point.calls)}; background-color: var(--color-accent);`}
-							></div>
-						{/if}
-						{#if point.other > 0}
-							<div
-								class="min-h-[2px]"
-								style={`height: ${barHeight(point.other)}; background-color: color-mix(in oklab, var(--color-ink-dim) 35%, transparent);`}
-							></div>
-						{/if}
-					</div>
-				</div>
-			{/each}
-		</div>
+		<BarChart
+			{data}
+			x="bucket"
+			series={chartSeries}
+			seriesLayout="stack"
+			{axis}
+			grid={axis}
+			legend={false}
+			bandPadding={0.25}
+			props={{
+				xAxis: { format: tick, ticks: 6 },
+				yAxis: wholeNumbers,
+				tooltip: { header: { format: bucketLabel } },
+				bars: { radius: 2, rounded: 'top', strokeWidth: 0 }
+			}}
+		/>
 	{/if}
-	<figcaption class="flex justify-between text-[10px] text-[var(--color-ink-dim)]">
-		<span>{series.length ? label(series[0].bucket) : ''}</span>
-		<span>{series.length ? label(series[series.length - 1].bucket) : ''}</span>
-	</figcaption>
-</figure>
+</div>

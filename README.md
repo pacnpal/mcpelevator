@@ -268,7 +268,8 @@ Both show, over a **24h / 7d / 30d** window (the dashboard adds 90d):
   server with other requests but zero tool calls means clients are connecting and
   the model is choosing not to call anything, which is exactly when a better tool
   name or description is worth trying.
-- **A bar chart** of the window (hourly buckets for 24h, daily beyond that).
+- **A chart** of the window — bars or an area line, with axes, a hover tooltip
+  breaking down the bucket, and hourly buckets for 24h, daily beyond that.
 - **A per-tool table** with call counts and when each was last called. A tool
   nothing has ever called stays in the table at `0 / never` rather than vanishing.
 

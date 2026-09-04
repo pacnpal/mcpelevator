@@ -9,7 +9,7 @@
 // Pure functions, no Svelte: the page wires them to inputs, and the rules are
 // unit-testable on their own.
 
-import type { InstanceUsage, UsageHour } from './types';
+import type { InstanceUsage, UsageBand, UsageHour, UsagePoint } from './types';
 
 // NOTE ON COLOUR. This app's design system declares one locked accent (see
 // app.css) and supplies no categorical palette — so no view here invents one. A
@@ -18,6 +18,55 @@ import type { InstanceUsage, UsageHour } from './types';
 // by its own title rather than by a hue the system doesn't have. That is the
 // documented way out when you run out of categorical slots, and here the system
 // has none to begin with.
+
+
+// --- chart data ---------------------------------------------------------------
+// LayerChart wants real Dates on a time axis and one flat row per point; the API
+// speaks ISO strings and (for the per-server split) index-aligned bands. These
+// map between the two, and they are pure so the mapping is tested here rather
+// than through a rendered chart.
+
+/** One row per bucket for the main series chart. */
+export function toChartPoints(
+	series: UsagePoint[]
+): { bucket: Date; calls: number; other: number }[] {
+	return series.map((point) => ({
+		bucket: new Date(point.bucket),
+		calls: point.calls,
+		other: point.other
+	}));
+}
+
+/**
+ * One band's rows, positioned by the series it is aligned to. A band carries only
+ * counts — the timestamps live in `series` — so a band longer than the series (a
+ * payload that disagrees with itself) is truncated rather than plotted against
+ * invented times.
+ */
+export function toFacetPoints(
+	band: UsageBand,
+	series: UsagePoint[]
+): { bucket: Date; calls: number }[] {
+	return band.points.slice(0, series.length).map((calls, index) => ({
+		bucket: new Date(series[index].bucket),
+		calls
+	}));
+}
+
+/** The y domain every facet shares: the busiest bucket across all of them, never
+ * 0 (an all-quiet window still has to produce a valid scale). */
+export function facetPeak(bands: UsageBand[]): number {
+	return Math.max(1, ...bands.flatMap((band) => band.points));
+}
+
+/** Axis tick text: clock time for hourly buckets, a date for daily ones. */
+export function tickLabel(value: Date | string | number, hourly: boolean): string {
+	const at = value instanceof Date ? value : new Date(value);
+	if (Number.isNaN(at.getTime())) return String(value);
+	return hourly
+		? at.toLocaleTimeString(undefined, { hour: 'numeric' })
+		: at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
 
 /** Weekday rows of the activity grid, Monday first — a work-week reads better
  * than a calendar week for "when is this thing used". */

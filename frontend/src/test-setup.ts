@@ -27,3 +27,30 @@ Object.defineProperty(globalThis, 'localStorage', {
 	writable: true,
 	configurable: true
 });
+
+// jsdom implements neither matchMedia nor ResizeObserver, and LayerChart needs
+// both: svelte/motion consults `prefers-reduced-motion` at import time, and every
+// chart measures its container to size the plot. Minimal stubs — enough for the
+// components to mount and render marks under test.
+if (typeof window !== 'undefined') {
+	if (!window.matchMedia) {
+		window.matchMedia = ((query: string) => ({
+			matches: false,
+			media: query,
+			onchange: null,
+			addEventListener: () => {},
+			removeEventListener: () => {},
+			addListener: () => {},
+			removeListener: () => {},
+			dispatchEvent: () => false
+		})) as typeof window.matchMedia;
+	}
+	if (!window.ResizeObserver) {
+		window.ResizeObserver = class {
+			observe(): void {}
+			unobserve(): void {}
+			disconnect(): void {}
+		} as unknown as typeof window.ResizeObserver;
+		globalThis.ResizeObserver = window.ResizeObserver;
+	}
+}

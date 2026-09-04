@@ -22,6 +22,7 @@
 		"@tailwindcss/vite": "^4.3.2",
 		"@types/node": "^26.1.1",
 		"jsdom": "^29.1.1",
+		"layerchart": "^2.3.1",
 		"svelte": "^5.56.1",
 		"svelte-check": "^4.7.2",
 		"tailwindcss": "^4.3.2",
