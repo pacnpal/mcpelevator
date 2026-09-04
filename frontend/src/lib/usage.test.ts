@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { InstanceUsage } from './types';
+import type { InstanceUsage, ServerUsage } from './types';
 import {
 	DEFAULT_VIEW,
 	HEATMAP_DAYS,
@@ -409,5 +409,22 @@ describe('effectiveWindowDays', () => {
 
 	it('has no answer for an empty series', () => {
 		expect(effectiveWindowDays(window(0, 86_400))).toBeNull();
+	});
+
+	it('reads a ServerUsage payload too, not just the instance one', () => {
+		// Both surfaces offer the same ranges against the same retention, so the rule
+		// has to be the same one — the per-server panel shipped without this notice
+		// while the dashboard had it, which is the drift this pins.
+		const serverUsage: ServerUsage = {
+			server_id: 's1',
+			since: '2026-08-30T00:00:00Z',
+			bucket_seconds: 86_400,
+			tool_calls: 0,
+			other_requests: 0,
+			last_call_at: null,
+			tools: [],
+			series: window(5, 86_400).series
+		};
+		expect(effectiveWindowDays(serverUsage)).toBe(5);
 	});
 });

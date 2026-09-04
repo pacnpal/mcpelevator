@@ -290,11 +290,16 @@ export function peakCalls(rows: UsageRow[]): number {
  * clock, and cannot drift with the viewer's.
  *
  * Null when there is no series to measure.
+ *
+ * Takes the series shape rather than a named response, because BOTH usage payloads
+ * carry it and both surfaces offer the same ranges against the same retention: the
+ * instance dashboard and a single server's panel have to say the same thing when
+ * one shortens the other.
  */
-export function effectiveWindowDays(usage: Pick<
-	InstanceUsage,
-	'series' | 'bucket_seconds'
->): number | null {
+export function effectiveWindowDays(usage: {
+	series: UsagePoint[];
+	bucket_seconds: number;
+}): number | null {
 	if (!usage.series.length) return null;
 	return Math.max(1, Math.round((usage.series.length * usage.bucket_seconds) / 86_400));
 }

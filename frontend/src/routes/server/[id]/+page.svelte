@@ -25,7 +25,7 @@
 		startupPhaseLabel
 	} from '$lib/startup';
 	import type { ServerDetail, ServerTool, ServerUsage, ToolOverride } from '$lib/types';
-	import { toolBadge } from '$lib/usage';
+	import { effectiveWindowDays, toolBadge } from '$lib/usage';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
@@ -692,6 +692,13 @@
 	// the table at zero rather than being absent — that row is the whole point of the
 	// panel (it's the one whose name or description is worth rewriting).
 	//
+	// The backend CLAMPS the window to `usage_retention_days`, so a 30d button on a
+	// 5-day retention charts 5 days while still reading "30d". Same rule and same
+	// helper as the instance dashboard — this panel offers the same ranges against the
+	// same retention, so it has to say the same thing when one shortens the other.
+	const usageEffectiveDays = $derived(usageStats ? effectiveWindowDays(usageStats) : null);
+	const usageClamped = $derived(usageEffectiveDays !== null && usageEffectiveDays < usageDays);
+
 	// Keyed off the tool's DISCOVERED name — what the running bridge actually serves,
 	// and therefore what usage was recorded under — not off `exposedName()`, which
 	// reflects edits STAGED in the editor above. A staged rename doesn't reach the
@@ -1519,6 +1526,13 @@
 						other requests
 					</span>
 					<span>Last call {formatLastCall(usageStats.last_call_at)}</span>
+					{#if usageClamped}
+						<span
+							title="Usage retention is shorter than the window you picked, so there is no older data to show. Change it in Settings."
+						>
+							· showing {usageEffectiveDays}d — limited by retention
+						</span>
+					{/if}
 				</div>
 
 				<UsageChart series={usageStats.series} bucketSeconds={usageStats.bucket_seconds} />
