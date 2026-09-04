@@ -272,10 +272,12 @@ Both show, over a **24h / 7d / 30d** window (the dashboard adds 90d):
   breaking down the bucket, and hourly buckets for 24h, daily beyond that.
 - **A per-tool table** with call counts and when each was last called. A tool
   nothing has ever called stays in the table at `0 / never` rather than vanishing.
-  A row named `(other tools)` can appear on a server reachable without auth: tool
-  names come from the caller, so the number of *unrecognised* ones stored per hour
-  is capped and the rest pool into that row. The calls are still counted as tool
-  calls — the tools your server actually exposes are never capped or pooled.
+  A row named `(other tools)`, badged *unrecognised*, can appear on a server
+  reachable without auth: tool names come from the caller, so the number of
+  unrecognised ones kept per hour is capped and the rest pool into that row. The
+  calls are still counted as tool calls — the tools your server actually exposes
+  are never capped or pooled, and the row is distinct from a *retired* one, which
+  means a name the server used to expose and no longer does.
 
 Counting happens wherever a call is actually served, so all three exposed surfaces
 land in the same counters: `/s/<slug>/mcp`, the REST mirror `POST /s/<slug>/rest/<tool>`,

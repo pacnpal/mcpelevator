@@ -9,11 +9,13 @@ import {
 	facetPeak,
 	heatLevel,
 	heatmap,
+	OVERFLOW_TOOL,
 	peakCalls,
 	serverRows,
 	tickLabel,
 	toChartPoints,
 	toFacetPoints,
+	toolBadge,
 	toolRows,
 	type UsageRow
 } from './usage';
@@ -125,6 +127,36 @@ describe('toolRows', () => {
 		]);
 		// Keys carry the server too: two servers may expose the same tool name.
 		expect(rows[0].key).toBe('srv1:gone');
+	});
+
+	it('does not call the overflow pool a retired tool', () => {
+		// "retired" means the server used to expose this name — a prompt to look at
+		// a rename. The pool is unrecognised traffic that never was a tool, so
+		// labelling it retired would report a tool that never existed AND hide the
+		// one condition the row exists to communicate.
+		const rows = toolRows(
+			usage({
+				tools: [
+					{
+						server_id: 'srv1',
+						slug: 'files',
+						tool: OVERFLOW_TOOL,
+						calls: 9,
+						last_call_at: '2026-09-02T10:00:00Z',
+						known: false
+					}
+				]
+			})
+		);
+		expect(rows[0].badge).toBe('unrecognised');
+	});
+});
+
+describe('toolBadge', () => {
+	it('separates the three kinds of row', () => {
+		expect(toolBadge('search', true)).toBeNull();
+		expect(toolBadge('search', false)).toBe('retired');
+		expect(toolBadge(OVERFLOW_TOOL, false)).toBe('unrecognised');
 	});
 });
 

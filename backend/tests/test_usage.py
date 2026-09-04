@@ -279,7 +279,12 @@ def test_flush_is_a_noop_without_pending_counts():
 def test_pending_keys_are_bounded_without_starving_real_tools():
     """A caller can name tools that were never advertised, and each distinct name
     is a key here and a row in storage — which time-based retention doesn't bound.
-    New keys stop at the ceiling; keys already being tracked keep counting."""
+
+    Past the ceiling a new name is POOLED under the overflow sentinel rather than
+    dropped: this budget is global across servers, so dropping would let a flood
+    on one open server silently undercount a genuine tool's first call of the
+    interval everywhere else. Keys already tracked keep counting as themselves."""
+    bucket = recorder.current_bucket()
     recorder.record("srv", ["real"])
     for i in range(recorder.MAX_PENDING_KEYS + 50):
         recorder.record("srv", [f"invented{i}"])
@@ -287,8 +292,12 @@ def test_pending_keys_are_bounded_without_starving_real_tools():
 
     with recorder._lock:
         pending = dict(recorder._pending)
-    assert len(pending) == recorder.MAX_PENDING_KEYS
-    assert pending[("srv", "real", recorder.current_bucket())] == 2
+    # The cap still bounds it: one pooled key per server is the only addition.
+    assert len(pending) == recorder.MAX_PENDING_KEYS + 1
+    assert pending[("srv", "real", bucket)] == 2
+    # Nothing was dropped — every refused name landed in the pool.
+    assert pending[("srv", OVERFLOW_TOOL, bucket)] == 51
+    assert sum(pending.values()) == recorder.MAX_PENDING_KEYS + 52
 
 
 def test_keys_being_written_still_count_against_the_ceiling(monkeypatch):
@@ -315,8 +324,9 @@ def test_keys_being_written_still_count_against_the_ceiling(monkeypatch):
         pending = dict(recorder._pending)
         inflight = dict(recorder._inflight)
     assert detached, "the write should have seen the detached batch"
-    # Never more than the ceiling, batch restored on top and all.
-    assert len(pending) <= recorder.MAX_PENDING_KEYS
+    # Never more than the ceiling (plus the one pooled key), batch restored on
+    # top and all.
+    assert len(pending) <= recorder.MAX_PENDING_KEYS + 1
     # The reservation is released once the write settles, either way.
     assert inflight == {}
     # The restored batch is still there — the point of restoring it.

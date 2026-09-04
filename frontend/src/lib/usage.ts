@@ -180,6 +180,22 @@ export function serverRows(usage: InstanceUsage): UsageRow[] {
 	}));
 }
 
+/** The backend's pool for calls past the per-hour unrecognised-name budget. Not a
+ * tool the server ever exposed, so it must not be read as one — see `toolBadge`. */
+export const OVERFLOW_TOOL = '(other tools)';
+
+/** What to call out about a tool row, if anything.
+ *
+ * The overflow pool is NOT "retired": retired means the server used to expose
+ * this name and no longer does, which is a prompt to look at a rename. The pool
+ * is unrecognised traffic the backend refused to give its own row, and labelling
+ * it retired would report a tool that never existed while hiding the one
+ * condition the row exists to communicate. */
+export function toolBadge(tool: string, known: boolean): string | null {
+	if (tool === OVERFLOW_TOOL) return 'unrecognised';
+	return known ? null : 'retired';
+}
+
 /** Tool rows across every visible server, including never-called ones. */
 export function toolRows(usage: InstanceUsage): UsageRow[] {
 	return usage.tools.map((tool) => ({
@@ -189,7 +205,7 @@ export function toolRows(usage: InstanceUsage): UsageRow[] {
 		calls: tool.calls,
 		lastCall: tool.last_call_at,
 		href: `/server/${encodeURIComponent(tool.server_id)}`,
-		badge: tool.known ? null : 'retired',
+		badge: toolBadge(tool.tool, tool.known),
 		meta: null
 	}));
 }

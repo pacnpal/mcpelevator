@@ -25,6 +25,7 @@
 		startupPhaseLabel
 	} from '$lib/startup';
 	import type { ServerDetail, ServerTool, ServerUsage, ToolOverride } from '$lib/types';
+	import { toolBadge } from '$lib/usage';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
@@ -708,16 +709,18 @@
 				name: tool.name,
 				calls: hit?.calls ?? 0,
 				lastCall: hit?.last_call_at ?? null,
-				retired: false
+				badge: null
 			};
 		});
 		// What's left was called under a name this server no longer exposes (renamed,
-		// hidden, or gone upstream). Still real traffic — show it, marked.
+		// hidden, or gone upstream). Still real traffic — show it, marked. The
+		// overflow pool is in here too but is NOT retired: it never was a tool, so
+		// `badge` distinguishes them (see toolBadge).
 		const retired = [...counts.values()].map((t) => ({
 			name: t.tool,
 			calls: t.calls,
 			lastCall: t.last_call_at,
-			retired: true
+			badge: toolBadge(t.tool, false)
 		}));
 		return [...rows, ...retired].sort(
 			(a, b) => b.calls - a.calls || a.name.localeCompare(b.name)
@@ -1540,12 +1543,14 @@
 								<tr class="border-t border-[var(--color-line)]">
 									<td class="py-1.5 font-mono break-all text-[var(--color-ink)]">
 										{row.name}
-										{#if row.retired}
+										{#if row.badge}
 											<span
 												class="ml-1 font-sans text-[10px] text-[var(--color-ink-dim)]"
-												title="Called under a name this server no longer exposes"
+												title={row.badge === 'unrecognised'
+													? 'Calls to names this server does not expose, pooled past the per-hour budget'
+													: 'Called under a name this server no longer exposes'}
 											>
-												retired
+												{row.badge}
 											</span>
 										{/if}
 									</td>

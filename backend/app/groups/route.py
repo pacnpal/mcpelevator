@@ -138,7 +138,6 @@ class GroupDispatch:
         request = Request(scope, receive)
         with Session(get_engine()) as session:
             known = registry.exists(session, name)
-            member_ids = registry.resolve(session, name) if known else []
         if not known:
             # indistinguishable from a nonexistent slug (same shape as the proxy's 404)
             await Response("unknown group", status_code=404)(scope, receive, send)
@@ -178,9 +177,17 @@ class GroupDispatch:
         # The window OPENS BEFORE usage buffers the body: reading a slow upload can
         # take longer than a member's idle deadline, and a request already accepted
         # must not have its bridge stopped out from under it mid-upload.
+        #
+        # Scoped to the MOUNTED members, not the registry's: a configured member
+        # that is running but excluded from this bundle (its auth is stricter than
+        # the group's) serves none of this request, so holding it in flight would
+        # keep an unrelated bridge awake and reset its idle clock for traffic it
+        # never saw. Snapshotted ONCE so start and finish stay balanced even if a
+        # reconcile swaps the instance mid-request.
+        mounted = self._hub.mounted_members(name)
         app = scope.get("app")
         supervisor = app.state.supervisor if app is not None else None
-        for member_id in member_ids or []:
+        for member_id in mounted.values():
             if supervisor is not None:
                 supervisor.request_started(member_id)
         try:
@@ -193,11 +200,9 @@ class GroupDispatch:
             # calls. Stripping slashes here counted the redirect AND the request
             # the client then followed it with, so one tool call landed twice.
             if subpath == "mcp":
-                receive = await _record_group_usage(
-                    request, receive, self._hub.mounted_members(name)
-                )
+                receive = await _record_group_usage(request, receive, mounted)
             await inner(sub_scope, receive, send)
         finally:
-            for member_id in member_ids or []:
+            for member_id in mounted.values():
                 if supervisor is not None:
                     supervisor.request_finished(member_id)

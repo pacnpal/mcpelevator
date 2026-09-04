@@ -25,7 +25,7 @@ from typing import Iterable
 from sqlmodel import Session
 
 from app.db import get_engine, repo
-from app.db.models import NOT_A_TOOL, utcnow
+from app.db.models import NOT_A_TOOL, OVERFLOW_TOOL, utcnow
 from app.registry import settings as runtime_settings
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,15 @@ _pending: defaultdict[tuple[str, str, datetime], int] = defaultdict(int)
 # Counting the holders makes the release correct however the two interleave.
 _inflight: Counter[tuple[str, str, datetime]] = Counter()
 _lock = threading.Lock()
+# Serializes whole flushes. NOT for the reservation bookkeeping above — the
+# reference count already makes that correct under any interleaving — but for
+# SHUTDOWN. Cancelling the periodic task releases its `await`, it does not stop
+# the worker thread already inside a write. Without this, the final flush could
+# run while that worker holds the detached batch, see an empty `_pending`, write
+# nothing, and exit just as the worker's failed write restored the batch it will
+# now never write. Serialized, the final flush waits for that worker and then
+# picks up whatever it handed back. Never held together with `_lock`.
+_flush_lock = threading.Lock()
 _last_prune: float | None = None
 
 
@@ -90,16 +99,20 @@ def record(server_id: str, tools: Iterable[str] = ()) -> None:
     with _lock:
         for name in names:
             key = (server_id, name, bucket)
-            # An already-tracked key always keeps counting; only NEW keys are
-            # refused at the ceiling, so a flood of invented tool names can't
-            # cost the real ones their counts. "Tracked" spans the in-flight
-            # batch too — a key being written is still one this process holds.
+            # An already-tracked key always keeps counting. A NEW key at the
+            # ceiling is POOLED, never dropped: this budget is global across
+            # servers, so dropping would mean a flood on one open server silently
+            # undercounts a genuine tool's first call of the interval on every
+            # other server — and the write-side exemption for exposed tools can't
+            # recover a count that never reached it. Pooling keeps the call.
+            # "Tracked" spans the in-flight batch too: a key being written is
+            # still one this process holds.
             if (
                 key not in _pending
                 and key not in _inflight
                 and _tracked_keys() >= MAX_PENDING_KEYS
             ):
-                continue
+                key = (server_id, OVERFLOW_TOOL, bucket)
             _pending[key] += 1
 
 
@@ -196,23 +209,26 @@ def flush_sync() -> int:
     decides the thread (the background task hands it to a worker so the event
     loop never blocks on the write); tests call it directly.
 
-    Safe to run concurrently with another flush: each batch holds its own
-    reference to the keys it detached (see `_inflight`)."""
-    batch = _take()
-    with Session(get_engine()) as session:
-        try:
-            repo.bump_usage(session, batch)
-        except Exception:
-            # The write is the only step whose failure loses data — put the batch
-            # back so the next tick retries it. A prune failure AFTER this point
-            # is not restored: those counts are already stored.
-            _restore(batch)
-            raise
-        # Written and committed — this batch's reservation has done its job.
-        with _lock:
-            _settle(batch)
-        _prune_if_due(session)
-    return len(batch)
+    Serialized on `_flush_lock` so a second flush waits rather than overtaking
+    one already in a write — see that lock for why shutdown depends on it. Each
+    batch also holds its own reference to the keys it detached (`_inflight`), so
+    the bookkeeping stays correct regardless."""
+    with _flush_lock:
+        batch = _take()
+        with Session(get_engine()) as session:
+            try:
+                repo.bump_usage(session, batch)
+            except Exception:
+                # The write is the only step whose failure loses data — put the
+                # batch back so the next tick retries it. A prune failure AFTER
+                # this point is not restored: those counts are already stored.
+                _restore(batch)
+                raise
+            # Written and committed — this batch's reservation has done its job.
+            with _lock:
+                _settle(batch)
+            _prune_if_due(session)
+        return len(batch)
 
 
 async def flush() -> int:
