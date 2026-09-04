@@ -17,6 +17,7 @@ from sqlmodel import Session, select
 
 from app.db.models import (
     NOT_A_TOOL,
+    OVERFLOW_TOOL,
     Server,
     ServerRuntime,
     Setting,
@@ -164,12 +165,34 @@ def reset_all_runtime(session: Session) -> None:
 # usage counters (data-plane traffic, pre-aggregated per server/tool/hour)
 # --------------------------------------------------------------------------- #
 
-# Ceiling on DISTINCT tool names STORED for one server in one hour. Tool names are
-# client-chosen, so this is what stops a caller inventing names forever from
-# choosing how many rows the table holds. Set far above any real server — a large
-# MCP server exposes tens of tools, not hundreds — so it bounds abuse without ever
-# truncating a genuine catalogue.
-MAX_TOOLS_PER_BUCKET = 500
+# Ceiling on distinct UNKNOWN tool names stored for one server in one hour — names
+# the server does not currently expose. Tool names are client-chosen, so this is
+# what stops a caller inventing names forever from choosing how many rows the table
+# holds. A tool the server actually exposes is NEVER counted against this and never
+# folded: a genuine catalogue is bounded by the server itself, and letting invented
+# names crowd real ones out would let an attacker corrupt the statistics rather than
+# merely pad them. What remains under the cap are the legitimately unknown names —
+# a tool renamed or removed mid-window, or one called before the probe refreshed —
+# which the "retired" listing exists to show.
+MAX_UNKNOWN_TOOLS_PER_BUCKET = 50
+
+
+def discovered_tool_names(session: Session, server_ids: set[str]) -> dict[str, set[str]]:
+    """Each server's currently discovered tool names, from the cached runtime rows.
+
+    The probe caches what the bridge last served, under the names clients actually
+    call (post-rename) — the same key usage is recorded under. A server that isn't
+    running has no cached tools and so contributes none."""
+    names: dict[str, set[str]] = {}
+    for runtime in list_runtimes(session):
+        if runtime.server_id not in server_ids:
+            continue
+        names[runtime.server_id] = {
+            tool["name"]
+            for tool in (runtime.tools or [])
+            if isinstance(tool, dict) and tool.get("name")
+        }
+    return names
 
 
 def bump_usage(session: Session, counts: dict[tuple[str, str, datetime], int]) -> None:
@@ -187,17 +210,28 @@ def bump_usage(session: Session, counts: dict[tuple[str, str, datetime], int]) -
     them. Checked here, inside the write, because that is the only place the
     check can't be raced.
 
-    Distinct tool names per server and hour are capped at
-    :data:`MAX_TOOLS_PER_BUCKET`, and the cap is applied HERE because this is
-    where it can be durable. The recorder's in-memory ceiling bounds one flush
+    Distinct UNKNOWN tool names per server and hour are capped at
+    :data:`MAX_UNKNOWN_TOOLS_PER_BUCKET`, and the cap is applied HERE because this
+    is where it can be durable. The recorder's in-memory ceiling bounds one flush
     interval and then resets, so a client naming fresh tools every interval was
-    bounded in memory but not in storage — an unauthenticated server could be
-    made to persist millions of rows a day, which retention only clears if it is
-    switched on. Past the cap, a name that isn't already stored for that hour is
-    folded into the ``NOT_A_TOOL`` sentinel: the CALL is still counted (it shows
-    up as plain traffic), only the attacker-chosen name is refused a row of its
-    own. Names already stored keep their rows and keep counting, so real tools
-    can never be crowded out by a flood arriving later."""
+    bounded in memory but not in storage — an unauthenticated server could be made
+    to persist millions of rows a day, which retention only clears if it is
+    switched on.
+
+    Two rules keep that bound from corrupting the statistics it protects:
+
+    * A tool the server CURRENTLY exposes is never capped and never folded. The
+      cap exists to bound attacker-chosen names, and a real catalogue is bounded
+      by the server itself. Without this, a caller could fill the cap early in an
+      hour and every genuine tool first called later that hour would be folded —
+      turning a padding attack into a corruption one.
+    * Overflow pools into :data:`~app.db.models.OVERFLOW_TOOL`, not
+      ``NOT_A_TOOL``. These are still tool calls; folding them into the non-tool
+      sentinel would move real calls out of ``tool_calls`` and into
+      ``other_requests``, mis-stating both.
+
+    Names already stored keep their rows and keep counting, so nothing a flood
+    arrives after can cost an established tool its row."""
     if not counts:
         return
     live = {
@@ -224,17 +258,22 @@ def bump_usage(session: Session, counts: dict[tuple[str, str, datetime], int]) -
     ):
         stored.setdefault((server_id, _naive(bucket)), set()).add(tool)
 
+    exposed = discovered_tool_names(session, {key[0] for key in counts})
+
     now = utcnow()
     # Sorted so which names win the cap is deterministic rather than dict order.
     for (server_id, tool, bucket), calls in sorted(counts.items()):
         if server_id not in live:
             continue
         seen = stored.setdefault((server_id, _naive(bucket)), set())
-        if tool not in seen:
-            if len(seen) >= MAX_TOOLS_PER_BUCKET:
-                tool = NOT_A_TOOL  # still counted, just not under its own name
-            else:
-                seen.add(tool)
+        # A name the server currently exposes is never capped: only invented ones
+        # are budgeted, so a flood can pad the counters but never displace a real
+        # tool's row or push its calls into the overflow pool.
+        if tool and tool not in seen and tool not in exposed.get(server_id, ()):
+            unknown_stored = len(seen - exposed.get(server_id, set()))
+            if unknown_stored >= MAX_UNKNOWN_TOOLS_PER_BUCKET:
+                tool = OVERFLOW_TOOL  # still a tool call, just pooled
+        seen.add(tool)
         statement = sqlite_insert(UsageBucket).values(
             server_id=server_id, tool=tool, bucket=bucket, calls=calls, last_call_at=now
         )

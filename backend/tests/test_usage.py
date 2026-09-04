@@ -24,7 +24,7 @@ from conftest import LOOPBACK, create_server
 
 from app import usage
 from app.db import get_engine, repo
-from app.db.models import Server, UsageBucket
+from app.db.models import NOT_A_TOOL, OVERFLOW_TOOL, Server, UsageBucket
 from app.main import app
 from app.registry import settings as runtime_settings
 from app.usage import attribution, recorder, stats
@@ -179,20 +179,30 @@ def test_a_batch_cannot_mint_unbounded_names():
 def test_proxy_tools_reads_mcp_body_and_rest_path():
     body = json.dumps(_call("search")).encode()
     assert attribution.proxy_tools("POST", "mcp", body) == ["search"]
-    assert attribution.proxy_tools("POST", "/mcp", body) == ["search"]
     # the REST mirror names the tool in the path instead
     assert attribution.proxy_tools("POST", "rest/echo", b"{}") == ["echo"]
 
 
-@pytest.mark.parametrize("path", ["mcp/", "/mcp/", "mcp//", "rest/echo/"])
-def test_a_trailing_slash_is_a_redirect_not_a_call(path):
-    """The bridge registers `/mcp` and `/rest/<tool>` exactly, so a trailing
-    slash is a 307 back to them — nothing is invoked.
+@pytest.mark.parametrize(
+    "path",
+    [
+        "mcp/",  # trailing slash: a 307 back to /mcp, not a call
+        "mcp//",
+        "rest/echo/",
+        "/mcp",  # from /s/<slug>//mcp — relayed as //mcp, which nothing serves
+        "/mcp/",
+        "/rest/echo",
+    ],
+)
+def test_only_the_exact_served_path_is_a_call(path):
+    """The bridge registers `/mcp` and `/rest/<tool>` and nothing else.
 
-    Counting it would charge the redirect AND the request the client follows it
-    with, landing one call twice; a client that ignores the redirect would be
-    charged for a request nothing served. Such a request still counts as plain
-    traffic, just not against a tool."""
+    A trailing slash is a 307 back to them, so counting it would charge the
+    redirect AND the request the client follows it with — one call landing twice,
+    or a charge for a request the client never followed up. A LEADING slash comes
+    from a doubled slash in the proxy path (`/s/<slug>//mcp`), which is relayed
+    upstream verbatim and simply isn't a route there. Neither invokes a tool, so
+    neither is attributed to one; both still count as plain traffic."""
     body = json.dumps(_call("search")).encode()
     assert attribution.proxy_tools("POST", path, body) == []
 
@@ -313,12 +323,11 @@ def test_keys_being_written_still_count_against_the_ceiling(monkeypatch):
     assert pending[(SYNTHETIC_ID, "before", recorder.current_bucket())] == 1
 
 
-def test_stored_tool_names_are_capped_across_flushes():
+def test_unknown_tool_names_are_capped_across_flushes():
     """The recorder's ceiling resets every flush, so it bounds memory but not
     storage: a client naming fresh tools each interval could persist rows
-    forever. The cap on the WRITE is what makes it durable — and the calls are
-    still counted, just folded under the plain-traffic sentinel."""
-    cap = repo.MAX_TOOLS_PER_BUCKET
+    forever. The cap on the WRITE is what makes it durable."""
+    cap = repo.MAX_UNKNOWN_TOOLS_PER_BUCKET
     # Two flushes, each well under the in-memory ceiling but together over the cap.
     for flush in range(2):
         for i in range(cap):
@@ -326,11 +335,12 @@ def test_stored_tool_names_are_capped_across_flushes():
         recorder.flush_sync()
 
     rows = _rows(SYNTHETIC_ID)
-    named = {tool: calls for tool, calls in rows.items() if tool}
-    assert len(named) == cap, "a later flush must not add rows past the cap"
-    # Nothing was lost: the refused names still counted as traffic.
+    assert len(rows) == cap + 1, "a later flush adds only the overflow row"
+    # Nothing was lost, and the overflow is still counted as TOOL traffic — not
+    # moved into plain traffic, which would understate tool_calls.
     assert sum(rows.values()) == 2 * cap
-    assert rows[""] == cap
+    assert rows[OVERFLOW_TOOL] == cap
+    assert NOT_A_TOOL not in rows
 
 
 def test_a_tool_already_stored_keeps_counting_past_the_cap():
@@ -338,12 +348,33 @@ def test_a_tool_already_stored_keeps_counting_past_the_cap():
     later must not cost a real tool its row."""
     recorder.record(SYNTHETIC_ID, ["real"])
     recorder.flush_sync()
-    for i in range(repo.MAX_TOOLS_PER_BUCKET + 10):
+    for i in range(repo.MAX_UNKNOWN_TOOLS_PER_BUCKET + 10):
         recorder.record(SYNTHETIC_ID, [f"invented{i}"])
     recorder.record(SYNTHETIC_ID, ["real"])
     recorder.flush_sync()
 
     assert _rows(SYNTHETIC_ID)["real"] == 2
+
+
+def test_a_tool_the_server_exposes_is_never_capped():
+    """Otherwise the cap becomes a corruption primitive rather than a bound: a
+    caller fills it early in the hour with invented names, and every genuine tool
+    first called later that hour gets pooled into the overflow row instead of
+    counted under its own name."""
+    with Session(get_engine()) as session:
+        repo.upsert_runtime(
+            session, SYNTHETIC_ID, state="running", tools=[{"name": "genuine"}]
+        )
+    # An attacker exhausts the unknown-name budget first...
+    for i in range(repo.MAX_UNKNOWN_TOOLS_PER_BUCKET + 25):
+        recorder.record(SYNTHETIC_ID, [f"invented{i}"])
+    # ...and only then is the real tool called for the first time this hour.
+    recorder.record(SYNTHETIC_ID, ["genuine"])
+    recorder.flush_sync()
+
+    rows = _rows(SYNTHETIC_ID)
+    assert rows["genuine"] == 1, "an exposed tool must keep its own row"
+    assert rows[OVERFLOW_TOOL] == 25
 
 
 def test_overlapping_flushes_do_not_release_each_others_reservations():

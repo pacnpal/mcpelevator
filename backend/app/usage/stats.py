@@ -198,25 +198,15 @@ def server_usage(session: Session, server_id: str, *, days: int) -> dict[str, An
     }
 
 
-def _known_tools(session: Session, server_ids: set[str]) -> dict[str, list[str]]:
+def _known_tools(session: Session, server_ids: set[str]) -> dict[str, set[str]]:
     """Each server's currently discovered tool names, by server id.
 
-    Read from the persisted runtime rows, which cache what the readiness probe
-    last saw under the names clients actually call (post-rename) — the same key
-    usage is recorded under. A server that isn't running has no cached tools, so
-    it contributes none; its previously called tools still appear from the
-    counters themselves."""
-    known: dict[str, list[str]] = {}
-    for runtime in repo.list_runtimes(session):
-        if runtime.server_id not in server_ids:
-            continue
-        names = [
-            tool.get("name")
-            for tool in (runtime.tools or [])
-            if isinstance(tool, dict) and tool.get("name")
-        ]
-        known[runtime.server_id] = names
-    return known
+    One extraction, shared with the write side (`repo.bump_usage` exempts a
+    server's real tools from its cardinality cap), so "what this server exposes"
+    cannot mean two different things at the two ends. A server that isn't running
+    has no cached tools and contributes none; its previously called tools still
+    appear from the counters themselves."""
+    return repo.discovered_tool_names(session, server_ids)
 
 
 def instance_usage(session: Session, servers: Sequence[Server], *, days: int) -> dict[str, Any]:
@@ -261,7 +251,7 @@ def instance_usage(session: Session, servers: Sequence[Server], *, days: int) ->
             active_servers += 1
 
         server_called = called.get(server.id, {})
-        server_known = known.get(server.id, [])
+        server_known = known.get(server.id, set())
         for tool in sorted(set(server_known) | set(server_called)):
             hit = server_called.get(tool)
             tool_rows.append(

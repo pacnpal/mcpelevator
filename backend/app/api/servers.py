@@ -357,7 +357,6 @@ async def get_server_usage(
     server_id: str,
     response: Response,
     days: int = Query(default=7, ge=1, le=usage.MAX_DAYS),
-    session: Session = Depends(get_session),
     principal: Principal = Depends(current_principal),
 ):
     """Call counters for one server: totals, per tool, and a series to chart.
@@ -366,13 +365,23 @@ async def get_server_usage(
     visible — a stats page that lags its own traffic by a flush interval reads
     as broken, and this is a rare, operator-driven read.
 
+    Like the instance-wide endpoint, the aggregation runs off the event loop in a
+    worker with its own session: these are synchronous SQLite scans, and the same
+    loop serves `/s` proxy traffic and supervision.
+
     `no-store` because the body is scoped to WHO asked: a member sees only the
     servers they own, so a cached copy could be replayed to a different
     principal on a shared browser or by an intermediary."""
-    server = _visible(principal, session, server_id)
+
+    def _compute() -> tuple[str, dict]:
+        with Session(get_engine()) as session:
+            server = _visible(principal, session, server_id)
+            return server.id, usage.server_usage(session, server.id, days=days)
+
     await usage.flush()
+    resolved_id, payload = await asyncio.to_thread(_compute)
     response.headers["Cache-Control"] = "no-store"
-    return ServerUsage(server_id=server.id, **usage.server_usage(session, server.id, days=days))
+    return ServerUsage(server_id=resolved_id, **payload)
 
 
 @router.patch("/servers/{server_id}", response_model=ServerSummary)

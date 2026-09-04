@@ -192,6 +192,13 @@ class ServerRuntime(SQLModel, table=True):
 # from one place instead of each spelling the empty string themselves.
 NOT_A_TOOL = ""
 
+# Where calls to tool names past the per-bucket cardinality cap are pooled. NOT the
+# `NOT_A_TOOL` sentinel: these ARE tool calls, and folding them into plain traffic
+# would move real calls out of `tool_calls` and into `other_requests`. Deliberately
+# not a legal MCP tool name (which is an identifier), so it can never collide with
+# a real one — a server genuinely exposing this name is not representable.
+OVERFLOW_TOOL = "(other tools)"
+
 
 class UsageBucket(SQLModel, table=True):
     """Data-plane usage counters, pre-aggregated per (server, tool, UTC hour).

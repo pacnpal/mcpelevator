@@ -85,10 +85,17 @@ def proxy_tools(method: str, path: str, body: bytes) -> list[str]:
     endpoint a GET opens the event stream and a DELETE ends the session, and the
     remaining methods are refused outright. A `tools/call`-shaped body sent with
     any of them invokes nothing, so attributing it would let a caller inflate a
-    real tool's counter without ever running it."""
-    normalized = path.lstrip("/")
+    real tool's counter without ever running it.
+
+    The path is compared EXACTLY as the proxy forwards it — not stripped of
+    slashes. `/s/<slug>//mcp` arrives here as `/mcp` and is relayed upstream as
+    `//mcp`, which the bridge does not serve; normalizing it away would count a
+    request that only ever got an error back. Same for a doubled slash before
+    `rest/<tool>`. A request like that still counts as plain traffic, as any
+    other non-tool request does."""
     if method.upper() != "POST":
         return []
+    normalized = path
     if normalized == "mcp":
         return tools_from_body(body)
     if normalized.startswith(_REST_PREFIX):
