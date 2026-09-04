@@ -292,6 +292,19 @@ def bump_usage(session: Session, counts: dict[tuple[str, str, datetime], int]) -
                 },
             )
         )
+    # The `live` filter above reads committed state BEFORE these upserts, so a
+    # delete that commits in between still leaves rows for a server that no longer
+    # exists (SQLite foreign keys are off, and neither `usage.forget` nor the
+    # in-flight reservation can reach a batch already detached into this call).
+    # Sweeping inside the same transaction closes that window: scoped to the
+    # servers this batch touched, so it costs an indexed lookup rather than a
+    # table scan, and it cleans any orphan an earlier race left behind.
+    session.execute(
+        delete(UsageBucket).where(
+            UsageBucket.server_id.in_({key[0] for key in counts}),
+            ~UsageBucket.server_id.in_(select(Server.id)),
+        )
+    )
     session.commit()
 
 

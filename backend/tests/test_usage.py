@@ -160,13 +160,33 @@ def test_deeply_nested_body_does_not_raise():
     assert attribution.tools_from_body(body) == []
 
 
-def test_absurd_tool_names_are_refused():
-    """The name is client-controlled, so what gets past attribution bounds what a
-    counter row can hold."""
+def test_absurd_tool_names_are_bounded_at_the_row():
+    """The name is client-controlled, so what reaches a counter row is bounded —
+    but the bound belongs on the STORED name, not on the parse.
+
+    A group call names its tool qualified by the member's slug, and slugs have no
+    length limit, so capping at parse time dropped calls to tools the hub really
+    serves. Attribution now carries a qualified name through, and `record` caps
+    the final one — pooling an over-long name rather than losing the call."""
     long_name = "x" * (attribution.MAX_TOOL_NAME + 1)
-    assert attribution.tools_from_body(json.dumps(_call(long_name)).encode()) == []
-    ok = "x" * attribution.MAX_TOOL_NAME
-    assert attribution.tools_from_body(json.dumps(_call(ok)).encode()) == [ok]
+    # Parsed (a namespace prefix may still be stripped off it)...
+    assert attribution.tools_from_body(json.dumps(_call(long_name)).encode()) == [long_name]
+    # ...but never stored under its own name.
+    recorder.record(SYNTHETIC_ID, [long_name])
+    assert _rows(SYNTHETIC_ID) == {OVERFLOW_TOOL: 1}
+
+    absurd = "x" * (attribution.MAX_PARSED_NAME + 1)
+    assert attribution.tools_from_body(json.dumps(_call(absurd)).encode()) == []
+
+
+def test_a_namespaced_group_name_survives_the_parse():
+    """`<slug>_<tool>` can exceed the stored cap while the tool part is well inside
+    it. Capping the parse dropped the call before split_namespaced could run."""
+    slug, tool = "s" * 64, "t" * 70
+    qualified = f"{slug}_{tool}"
+    assert len(qualified) > attribution.MAX_TOOL_NAME
+    assert attribution.tools_from_body(json.dumps(_call(qualified)).encode()) == [qualified]
+    assert attribution.split_namespaced(qualified, {slug: "id"}) == (slug, tool)
 
 
 def test_a_batch_cannot_mint_unbounded_names():
@@ -218,19 +238,19 @@ def test_only_a_post_invokes_an_mcp_tool(method):
     assert attribution.proxy_tools("POST", "mcp", body) == ["search"]
 
 
-def test_a_rest_tool_name_is_bounded_like_a_json_rpc_one():
-    """The path segment is client-chosen too, so without the cap a caller picks
-    the size of a stored row."""
-    ok = "e" * attribution.MAX_TOOL_NAME
-    assert attribution.proxy_tools("POST", f"rest/{ok}", b"{}") == [ok]
-    assert attribution.proxy_tools("POST", f"rest/{ok}e", b"{}") == []
+def test_a_rest_tool_name_is_bounded_at_the_row_too():
+    """Same rule as a JSON-RPC name: the path segment is client-chosen, and the
+    bound that matters is on what gets stored."""
+    oversized = "e" * (attribution.MAX_TOOL_NAME + 1)
+    assert attribution.proxy_tools("POST", f"rest/{oversized}", b"{}") == [oversized]
+    recorder.record(SYNTHETIC_ID, [oversized])
+    assert _rows(SYNTHETIC_ID) == {OVERFLOW_TOOL: 1}
 
 
 @pytest.mark.parametrize(
     "method,path",
     [
         ("GET", "rest/echo"),  # only a POST invokes a REST tool
-        ("POST", "rest/openapi.json"),  # the generated doc, not a tool
         ("GET", "rest"),  # the REST index
         ("GET", "sse"),
         ("POST", "rest/nested/thing"),  # not a tool route shape
@@ -417,6 +437,32 @@ def test_overlapping_flushes_do_not_release_each_others_reservations():
         assert key not in recorder._inflight
 
 
+def test_a_flush_sweeps_rows_whose_server_is_gone():
+    """`bump_usage` reads liveness BEFORE its upserts, so a delete committing in
+    that window leaves rows for a server that no longer exists — SQLite foreign
+    keys are off, and neither `forget` nor the reservation reaches a batch already
+    detached into the call.
+
+    The interleaving itself can't be staged in-process (SQLite serializes writers),
+    so this asserts the SWEEP that closes it: an orphan row present at flush time
+    is gone afterwards, scoped to the servers the batch touched."""
+    bucket = recorder.current_bucket()
+    with Session(get_engine()) as session:
+        session.add(
+            UsageBucket(server_id="ghost-server", tool="search", bucket=bucket, calls=3)
+        )
+        session.commit()
+
+    # A flush whose batch touches that id sweeps it; the live server is untouched.
+    recorder.record("ghost-server", ["anything"])
+    recorder.record(SYNTHETIC_ID, ["real"])
+    recorder.flush_sync()
+
+    with Session(get_engine()) as session:
+        remaining = {(r.server_id, r.tool) for r in session.exec(select(UsageBucket)).all()}
+    assert remaining == {(SYNTHETIC_ID, "real")}
+
+
 def test_a_failed_write_keeps_the_counts_for_the_next_flush(monkeypatch):
     """The batch is detached before the write, so a transient database error must
     put it back rather than silently drop an interval of traffic."""
@@ -470,9 +516,28 @@ def test_proxy_counts_a_rest_tool_call():
     with TestClient(app) as client:
         srv = create_server(client, name="usage-rest", auth="none")
         try:
+            r = client.patch(
+                f"/api/servers/{srv['id']}", json={"rest_openapi": True}, headers=LOOPBACK
+            )
+            assert r.status_code == 200, r.text
             _point_proxy_at_upstream(client)
             client.post(f"/s/{srv['slug']}/rest/echo", json={"q": "hi"}, headers=LOOPBACK)
             assert _rows(srv["id"]) == {"echo": 1}
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_rest_traffic_is_not_a_tool_call_when_the_surface_is_off():
+    """`rest_openapi` is off by DEFAULT, and the bridge then installs no /rest
+    routes at all — such a request only ever collects a 404. Counting it let
+    traffic aimed at a surface the server does not serve invent tool rows."""
+    with TestClient(app) as client:
+        srv = create_server(client, name="usage-rest-off", auth="none")
+        try:
+            _point_proxy_at_upstream(client)
+            client.post(f"/s/{srv['slug']}/rest/echo", json={"q": "hi"}, headers=LOOPBACK)
+            # Still counted as traffic that reached the bridge, just not as a tool.
+            assert _rows(srv["id"]) == {NOT_A_TOOL: 1}
         finally:
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
 

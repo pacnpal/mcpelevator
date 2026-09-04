@@ -25,6 +25,14 @@ MAX_PARSE_BYTES = 1 << 20  # 1 MiB
 # A real MCP tool name is a function identifier; anything longer is not one, and
 # storing it would let a caller choose the size of a stored row.
 MAX_TOOL_NAME = 128
+# What a body may CARRY, which is not the same bound. A group call names its tool
+# qualified by the member's slug (`<slug>_<tool>`), and slugs have no length limit
+# of their own, so a qualified name can exceed MAX_TOOL_NAME while the tool part
+# that actually gets stored is well inside it. Bounding the parse at MAX_TOOL_NAME
+# dropped those calls outright — the hub advertised and served a tool that usage
+# then recorded nothing for. `recorder.record` applies the real cap to the final
+# stored name, after `split_namespaced` has taken the prefix off.
+MAX_PARSED_NAME = MAX_TOOL_NAME * 2
 # A batch is counted per element, so cap how many elements one body may contribute.
 MAX_BATCH_NAMES = 64
 
@@ -37,10 +45,18 @@ def tools_from_body(body: bytes) -> list[str]:
     """The tool names a JSON-RPC request invokes — empty when it invokes none.
 
     Tolerates a batch array (a list of envelopes) even though MCP 2025-06-18
-    dropped batching: an older client may still send one, and counting each
-    element beats counting the batch as a single call — bounded by
+    dropped batching: an older client may still send one, and counting each of
+    its TOOL CALLS beats counting the batch as a single call — bounded by
     :data:`MAX_BATCH_NAMES` so one request can't mint an unbounded number of
     counter keys.
+
+    Per-element accounting stops at tool calls. A batch's non-tool elements
+    (``initialize``, ``tools/list``) are not counted individually: the whole
+    request still contributes exactly one plain-traffic count when it names no
+    tool at all, and none when it names one. Splitting them out would mean
+    `record` accepting a count of non-tool entries alongside the names, which
+    buys a more precise `other_requests` for a message shape the current protocol
+    no longer defines — not worth the widened contract.
 
     A body that isn't JSON, isn't an envelope, is oversized, or is nested deeply
     enough to exhaust the parser's stack yields no names rather than raising:
@@ -62,17 +78,22 @@ def tools_from_body(body: bytes) -> list[str]:
             continue
         params = entry.get("params")
         name = params.get("name") if isinstance(params, dict) else None
-        if isinstance(name, str) and 0 < len(name) <= MAX_TOOL_NAME:
+        if isinstance(name, str) and 0 < len(name) <= MAX_PARSED_NAME:
             names.append(name)
     return names
 
 
-def proxy_tools(method: str, path: str, body: bytes) -> list[str]:
+def proxy_tools(method: str, path: str, body: bytes, *, rest_enabled: bool = True) -> list[str]:
     """The tools a ``/s/<slug>/<path>`` request invoked.
 
     Two exposed surfaces reach the same tools, so both are attributed here:
     the MCP endpoint (``mcp``, tool named in the JSON-RPC body) and the REST
     mirror (``POST rest/<tool>``, tool named in the path).
+
+    ``rest_enabled`` is the server's own ``rest_openapi`` exposure. With it off —
+    the DEFAULT — the bridge installs no ``/rest/*`` routes at all, so such a
+    request only ever collects a 404; counting it would let traffic aimed at a
+    surface the server does not serve invent tool rows and inflate `tool_calls`.
 
     The MCP path is matched EXACTLY, not slash-stripped. The bridge registers
     ``/mcp`` alone, so ``/mcp/`` is a 307 back to it — no tool is invoked. A
@@ -98,12 +119,15 @@ def proxy_tools(method: str, path: str, body: bytes) -> list[str]:
     normalized = path
     if normalized == "mcp":
         return tools_from_body(body)
-    if normalized.startswith(_REST_PREFIX):
+    if rest_enabled and normalized.startswith(_REST_PREFIX):
         tool = normalized[len(_REST_PREFIX):]
-        # Bounded like a JSON-RPC name: this segment is client-chosen too, so
-        # without the cap a caller picks the size of a stored row.
-        if tool and "/" not in tool and tool not in _REST_NON_TOOL:
-            return [tool] if len(tool) <= MAX_TOOL_NAME else []
+        # No `_REST_NON_TOOL` exclusion here: the generated document is served on
+        # `GET /rest/openapi.json` and this branch is POST-only, so a POST to that
+        # path reaches the dynamic `/rest/{tool}` route like any other. Excluding
+        # the name would silently mis-file a server that genuinely exposes a tool
+        # called `openapi.json` as plain traffic.
+        if tool and "/" not in tool:
+            return [tool]
     return []
 
 

@@ -141,7 +141,12 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
     # server's in-flight count raised forever, quietly disabling idle quiescence for
     # it. Losing a count is the acceptable failure; losing the bridge is not.
     try:
-        usage.record(server.id, usage.proxy_tools(request.method, path, body))
+        usage.record(
+            server.id,
+            usage.proxy_tools(
+                request.method, path, body, rest_enabled=bool(server.rest_openapi)
+            ),
+        )
     except Exception:
         logger.exception("usage accounting failed for %s", slug)
 

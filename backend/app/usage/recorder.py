@@ -27,6 +27,7 @@ from sqlmodel import Session
 from app.db import get_engine, repo
 from app.db.models import NOT_A_TOOL, OVERFLOW_TOOL, utcnow
 from app.registry import settings as runtime_settings
+from app.usage import attribution
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,16 @@ def record(server_id: str, tools: Iterable[str] = ()) -> None:
     bridge, whatever the tool then answered. An MCP tool failure is a successful
     HTTP call carrying ``isError``, and a request refused before a bridge was
     picked (unknown slug, auth, nothing running) never gets here at all."""
-    names = [t for t in tools if t] or [NOT_A_TOOL]
+    # The stored bound is applied HERE, on the final name, because this is the one
+    # place every surface funnels through — and only here is the name the one that
+    # becomes a row. A group call arrives at attribution qualified by the member's
+    # slug, so capping it there would drop tools the hub really serves; an
+    # over-long name still counts, pooled, rather than vanishing.
+    names = [
+        t if len(t) <= attribution.MAX_TOOL_NAME else OVERFLOW_TOOL
+        for t in tools
+        if t
+    ] or [NOT_A_TOOL]
     bucket = current_bucket()
     with _lock:
         for name in names:
