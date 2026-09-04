@@ -63,6 +63,19 @@ describe('UsageRows', () => {
 		expect(text).toContain('1/4 tools used');
 	});
 
+	it('keeps the meta qualifier in bar style too', () => {
+		// A server reached only by initialize/tools/list survives "Used only" and the
+		// summary counts it active, but its bar is empty and its count is 0. Without
+		// the meta line this style renders it identically to a wholly untouched
+		// server — the state the breakdown exists to distinguish.
+		const target = render(
+			[row({ key: 'a', label: 'quiet', calls: 0, other: 4, meta: '4 other requests' })],
+			{ style: 'bars' }
+		);
+		expect(target.querySelector('[data-testid="usage-rows-bars"]')).not.toBeNull();
+		expect(target.textContent ?? '').toContain('4 other requests');
+	});
+
 	it('scales bars against the busiest row in bar style', () => {
 		const target = render(
 			[row({ key: 'a', label: 'a', calls: 10 }), row({ key: 'b', label: 'b', calls: 5 })],

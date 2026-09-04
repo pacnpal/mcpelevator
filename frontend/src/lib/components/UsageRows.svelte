@@ -63,6 +63,14 @@
 						{#if row.badge}
 							<span class="shrink-0 text-[10px] text-[var(--color-ink-dim)]">· {row.badge}</span>
 						{/if}
+						<!-- Carried in BOTH styles, not just the table. A server reached only by
+						     `initialize`/`tools/list` is kept by "Used only" and counted as active
+						     by the summary, but its bar is empty and its count is 0 — so without
+						     this line it reads as entirely untouched, which is the opposite of
+						     what it is. `meta` is where "N other requests" is said. -->
+						{#if row.meta}
+							<span class="truncate text-[10px] text-[var(--color-ink-dim)]">· {row.meta}</span>
+						{/if}
 					</span>
 					<span
 						class="shrink-0 font-mono"
