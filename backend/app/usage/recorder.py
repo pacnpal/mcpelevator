@@ -122,6 +122,15 @@ def record(server_id: str, tools: Iterable[str] = ()) -> None:
             # recover a count that never reached it. Pooling keeps the call.
             # "Tracked" spans the in-flight batch too: a key being written is
             # still one this process holds.
+            #
+            # The pool is per-SERVER, so the tracked total settles at the ceiling
+            # plus one key per server refused in this bucket rather than at the
+            # ceiling exactly. That overhang is deliberate and is what the ceiling
+            # is FOR: it bounds the client-controlled dimension (tool names, one
+            # request each), while the overhang is bounded by the number of
+            # registered servers — which only an authenticated control-plane caller
+            # can add. Pooling globally would be tighter and wrong, crediting one
+            # server's flood to another; a bucket row is keyed by server.
             if (
                 key not in _pending
                 and key not in _inflight

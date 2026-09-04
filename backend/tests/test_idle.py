@@ -366,15 +366,24 @@ def test_group_request_counts_members_in_flight():
     with TestClient(app) as client:
         srv = create_server(client, name="grp-member", auth="none")
         sid = srv["id"]
+        # Configured into the group but NOT in the mounted topology — the state a
+        # member lands in when it is stopped, or excluded for stricter auth. Without
+        # a second server the test cannot tell the two scopes apart, because the one
+        # member would be both configured and mounted.
+        absent = create_server(client, name="grp-absent", auth="none")
+        absent_id = absent["id"]
         group = "inflight-grp"
         try:
-            r = client.put(f"/api/groups/{group}", json={"members": [sid]}, headers=LOOPBACK)
+            r = client.put(
+                f"/api/groups/{group}", json={"members": [sid, absent_id]}, headers=LOOPBACK
+            )
             assert r.status_code == 200, r.text
             sup = client.app.state.supervisor
             observed: dict = {}
 
             async def inner(scope, receive, send):
                 observed["during"] = sup._in_flight.get(sid, 0)
+                observed["absent_during"] = sup._in_flight.get(absent_id, 0)
                 from starlette.responses import Response
 
                 await Response("ok")(scope, receive, send)
@@ -385,9 +394,14 @@ def test_group_request_counts_members_in_flight():
             assert r.status_code == 200, r.text
             assert observed["during"] == 1          # held while the inner app ran
             assert sup._in_flight.get(sid, 0) == 0  # released afterwards
+            # The unmounted member served none of this request, so its idle clock is
+            # untouched — holding it would keep a bridge alive on traffic it never saw.
+            assert observed["absent_during"] == 0
+            assert sup._in_flight.get(absent_id, 0) == 0
         finally:
             client.delete(f"/api/groups/{group}", headers=LOOPBACK)
             client.delete(f"/api/servers/{sid}", headers=LOOPBACK)
+            client.delete(f"/api/servers/{absent_id}", headers=LOOPBACK)
 
 
 # --- proxy wake-on-request ---------------------------------------------------- #

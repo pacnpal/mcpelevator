@@ -326,6 +326,51 @@ def test_pending_keys_are_bounded_without_starving_real_tools():
     assert sum(pending.values()) == recorder.MAX_PENDING_KEYS + 52
 
 
+def test_the_pool_adds_one_key_per_server_not_one_overall():
+    """The ceiling bounds the CLIENT-controlled dimension — tool names. The pool it
+    spills into is per-server, because a bucket row is keyed by server and pooling
+    globally would credit one server's flood to another.
+
+    So the tracked total settles at the ceiling plus one key per server that gets
+    refused in this bucket, and that overhang is bounded by the number of REGISTERED
+    servers — which only an authenticated control-plane caller can add. This pins
+    that shape; before it, "one pooled key per server" was asserted by comment
+    alone, on a test that only ever used one server."""
+    bucket = recorder.current_bucket()
+    for i in range(recorder.MAX_PENDING_KEYS + 10):
+        recorder.record("srv-a", [f"invented{i}"])
+    # A second server, arriving with the budget already spent, still gets its own
+    # pooled row rather than landing in the first server's.
+    recorder.record("srv-b", ["also-refused"])
+    recorder.record("srv-c", ["also-refused"])
+
+    with recorder._lock:
+        pending = dict(recorder._pending)
+    assert pending[("srv-b", OVERFLOW_TOOL, bucket)] == 1
+    assert pending[("srv-c", OVERFLOW_TOOL, bucket)] == 1
+    # Three servers were refused, so three pooled keys — and nothing beyond that.
+    assert len(pending) == recorder.MAX_PENDING_KEYS + 3
+
+
+def test_a_client_supplied_overflow_name_merges_into_the_pool():
+    """`(other tools)` is client-sendable: MCP discovery cannot advertise it, but
+    nothing stops a caller naming it. It therefore merges into the pool rather than
+    being rejected — the row means "calls not attributable to a tool this server
+    exposes", which such a call genuinely is.
+
+    Rejecting the sentinel instead would drop the call from the counters entirely,
+    letting a caller make its own traffic invisible by choosing that one name. That
+    is strictly worse than counting it in the bucket for unattributable calls."""
+    bucket = recorder.current_bucket()
+    recorder.record("srv", [OVERFLOW_TOOL])
+    recorder.record("srv", ["x" * (attribution.MAX_TOOL_NAME + 1)])
+
+    with recorder._lock:
+        pending = dict(recorder._pending)
+    # Both land on the one pooled row: the client-sent name and the over-long one.
+    assert pending[("srv", OVERFLOW_TOOL, bucket)] == 2
+
+
 def test_keys_being_written_still_count_against_the_ceiling(monkeypatch):
     """`_take` empties `_pending`, so without reserving the detached keys a client
     could fill the map to the cap again while the write runs — and a failed write
