@@ -355,32 +355,53 @@ def test_idle_timeout_validation_on_server_and_settings():
 
 
 def test_group_request_counts_members_in_flight():
-    """A /g request holds every member's in-flight count for the whole delegation,
-    so a long-lived group stream can't have a member bridge idled out mid-session."""
+    """A /g request holds every MOUNTED member's in-flight count for the whole
+    delegation, so a long-lived group stream can't have a member bridge idled out
+    mid-session.
+
+    The stub declares the mounted topology as well as the app: the dispatcher
+    scopes this to what the hub is actually serving (a configured member excluded
+    from the bundle serves none of the request), and in production an instance
+    always exists by the time we get here — `app_for` returning None 503s first."""
     with TestClient(app) as client:
         srv = create_server(client, name="grp-member", auth="none")
         sid = srv["id"]
+        # Configured into the group but NOT in the mounted topology — the state a
+        # member lands in when it is stopped, or excluded for stricter auth. Without
+        # a second server the test cannot tell the two scopes apart, because the one
+        # member would be both configured and mounted.
+        absent = create_server(client, name="grp-absent", auth="none")
+        absent_id = absent["id"]
         group = "inflight-grp"
         try:
-            r = client.put(f"/api/groups/{group}", json={"members": [sid]}, headers=LOOPBACK)
+            r = client.put(
+                f"/api/groups/{group}", json={"members": [sid, absent_id]}, headers=LOOPBACK
+            )
             assert r.status_code == 200, r.text
             sup = client.app.state.supervisor
             observed: dict = {}
 
             async def inner(scope, receive, send):
                 observed["during"] = sup._in_flight.get(sid, 0)
+                observed["absent_during"] = sup._in_flight.get(absent_id, 0)
                 from starlette.responses import Response
 
                 await Response("ok")(scope, receive, send)
 
             client.app.state.groups.app_for = lambda name: inner
+            client.app.state.groups.mounted_members = lambda name: {srv["slug"]: sid}
             r = client.get(f"/g/{group}/mcp", headers=LOOPBACK)
             assert r.status_code == 200, r.text
             assert observed["during"] == 1          # held while the inner app ran
             assert sup._in_flight.get(sid, 0) == 0  # released afterwards
+            # The unmounted member served none of this request, so its idle clock is
+            # untouched — holding it would keep a bridge alive on traffic it never saw.
+            assert observed["absent_during"] == 0
+            assert sup._in_flight.get(absent_id, 0) == 0
         finally:
             client.delete(f"/api/groups/{group}", headers=LOOPBACK)
             client.delete(f"/api/servers/{sid}", headers=LOOPBACK)
+            client.delete(f"/api/servers/{absent_id}", headers=LOOPBACK)
 
 
 # --- proxy wake-on-request ---------------------------------------------------- #

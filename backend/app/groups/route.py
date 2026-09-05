@@ -14,6 +14,10 @@ Deterministic behavior:
 - **Known but empty group** (no running members) -> the hub still builds a valid
   (tool-less) bundle, so ``initialize`` succeeds and ``tools/list`` is ``[]``.
 
+A tool called through a bundle is counted against the member that owns it, so
+group traffic shows up in the same per-server / per-tool usage as a direct ``/s``
+call (see :func:`_record_group_usage`).
+
 Scope surgery: a request to ``/g/<name>/mcp`` arrives here behind the ``/g``
 mount. ``root_path`` includes both an optional outer ``app_root_path`` and ``/g``,
 while ``path`` may omit that app prefix when a proxy already stripped it. Deriving
@@ -29,12 +33,104 @@ from sqlmodel import Session
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import get_route_path
-from starlette.types import Receive, Scope, Send
+from starlette.types import Message, Receive, Scope, Send
 
+from app import usage
 from app.auth.middleware import enforce
 from app.db import get_engine
 from app.groups import registry
 from app.groups.hub import GroupHub, group_server
+from app.usage import attribution
+
+
+async def _record_group_usage(
+    request: Request, receive: Receive, mounted: dict[str, str]
+) -> Receive:
+    """Count a tool called through the bundle against the MEMBER that owns it,
+    and return the receive channel the inner app should read.
+
+    A tool reached through a group is the same tool call a direct ``/s`` request
+    would make, so it belongs in the same counters — the hub namespaces tools by
+    slug (``<slug>_<tool>``), which is exactly the attribution this needs. Non-tool
+    group traffic (``initialize``, ``tools/list``) is deliberately NOT counted: it
+    fans out to every member, and charging each one would invent traffic none of
+    them individually received.
+
+    Attribution is resolved against the members the hub is CURRENTLY serving, not
+    the group's configured membership: a member that is stopped, has `mcp_http`
+    off, or is excluded by the anti-downgrade rule is in the registry but has no
+    provider in the bundle, so a call naming its namespace gets a tool-not-found —
+    crediting it would let any caller inflate a server the request never reached.
+
+    `mounted` carries the server id with the slug, so this stays off the database:
+    resolving a namespace by loading every registered server would put O(servers)
+    of synchronous ORM work on the event loop for every group call, in the one
+    place the design keeps deliberately in-memory.
+
+    Reading the body consumes the ASGI stream, so every message pulled off it is
+    replayed to the inner app in order — usage accounting never changes what the
+    group serves.
+
+    The stream is read directly rather than through `Content-Length`, which is
+    OPTIONAL: a chunked or HTTP/2 client sends none, and gating on it meant every
+    group tool call from such a client was served normally and counted nowhere.
+    The parse cap does the bounding instead, and does it on what actually arrives
+    rather than on what a header claims: reading stops the moment the cap is
+    passed, so at most the cap plus one chunk is ever held."""
+    if request.method != "POST" or not mounted:
+        return receive
+    # A declared length over the cap is the one case worth short-circuiting: the
+    # body is known to be unparseable before a byte of it is buffered. An absent
+    # or unparseable header says nothing and is NOT a reason to skip.
+    raw_length = request.headers.get("content-length")
+    try:
+        if raw_length is not None and int(raw_length) > attribution.MAX_PARSE_BYTES:
+            return receive
+    except ValueError:
+        pass
+
+    buffered: list[Message] = []
+    chunks: list[bytes] = []
+    size = 0
+    body: bytes | None = None
+    try:
+        while True:
+            message = await receive()
+            buffered.append(message)
+            if message["type"] != "http.request":
+                break  # http.disconnect — nothing to count, but replay what we hold
+            chunk = message.get("body", b"")
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > attribution.MAX_PARSE_BYTES:
+                break  # over the cap: stop READING, so the buffer stays bounded
+            if not message.get("more_body", False):
+                body = b"".join(chunks)
+                break
+    except Exception:
+        # The client went away (or the stream couldn't be read). Nothing to count —
+        # hand back the real channel and let the inner app see the disconnect it
+        # would have seen without us.
+        return receive
+
+    index = 0
+
+    async def replay():
+        # The buffered messages in order, then back to the real channel so the
+        # inner app still sees the rest of a capped body, and any http.disconnect.
+        nonlocal index
+        if index < len(buffered):
+            message = buffered[index]
+            index += 1
+            return message
+        return await receive()
+
+    if body is not None:
+        for name in attribution.tools_from_body(body):
+            hit = attribution.split_namespaced(name, mounted)
+            if hit is not None:
+                usage.record(mounted[hit[0]], [hit[1]])
+    return replay
 
 
 class GroupDispatch:
@@ -61,7 +157,7 @@ class GroupDispatch:
         route_scope = dict(scope)
         route_scope["root_path"] = routing_root_path
         route_path = get_route_path(route_scope)  # -> "/<name>/<rest>"
-        name, _, _ = route_path.lstrip("/").partition("/")
+        name, _, subpath = route_path.lstrip("/").partition("/")
         if not name:
             await Response("unknown group", status_code=404)(scope, receive, send)
             return
@@ -69,7 +165,6 @@ class GroupDispatch:
         request = Request(scope, receive)
         with Session(get_engine()) as session:
             known = registry.exists(session, name)
-            member_ids = registry.resolve(session, name) if known else []
         if not known:
             # indistinguishable from a nonexistent slug (same shape as the proxy's 404)
             await Response("unknown group", status_code=404)(scope, receive, send)
@@ -105,15 +200,36 @@ class GroupDispatch:
         # members — the bundle mounts running members only, and remounting happens
         # on the reconcile that follows a wake.) app.state.supervisor is assigned
         # in the lifespan before any request is served — fail fast if missing.
+        #
+        # The window OPENS BEFORE usage buffers the body: reading a slow upload can
+        # take longer than a member's idle deadline, and a request already accepted
+        # must not have its bridge stopped out from under it mid-upload.
+        #
+        # Scoped to the MOUNTED members, not the registry's: a configured member
+        # that is running but excluded from this bundle (its auth is stricter than
+        # the group's) serves none of this request, so holding it in flight would
+        # keep an unrelated bridge awake and reset its idle clock for traffic it
+        # never saw. Snapshotted ONCE so start and finish stay balanced even if a
+        # reconcile swaps the instance mid-request.
+        mounted = self._hub.mounted_members(name)
         app = scope.get("app")
-        if app is None:
-            await inner(sub_scope, receive, send)
-            return
-        supervisor = app.state.supervisor
-        for member_id in member_ids or []:
-            supervisor.request_started(member_id)
+        supervisor = app.state.supervisor if app is not None else None
+        for member_id in mounted.values():
+            if supervisor is not None:
+                supervisor.request_started(member_id)
         try:
+            # Count the tool calls this request carries (see _record_group_usage),
+            # which may consume + replay the body. Only the bundle's own endpoint
+            # counts — the inner app is mounted at "/mcp" alone, so a POST to any
+            # other subpath 404s there and served nothing.
+            #
+            # Matched EXACTLY: "mcp/" and "mcp//" are 307s back to "/mcp", not
+            # calls. Stripping slashes here counted the redirect AND the request
+            # the client then followed it with, so one tool call landed twice.
+            if subpath == "mcp":
+                receive = await _record_group_usage(request, receive, mounted)
             await inner(sub_scope, receive, send)
         finally:
-            for member_id in member_ids or []:
-                supervisor.request_finished(member_id)
+            for member_id in mounted.values():
+                if supervisor is not None:
+                    supervisor.request_finished(member_id)

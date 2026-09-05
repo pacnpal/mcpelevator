@@ -8,6 +8,7 @@ supervisor + reconciler run as a background task tied to the app lifespan.
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 import httpx
@@ -18,7 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.staticfiles import StaticFiles
 
-from app import __version__
+from app import __version__, usage
 from app.api import auth as auth_api
 from app.api import catalog as catalog_api
 from app.api import groups as groups_api
@@ -26,6 +27,7 @@ from app.api import health as health_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
 from app.api import tokens as tokens_api
+from app.api import usage as usage_api
 from app.api import users as users_api
 from app.auth.control_plane import (
     ensure_control_token,
@@ -147,15 +149,24 @@ async def lifespan(app: FastAPI):
     # reconcile pass converges each group's mounted set.
     supervisor.on_converged = lambda: app.state.groups.sync(supervisor)
     reconciler = asyncio.create_task(supervisor.run_forever())
+    # Usage counters accumulate in memory on the data-plane hot path; this task is
+    # what ever writes them (and applies their retention).
+    usage_flusher = asyncio.create_task(usage.run_forever())
     try:
         yield
     finally:
         await supervisor.shutdown()
         reconciler.cancel()
+        usage_flusher.cancel()
+        for task in (reconciler, usage_flusher):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         try:
-            await reconciler
-        except asyncio.CancelledError:
-            pass
+            await usage.flush()  # don't drop the last interval's counts on a clean stop
+        except Exception:
+            logging.getLogger(__name__).exception("final usage flush failed")
         await app.state.groups.close()  # stop each group's session manager
         await app.state.http.aclose()
 
@@ -215,6 +226,7 @@ def create_app() -> FastAPI:
     app.include_router(catalog_api.router, prefix="/api", dependencies=gated)
     app.include_router(tokens_api.router, prefix="/api", dependencies=gated)
     app.include_router(settings_api.router, prefix="/api", dependencies=gated)
+    app.include_router(usage_api.router, prefix="/api", dependencies=gated)
     # Groups and user management are global, admin-owned surfaces (their routers
     # also declare require_admin themselves — defense in depth at include time).
     app.include_router(groups_api.router, prefix="/api", dependencies=gated)

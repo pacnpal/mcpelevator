@@ -66,6 +66,11 @@ DEFAULTS: dict[str, Any] = {
     # (state "idle") and the proxy restarts it on the next request. 0 (the default)
     # disables idling, so existing installs keep today's always-running behavior.
     "idle_timeout_s": 0,
+    # How long per-server / per-tool usage counters are kept, in DAYS. Buckets older
+    # than this are pruned hourly by the usage recorder, so counters stay bounded
+    # without operator sweeps. 0 keeps them forever (the explicit opt-out); the
+    # window a stats view can show never reaches further back than this.
+    "usage_retention_days": 30,
     # --- upstream oauth (this instance as an OAuth CLIENT of remote servers) ---
     # How sign-ins to a remote server identify this instance to the provider when no
     # static client id is configured. 'auto' (the default) self-probes the CIMD
@@ -83,6 +88,11 @@ DEFAULTS: dict[str, Any] = {
 def read_all(session: Session) -> dict[str, Any]:
     return {key: repo.setting_get(session, key, default) for key, default in DEFAULTS.items()}
 
+
+# Ceiling for `usage_retention_days` (a century). Retention is turned into a
+# `timedelta` to build the prune cutoff, so the stored value must stay inside what
+# `datetime` arithmetic can represent — see the validation in write().
+MAX_USAGE_RETENTION_DAYS = 36500
 
 _MODES = {"local", "expose"}
 _PROVIDERS = {"none", "bearer", "oauth"}
@@ -215,6 +225,20 @@ def write(
             # bool is an int subclass — reject it explicitly so `true` can't store as 1.
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"invalid idle_timeout_s: {value!r} (seconds, ≥ 0)")
+        if key == "usage_retention_days":
+            # Bounded above, not just below: the prune builds `utcnow() -
+            # timedelta(days=value)`, and a value big enough to underflow datetime
+            # raises OverflowError there — which would break every flush (and the
+            # usage endpoints, which flush) until the setting was changed back.
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= MAX_USAGE_RETENTION_DAYS
+            ):
+                raise ValueError(
+                    f"invalid usage_retention_days: {value!r} "
+                    f"(days, 0–{MAX_USAGE_RETENTION_DAYS}; 0 keeps forever)"
+                )
         if key == "oauth_scopes":
             if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
                 raise ValueError(f"invalid oauth_scopes: {value!r}")
@@ -285,6 +309,11 @@ def docker_runner(session: Session) -> bool:
 def idle_timeout_s(session: Session) -> int:
     """Global default idle-quiescence window in seconds (0 = idling disabled)."""
     return repo.setting_get(session, "idle_timeout_s", DEFAULTS["idle_timeout_s"])
+
+
+def usage_retention_days(session: Session) -> int:
+    """How long usage counters are kept, in days (0 = keep forever)."""
+    return repo.setting_get(session, "usage_retention_days", DEFAULTS["usage_retention_days"])
 
 
 def groups(session: Session) -> dict[str, Any]:

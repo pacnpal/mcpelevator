@@ -39,6 +39,9 @@ Add a server, press start, copy the URL. The dashboard supervises each one — l
     <td><img src="docs/screenshots/add-server.png" alt="Add a server form"><br><b>Add a server</b> — npx, uvx, a command, or a remote URL.</td>
     <td><img src="docs/screenshots/settings.png" alt="Settings — access tokens and network security"><br><b>Settings</b> — access tokens, bind mode, and the LAN gate.</td>
   </tr>
+  <tr>
+    <td colspan="2"><img src="docs/screenshots/usage.png" alt="Usage dashboard — totals, calls over time, an activity grid, and a per-tool breakdown"><br><b>Usage</b> — what every server and tool is actually being called, and what never is.</td>
+  </tr>
 </table>
 
 <details>
@@ -245,6 +248,59 @@ keyed by the tool's upstream name, so an override survives being renamed again. 
 the API: `PATCH /api/servers/<id>` with
 `{"tool_overrides": {"do_thing": {"name": "run_report", "description": "Runs the report."}}}`
 (send `{}` to restore every tool's upstream labels).
+
+### Usage stats (per server, per tool)
+
+**Usage** in the header opens the instance-wide dashboard: totals across every server
+you can see, calls over time (bars, a line, or split per server as small multiples), an
+activity grid showing which weekday hours the traffic actually lands in — in your own
+timezone — and a breakdown you can search, sort (most calls, **least** calls, recently
+used, name), filter to used-only, and read as a table or as proportional bars. Sorting
+by *least calls* is the fast way to the tools nothing is calling. Every row links to
+its server.
+
+Each server's detail page carries the same panel scoped to that one server, answering
+the question a rename is usually made against: *has anything actually called this tool?*
+Both show, over a **24h / 7d / 30d** window (the dashboard adds 90d):
+
+- **Tool calls** and **other requests** — traffic that wasn't a tool call
+  (`initialize`, `tools/list`, the SSE stream). The split is the useful part: a
+  server with other requests but zero tool calls means clients are connecting and
+  the model is choosing not to call anything, which is exactly when a better tool
+  name or description is worth trying.
+- **A chart** of the window — bars or an area line, with axes, a hover tooltip
+  breaking down the bucket, and hourly buckets for 24h, daily beyond that.
+- **A per-tool table** with call counts and when each was last called. A tool
+  nothing has ever called stays in the table at `0 / never` rather than vanishing.
+  A row named `(other tools)`, badged *unrecognised*, can appear on a server
+  reachable without auth: tool names come from the caller, so the number of
+  unrecognised ones kept per hour is capped and the rest pool into that row. The
+  calls are still counted as tool calls — the tools a running server exposes are
+  never capped or pooled, and the row is distinct from a *retired* one, which
+  means a name the server used to expose and no longer does. (The exemption reads
+  the discovered tool list, which is cleared when a server stops, so counts still
+  in memory at that moment are judged as unrecognised.)
+
+Counting happens wherever a call is actually served, so all three exposed surfaces
+land in the same counters: `/s/<slug>/mcp`, the REST mirror `POST /s/<slug>/rest/<tool>`,
+and a group call through `/g/<name>/mcp` (attributed to the member that owns the
+tool, not to the group). Traffic that never reached a bridge — an unknown slug, a
+rejected token, a server that isn't running — is never counted, and neither is the
+dashboard playground: the panel reports what *clients* did, not what you did while
+testing.
+
+Each bucket stores a server id, a tool name, an hour, a count, and when that
+count was last written (the "last call" the panels show, which is the flush time
+rather than the exact call time). Tool arguments and results are never recorded,
+and a bucket's timestamp is dropped with the bucket at the retention cutoff. Counters accumulate in memory and are
+written every few seconds, so a hard crash can lose the last few seconds of counts.
+
+Retention is **Settings → Security → Usage retention** (`usage_retention_days`,
+default `30`, `0` keeps them forever); older buckets are pruned automatically, and a
+window never reaches further back than the retention. Over the API:
+`GET /api/usage?days=7` for the instance-wide view and
+`GET /api/servers/<id>/usage?days=7` for one server. Both are scoped to what the
+caller can see — a member's totals sum over the servers they own, never the whole box.
 
 ### Per-server REST/OpenAPI surface
 
@@ -464,7 +520,7 @@ When control-plane auth is enforced, the SPA shows a login screen. The admin tok
 ## Project layout
 
 ```
-backend/app/   FastAPI control plane, supervisor, bridge host, runners, auth, proxy, catalog
+backend/app/   FastAPI control plane, supervisor, bridge host, runners, auth, proxy, catalog, usage
 frontend/      SvelteKit (Svelte 5) SPA, adapter-static
 Dockerfile     multi-stage: build SPA → python+node+uv runtime
 ```

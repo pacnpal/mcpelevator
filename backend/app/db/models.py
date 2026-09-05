@@ -186,6 +186,59 @@ class ServerRuntime(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+# The ``UsageBucket.tool`` value standing for data-plane traffic that isn't a tool
+# call at all. Defined beside the column so both the recording rules
+# (app.usage.attribution) and the aggregate queries (app.db.repo) read the sentinel
+# from one place instead of each spelling the empty string themselves.
+NOT_A_TOOL = ""
+
+# Where calls to tool names past the per-bucket cardinality cap are pooled. NOT the
+# `NOT_A_TOOL` sentinel: these ARE tool calls, and folding them into plain traffic
+# would move real calls out of `tool_calls` and into `other_requests`.
+#
+# Not a legal MCP tool name (which is an identifier), so no server can ADVERTISE
+# it and it can never displace a discovered tool. A CLIENT can still send it —
+# the counter is keyed on the name the caller asked for, and callers may ask for
+# anything — in which case its calls merge into this row. That is the correct
+# outcome, not a collision to defend against: a call to a name the server does not
+# expose is unrecognised traffic, which is exactly what this row counts. Treating
+# it specially would make one nonexistent name behave unlike every other.
+OVERFLOW_TOOL = "(other tools)"
+
+
+class UsageBucket(SQLModel, table=True):
+    """Data-plane usage counters, pre-aggregated per (server, tool, UTC hour).
+
+    Answers "has anything ever actually called this tool?" — the question a
+    per-tool rename/description edit is made against. Counts only, never
+    arguments or results: a usage row must not become a shadow copy of the
+    traffic it summarizes.
+
+    ``tool`` is the EXPOSED tool name (what the client asked for, so it lines up
+    with what ``tools/list`` advertises and what the operator edits), or ``""``
+    for data-plane traffic that isn't a tool call at all — ``initialize``,
+    ``tools/list``, the SSE GET. Keeping both in one table means a server with
+    connections but no tool calls is distinguishable from one nothing ever
+    reached, which is exactly the "should I rename it?" signal.
+
+    Hourly buckets: fine enough to graph a day, coarse enough that a busy server
+    writes a bounded number of rows. Rows are pruned past the
+    ``usage_retention_days`` setting, and dropped with their server.
+    """
+
+    __tablename__ = "usage_bucket"
+
+    server_id: str = Field(primary_key=True, foreign_key="server.id")
+    tool: str = Field(primary_key=True)
+    # Indexed on its own as well as being the LAST primary-key column: retention
+    # prunes with `DELETE ... WHERE bucket < cutoff`, a global predicate SQLite
+    # cannot seek through a trailing key column, so without this every hourly
+    # prune full-scans the table inside a write transaction.
+    bucket: datetime = Field(primary_key=True, index=True)
+    calls: int = 0
+    last_call_at: datetime = Field(default_factory=utcnow)
+
+
 class Setting(SQLModel, table=True):
     """Runtime-mutable key/value settings (JSON-encoded values)."""
 

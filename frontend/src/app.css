@@ -120,3 +120,21 @@
 		animation: rise-in 0.4s var(--ease-out-quint) both;
 	}
 }
+
+/*
+  LayerChart theming.
+
+  LayerChart (the Svelte 5 charting library shadcn-svelte's charts are built on)
+  styles itself from a handful of CSS variables rather than hard-coded colours, so
+  charts inherit this design system instead of importing a second one. One accent
+  in, zinc surfaces around it — the same tokens every other surface uses. Both
+  scopes are needed: tooltips portal out of the chart container onto <body>.
+*/
+.lc-root-container,
+.lc-tooltip-root {
+	--color-primary: var(--color-accent);
+	--color-surface-100: var(--color-surface);
+	--color-surface-200: var(--color-surface-2);
+	--color-surface-300: var(--color-line);
+	--color-surface-content: var(--color-ink);
+}

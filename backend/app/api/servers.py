@@ -14,7 +14,7 @@ import time
 from contextlib import nullcontext
 from datetime import timezone
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastmcp import Client
 from sqlmodel import Session
@@ -30,13 +30,14 @@ from app.api.schemas import (
     ServerDetail,
     ServerSummary,
     ServerUpdate,
+    ServerUsage,
     StartupStatus,
     ToolCallRequest,
     ToolCallResult,
     Transports,
     Urls,
 )
-from app import mcpb
+from app import mcpb, usage
 from app.api.util import base_url, oauth_public_base, resync_groups
 from app.auth import oauth_flow, policy
 from app.auth import principal as principal_mod
@@ -351,6 +352,41 @@ async def get_server(
     return _detail(server, request.app.state.supervisor, session, base_url(request))
 
 
+@router.get("/servers/{server_id}/usage", response_model=ServerUsage)
+async def get_server_usage(
+    server_id: str,
+    response: Response,
+    days: int = Query(default=7, ge=1, le=usage.MAX_DAYS),
+    principal: Principal = Depends(current_principal),
+):
+    """Call counters for one server: totals, per tool, and a series to chart.
+
+    Pending counts are flushed first so a call made seconds ago is already
+    visible — a stats page that lags its own traffic by a flush interval reads
+    as broken, and this is a rare, operator-driven read.
+
+    Like the instance-wide endpoint, the aggregation runs off the event loop in a
+    worker with its own session: these are synchronous SQLite scans, and the same
+    loop serves `/s` proxy traffic and supervision. Visibility is re-checked there
+    against a REFRESHED principal, because the flush is awaited first and an owner
+    reassignment, a demotion, or a revocation of this request's own token can land
+    while it waits.
+
+    `no-store` because the body is scoped to WHO asked: a member sees only the
+    servers they own, so a cached copy could be replayed to a different
+    principal on a shared browser or by an intermediary."""
+
+    def _compute() -> tuple[str, dict]:
+        with Session(get_engine()) as session:
+            server = _visible(_fresh(session, principal), session, server_id)
+            return server.id, usage.server_usage(session, server.id, days=days)
+
+    await usage.flush()
+    resolved_id, payload = await asyncio.to_thread(_compute)
+    response.headers["Cache-Control"] = "no-store"
+    return ServerUsage(server_id=resolved_id, **payload)
+
+
 @router.patch("/servers/{server_id}", response_model=ServerSummary)
 async def update_server(
     server_id: str,
@@ -546,7 +582,14 @@ def _prune_then_delete(session: Session, server_id: str, principal: Principal) -
         if fresh is None or not policy.can_view_server(fresh, current):
             return False
         group_registry.prune_server(session, server_id)
-        return service.delete_server(session, server_id)
+        deleted = service.delete_server(session, server_id)
+    if deleted:
+        # Counters for this server are still accumulating in memory; drop them so
+        # the next flush doesn't write back rows the delete just removed. (The
+        # flush itself also refuses rows for servers that no longer exist — this
+        # is the cheap half, that one closes the race.)
+        usage.forget(server_id)
+    return deleted
 
 
 @router.delete("/servers/{server_id}", status_code=204)

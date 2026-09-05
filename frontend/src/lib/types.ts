@@ -91,6 +91,107 @@ export interface ToolCallResult {
 	duration_ms: number;
 }
 
+/** One tool's calls inside a usage window (GET /api/servers/{id}/usage). */
+export interface ToolUsage {
+	tool: string;
+	calls: number;
+	/** When the last of those calls was flushed. Counts are batched, so this can
+	 * differ from the exact call time by up to one flush interval. */
+	last_call_at: string;
+}
+
+/** One bucket of the usage series. Present even when quiet, so a chart renders the
+ * whole window without filling gaps itself. */
+export interface UsagePoint {
+	bucket: string;
+	/** Tool invocations in this bucket. */
+	calls: number;
+	/** Data-plane traffic that wasn't a tool call (initialize, tools/list, SSE). */
+	other: number;
+}
+
+/** Usage for one server over a trailing window (GET /api/servers/{id}/usage).
+ * Counts and last-call timestamps only — arguments and results are never
+ * recorded. */
+export interface ServerUsage {
+	server_id: string;
+	since: string;
+	/** Width of each series bucket: 3600 (hourly) or 86400 (daily). */
+	bucket_seconds: number;
+	tool_calls: number;
+	other_requests: number;
+	last_call_at: string | null;
+	/** Busiest first; tools nothing has called are absent (not zero rows). */
+	tools: ToolUsage[];
+	series: UsagePoint[];
+}
+
+/** One server's totals in the instance-wide view (GET /api/usage). Present even
+ * at zero — "which of my servers is nothing using?" is half of what it answers. */
+export interface UsageServerRow {
+	server_id: string;
+	slug: string;
+	name: string;
+	tool_calls: number;
+	other_requests: number;
+	last_call_at: string | null;
+	/** Distinct tools called in the window, against how many the server currently
+	 * exposes (0 while it isn't running — nothing has been discovered). */
+	tools_called: number;
+	tools_known: number;
+}
+
+/** One tool's calls in the instance-wide view, carrying the server it belongs to.
+ * A discovered tool nothing called appears at `calls: 0`; a tool called under a
+ * name its server no longer exposes appears with `known: false`. */
+export interface UsageToolRow {
+	server_id: string;
+	slug: string;
+	tool: string;
+	calls: number;
+	last_call_at: string | null;
+	known: boolean;
+}
+
+/** One server's call series inside the stacked view. `points` is aligned
+ * index-for-index with `InstanceUsage.series` — the timestamps live there and
+ * aren't repeated. `server_id` is null on the single "Other" band the servers
+ * past the top few fold into. */
+export interface UsageBand {
+	server_id: string | null;
+	slug: string;
+	name: string;
+	points: number[];
+}
+
+/** Tool calls in one UTC hour. Always hourly whatever width the main series was
+ * rolled up to, and sparse — quiet hours are absent, not zero rows. */
+export interface UsageHour {
+	bucket: string;
+	calls: number;
+}
+
+/** Usage across every server the caller can see (GET /api/usage). Listings come
+ * back whole — bounded by servers x tools — so the dashboard filters and sorts in
+ * the browser instead of round-tripping per keystroke. */
+export interface InstanceUsage {
+	since: string;
+	bucket_seconds: number;
+	tool_calls: number;
+	other_requests: number;
+	last_call_at: string | null;
+	/** Servers with any traffic in the window, out of `servers.length`. */
+	active_servers: number;
+	servers: UsageServerRow[];
+	tools: UsageToolRow[];
+	series: UsagePoint[];
+	/** The same window split by server, for the stacked view. */
+	series_by_server: UsageBand[];
+	/** Hourly call counts (UTC) for an activity-by-hour view the client buckets
+	 * into the reader's own timezone. */
+	hourly: UsageHour[];
+}
+
 /** Upstream-OAuth state for a remote server (GET /api/servers/{id}). */
 export interface OAuthStatus {
 	/** Is this server configured to authenticate upstream via OAuth? */
@@ -388,6 +489,9 @@ export interface SettingsInfo {
 	oauth_scopes: string[];
 	/** Default idle quiescence in seconds for servers set to inherit (0 = off). */
 	idle_timeout_s: number;
+	/** How long per-server / per-tool usage counters are kept, in days (0 = forever).
+	 * A usage view never reaches further back than this. */
+	usage_retention_days: number;
 	/** Upstream-OAuth client identity: probed CIMD with DCR fallback, or an explicit pick. */
 	upstream_oauth_client_mode: UpstreamOauthClientMode;
 }

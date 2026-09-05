@@ -9,20 +9,28 @@ Every proxied request also feeds the supervisor's idle bookkeeping: traffic mark
 the server active, and a request for a quiesced ("idle") server WAKES it — the
 proxy holds the request until the bridge is ready (bounded by the same startup
 timeout the activation itself gets) instead of bouncing the client with a 503.
+
+It is likewise where per-server and per-tool USAGE is counted (``app.usage``):
+the body is already buffered here, so naming the tool a request invoked costs a
+dict increment and no extra I/O.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import httpx
 from fastapi import APIRouter, Request
 from sqlmodel import Session
 from starlette.responses import Response, StreamingResponse
 
+from app import usage
 from app.auth.middleware import enforce
 from app.config import get_settings
 from app.db import get_engine, repo
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -101,6 +109,20 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
         )
     host, port = endpoint
 
+    # REST attribution reads the exposure of the bridge that will actually serve this
+    # request, not the ORM row. `rest_openapi` is part of config_hash, so a PATCH takes
+    # effect only once the restart lands; until then the row is DESIRED state while the
+    # live bridge still has the old surface. Reading the row across that window counts
+    # the old bridge's 404 as a tool call when REST was just enabled, and files a call
+    # it genuinely served as plain traffic when it was just disabled. The unit resolves
+    # from the same slug `endpoint` did, so it is the one behind that host/port.
+    serving = sup.unit_by_slug(slug)
+    rest_enabled = bool(
+        serving.exposure.get("rest_openapi")
+        if serving is not None
+        else server.rest_openapi
+    )
+
     # Count the request as in flight from the moment a bridge is selected until
     # the response stream closes — covering the body read too, not just the
     # dispatch: a slow upload or a long-held Streamable-HTTP/SSE stream can each
@@ -122,6 +144,23 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
     except BaseException:
         sup.request_finished(server.id)
         raise
+
+    # Usage accounting: the request reached a running bridge and came back with a
+    # response, so it counts — under the tool it invoked (MCP body or REST path),
+    # else as plain traffic. In-memory only; the recorder's own task writes it.
+    #
+    # Guarded, and the guard is structural rather than a belt over the parser's own
+    # promise: this sits between the upstream response opening and the relay that
+    # closes it, so anything escaping here would leak that response AND leave the
+    # server's in-flight count raised forever, quietly disabling idle quiescence for
+    # it. Losing a count is the acceptable failure; losing the bridge is not.
+    try:
+        usage.record(
+            server.id,
+            usage.proxy_tools(request.method, path, body, rest_enabled=rest_enabled),
+        )
+    except Exception:
+        logger.exception("usage accounting failed for %s", slug)
 
     resp_headers = {
         k: v for k, v in upstream.headers.items()

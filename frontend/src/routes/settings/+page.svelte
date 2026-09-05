@@ -80,6 +80,7 @@
 			oauthScopes = s.oauth_scopes.join(', ');
 			oauthAcceptBearer = s.oauth_accept_bearer;
 			idleTimeoutText = String(s.idle_timeout_s);
+			usageRetentionText = String(s.usage_retention_days);
 			tokens = t;
 			servers = srv;
 			groups = grp;
@@ -523,6 +524,32 @@
 		if (!settings || !idleTimeoutValid || savingField) return;
 		await patchSettings({ idle_timeout_s: Number(idleTimeoutText.trim()) }, 'idle_timeout_s');
 		if (settings) idleTimeoutText = String(settings.idle_timeout_s);
+	}
+
+	// ---- Usage retention ---------------------------------------------------------
+	// How far back per-server / per-tool call counters are kept. 0 keeps them forever;
+	// a usage view never reaches further back than this. Same text-then-validate shape
+	// as the idle timeout above.
+	let usageRetentionText = $state('30');
+	const usageRetentionValid = $derived(/^\d+$/.test(usageRetentionText.trim()));
+	const usageRetentionDirty = $derived(
+		settings !== null &&
+			usageRetentionValid &&
+			Number(usageRetentionText.trim()) !== settings.usage_retention_days
+	);
+
+	/** Persist the retention window, then resync the field from the settings the
+	 * server returned. The backend REJECTS an out-of-range value rather than
+	 * clamping it, so on a rejected save this snaps the input back to the setting
+	 * still in force instead of leaving a number that was never accepted. */
+	async function saveUsageRetention(e: SubmitEvent) {
+		e.preventDefault();
+		if (!settings || !usageRetentionValid || savingField) return;
+		await patchSettings(
+			{ usage_retention_days: Number(usageRetentionText.trim()) },
+			'usage_retention_days'
+		);
+		if (settings) usageRetentionText = String(settings.usage_retention_days);
 	}
 
 	// ---- Groups (the /g/<name> registry) ----------------------------------------
@@ -1542,6 +1569,46 @@
 				{#if !idleTimeoutValid}
 					<p class="text-xs text-[var(--color-state-failed)]" role="alert">
 						Enter a whole number of seconds (0 turns idling off).
+					</p>
+				{/if}
+			</fieldset>
+
+			<!-- Usage retention -->
+			<fieldset class="flex flex-col gap-2 border-0 p-0">
+				<legend class="text-sm font-medium text-[var(--color-ink)]">Usage retention</legend>
+				<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+					How long to keep per-server and per-tool call counts, shown on each server's
+					Usage panel — counts and when each was last seen, never arguments or results.
+					<code class="font-mono text-[var(--color-ink-muted)]">0</code> keeps them forever;
+					a usage window never reaches further back than this, so lowering it shortens what
+					the charts can show.
+				</p>
+				<form class="flex items-center gap-2" onsubmit={saveUsageRetention}>
+					<input
+						type="text"
+						inputmode="numeric"
+						bind:value={usageRetentionText}
+						autocomplete="off"
+						spellcheck="false"
+						aria-label="Usage retention in days"
+						aria-invalid={!usageRetentionValid}
+						class="w-32 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+						style={usageRetentionValid
+							? 'border-color: var(--color-line);'
+							: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+					/>
+					<span class="text-xs text-[var(--color-ink-dim)]">days</span>
+					<button
+						type="submit"
+						disabled={!usageRetentionValid || !usageRetentionDirty || savingField !== null}
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
+					>
+						Save
+					</button>
+				</form>
+				{#if !usageRetentionValid}
+					<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+						Enter a whole number of days (0 keeps counters forever).
 					</p>
 				{/if}
 			</fieldset>

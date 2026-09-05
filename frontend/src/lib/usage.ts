@@ -1,0 +1,311 @@
+// Usage dashboard view model: normalize, filter, sort.
+//
+// Servers and tools are two different shapes on the wire but the SAME question
+// on screen ("what is used, what isn't, when was it last touched"), so both are
+// normalized to one `UsageRow` here and rendered by one set of components. The
+// listings arrive whole from `GET /api/usage` — bounded by servers x tools — so
+// filtering and sorting happen in the browser and answer instantly.
+//
+// Pure functions, no Svelte: the page wires them to inputs, and the rules are
+// unit-testable on their own.
+
+import type { InstanceUsage, UsageBand, UsageHour, UsagePoint } from './types';
+
+// NOTE ON COLOUR. This app's design system declares one locked accent (see
+// app.css) and supplies no categorical palette — so no view here invents one. A
+// split-by-server view is rendered as SMALL MULTIPLES instead of a stacked
+// multi-hue chart: one sparkline per server, each in the accent, identity carried
+// by its own title rather than by a hue the system doesn't have. That is the
+// documented way out when you run out of categorical slots, and here the system
+// has none to begin with.
+
+
+// --- chart data ---------------------------------------------------------------
+// LayerChart wants real Dates on a time axis and one flat row per point; the API
+// speaks ISO strings and (for the per-server split) index-aligned bands. These
+// map between the two, and they are pure so the mapping is tested here rather
+// than through a rendered chart.
+
+/** One row per bucket for the main series chart. */
+export function toChartPoints(
+	series: UsagePoint[]
+): { bucket: Date; calls: number; other: number }[] {
+	return series.map((point) => ({
+		bucket: new Date(point.bucket),
+		calls: point.calls,
+		other: point.other
+	}));
+}
+
+/**
+ * One band's rows, positioned by the series it is aligned to. A band carries only
+ * counts — the timestamps live in `series` — so a band longer than the series (a
+ * payload that disagrees with itself) is truncated rather than plotted against
+ * invented times.
+ */
+export function toFacetPoints(
+	band: UsageBand,
+	series: UsagePoint[]
+): { bucket: Date; calls: number }[] {
+	return band.points.slice(0, series.length).map((calls, index) => ({
+		bucket: new Date(series[index].bucket),
+		calls
+	}));
+}
+
+/** The y domain every facet shares: the busiest bucket across all of them, never
+ * 0 (an all-quiet window still has to produce a valid scale). */
+export function facetPeak(bands: UsageBand[]): number {
+	return Math.max(1, ...bands.flatMap((band) => band.points));
+}
+
+/** Axis tick text: clock time for hourly buckets, a date for daily ones.
+ *
+ * A DAILY bucket is anchored at UTC midnight and spans that whole UTC day, so it
+ * is labelled in UTC. Rendered locally, every bucket west of UTC would show the
+ * previous calendar day while holding the following day's counts. An HOURLY
+ * bucket is a point on the reader's own timeline, so it stays local — 10:00Z
+ * genuinely is 6 AM to a reader at UTC-4. */
+export function tickLabel(value: Date | string | number, hourly: boolean): string {
+	const at = value instanceof Date ? value : new Date(value);
+	if (Number.isNaN(at.getTime())) return String(value);
+	return hourly
+		? at.toLocaleTimeString(undefined, { hour: 'numeric' })
+		: at.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+/** Weekday rows of the activity grid, Monday first — a work-week reads better
+ * than a calendar week for "when is this thing used". */
+export const HEATMAP_DAYS = [1, 2, 3, 4, 5, 6, 0];
+
+export interface Heatmap {
+	/** cells[row][hour] — rows follow HEATMAP_DAYS, hours are 0–23 LOCAL. */
+	cells: number[][];
+	peak: number;
+	total: number;
+}
+
+/**
+ * Fold sparse hourly counts into a weekday x hour grid in the READER's timezone.
+ * The API reports UTC hours precisely because only the browser knows which local
+ * hour they belong to — bucketing server-side would label a European operator's
+ * morning as someone else's night.
+ */
+export function heatmap(hourly: UsageHour[]): Heatmap {
+	const cells = HEATMAP_DAYS.map(() => new Array<number>(24).fill(0));
+	const rowOf = new Map(HEATMAP_DAYS.map((day, index) => [day, index]));
+	let peak = 0;
+	let total = 0;
+	for (const hour of hourly) {
+		const at = new Date(hour.bucket);
+		if (Number.isNaN(at.getTime())) continue;
+		const row = rowOf.get(at.getDay());
+		if (row === undefined) continue;
+		const value = (cells[row][at.getHours()] += hour.calls);
+		if (value > peak) peak = value;
+		total += hour.calls;
+	}
+	return { cells, peak, total };
+}
+
+/** Which step of the sequential ramp a cell sits on: 0 (empty) then 1–4. A
+ * stepped ramp reads as a legend-able scale where a continuous one reads as
+ * noise. */
+export function heatLevel(value: number, peak: number): number {
+	if (value <= 0) return 0;
+	if (peak <= 0) return 1;
+	return Math.min(4, Math.ceil((value / peak) * 4));
+}
+
+/** One row of a breakdown listing — a server or a tool, rendered identically. */
+export interface UsageRow {
+	/** Stable key for `{#each}` and for the row's identity across re-sorts. */
+	key: string;
+	label: string;
+	/** Secondary identifier (a tool's server), shown next to the label. */
+	sublabel: string | null;
+	calls: number;
+	/** Traffic that wasn't a tool call (a server's `other_requests`); 0 for a tool
+	 * row. Kept separate from `calls` so "Used only" can hide a row nothing has
+	 * touched AT ALL without also hiding a server whose clients connect but never
+	 * invoke anything — which the summary counts as active, and which is one of
+	 * the states this dashboard exists to surface. */
+	other: number;
+	/** ISO timestamp of the last call, or null when nothing ever called it. */
+	lastCall: string | null;
+	/** Where clicking the row goes, when it has a destination. */
+	href: string | null;
+	/** Short qualifier: a tool the server no longer exposes, a server that is
+	 * exposing nothing right now. */
+	badge: string | null;
+	/** Extra context for the row (e.g. how many of a server's tools got used). */
+	meta: string | null;
+}
+
+export type UsageSort = 'calls-desc' | 'calls-asc' | 'recent' | 'name';
+
+/** Sort options in the order the picker offers them. `calls-asc` is not a
+ * curiosity: "least used first" is how you find the tool worth renaming, which
+ * is the question the whole panel exists for. */
+export const USAGE_SORTS: { value: UsageSort; label: string }[] = [
+	{ value: 'calls-desc', label: 'Most calls' },
+	{ value: 'calls-asc', label: 'Least calls' },
+	{ value: 'recent', label: 'Recently used' },
+	{ value: 'name', label: 'Name' }
+];
+
+export interface UsageView {
+	search: string;
+	sort: UsageSort;
+	/** Drop rows with no calls at all in the window. */
+	hideUnused: boolean;
+}
+
+export const DEFAULT_VIEW: UsageView = {
+	search: '',
+	sort: 'calls-desc',
+	hideUnused: false
+};
+
+/** A server row's secondary line: how much of its catalogue has been used, and —
+ * when it has connections but no tool calls — that it is being reached at all.
+ * Without the second half the breakdown offers no way to tell WHICH server
+ * produced the non-tool traffic the summary counts. */
+function serverMeta(server: InstanceUsage['servers'][number]): string | null {
+	const parts: string[] = [];
+	if (server.tools_known > 0) {
+		parts.push(`${server.tools_called}/${server.tools_known} tools used`);
+	}
+	if (server.tool_calls === 0 && server.other_requests > 0) {
+		parts.push(`${server.other_requests} other request${server.other_requests === 1 ? '' : 's'}`);
+	}
+	return parts.length ? parts.join(' · ') : null;
+}
+
+/** Server rows: every visible server, including the ones nothing touched. */
+export function serverRows(usage: InstanceUsage): UsageRow[] {
+	return usage.servers.map((server) => ({
+		key: server.server_id,
+		label: server.name,
+		sublabel: server.slug,
+		calls: server.tool_calls,
+		other: server.other_requests,
+		lastCall: server.last_call_at,
+		href: `/server/${encodeURIComponent(server.server_id)}`,
+		// tools_known is 0 while a server isn't running (nothing discovered), which
+		// is worth saying out loud rather than rendering a bare "0 of 0".
+		badge: server.tools_known === 0 ? 'no tools listed' : null,
+		meta: serverMeta(server)
+	}));
+}
+
+/** The backend's pool for calls past the per-hour unrecognised-name budget. Not a
+ * tool the server ever exposed, so it must not be read as one — see `toolBadge`. */
+export const OVERFLOW_TOOL = '(other tools)';
+
+/** What to call out about a tool row, if anything.
+ *
+ * The overflow pool is NOT "retired": retired means the server used to expose
+ * this name and no longer does, which is a prompt to look at a rename. The pool
+ * is unrecognised traffic the backend refused to give its own row, and labelling
+ * it retired would report a tool that never existed while hiding the one
+ * condition the row exists to communicate. */
+export function toolBadge(tool: string, known: boolean): string | null {
+	if (tool === OVERFLOW_TOOL) return 'unrecognised';
+	return known ? null : 'retired';
+}
+
+/** Tool rows across every visible server, including never-called ones. */
+export function toolRows(usage: InstanceUsage): UsageRow[] {
+	return usage.tools.map((tool) => ({
+		key: `${tool.server_id}:${tool.tool}`,
+		label: tool.tool,
+		sublabel: tool.slug,
+		calls: tool.calls,
+		other: 0,
+		lastCall: tool.last_call_at,
+		href: `/server/${encodeURIComponent(tool.server_id)}`,
+		badge: toolBadge(tool.tool, tool.known),
+		meta: null
+	}));
+}
+
+/** Search predicate: matches a row's own name OR the server it belongs to, so
+ * typing a server slug narrows the tool listing to that server's tools. */
+function matches(row: UsageRow, needle: string): boolean {
+	return (
+		row.label.toLowerCase().includes(needle) ||
+		(row.sublabel?.toLowerCase().includes(needle) ?? false)
+	);
+}
+
+/** Name order, tie-broken on the server, so two servers exposing the same tool
+ * name keep a stable relative position instead of swapping between renders. */
+function byName(a: UsageRow, b: UsageRow): number {
+	return a.label.localeCompare(b.label) || (a.sublabel ?? '').localeCompare(b.sublabel ?? '');
+}
+
+/** Sort key for "recently used". Never-called and unparseable timestamps both
+ * collapse to -Infinity, which puts them last under a descending sort. */
+function lastCallValue(row: UsageRow): number {
+	if (!row.lastCall) return -Infinity; // never called sorts last under "recent"
+	const at = Date.parse(row.lastCall);
+	return Number.isNaN(at) ? -Infinity : at;
+}
+
+const COMPARATORS: Record<UsageSort, (a: UsageRow, b: UsageRow) => number> = {
+	'calls-desc': (a, b) => b.calls - a.calls || byName(a, b),
+	'calls-asc': (a, b) => a.calls - b.calls || byName(a, b),
+	recent: (a, b) => lastCallValue(b) - lastCallValue(a) || byName(a, b),
+	name: byName
+};
+
+/** Apply the toolbar to a listing. Never mutates the input — the page keeps the
+ * unfiltered rows so clearing a filter costs no refetch. */
+export function applyView(rows: UsageRow[], view: UsageView): UsageRow[] {
+	const needle = view.search.trim().toLowerCase();
+	const filtered = rows.filter(
+		(row) =>
+			(!view.hideUnused || row.calls > 0 || row.other > 0) &&
+			(!needle || matches(row, needle))
+	);
+	return [...filtered].sort(COMPARATORS[view.sort]);
+}
+
+/** The busiest row's call count, for scaling proportional bars. Never 0, so a
+ * listing where nothing has been called still divides. */
+export function peakCalls(rows: UsageRow[]): number {
+	return Math.max(1, ...rows.map((row) => row.calls));
+}
+
+/**
+ * How many days of history a response actually carries.
+ *
+ * Measured from the payload — `series.length` buckets of `bucket_seconds` each —
+ * and deliberately NOT from elapsed wall-clock time since `since`. The window's
+ * first daily bucket opens `days - 1` midnights ago, so elapsed time on an
+ * ordinary, unclamped 7-day response is 6 days plus however far into today it is:
+ * it rounds to 6 before noon UTC and to 7 after, which would report a full window
+ * as retention-limited for half of every day. Counting buckets is exact, needs no
+ * clock, and cannot drift with the viewer's.
+ *
+ * Null when there is no series to measure.
+ *
+ * Takes the series shape rather than a named response, because BOTH usage payloads
+ * carry it and both surfaces offer the same ranges against the same retention: the
+ * instance dashboard and a single server's panel have to say the same thing when
+ * one shortens the other.
+ */
+export function effectiveWindowDays(usage: {
+	series: UsagePoint[];
+	bucket_seconds: number;
+}): number | null {
+	if (!usage.series.length) return null;
+	return Math.max(1, Math.round((usage.series.length * usage.bucket_seconds) / 86_400));
+}
+
+/** "3 of 12 servers" style summary of what a filter is currently showing. */
+export function countLabel(shown: number, total: number, noun: string): string {
+	const plural = total === 1 ? noun : `${noun}s`;
+	return shown === total ? `${total} ${plural}` : `${shown} of ${total} ${plural}`;
+}
