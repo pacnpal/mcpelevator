@@ -1,0 +1,19 @@
+docs/screenshots/README.md
+  s_87766f687221e9::t_8c86ff50876d39 16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "85e3919f4cec210cfb863d7f35f9d7e372ba7d32",
+  "prompts": {},
+  "sessions": {
+    "s_87766f687221e9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07c1c-426b-71c1-b7a3-8466838d31d8",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "pacnpal <183241239+pacnpal@users.noreply.github.com>"
+    }
+  }
+}
