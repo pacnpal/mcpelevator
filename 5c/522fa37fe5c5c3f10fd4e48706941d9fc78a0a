@@ -1,0 +1,22 @@
+frontend/src/routes/+layout.svelte
+  s_bd8be37650c72f::t_355c4920a89e67 5,25-37,201,216-219
+  s_bd8be37650c72f::t_c70ed98b8374d5 199-200,202-215,220-221
+frontend/src/lib/components/HealthDot.svelte
+  s_bd8be37650c72f::t_355c4920a89e67 40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "5c522fa37fe5c5c3f10fd4e48706941d9fc78a0a",
+  "prompts": {},
+  "sessions": {
+    "s_bd8be37650c72f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a10827d-6883-49a4-b2b3-b0e5cbccf8e2",
+        "model": "claude-opus-5"
+      },
+      "human_author": "pacnpal <183241239+pacnpal@users.noreply.github.com>"
+    }
+  }
+}
