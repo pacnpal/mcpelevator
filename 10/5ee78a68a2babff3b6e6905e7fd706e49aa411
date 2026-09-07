@@ -1,0 +1,19 @@
+Dockerfile
+  s_5eed26b013d829::t_917a53414e397c 29-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "105ee78a68a2babff3b6e6905e7fd706e49aa411",
+  "prompts": {},
+  "sessions": {
+    "s_5eed26b013d829": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07e04-d38a-77f2-a31d-544c2b145138",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "pacnpal <183241239+pacnpal@users.noreply.github.com>"
+    }
+  }
+}
