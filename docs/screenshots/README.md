@@ -13,6 +13,7 @@ real running / failed / stopped state instead of an empty first-run screen.
 | `add-server.png` | Add-a-server form |
 | `catalog-browse.png` | Browse the registry |
 | `catalog-search.png` | Registry search results |
+| `usage.png` | Usage dashboard with seeded tool traffic |
 | `settings.png` | Access tokens + network security |
 
 ## Regenerating
