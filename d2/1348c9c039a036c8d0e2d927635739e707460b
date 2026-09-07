@@ -1,0 +1,24 @@
+frontend/src/routes/+layout.svelte
+  s_87766f687221e9::t_65f87229f4c18c 5,25-26,182
+frontend/src/lib/components/HealthDot.svelte
+  s_87766f687221e9::t_65f87229f4c18c 3,6-7,10,21
+frontend/src/lib/components/HealthDot.test.ts
+  s_87766f687221e9::t_4f9c947a969a3d 34
+  s_87766f687221e9::t_1265de8b9ddde6 1-33,35-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "d21348c9c039a036c8d0e2d927635739e707460b",
+  "prompts": {},
+  "sessions": {
+    "s_87766f687221e9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07c1c-426b-71c1-b7a3-8466838d31d8",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "pacnpal <183241239+pacnpal@users.noreply.github.com>"
+    }
+  }
+}
