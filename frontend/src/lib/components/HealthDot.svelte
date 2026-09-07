@@ -1,25 +1,26 @@
 <script lang="ts">
 	import { getHealth } from '$lib/api';
+	import type { HealthResponse } from '$lib/types';
 
 	let {
-		intervalMs = 5000
+		intervalMs = 5000,
+		onhealth
 	}: {
 		intervalMs?: number;
+		onhealth?: (health: HealthResponse) => void;
 	} = $props();
 
 	type Status = 'pending' | 'ok' | 'down';
 
 	let status = $state<Status>('pending');
-	let version = $state<string | null>(null);
 
 	async function poll() {
 		try {
 			const health = await getHealth();
 			status = health.status === 'ok' ? 'ok' : 'down';
-			version = health.version ?? null;
+			onhealth?.(health);
 		} catch {
 			status = 'down';
-			version = null;
 		}
 	}
 
@@ -40,9 +41,7 @@
 
 	const label = $derived(
 		status === 'ok'
-			? version
-				? `API online · v${version}`
-				: 'API online'
+			? 'API online'
 			: status === 'down'
 				? 'API unreachable'
 				: 'Checking API…'
