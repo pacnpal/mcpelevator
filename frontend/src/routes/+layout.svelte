@@ -2,7 +2,7 @@
 	import '../app.css';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { getAuthStatus, getHealth } from '$lib/api';
+	import { getAuthStatus } from '$lib/api';
 	import { clearToken } from '$lib/auth';
 	import { completeOauthPopup } from '$lib/oauthPopup';
 	import favicon from '$lib/assets/favicon.svg';
@@ -22,18 +22,9 @@
 		completeOauthPopup(page.url);
 	});
 
-	// The running version, shown in the footer. Fetched once: it only changes when
-	// the control plane restarts, which reloads the page anyway.
+	// The health poller refreshes this after every successful request, including
+	// a control-plane restart that leaves this SPA tab open.
 	let version = $state<string | null>(null);
-	$effect(() => {
-		getHealth()
-			.then((health) => {
-				version = health.version ?? null;
-			})
-			.catch(() => {
-				// best-effort; the footer just omits the version.
-			});
-	});
 
 	const onSettings = $derived(page.url.pathname.startsWith('/settings'));
 	const onCatalog = $derived(page.url.pathname.startsWith('/catalog'));
@@ -188,7 +179,7 @@
 							</svg>
 						</button>
 					{/if}
-					<HealthDot />
+					<HealthDot onhealth={(health) => (version = health.version)} />
 			</div>
 		</div>
 	</header>
