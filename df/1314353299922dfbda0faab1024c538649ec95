@@ -1,0 +1,25 @@
+backend/pyproject.toml
+  s_9db66c2d49a847::t_53a22f9a006500 6
+frontend/package.json
+  s_9db66c2d49a847::t_53a22f9a006500 4
+backend/uv.lock
+  s_9db66c2d49a847::t_086ba609f6eaf5 820
+frontend/package-lock.json
+  s_9db66c2d49a847::t_ab4eb4f0247aea 3,9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "df1314353299922dfbda0faab1024c538649ec95",
+  "prompts": {},
+  "sessions": {
+    "s_9db66c2d49a847": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fbbe10fc-4632-4ac6-a3f4-7a2a3971ecaf",
+        "model": "claude-opus-5"
+      },
+      "human_author": "pacnpal <183241239+pacnpal@users.noreply.github.com>"
+    }
+  }
+}
