@@ -29,14 +29,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # version Node ships (tar >=7.5.16, undici >=6.27.0 for the June 2026
     # cookie/keep-alive/WebSocket advisories — CVE-2026-{12151,9679,11525,6733}).
     && npm install -g npm@11.19.0 \
-    # Overlay two deps bundled inside npm itself that no published npm has
+    # Overlay three deps bundled inside npm itself that no published npm has
     # re-vendored yet (checked 11.19.0 and 12.0.2, both still ship the vulnerable
     # versions): brace-expansion <5.0.9 (CVE-2026-14257, CVE-2026-69152) and
-    # ip-address <10.3.1 (CVE-2026-69192). The patched releases are semver-patch
-    # swaps with identical dependency sets, so replacing the package directory
-    # in npm's flat node_modules is a complete, drop-in fix. Once an npm release
-    # bundles these (or newer) versions, fold this into the version bump above.
-    && for pkg in brace-expansion@5.0.9 ip-address@10.3.1; do \
+    # ip-address <10.3.1 (CVE-2026-69192), plus tar <7.5.21 (CVE-2026-73566).
+    # The patched releases are semver-patch swaps with identical dependency sets,
+    # so replacing the package directory in npm's flat node_modules is a complete,
+    # drop-in fix. Once an npm release bundles these (or newer) versions, fold this
+    # into the version bump above.
+    && for pkg in brace-expansion@5.0.9 ip-address@10.3.1 tar@7.5.21; do \
            name="${pkg%@*}" ver="${pkg#*@}" \
            && dir="/usr/lib/node_modules/npm/node_modules/${name}" \
            && rm -rf "${dir}" && mkdir -p "${dir}" \
