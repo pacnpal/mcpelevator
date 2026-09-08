@@ -34,6 +34,7 @@
 	} from '$lib/types';
 	import { clearToken, setToken } from '$lib/auth';
 	import { isLoopbackHost, isPrivateIpHost, normalizeHost } from '$lib/host';
+	import { pollingInterval, shouldPollFast } from '$lib/startup';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import CopyMenu from '$lib/components/CopyMenu.svelte';
 	import RestartButton from '$lib/components/RestartButton.svelte';
@@ -614,19 +615,37 @@
 	 *  token scope picker and the group builder). */
 	function applyServerUpdate(next: ServerSummary) {
 		servers = servers.map((s) => (s.id === next.id ? { ...s, ...next } : s));
+		followMemberTransitions();
 	}
 
 	/** Re-read every server summary. A GROUP restart bounces many members at once and
 	 *  answers with ids, not summaries — and this page has no status polling of its own,
 	 *  so without this each member row would keep showing its pre-restart state (often
-	 *  `running` + Stop) until a reload. */
-	async function refreshServers() {
+	 *  `running` + Stop) until a reload. Silent on the polling path: a transient failure
+	 *  there is retried on the next tick, not worth a toast per tick. */
+	async function refreshServers(silent = false) {
 		try {
 			servers = await listServers();
 		} catch (err) {
-			flashToast(errorMessage(err));
+			if (!silent) flashToast(errorMessage(err));
+		} finally {
+			followMemberTransitions();
 		}
 	}
+
+	// A lifecycle action answers as soon as desired state is written, so the summary it
+	// returns is `starting`/`stopping` — the supervisor converges after. Follow those rows
+	// until they settle (`shouldPollFast` is the same predicate the dashboard polls on),
+	// then stop: the rest of Settings is configuration, not a status view.
+	let memberPollTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function followMemberTransitions() {
+		clearTimeout(memberPollTimer);
+		if (!servers.some(shouldPollFast)) return;
+		memberPollTimer = setTimeout(() => void refreshServers(true), pollingInterval(servers));
+	}
+
+	$effect(() => () => clearTimeout(memberPollTimer));
 
 	function toggleNewGroupServer(id: string, included: boolean) {
 		newGroupSelection = included

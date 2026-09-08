@@ -135,6 +135,27 @@ describe('ToolLabelModal', () => {
 		expect(field(restoring, 'Description').placeholder).toBe("The upstream's description");
 	});
 
+	it('leaves an IME composition alone when Enter commits a candidate', () => {
+		const onsave = vi.fn();
+		const onclose = vi.fn();
+		const target = render({ upstreamName: 'tool', override: {}, onsave, onclose });
+		const name = field(target, 'Name');
+
+		type(name, 'partial-candidate');
+		// Enter with an IME open commits the candidate, not the dialog.
+		name.dispatchEvent(
+			new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true })
+		);
+		flushSync();
+		expect(onsave).not.toHaveBeenCalled();
+		expect(onclose).not.toHaveBeenCalled();
+
+		// The same key, composition finished, saves.
+		name.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+		flushSync();
+		expect(onsave).toHaveBeenCalledWith({ name: 'partial-candidate' });
+	});
+
 	it('opens as a real modal and reports every close through one path', () => {
 		const onclose = vi.fn();
 		const target = render({ upstreamName: 'tool', override: {}, onclose });

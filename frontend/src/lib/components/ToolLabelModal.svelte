@@ -142,7 +142,9 @@
 				autocomplete="off"
 				{disabled}
 				onkeydown={(e) => {
-					if (e.key === 'Enter') {
+					// `isComposing`: for an IME, Enter commits the candidate being typed —
+					// saving there would stage a half-finished name and close the dialog.
+					if (e.key === 'Enter' && !e.isComposing) {
 						e.preventDefault();
 						save();
 					}
@@ -161,8 +163,9 @@
 					: servedDescription}
 				{disabled}
 				onkeydown={(e) => {
-					// Enter stays a newline here; the usual multi-line shortcut saves.
-					if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+					// Enter stays a newline here; the usual multi-line shortcut saves — and
+					// not while an IME is composing (see the name field).
+					if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) {
 						e.preventDefault();
 						save();
 					}

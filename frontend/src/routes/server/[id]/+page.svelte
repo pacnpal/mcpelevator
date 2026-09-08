@@ -147,7 +147,12 @@
 	const effectiveOverrides = $derived(pendingOverrides ?? baseOverrides);
 
 	let applyingTools = $state(false); // Apply PATCH + reload in flight
-	let editingTool = $state<string | null>(null); // upstream name whose label form is open
+	// The tool the label dialog is open on, SNAPSHOT at open time — never re-derived from
+	// live discovery. A background poll during a restart (another tab, a group action) can
+	// answer with an empty tool list, and re-deriving would drop the row, unmount the
+	// dialog, and take the operator's unsaved typing with it.
+	let editing = $state<{ key: string; tool: ServerTool } | null>(null);
+	const editingTool = $derived(editing?.key ?? null); // the open row, for the list's state
 
 	function setsEqual(a: Set<string>, b: Set<string>): boolean {
 		return a.size === b.size && [...a].every((x) => b.has(x));
@@ -184,7 +189,7 @@
 			stagedForServerId = sid;
 			pendingDisabled = null;
 			pendingOverrides = null;
-			editingTool = null;
+			editing = null;
 		}
 	});
 
@@ -256,13 +261,6 @@
 		return new Set([...counts].filter(([, n]) => n > 1).map(([name]) => name));
 	});
 
-	// The row the label dialog is open on (null when closed). Resolved by UPSTREAM name, so
-	// a background poll that re-orders or re-discovers tools can't swap the dialog onto a
-	// different tool underneath the operator.
-	const editingRow = $derived(
-		editingTool === null ? null : (toolRows.find((r) => r.key === editingTool) ?? null)
-	);
-
 	/** Exposed names OTHER live tools already answer to — what the dialog warns a rename
 	 *  against. Same discovered-only rule as `collidingNames`: a hidden or unconfirmed row
 	 *  can't be confirmed to exist upstream, so it claims no name. */
@@ -317,7 +315,7 @@
 		if (applyingTools) return;
 		pendingDisabled = null;
 		pendingOverrides = null;
-		editingTool = null;
+		editing = null;
 	}
 
 	async function applyToolChanges() {
@@ -346,7 +344,7 @@
 			// Cleared only once `base*` really is what was saved.
 			pendingDisabled = null;
 			pendingOverrides = null;
-			editingTool = null;
+			editing = null;
 		} catch (err) {
 			if (requestedId === id) flashToast(errorMessage(err));
 		} finally {
@@ -1379,7 +1377,7 @@
 										aria-label={`Edit labels for ${key}`}
 										title="Rename this tool or rewrite its description"
 										disabled={toolEditsBlocked}
-										onclick={() => (editingTool = key)}
+										onclick={() => (editing = { key, tool })}
 										class="rounded-md border border-[var(--color-line)] p-1.5 text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50 {editingTool ===
 										key
 											? 'border-[var(--color-accent)] text-[var(--color-accent)]'
@@ -1646,17 +1644,18 @@
 
 		<!-- The one editor for a tool's exposed name and description. Keyed on the row so
 		     opening a different tool remounts it with that tool's draft. -->
-		{#if editingRow}
-			{#key editingRow.key}
+		{#if editing}
+			{@const open = editing}
+			{#key open.key}
 				<ToolLabelModal
-					upstreamName={editingRow.key}
-					override={effectiveOverrides[editingRow.key] ?? {}}
-					servedDescription={editingRow.tool.description}
-					restoringDescription={isRestoringDescription(editingRow.key)}
-					takenNames={namesTakenExcluding(editingRow.key)}
+					upstreamName={open.key}
+					override={effectiveOverrides[open.key] ?? {}}
+					servedDescription={open.tool.description}
+					restoringDescription={isRestoringDescription(open.key)}
+					takenNames={namesTakenExcluding(open.key)}
 					disabled={toolEditsBlocked}
-					onsave={(next) => saveOverride(editingRow.key, next)}
-					onclose={() => (editingTool = null)}
+					onsave={(next) => saveOverride(open.key, next)}
+					onclose={() => (editing = null)}
 				/>
 			{/key}
 		{/if}
