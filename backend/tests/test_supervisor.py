@@ -9,6 +9,8 @@ exist yet and was then started from a pre-rename snapshot.
 
 from __future__ import annotations
 
+import pytest
+
 from types import SimpleNamespace
 
 from sqlmodel import Session
@@ -19,7 +21,7 @@ from app.db import get_engine, init_db, repo
 from app.registry import service
 from app.registry import settings as runtime_settings
 from app.supervisor.supervisor import Supervisor
-from app.supervisor.unit import tool_summary
+from app.supervisor.unit import ServerUnit, tool_summary
 
 init_db()  # ensure the global-engine tables exist when this module runs alone
 
@@ -373,3 +375,32 @@ async def test_reconcile_starts_requested_activations_before_starved_rows(monkey
         with Session(get_engine()) as session:
             repo.delete_server(session, older_id)
             repo.delete_server(session, newer_id)
+
+
+async def test_stop_keeps_the_unit_when_teardown_raises():
+    """`_stop` pops the unit before awaiting its teardown. If that teardown raises, the
+    process (or container) may still be alive — and a dropped unit reads to the next
+    reconcile as "no unit for a desired server", which would launch a SECOND copy beside
+    it. The unit goes back in the map so the id stays accounted for and the next pass
+    retries the stop."""
+    with Session(get_engine()) as session:
+        server = service.create_server(
+            session, name="Wedged", runner="command", command="/bin/true"
+        )
+        server_id = server.id
+        unit = ServerUnit(server)
+    sup = Supervisor()
+    try:
+        async def wedged_stop():
+            raise RuntimeError("docker daemon is wedged")
+
+        unit.stop = wedged_stop  # type: ignore[method-assign]
+        sup.units[server_id] = unit
+
+        with pytest.raises(RuntimeError):
+            await sup._stop(server_id)
+
+        assert sup.units.get(server_id) is unit  # still accounted for, not "absent"
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, server_id)

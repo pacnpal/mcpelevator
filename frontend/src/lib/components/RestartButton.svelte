@@ -61,13 +61,16 @@
 				const failed = result.failed?.length ?? 0;
 				const bounced = result.restarted.length;
 				const tail = failed > 0 ? ` ${failed} failed to stop — check its logs.` : '';
-				flashToast(
-					(bounced === 0
-						? `No enabled members in ${result.name} were restarted.`
-						: `Restarting ${bounced} member${bounced === 1 ? '' : 's'} of ${result.name}.`) +
-						tail,
-					failed > 0 ? 'error' : 'info'
-				);
+				// Nothing bounced reads two ways, and the toast is the only account of a
+				// group restart: with failures it means every member's teardown failed,
+				// without them it means the group had no enabled member at all.
+				const headline =
+					bounced > 0
+						? `Restarting ${bounced} member${bounced === 1 ? '' : 's'} of ${result.name}.`
+						: failed > 0
+							? `Nothing restarted in ${result.name}.`
+							: `No enabled members in ${result.name} were restarted.`;
+				flashToast(headline + tail, failed > 0 ? 'error' : 'info');
 			}
 		} catch (err) {
 			const message = errorMessage(err);

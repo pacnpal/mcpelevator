@@ -93,6 +93,7 @@
      covers the rest), so it dismisses. -->
 <dialog
 	bind:this={dialogEl}
+	aria-labelledby="tool-label-modal-title"
 	onclose={() => onclose?.()}
 	onclick={(e) => {
 		if (e.target === dialogEl) dismiss();

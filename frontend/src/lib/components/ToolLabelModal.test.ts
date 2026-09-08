@@ -165,6 +165,10 @@ describe('ToolLabelModal', () => {
 		// showModal (not show) is what gives the focus trap, the inert background, and
 		// Escape — the reason this is a native dialog rather than a positioned div.
 		expect(dialog.open).toBe(true);
+		// ...and it has to announce what it is: the heading is only the dialog's
+		// accessible name if the dialog points at it.
+		expect(dialog.getAttribute('aria-labelledby')).toBe('tool-label-modal-title');
+		expect(target.querySelector('#tool-label-modal-title')).not.toBeNull();
 
 		// Escape, the close button, Cancel, and a backdrop click all end at the dialog's
 		// own close event, so the caller has exactly one signal to handle.

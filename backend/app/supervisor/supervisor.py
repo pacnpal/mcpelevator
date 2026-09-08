@@ -189,8 +189,17 @@ class Supervisor:
 
     async def _stop(self, server_id: str) -> None:
         unit = self.units.pop(server_id, None)
-        if unit is not None:
+        if unit is None:
+            return
+        try:
             await unit.stop()
+        except BaseException:
+            # A teardown that RAISED may have left the process (or container) alive.
+            # Dropping the unit here would make the next reconcile see "no unit" for a
+            # still-desired server and launch a second copy beside the first. Put it
+            # back so the id stays accounted for and the next pass retries the stop.
+            self.units[server_id] = unit
+            raise
 
     async def stop(self, server_id: str) -> None:
         """Public stop (e.g. API-driven delete). Steady state is still reconciled."""

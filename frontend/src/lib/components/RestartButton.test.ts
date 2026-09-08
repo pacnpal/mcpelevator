@@ -87,6 +87,25 @@ describe('RestartButton', () => {
 		);
 	});
 
+	it('separates "every member failed" from "no enabled members"', async () => {
+		api.restartGroup.mockResolvedValue({
+			name: 'team',
+			restarted: [],
+			skipped: [],
+			failed: ['a', 'b']
+		});
+		const el = render({ target: { kind: 'group', name: 'team' } });
+
+		el.click();
+		// Not "no enabled members" — there were two, and both failed to stop.
+		await vi.waitFor(() =>
+			expect(toast.flashToast).toHaveBeenCalledWith(
+				'Nothing restarted in team. 2 failed to stop — check its logs.',
+				'error'
+			)
+		);
+	});
+
 	it('reports members whose teardown failed — the only account of a group restart', async () => {
 		api.restartGroup.mockResolvedValue({
 			name: 'team',

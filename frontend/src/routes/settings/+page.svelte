@@ -638,14 +638,22 @@
 	// until they settle (`shouldPollFast` is the same predicate the dashboard polls on),
 	// then stop: the rest of Settings is configuration, not a status view.
 	let memberPollTimer: ReturnType<typeof setTimeout> | undefined;
+	// Cleared on teardown: clearing the timer alone isn't enough, because a refresh still
+	// in flight when the page is destroyed reaches its `finally` afterwards and would
+	// schedule the next tick from an abandoned page — forever, while the states it last
+	// saw stay transitional.
+	let memberPollingLive = true;
 
 	function followMemberTransitions() {
 		clearTimeout(memberPollTimer);
-		if (!servers.some(shouldPollFast)) return;
+		if (!memberPollingLive || !servers.some(shouldPollFast)) return;
 		memberPollTimer = setTimeout(() => void refreshServers(true), pollingInterval(servers));
 	}
 
-	$effect(() => () => clearTimeout(memberPollTimer));
+	$effect(() => () => {
+		memberPollingLive = false;
+		clearTimeout(memberPollTimer);
+	});
 
 	function toggleNewGroupServer(id: string, included: boolean) {
 		newGroupSelection = included

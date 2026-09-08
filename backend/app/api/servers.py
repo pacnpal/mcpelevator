@@ -615,6 +615,13 @@ async def delete_server(
     # write lock, so the wait must not sit on the event loop.
     if not await run_in_threadpool(_prune_then_delete, session, server_id, principal):
         raise HTTPException(status_code=404, detail="server not found")
+    # The stop above ran while the row still existed, so a reconcile pass could have
+    # consumed a queued activation (an operator restart) in the gap and relaunched the
+    # server before this delete committed. Cancel and stop again now that the row is
+    # gone: both are no-ops in the common case, and they close that window here rather
+    # than leaving a process for a deleted server running until the next sweep.
+    sup.cancel_activation_request(server_id)
+    await sup.stop(server_id)
     # Cancel any in-flight authorization and drop stored upstream OAuth credentials for this
     # (now-deleted) server — otherwise a late callback could re-promote tokens and leave an
     # orphan credential file on disk for a server that no longer exists. ``deleted=True``

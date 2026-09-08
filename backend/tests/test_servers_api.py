@@ -554,3 +554,45 @@ def test_restart_refuses_when_a_disable_lands_during_teardown(monkeypatch):
             assert sup.activation_requested_at(server_id) is None
         finally:
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_delete_stops_a_server_relaunched_during_the_delete(monkeypatch):
+    """The delete's stop runs while the row still exists, so a reconcile pass can consume
+    a queued activation (an operator restart) in the gap and relaunch the server before
+    the row is removed. The delete cancels and stops again afterwards, so nothing is left
+    running for a server that no longer exists."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Raced delete", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        sup = c.app.state.supervisor
+        with Session(get_engine()) as session:
+            server = service.set_enabled(session, server_id, True)
+
+        # Stand in for the reconciler winning the gap: the first stop (before the row is
+        # removed) is followed by a relaunch, exactly as a consumed activation would.
+        relaunched = ServerUnit(server)
+        relaunched.state = "running"
+        relaunched.port = 49996
+        real_stop = Supervisor._stop
+        stops: list[str] = []
+
+        async def relaunching_stop(self, sid):
+            await real_stop(self, sid)
+            stops.append(sid)
+            if len(stops) == 1:
+                self.units[sid] = relaunched  # the reconciler's replacement
+
+        monkeypatch.setattr(Supervisor, "_stop", relaunching_stop)
+        sup.request_activation(server_id)
+
+        assert c.delete(f"/api/servers/{server_id}", headers=LOOPBACK).status_code == 204
+        assert server_id not in sup.units  # the relaunch was torn down too
+        assert sup.activation_requested_at(server_id) is None
