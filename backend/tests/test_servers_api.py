@@ -7,6 +7,7 @@ when a disabled docker server is enabled while the root-equivalent runner is sti
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,7 +20,8 @@ from app.auth.oauth_store import ServerTokenStorage
 from app.db import get_engine, repo
 from app.main import app
 from app.registry import service
-from app.supervisor.supervisor import Supervisor
+from app.db.models import utcnow
+from app.supervisor.supervisor import Supervisor, _Quarantine
 from app.supervisor.unit import ServerUnit
 
 
@@ -638,3 +640,41 @@ def test_delete_cleans_up_even_when_the_final_teardown_fails(monkeypatch):
 
         assert len(stops) == 2
         assert not store.path.exists()  # no orphan credential file for a deleted server
+
+
+def test_summary_reports_why_a_teardown_is_being_retried(monkeypatch):
+    """An enabled server whose unit is mid-stop renders as a queued restart — which is
+    what a quarantined unit looks like too, except its stop keeps FAILING and the
+    supervisor is retrying it on a backoff. Without the reason attached, the operator
+    watches a spinner that never resolves and never says why."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Wedged stop", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            with Session(get_engine()) as session:
+                server = service.set_enabled(session, server_id, True)
+                unit = ServerUnit(server)
+            unit.state = "stopping"
+            unit.last_error = "stop failed: docker daemon is wedged"
+            sup = c.app.state.supervisor
+            sup.units[server_id] = unit
+            sup._teardown_failed[server_id] = _Quarantine(
+                retry_at=utcnow() + timedelta(seconds=30), delay=1.0
+            )
+
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK).json()
+            assert detail["state"] == "starting"  # a restart really is pending
+            assert "wedged" in (detail["last_error"] or "")
+        finally:
+            sup.units.pop(server_id, None)
+            sup._teardown_failed.pop(server_id, None)
+            with Session(get_engine()) as session:
+                repo.delete_server(session, server_id)

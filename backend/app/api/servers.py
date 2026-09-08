@@ -70,12 +70,20 @@ def _live_state(server: Server, sup, session: Session):
     requested_at = sup.activation_requested_at(server.id)
     runtime = repo.get_runtime(session, server.id)
     if server.enabled:
+        # A unit whose teardown FAILED is still a restart in progress — the supervisor
+        # retries the stop on a backoff — but one with a reason. It reaches the same
+        # "starting" shape as any queued restart below, so carry the reason with it
+        # rather than leaving the operator on a spinner that never explains itself.
+        stop_error = sup.teardown_error(server.id)
         if requested_at is not None:
-            return "starting", None, None, None, [], _queued_status(server, requested_at)
+            return (
+                "starting", stop_error, None, None, [],
+                _queued_status(server, requested_at),
+            )
         if unit is not None and (
             unit.config_hash != server.config_hash or unit.state in ("stopped", "stopping")
         ):
-            return "starting", None, None, None, [], _queued_status(server)
+            return "starting", stop_error, None, None, [], _queued_status(server)
         if unit is None:
             # "idle" is a deliberate quiescence, not a startup in progress: surface it
             # as-is (with the cached tool list) instead of the queued/starting shape.

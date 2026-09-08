@@ -141,6 +141,20 @@ class Supervisor:
     def activation_requested_at(self, server_id: str):
         return self._activation_requests.get(server_id)
 
+    def teardown_error(self, server_id: str) -> Optional[str]:
+        """Why this server's stop is being retried, or None if it isn't.
+
+        A quarantined unit sits in "stopping" while the sweep retries its teardown on a
+        backoff, and the API renders an enabled server in that state as an ordinary
+        queued restart — so without this the operator watches a spinner that never
+        resolves and never says why."""
+        if server_id not in self._teardown_failed:
+            return None
+        unit = self.units.get(server_id)
+        return (getattr(unit, "last_error", None) if unit is not None else None) or (
+            "stop failed"
+        )
+
     def request_activation(self, server_id: str) -> None:
         self._activation_requests[server_id] = utcnow()
         self.nudge()
