@@ -55,13 +55,18 @@
 			} else {
 				const result = await restartGroup(target.name);
 				onrestarted?.();
+				// A group answers with ids, not summaries, so the toast is the only account
+				// of what happened — including the members whose teardown failed, which the
+				// backend reports rather than aborting the rest of the batch.
+				const failed = result.failed?.length ?? 0;
+				const bounced = result.restarted.length;
+				const tail = failed > 0 ? ` ${failed} failed to stop — check its logs.` : '';
 				flashToast(
-					result.restarted.length === 0
-						? `No enabled members in ${result.name} — nothing to restart.`
-						: `Restarting ${result.restarted.length} member${
-								result.restarted.length === 1 ? '' : 's'
-							} of ${result.name}.`,
-					'info'
+					(bounced === 0
+						? `No enabled members in ${result.name} were restarted.`
+						: `Restarting ${bounced} member${bounced === 1 ? '' : 's'} of ${result.name}.`) +
+						tail,
+					failed > 0 ? 'error' : 'info'
 				);
 			}
 		} catch (err) {

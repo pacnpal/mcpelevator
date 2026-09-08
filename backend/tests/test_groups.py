@@ -940,7 +940,12 @@ def test_group_restart_bounces_enabled_members_only(clean_settings, monkeypatch)
             r = client.post("/api/groups/team/restart", headers=LOOPBACK)
             assert r.status_code == 200, r.text
             body = r.json()
-            assert body == {"name": "team", "restarted": [on.id], "skipped": [off.id]}
+            assert body == {
+                "name": "team",
+                "restarted": [on.id],
+                "skipped": [off.id],
+                "failed": [],
+            }
             assert sup.activation_requested_at(on.id) is not None
             assert sup.activation_requested_at(off.id) is None
 
@@ -999,6 +1004,91 @@ def test_group_restart_stops_when_the_caller_stops_being_an_admin(clean_settings
             # Denied at the FIRST member's first decision point: nothing was queued.
             assert sup.activation_requested_at(a.id) is None
             assert sup.activation_requested_at(b.id) is None
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, a.id)
+            repo.delete_server(session, b.id)
+
+
+def test_group_restart_reports_a_member_whose_teardown_fails(clean_settings, monkeypatch):
+    """One member's teardown blowing up must not abandon the rest of the batch, nor lose
+    the report: the members already bounced are stopped and queued, and the caller needs
+    to know which. The failure is its own result field — not `skipped`, which means a
+    member that had nothing to bounce."""
+    monkeypatch.setattr(Supervisor, "run_forever", _parked_reconciler)
+    with Session(get_engine()) as session:
+        bad = _mk_server(session, "Teardown Bad")
+        good = _mk_server(session, "Teardown Good")
+        service.set_enabled(session, bad.id, True)
+        service.set_enabled(session, good.id, True)
+    try:
+        _write_groups({"team": [bad.id, good.id]})
+        with TestClient(app) as client:
+            client.app.state.supervisor.on_converged = None
+            sup = client.app.state.supervisor
+            real_restart = Supervisor.restart
+
+            async def flaky_restart(self, server_id, authorized=None):
+                if server_id == bad.id:
+                    raise RuntimeError("docker daemon is wedged")
+                return await real_restart(self, server_id, authorized=authorized)
+
+            monkeypatch.setattr(Supervisor, "restart", flaky_restart)
+            sup.cancel_activation_request(good.id)
+
+            r = client.post("/api/groups/team/restart", headers=LOOPBACK)
+            assert r.status_code == 200, r.text
+            assert r.json() == {
+                "name": "team",
+                "restarted": [good.id],
+                "skipped": [],
+                "failed": [bad.id],
+            }
+            # The member after the failure was still bounced.
+            assert sup.activation_requested_at(good.id) is not None
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, bad.id)
+            repo.delete_server(session, good.id)
+
+
+def test_group_restart_skips_a_member_disabled_while_the_batch_runs(clean_settings, monkeypatch):
+    """Same race the per-server route guards: a disable can commit while a member's stop
+    awaits teardown. The per-member hook re-reads committed state, so that member ends up
+    stopped (its new desired state) and reported as skipped, not restarted."""
+    monkeypatch.setattr(Supervisor, "run_forever", _parked_reconciler)
+    with Session(get_engine()) as session:
+        a = _mk_server(session, "Race A")
+        b = _mk_server(session, "Race B")
+        service.set_enabled(session, a.id, True)
+        service.set_enabled(session, b.id, True)
+    try:
+        _write_groups({"team": [a.id, b.id]})
+        with TestClient(app) as client:
+            client.app.state.supervisor.on_converged = None
+            sup = client.app.state.supervisor
+            real_stop = Supervisor._stop
+
+            async def disabling_stop(self, server_id):
+                if server_id == a.id:
+                    with Session(get_engine()) as session:
+                        service.set_enabled(session, a.id, False)
+                return await real_stop(self, server_id)
+
+            monkeypatch.setattr(Supervisor, "_stop", disabling_stop)
+            sup.cancel_activation_request(a.id)
+            sup.cancel_activation_request(b.id)
+
+            r = client.post("/api/groups/team/restart", headers=LOOPBACK)
+            assert r.status_code == 200, r.text
+            assert r.json() == {
+                "name": "team",
+                "restarted": [b.id],
+                "skipped": [a.id],
+                "failed": [],
+            }
+            assert sup.activation_requested_at(a.id) is None  # no activation for it
+            assert sup.activation_requested_at(b.id) is not None
     finally:
         with Session(get_engine()) as session:
             repo.delete_server(session, a.id)

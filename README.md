@@ -203,8 +203,12 @@ bounced without leaving the page:
 
 ```bash
 curl -X POST "http://127.0.0.1:8080/api/groups/<name>/restart"
-# -> {"name": "...", "restarted": ["<server-id>", ...], "skipped": ["<disabled-id>"]}
+# -> {"name": "…", "restarted": [...], "skipped": [<disabled>], "failed": [<teardown blew up>]}
 ```
+
+Members are bounced one at a time, so a large group's restart takes as long as the sum
+of its members' shutdowns. A member whose teardown fails is reported in `failed` and the
+rest of the batch continues.
 
 ### Idle shutdown (wake-on-request)
 

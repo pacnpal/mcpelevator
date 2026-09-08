@@ -493,14 +493,17 @@ class GroupUpsert(BaseModel):
 
 
 class GroupRestart(BaseModel):
-    """Result of POST /api/groups/{name}/restart — which members were actually
-    bounced. A group is only a bundle of servers, so restarting one restarts each
-    ENABLED member through the same per-server primitive; disabled members have no
-    bridge to bounce and come back in ``skipped`` rather than failing the call."""
+    """Result of POST /api/groups/{name}/restart — what happened to each member. A group
+    is only a bundle of servers, so restarting one restarts each ENABLED member through
+    the same per-server primitive. ``skipped`` holds the members with no bridge to bounce
+    (disabled at the start, or disabled while the batch ran); ``failed`` holds those whose
+    teardown raised — reported rather than aborting the batch, since the members before
+    them are already stopped and queued and the caller needs to know which."""
 
     name: str
     restarted: list[str]
     skipped: list[str]
+    failed: list[str] = []
 
 
 Role = Literal["admin", "member"]
