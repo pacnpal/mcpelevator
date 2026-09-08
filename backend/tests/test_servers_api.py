@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from fastapi.testclient import TestClient
+from mcp.shared.auth import OAuthToken
 from sqlmodel import Session
 
 from conftest import LOOPBACK
 
+from app.auth.oauth_store import ServerTokenStorage
 from app.db import get_engine, repo
 from app.main import app
 from app.registry import service
@@ -596,3 +599,42 @@ def test_delete_stops_a_server_relaunched_during_the_delete(monkeypatch):
         assert c.delete(f"/api/servers/{server_id}", headers=LOOPBACK).status_code == 204
         assert server_id not in sup.units  # the relaunch was torn down too
         assert sup.activation_requested_at(server_id) is None
+
+
+def test_delete_cleans_up_even_when_the_final_teardown_fails(monkeypatch):
+    """The row is already gone by the second stop, so a teardown that raises there can't
+    be retried through this endpoint — a second DELETE 404s at its lookup. The credential
+    file and the group remount only ever happen here, so they must happen either way; the
+    process itself is the supervisor's problem (it keeps the unit and retries the stop)."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Wedged delete", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+
+        store = ServerTokenStorage(server_id)
+        asyncio.run(store.set_tokens(OAuthToken(access_token="AT", token_type="Bearer")))
+        assert store.path.exists()
+
+        stops: list[str] = []
+        real_stop = Supervisor.stop
+
+        async def wedged_second_stop(self, sid):
+            stops.append(sid)
+            if len(stops) == 2:  # the one after the row is gone
+                raise RuntimeError("docker daemon is wedged")
+            await real_stop(self, sid)
+
+        monkeypatch.setattr(Supervisor, "stop", wedged_second_stop)
+
+        with pytest.raises(RuntimeError):
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+        assert len(stops) == 2
+        assert not store.path.exists()  # no orphan credential file for a deleted server

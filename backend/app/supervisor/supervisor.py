@@ -76,6 +76,11 @@ class Supervisor:
         self._last_activity: dict[str, datetime] = {}
         self._idle: set[str] = set()
         self._in_flight: dict[str, int] = {}
+        # Units whose ``stop()`` RAISED and were put back (see ``_stop``). The unit is
+        # registered but its process may still be alive, and its state ("stopping")
+        # matches none of the re-derive branches in the sweep — so the id is quarantined
+        # here and reconcile retries the teardown until it succeeds.
+        self._teardown_failed: set[str] = set()
         self._unit_lock = asyncio.Lock()
         self._nudge = asyncio.Event()
         self._stopping = False
@@ -190,6 +195,7 @@ class Supervisor:
     async def _stop(self, server_id: str) -> None:
         unit = self.units.pop(server_id, None)
         if unit is None:
+            self._teardown_failed.discard(server_id)
             return
         try:
             await unit.stop()
@@ -197,9 +203,34 @@ class Supervisor:
             # A teardown that RAISED may have left the process (or container) alive.
             # Dropping the unit here would make the next reconcile see "no unit" for a
             # still-desired server and launch a second copy beside the first. Put it
-            # back so the id stays accounted for and the next pass retries the stop.
+            # back so the id stays accounted for — and quarantine it, because a
+            # registered unit is otherwise invisible to the sweep: a still-desired
+            # server with an unchanged config_hash and a "stopping" unit matches no
+            # re-derive branch, so without the marker it would sit there unreachable
+            # until an operator acted on it by hand.
             self.units[server_id] = unit
+            self._teardown_failed.add(server_id)
             raise
+        self._teardown_failed.discard(server_id)
+
+    async def _stop_quietly(self, server_id: str) -> bool:
+        """:meth:`_stop` that reports a failed teardown instead of raising it.
+
+        Returns True when the unit is gone. Every stop the reconcile sweep performs goes
+        through here: a raise there would abandon the rest of the pass (no other server
+        started, no runtime row written) for as long as the one unit stays wedged, which
+        is exactly when the others most need converging. The unit stays quarantined by
+        :meth:`_stop`, so the next pass retries it.
+        """
+        try:
+            await self._stop(server_id)
+        except Exception as exc:
+            print(f"[mcpelevator] stop failed for {server_id}: {exc}")
+            unit = self.units.get(server_id)
+            if unit is not None:
+                unit.last_error = f"stop failed: {str(exc)[:280]}"
+            return False
+        return True
 
     async def stop(self, server_id: str) -> None:
         """Public stop (e.g. API-driven delete). Steady state is still reconciled."""
@@ -340,7 +371,7 @@ class Supervisor:
         for sv, reason in forbidden_docker:
             self.cancel_activation_request(sv.id)
             if sv.id in self.units:
-                await self._stop(sv.id)
+                await self._stop_quietly(sv.id)
             self._write_runtime(
                 sv.id, state="failed", pid=None, port=None,
                 last_error=reason, restart_count=0, last_health=None, tools=[],
@@ -351,7 +382,10 @@ class Supervisor:
         for server_id in list(self.units):
             if server_id not in desired:
                 self.cancel_activation_request(server_id)
-                await self._stop(server_id)
+                if not await self._stop_quietly(server_id):
+                    # Not stopped, so don't record it as stopped: the unit stays
+                    # quarantined and this loop retries it on the next pass.
+                    continue
                 self._write_runtime(
                     server_id, state="stopped", pid=None, port=None,
                     last_error=None, restart_count=0, last_health=None, tools=[],
@@ -436,12 +470,15 @@ class Supervisor:
                 last = self._last_activity.get(server_id)
                 if last is not None and (now - last).total_seconds() >= timeout:
                     tools = unit.tools
-                    await self._stop(server_id)
-                    self._idle.add(server_id)
-                    self._write_runtime(
-                        server_id, state="idle", pid=None, port=None,
-                        last_error=None, restart_count=0, last_health=None, tools=tools,
-                    )
+                    # A failed quiesce must not read as "idle" — an idle server is one
+                    # the proxy may wake, and waking a unit whose process never died
+                    # would start a second one. Leave it quarantined and try next pass.
+                    if await self._stop_quietly(server_id):
+                        self._idle.add(server_id)
+                        self._write_runtime(
+                            server_id, state="idle", pid=None, port=None,
+                            last_error=None, restart_count=0, last_health=None, tools=tools,
+                        )
                     continue
 
             if server_id in self._idle:
@@ -452,13 +489,21 @@ class Supervisor:
                 start_error = await self._try_start(server, activation_started_at=requested_at)
             elif (
                 requested_at is not None
+                # A quarantined unit (its ``stop()`` raised, so it was put back) is
+                # desired-but-unreachable: retry the teardown here, since nothing else
+                # in this sweep looks at a unit whose config still matches.
+                or server_id in self._teardown_failed
                 or unit.config_hash != server.config_hash
                 or unit.state == "unhealthy"
             ):
-                await self._stop(server_id)
-                start_error = await self._try_start(
-                    server, activation_started_at=requested_at or utcnow()
-                )
+                # Start only if the teardown actually succeeded: a failed one leaves the
+                # unit quarantined (the next pass retries it), and launching a second
+                # copy beside a process that may still be alive is the one outcome worth
+                # avoiding here.
+                if await self._stop_quietly(server_id):
+                    start_error = await self._try_start(
+                        server, activation_started_at=requested_at or utcnow()
+                    )
 
             unit = self.units.get(server_id)
             if unit is not None:

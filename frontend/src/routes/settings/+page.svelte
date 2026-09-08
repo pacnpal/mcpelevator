@@ -91,6 +91,11 @@
 			users = usr;
 			hasUsableAdminCredential = auth.authenticated;
 			loadState = 'ready';
+			// A member can already be mid-transition when this page opens (someone started
+			// it from the dashboard a second ago). The group rows show its state, so the
+			// follow has to start from the FIRST list too, not only from a lifecycle
+			// action taken here — otherwise those pills stay frozen until a reload.
+			followMemberTransitions();
 		} catch (err) {
 			loadState = 'error';
 			loadError = errorMessage(err);

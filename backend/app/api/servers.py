@@ -621,15 +621,22 @@ async def delete_server(
     # gone: both are no-ops in the common case, and they close that window here rather
     # than leaving a process for a deleted server running until the next sweep.
     sup.cancel_activation_request(server_id)
-    await sup.stop(server_id)
-    # Cancel any in-flight authorization and drop stored upstream OAuth credentials for this
-    # (now-deleted) server — otherwise a late callback could re-promote tokens and leave an
-    # orphan credential file on disk for a server that no longer exists. ``deleted=True``
-    # so the waiting callback reports "server deleted" rather than sending the operator to
-    # inspect a configuration that is gone.
-    oauth_flow.cancel_pending(server_id, deleted=True)
-    ServerTokenStorage(server_id).clear()
-    await resync_groups(request)
+    # In a ``finally``: the row is already gone, so a teardown that raises here can't be
+    # retried through this endpoint (a second DELETE 404s at its lookup) and would strand
+    # the credential file and leave the deleted server mounted in its groups. The
+    # supervisor keeps a unit whose stop failed and retries it each sweep, so the process
+    # is still converged — but this cleanup only ever runs here, so it runs either way.
+    try:
+        await sup.stop(server_id)
+    finally:
+        # Cancel any in-flight authorization and drop stored upstream OAuth credentials for
+        # this (now-deleted) server — otherwise a late callback could re-promote tokens and
+        # leave an orphan credential file on disk for a server that no longer exists.
+        # ``deleted=True`` so the waiting callback reports "server deleted" rather than
+        # sending the operator to inspect a configuration that is gone.
+        oauth_flow.cancel_pending(server_id, deleted=True)
+        ServerTokenStorage(server_id).clear()
+        await resync_groups(request)
     return Response(status_code=204)
 
 

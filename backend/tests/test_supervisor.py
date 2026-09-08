@@ -404,3 +404,108 @@ async def test_stop_keeps_the_unit_when_teardown_raises():
     finally:
         with Session(get_engine()) as session:
             repo.delete_server(session, server_id)
+
+
+async def test_reconcile_retries_a_quarantined_teardown_and_starts_after_it(monkeypatch):
+    """A unit whose ``stop()`` raised is kept (so no second copy is launched beside a
+    process that may still be alive) — but a KEPT unit is invisible to the sweep: for a
+    still-desired server with an unchanged ``config_hash`` and a "stopping" unit, no
+    re-derive branch matches, so it would sit there enabled-but-unreachable until an
+    operator acted by hand. ``_teardown_failed`` is what makes the next pass retry the
+    stop, and start the server once that succeeds."""
+    with Session(get_engine()) as session:
+        server = service.create_server(
+            session, name="Wedged then freed", runner="command", command="/bin/true"
+        )
+        service.set_enabled(session, server.id, True)
+        session.refresh(server)
+        server_id = server.id
+        unit = SimpleNamespace(**vars(_fake_unit(server)))
+
+    sup = Supervisor()
+    attempts: list[str] = []
+    started: list[str] = []
+
+    async def wedged_then_freed():
+        attempts.append(server_id)
+        unit.state = "stopping"
+        if len(attempts) == 1:
+            raise RuntimeError("docker daemon is wedged")
+
+    unit.stop = wedged_then_freed
+    sup.units[server_id] = unit
+
+    async def record_start(server, *, activation_started_at=None):
+        started.append(server.id)
+        sup.units[server.id] = _fake_unit(server)
+        return None
+
+    monkeypatch.setattr(sup, "_try_start", record_start)
+    try:
+        # The operator's restart: the stop raises, so no activation is queued.
+        with pytest.raises(RuntimeError):
+            await sup.restart(server_id)
+        assert sup.units[server_id] is unit
+        assert started == []
+
+        # The sweep retries the teardown it was left with, and only then starts.
+        await sup.reconcile_once()
+
+        assert attempts == [server_id, server_id]
+        assert started == [server_id]
+        assert server_id not in sup._teardown_failed
+    finally:
+        sup.units.clear()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, server_id)
+
+
+async def test_reconcile_keeps_sweeping_when_one_teardown_fails(monkeypatch):
+    """One wedged unit must not abandon the pass. A stop that raises used to propagate
+    out of the sweep, so every server after it in the loop went unstarted (and unwritten)
+    for as long as that one stayed wedged — which is exactly when the others most need
+    converging."""
+    with Session(get_engine()) as session:
+        wedged = service.create_server(
+            session, name="Wedged", runner="command", command="/bin/true"
+        )
+        other = service.create_server(
+            session, name="Healthy neighbour", runner="command", command="/bin/true"
+        )
+        service.set_enabled(session, wedged.id, True)
+        service.set_enabled(session, other.id, True)
+        session.refresh(wedged)
+        wedged_id, other_id = wedged.id, other.id
+        unit = SimpleNamespace(**vars(_fake_unit(wedged)))
+
+    sup = Supervisor()
+    started: list[str] = []
+
+    async def always_wedged():
+        unit.state = "stopping"
+        raise RuntimeError("docker daemon is wedged")
+
+    unit.stop = always_wedged
+    sup.units[wedged_id] = unit
+    sup.request_activation(wedged_id)  # a restart of the wedged one
+
+    async def record_start(server, *, activation_started_at=None):
+        started.append(server.id)
+        sup.units[server.id] = _fake_unit(server)
+        return None
+
+    monkeypatch.setattr(sup, "_try_start", record_start)
+    try:
+        await sup.reconcile_once()
+
+        # The wedged unit is kept and NOT restarted (its process may still be alive),
+        # its failure is on the row, and the neighbour was started all the same.
+        assert sup.units[wedged_id] is unit
+        assert wedged_id in sup._teardown_failed
+        assert started == [other_id]
+        assert "stop failed" in (unit.last_error or "")
+    finally:
+        sup.units.clear()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, wedged_id)
+            repo.delete_server(session, other_id)
