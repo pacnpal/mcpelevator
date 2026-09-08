@@ -47,6 +47,9 @@
 	// they must not race one another.
 	let busy = $state(false); // start/stop/retry
 	let restarting = $state(false);
+	// Declared with the other lifecycle flags, not with the OAuth block below, because
+	// `toolEditsBlocked` reads it: a disconnect restarts the server like the rest.
+	let oauthBusy = $state(false); // authorize / disconnect in flight
 	let deleting = $state(false);
 	let confirmDelete = $state(false);
 	let cloning = $state(false);
@@ -282,7 +285,9 @@
 
 	// Local-only edits: stage the change, don't touch the server until Apply. Skipped while
 	// an Apply or a lifecycle op (start/stop/delete/clone) is in flight.
-	const toolEditsBlocked = $derived(applyingTools || busy || restarting || deleting || cloning);
+	const toolEditsBlocked = $derived(
+		applyingTools || busy || restarting || deleting || cloning || oauthBusy
+	);
 
 	function toggleToolPending(key: string, enable: boolean) {
 		if (!server || toolEditsBlocked) return;
@@ -381,7 +386,6 @@
 		}
 	}
 
-	let oauthBusy = $state(false); // authorize / disconnect in flight
 	let oauthPopupWatch: ReturnType<typeof setInterval> | undefined;
 	let oauthGraceTimer: ReturnType<typeof setTimeout> | undefined;
 	// Nonce of the flow THIS page started; broadcasts carrying any other nonce belong
@@ -502,9 +506,11 @@
 	});
 
 	async function doDisconnect() {
-		// Disconnecting restarts the server, so it must not race an in-flight tool Apply
-		// (which triggers its own restart) — same reason start/stop/retry/delete are guarded.
-		if (!server || oauthBusy || applyingTools) return;
+		// Disconnecting RESTARTS the server, so it belongs in the same interlock as every
+		// other bridge-bouncing action: a tool Apply, a start/stop/retry, a restart, a
+		// delete. The gate runs both ways — the lifecycle controls below take `oauthBusy`
+		// for the same reason.
+		if (!server || oauthBusy || applyingTools || busy || restarting || deleting) return;
 		oauthBusy = true;
 		try {
 			const updated = await disconnectOauth(server.id);
@@ -847,7 +853,7 @@
 				<ServerActionButton
 					{server}
 					bind:busy
-					disabled={cloning || deleting || applyingTools || restarting}
+					disabled={cloning || deleting || applyingTools || restarting || oauthBusy}
 					onchange={(next) => {
 						// Match the response to the server on screen: this component is reused
 						// across same-route navigations (clone, sidebar), so a summary that
@@ -865,7 +871,7 @@
 					<RestartButton
 						target={{ kind: 'server', id: server.id }}
 						bind:busy={restarting}
-						disabled={busy || cloning || deleting || applyingTools}
+						disabled={busy || cloning || deleting || applyingTools || oauthBusy}
 						onrestarted={(next) => {
 							// Same id guard as the action button: a summary that lands after a
 							// same-route navigation belongs to the server we just left.
