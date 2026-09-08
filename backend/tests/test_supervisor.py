@@ -569,3 +569,76 @@ async def test_reconcile_backs_off_repeated_teardown_attempts(monkeypatch):
         sup.units.clear()
         with Session(get_engine()) as session:
             repo.delete_server(session, server_id)
+
+
+async def test_reconcile_writes_no_runtime_row_for_a_deleted_server(monkeypatch):
+    """A deleted server reaches the undesired-stop loop only when its own teardown failed
+    and the unit was quarantined. Its runtime row went with the delete, and foreign keys
+    are off here — so writing "stopped" once the retry succeeds would resurrect an orphan
+    row nothing reads and nothing cleans up."""
+    with Session(get_engine()) as session:
+        server = service.create_server(
+            session, name="Deleted mid-teardown", runner="command", command="/bin/true"
+        )
+        service.set_enabled(session, server.id, True)
+        session.refresh(server)
+        server_id = server.id
+        unit = SimpleNamespace(**vars(_fake_unit(server)))
+
+    sup = Supervisor()
+
+    async def clean_stop():
+        unit.state = "stopped"
+
+    unit.stop = clean_stop
+    sup.units[server_id] = unit
+    # The row is gone (the delete committed), but the unit is still registered.
+    with Session(get_engine()) as session:
+        repo.delete_server(session, server_id)
+
+    await sup.reconcile_once()
+
+    assert server_id not in sup.units
+    with Session(get_engine()) as session:
+        assert repo.get_runtime(session, server_id) is None
+
+
+async def test_disabled_row_is_not_marked_stopped_while_its_teardown_keeps_failing():
+    """Disabling a server whose stop raises leaves the unit quarantined — its process may
+    still be alive. The disabled-row cleanup runs off a snapshot taken before that
+    attempt, so without a check it would persist "stopped" for a server that isn't."""
+    with Session(get_engine()) as session:
+        server = service.create_server(
+            session, name="Wedged on disable", runner="command", command="/bin/true"
+        )
+        service.set_enabled(session, server.id, True)
+        session.refresh(server)
+        server_id = server.id
+        unit = SimpleNamespace(**vars(_fake_unit(server)))
+        # A live runtime row, as a running server has.
+        repo.upsert_runtime(
+            session, server_id, state="running", pid=4321, port=9999,
+            last_error=None, restart_count=0, last_health=None, tools=[],
+        )
+
+    sup = Supervisor()
+
+    async def always_wedged():
+        unit.state = "stopping"
+        raise RuntimeError("docker daemon is wedged")
+
+    unit.stop = always_wedged
+    sup.units[server_id] = unit
+    with Session(get_engine()) as session:
+        service.set_enabled(session, server_id, False)
+    try:
+        await sup.reconcile_once()
+
+        assert sup.units[server_id] is unit  # quarantined, not gone
+        with Session(get_engine()) as session:
+            runtime = repo.get_runtime(session, server_id)
+        assert runtime is not None and runtime.state != "stopped", runtime.state
+    finally:
+        sup.units.clear()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, server_id)

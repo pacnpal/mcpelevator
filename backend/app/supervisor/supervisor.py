@@ -411,6 +411,7 @@ class Supervisor:
             )
 
         # stop anything running that is no longer desired
+        registered = {sv.id for sv in servers}
         stopped_runtime: set[str] = set()
         for server_id in list(self.units):
             if server_id not in desired:
@@ -419,6 +420,12 @@ class Supervisor:
                     # Not stopped, so don't record it as stopped: the unit stays
                     # quarantined and this loop retries it on the next pass.
                     continue
+                if server_id not in registered:
+                    # A DELETED server, reached here because its own teardown failed
+                    # earlier and the unit was quarantined. Its runtime row went with the
+                    # delete; writing one now would resurrect an orphan nothing reads and
+                    # nothing cleans up (foreign keys are off).
+                    continue
                 self._write_runtime(
                     server_id, state="stopped", pid=None, port=None,
                     last_error=None, restart_count=0, last_health=None, tools=[],
@@ -426,8 +433,13 @@ class Supervisor:
                 stopped_runtime.add(server_id)
 
         # A queued activation may have no unit yet. Disabling it still has to
-        # converge a stale persisted runtime row to stopped.
+        # converge a stale persisted runtime row to stopped — unless the unit is STILL
+        # registered, which now means only one thing: its teardown failed and it was
+        # quarantined. Its process may be alive, so "stopped" would be a lie; the retry
+        # writes the truth once the stop succeeds.
         for sv in disabled:
+            if sv.id in self.units:
+                continue
             if sv.id not in stopped_runtime and disabled_runtime_stale.get(sv.id, False):
                 self._write_runtime(
                     sv.id,
@@ -445,7 +457,6 @@ class Supervisor:
         # server being deleted (an operator restart racing the delete's own teardown)
         # would otherwise sit in the map forever. Deriving this from the row set makes it
         # self-healing rather than dependent on every caller's cancel ordering.
-        registered = {sv.id for sv in servers}
         for server_id in list(self._activation_requests):
             if server_id not in registered:
                 self._activation_requests.pop(server_id, None)

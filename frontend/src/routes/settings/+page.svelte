@@ -615,10 +615,18 @@
 			.filter((s): s is ServerSummary => s !== undefined);
 	}
 
+	/** Bumped whenever a lifecycle action installs a summary fresher than any list read
+	 *  already in flight can carry. A poll that started before the bump observed the row
+	 *  as it was BEFORE the action — landing it would put `running` + Stop back over a
+	 *  just-returned `stopping`, and with nothing transitional left the follow would then
+	 *  stop, stranding the page on that stale state until a reload. */
+	let serversRevision = 0;
+
 	/** Fold one server's refreshed summary back into the list, so a member acted on from
 	 *  a group row updates its own pill and button label (the same rows also feed the
 	 *  token scope picker and the group builder). */
 	function applyServerUpdate(next: ServerSummary) {
+		serversRevision += 1;
 		servers = servers.map((s) => (s.id === next.id ? { ...s, ...next } : s));
 		followMemberTransitions();
 	}
@@ -629,8 +637,13 @@
 	 *  `running` + Stop) until a reload. Silent on the polling path: a transient failure
 	 *  there is retried on the next tick, not worth a toast per tick. */
 	async function refreshServers(silent = false) {
+		const revision = serversRevision;
 		try {
-			servers = await listServers();
+			const next = await listServers();
+			// Superseded while this was in flight — drop it rather than undo the action.
+			// The follow still runs below: the newer state may itself be transitional.
+			if (revision !== serversRevision) return;
+			servers = next;
 		} catch (err) {
 			if (!silent) flashToast(errorMessage(err));
 		} finally {
