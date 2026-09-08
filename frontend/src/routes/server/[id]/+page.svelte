@@ -289,6 +289,13 @@
 		applyingTools || busy || restarting || deleting || cloning || oauthBusy
 	);
 
+	// Delete waits for every other op in flight. The one that bites is an OAuth
+	// disconnect: it stops the bridge, clears the token store and re-activates, all
+	// re-reading the row — so a delete landing mid-flight turns it into a 404 the
+	// operator never asked for. The others (a start/stop, a restart, an Apply, a clone)
+	// would likewise be acting on a server that is about to stop existing.
+	const deleteBlocked = $derived(applyingTools || busy || restarting || cloning || oauthBusy);
+
 	function toggleToolPending(key: string, enable: boolean) {
 		if (!server || toolEditsBlocked) return;
 		const next = new Set(pendingDisabled ?? baseDisabled);
@@ -542,8 +549,9 @@
 	}
 
 	async function doDelete() {
-		// Not while a tool Apply is in flight — the PATCH would land on a deleted server.
-		if (!server || deleting || applyingTools) return;
+		// Not while anything else is in flight (see `deleteBlocked`) — an Apply's PATCH
+		// would land on a deleted server, and a disconnect would 404 mid-flight.
+		if (!server || deleting || deleteBlocked) return;
 		deleting = true;
 		try {
 			await deleteServer(server.id);
@@ -1562,7 +1570,7 @@
 					<button
 						type="button"
 						onclick={() => (confirmDelete = true)}
-						disabled={applyingTools}
+						disabled={deleteBlocked}
 						class="shrink-0 rounded-lg border px-3.5 py-2 text-sm font-medium transition active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50"
 						style="border-color: color-mix(in oklab, var(--color-state-failed) 40%, transparent); color: var(--color-state-failed);"
 					>
@@ -1579,7 +1587,7 @@
 						<button
 							type="button"
 							onclick={doDelete}
-							disabled={deleting || applyingTools}
+							disabled={deleting || deleteBlocked}
 							aria-busy={deleting}
 							class="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
 							style="background-color: var(--color-state-failed);"

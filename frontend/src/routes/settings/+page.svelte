@@ -621,6 +621,11 @@
 	 *  just-returned `stopping`, and with nothing transitional left the follow would then
 	 *  stop, stranding the page on that stale state until a reload. */
 	let serversRevision = 0;
+	/** Distinguishes concurrent list reads from each other, which `serversRevision` can't:
+	 *  a group restart's refresh and a poll tick can be in flight at once, and the slower
+	 *  one landing last would install the older snapshot — and then, if nothing in it is
+	 *  transitional, stop the follow on that stale state. Only the newest read applies. */
+	let serversSequence = 0;
 
 	/** Fold one server's refreshed summary back into the list, so a member acted on from
 	 *  a group row updates its own pill and button label (the same rows also feed the
@@ -638,11 +643,13 @@
 	 *  there is retried on the next tick, not worth a toast per tick. */
 	async function refreshServers(silent = false) {
 		const revision = serversRevision;
+		const sequence = ++serversSequence;
 		try {
 			const next = await listServers();
-			// Superseded while this was in flight — drop it rather than undo the action.
-			// The follow still runs below: the newer state may itself be transitional.
-			if (revision !== serversRevision) return;
+			// Superseded while this was in flight — by a lifecycle action, or by a later
+			// read that already landed. Drop it rather than undo the newer state; the
+			// follow still runs below, since that state may itself be transitional.
+			if (revision !== serversRevision || sequence !== serversSequence) return;
 			servers = next;
 		} catch (err) {
 			if (!silent) flashToast(errorMessage(err));
