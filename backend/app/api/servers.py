@@ -53,7 +53,7 @@ from app.registry import settings as runtime_settings
 router = APIRouter()
 
 
-def _queued_status(server: Server, started_at=None) -> StartupStatus:
+def _queued_status(server: Server, started_at=None, message=None) -> StartupStatus:
     started_at = started_at or server.updated_at
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=timezone.utc)
@@ -62,6 +62,7 @@ def _queued_status(server: Server, started_at=None) -> StartupStatus:
         attempt=1,
         max_attempts=get_settings().restart_budget,
         activation_started_at=started_at,
+        message=message,
     )
 
 
@@ -74,16 +75,22 @@ def _live_state(server: Server, sup, session: Session):
         # retries the stop on a backoff — but one with a reason. It reaches the same
         # "starting" shape as any queued restart below, so carry the reason with it
         # rather than leaving the operator on a spinner that never explains itself.
+        # It goes in the STATUS message, not just last_error: while a startup is active
+        # both the card and the detail page hide last_error and render the status
+        # message, so that is the only line an operator would actually see.
         stop_error = sup.teardown_error(server.id)
         if requested_at is not None:
             return (
                 "starting", stop_error, None, None, [],
-                _queued_status(server, requested_at),
+                _queued_status(server, requested_at, stop_error),
             )
         if unit is not None and (
             unit.config_hash != server.config_hash or unit.state in ("stopped", "stopping")
         ):
-            return "starting", stop_error, None, None, [], _queued_status(server)
+            return (
+                "starting", stop_error, None, None, [],
+                _queued_status(server, message=stop_error),
+            )
         if unit is None:
             # "idle" is a deliberate quiescence, not a startup in progress: surface it
             # as-is (with the cached tool list) instead of the queued/starting shape.

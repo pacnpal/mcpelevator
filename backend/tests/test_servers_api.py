@@ -673,6 +673,9 @@ def test_summary_reports_why_a_teardown_is_being_retried(monkeypatch):
             detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK).json()
             assert detail["state"] == "starting"  # a restart really is pending
             assert "wedged" in (detail["last_error"] or "")
+            # And in the startup status, which is the line the UI actually renders: both
+            # the card and the detail page hide last_error while a startup is active.
+            assert "wedged" in (detail["startup_status"]["message"] or "")
         finally:
             sup.units.pop(server_id, None)
             sup._teardown_failed.pop(server_id, None)
