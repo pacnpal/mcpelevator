@@ -36,6 +36,9 @@
 	import { isLoopbackHost, isPrivateIpHost, normalizeHost } from '$lib/host';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import CopyMenu from '$lib/components/CopyMenu.svelte';
+	import RestartButton from '$lib/components/RestartButton.svelte';
+	import ServerActionButton from '$lib/components/ServerActionButton.svelte';
+	import StatePill from '$lib/components/StatePill.svelte';
 	import { flashToast } from '$lib/toast.svelte';
 
 	type LoadState = 'loading' | 'ready' | 'error';
@@ -593,6 +596,24 @@
 			port: null,
 			tools_count: 0
 		} satisfies ServerSummary;
+	}
+
+	/** A group's member servers, resolved the way the backend resolves them: the wildcard
+	 *  is every registered server, an explicit list keeps its registry order. An id with no
+	 *  server row is dropped — a deleted server is pruned from the registry, so this only
+	 *  shows up in the window between the delete and the next groups fetch. */
+	function groupMembers(group: GroupInfo): ServerSummary[] {
+		if (group.members === '*') return servers;
+		return group.members
+			.map((id) => servers.find((s) => s.id === id))
+			.filter((s): s is ServerSummary => s !== undefined);
+	}
+
+	/** Fold one server's refreshed summary back into the list, so a member acted on from
+	 *  a group row updates its own pill and button label (the same rows also feed the
+	 *  token scope picker and the group builder). */
+	function applyServerUpdate(next: ServerSummary) {
+		servers = servers.map((s) => (s.id === next.id ? { ...s, ...next } : s));
 	}
 
 	function toggleNewGroupServer(id: string, included: boolean) {
@@ -1704,6 +1725,13 @@
 									<div class="flex shrink-0 items-center gap-1.5">
 										<CopyMenu server={groupSummary(group)} />
 										{#if confirmDeleteGroup !== group.name}
+											<!-- A group owns no process: restarting it bounces each enabled
+											     member through the same per-server restart, so the bundle
+											     re-reads their tools. Same component as the server pages. -->
+											<RestartButton
+												target={{ kind: 'group', name: group.name }}
+												size="sm"
+											/>
 											<button
 												type="button"
 												onclick={() => editGroup(group)}
@@ -1754,6 +1782,62 @@
 								<code class="min-w-0 truncate font-mono text-[11px] text-[var(--color-ink-dim)]">
 									{group.url}
 								</code>
+
+								<!-- Members, each with its own controls. A group is only a view over its
+								     servers: what it serves is exactly what its RUNNING members expose, so
+								     starting, stopping, or restarting one from here is the same action as
+								     on its own page — same components, same endpoints. -->
+								{#if groupMembers(group).length === 0}
+									<p class="text-[11px] text-[var(--color-ink-dim)]">
+										No members yet — this group serves an empty bundle.
+									</p>
+								{:else}
+									<details class="mt-0.5">
+										<summary
+											class="cursor-pointer text-[11px] font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
+										>
+											Members ({groupMembers(group).length})
+										</summary>
+										<ul class="mt-1.5 flex flex-col divide-y divide-[var(--color-line)]">
+											{#each groupMembers(group) as member (member.id)}
+												<li class="flex flex-wrap items-center justify-between gap-2 py-1.5">
+													<a
+														href={`/server/${member.id}`}
+														class="flex min-w-0 flex-1 basis-40 items-center gap-2 rounded-md outline-offset-4 transition-opacity hover:opacity-80"
+													>
+														<StatePill
+															state={member.state}
+															startupStatus={member.startup_status}
+														/>
+														<span class="min-w-0 truncate text-xs text-[var(--color-ink)]">
+															{member.name}
+														</span>
+														<span
+															class="min-w-0 truncate font-mono text-[11px] text-[var(--color-ink-dim)]"
+														>
+															{member.slug}
+														</span>
+													</a>
+													<div class="flex shrink-0 items-center gap-1.5">
+														<ServerActionButton
+															server={member}
+															size="sm"
+															onchange={applyServerUpdate}
+															onerror={flashToast}
+														/>
+														{#if member.enabled}
+															<RestartButton
+																target={{ kind: 'server', id: member.id }}
+																size="sm"
+																onrestarted={(next) => next && applyServerUpdate(next)}
+															/>
+														{/if}
+													</div>
+												</li>
+											{/each}
+										</ul>
+									</details>
+								{/if}
 							</li>
 						{/each}
 					</ul>

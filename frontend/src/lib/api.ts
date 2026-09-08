@@ -18,6 +18,7 @@ import type {
 	CatalogVersions,
 	GroupInfo,
 	GroupMembers,
+	GroupRestartResult,
 	HealthResponse,
 	ImportResult,
 	InstanceUsage,
@@ -342,6 +343,19 @@ export function retryServer(id: string): Promise<ServerSummary> {
 }
 
 /**
+ * Restart an enabled server: the bridge is stopped and re-activated, so discovery
+ * re-runs and every surface (MCP, REST, the group hub) picks up the upstream's
+ * current tools. Desired state is untouched — no config change, no re-hash. Works
+ * from `running`, `idle`, `starting`, and `failed`; a disabled server is a 409
+ * (Start is the action for it).
+ */
+export function restartServer(id: string): Promise<ServerSummary> {
+	return request<ServerSummary>(`/servers/${encodeURIComponent(id)}/restart`, {
+		method: 'POST'
+	});
+}
+
+/**
  * Invoke one tool on a running server's bridge (the tool playground). Runs over
  * the control plane, so no data-plane bearer token is needed. A tool's own
  * failure comes back as `is_error` in a 200; a stopped server is a 409 and an
@@ -524,6 +538,18 @@ export function putGroup(name: string, members: GroupMembers): Promise<GroupInfo
 	// hit the collection route (405/unexpected) instead of failing clearly.
 	if (!name) return Promise.reject(new Error('group name is required'));
 	return jsonRequest<GroupInfo>(`/groups/${encodeURIComponent(name)}`, 'PUT', { members });
+}
+
+/**
+ * Restart a group: every enabled member is bounced through the same per-server
+ * restart, so the bundle re-reads their tools. The result names which members were
+ * restarted and which were skipped (disabled ones have no bridge to bounce).
+ */
+export function restartGroup(name: string): Promise<GroupRestartResult> {
+	if (!name) return Promise.reject(new Error('group name is required'));
+	return request<GroupRestartResult>(`/groups/${encodeURIComponent(name)}/restart`, {
+		method: 'POST'
+	});
 }
 
 /** Delete a group by name. */

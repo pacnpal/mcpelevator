@@ -1,22 +1,12 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 
-	import {
-		cloneServer,
-		deleteServer,
-		disableServer,
-		enableServer,
-		errorMessage,
-		retryServer
-	} from '$lib/api';
-	import {
-		formatCountdown,
-		formatElapsed,
-		primaryServerAction,
-		startupPhaseLabel
-	} from '$lib/startup';
+	import { cloneServer, deleteServer, errorMessage } from '$lib/api';
+	import { formatCountdown, formatElapsed, startupPhaseLabel } from '$lib/startup';
 	import type { ServerSummary } from '$lib/types';
 	import CopyMenu from './CopyMenu.svelte';
+	import RestartButton from './RestartButton.svelte';
+	import ServerActionButton from './ServerActionButton.svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
 	import StatePill from './StatePill.svelte';
 
@@ -35,7 +25,6 @@
 		onerror?: (message: string) => void;
 	} = $props();
 
-	let busy = $state(false);
 	let menuOpen = $state(false);
 	let confirmDelete = $state(false);
 	let deleting = $state(false);
@@ -43,31 +32,12 @@
 	let cardEl = $state<HTMLElement>();
 
 	const startup = $derived(server.startup_status);
-	const action = $derived(primaryServerAction(server));
 	const startupElapsed = $derived(startup ? formatElapsed(startup.activation_started_at) : null);
 	const startupCountdown = $derived(
 		startup ? formatCountdown(startup.next_retry_at ?? startup.deadline_at) : null
 	);
 
 	const detailHref = $derived(`/server/${server.id}`);
-
-	async function runPrimaryAction() {
-		if (busy) return;
-		busy = true;
-		try {
-			const next =
-				action === 'stop'
-					? await disableServer(server.id)
-					: action === 'retry'
-						? await retryServer(server.id)
-						: await enableServer(server.id);
-			onchange?.(next);
-		} catch (err) {
-			onerror?.(errorMessage(err));
-		} finally {
-			busy = false;
-		}
-	}
 
 	function closeMenu() {
 		menuOpen = false;
@@ -222,6 +192,21 @@
 								</svg>
 								Edit
 							</a>
+							{#if server.enabled}
+								<!-- Same restart as the detail page — one component, so the action means
+								     the same thing here. Only for a DESIRED server: a stopped one has no
+								     bridge to bounce (the footer's Start is its action). -->
+								<RestartButton
+									target={{ kind: 'server', id: server.id }}
+									variant="menuitem"
+									disabled={cloning || deleting}
+									onrestarted={(next) => {
+										closeMenu();
+										if (next) onchange?.(next);
+									}}
+									{onerror}
+								/>
+							{/if}
 							<button
 								type="button"
 								role="menuitem"
@@ -368,36 +353,6 @@
 	>
 		<CopyMenu {server} />
 
-		<button
-			type="button"
-			onclick={runPrimaryAction}
-			disabled={busy}
-			aria-busy={busy}
-			class="inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
-			class:running={action === 'stop'}
-			style={action === 'stop'
-				? 'color: var(--color-ink-muted); border: 1px solid var(--color-line);'
-				: 'color: var(--color-accent-ink); background-color: var(--color-accent);'}
-		>
-			{#if busy}
-				{@render spinner('size-3.5')}
-				{action === 'stop' ? 'Stopping' : action === 'retry' ? 'Retrying' : 'Starting'}
-			{:else if action === 'stop'}
-				<svg class="size-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-					<rect x="7" y="7" width="10" height="10" rx="1.5" />
-				</svg>
-				Stop
-			{:else if action === 'retry'}
-				<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" />
-				</svg>
-				Retry
-			{:else}
-				<svg class="size-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-					<path d="M8 5v14l11-7z" />
-				</svg>
-				Start
-			{/if}
-		</button>
+		<ServerActionButton {server} disabled={deleting || cloning} size="sm" {onchange} {onerror} />
 	</footer>
 </article>

@@ -182,6 +182,30 @@ changing its saved configuration, or through the API:
 curl -X POST "http://127.0.0.1:8080/api/servers/<server-id>/retry"
 ```
 
+### Restart
+
+**Restart** bounces an enabled server's bridge without touching its saved
+configuration: the process is stopped and re-activated, and readiness re-runs
+discovery — so it's how you pick up **new or renamed tools** an upstream server has
+added since it started. It works from any live state (`running`, `idle`, `starting`,
+`failed`), unlike Retry, which is only offered on a terminal failure. The button sits
+in the server page header and in each card's ⋯ menu; over the API:
+
+```bash
+curl -X POST "http://127.0.0.1:8080/api/servers/<server-id>/restart"
+```
+
+A group can be restarted too (**Settings → Groups**), which restarts each of its
+enabled members — a group hosts no process of its own, so its bundle is only as fresh
+as the members behind it. The same section lists every member with its own
+start/stop/retry and restart controls, so one misbehaving server in a bundle can be
+bounced without leaving the page:
+
+```bash
+curl -X POST "http://127.0.0.1:8080/api/groups/<name>/restart"
+# -> {"name": "...", "restarted": ["<server-id>", ...], "skipped": ["<disabled-id>"]}
+```
+
 ### Idle shutdown (wake-on-request)
 
 Every enabled server normally keeps a resident bridge process. On a box with many
@@ -230,7 +254,8 @@ the API too: `PATCH /api/servers/<id>` with `{"disabled_tools": ["internal_tool"
 A tool's name and description are the whole interface a model gets — and some servers
 ship poor ones. When you can't fix that upstream (a closed-source or paid endpoint),
 override it here instead. Each tool row on the server detail page has an **edit**
-button with two optional fields:
+button that opens the label editor — one dialog, so a long upstream description never
+stands between you and the fields — with two optional entries:
 
 - **Name** — what clients call the tool. A renamed tool answers to its **new name
   only**, exactly as if the upstream server had been rebuilt, so update any client
@@ -243,7 +268,9 @@ you can rewrite a description without renaming, or vice versa. Overrides apply t
 appears that way in the generated OpenAPI), and any group the server belongs to.
 
 Overrides are staged alongside the enable/disable switches: edit as many tools as you
-like, then click **Apply** once to save the batch in a single bridge restart. They're
+like, then click **Apply** once to save the batch in a single bridge restart. The
+Apply bar follows the page, so a change staged at the top of a long tool list can be
+saved without scrolling back to it. They're
 keyed by the tool's upstream name, so an override survives being renamed again. Over
 the API: `PATCH /api/servers/<id>` with
 `{"tool_overrides": {"do_thing": {"name": "run_report", "description": "Runs the report."}}}`
@@ -527,7 +554,7 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 ## Status / roadmap
 
-**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop / retry, with optional setup scripts for local runners. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: local bearer tokens or external-AS OAuth JWTs for `/s` and `/g`, control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
+**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop / retry / **restart** (bounce a running server to pick up its upstream's new tools), with optional setup scripts for local runners. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), and `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: local bearer tokens or external-AS OAuth JWTs for `/s` and `/g`, control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
 
 Also working: a **tool playground** on the server page (invoke any discovered tool from a schema-built form, no client needed), **per-tool disable** (toggle individual tools off to hide them from every surface — MCP, REST, and groups — and refuse them if called), **per-tool overrides** (rename a tool or rewrite its description when the upstream's wording trips up models — applied to every surface, no upstream rebuild needed), **idle shutdown with wake-on-request** (quiesce inactive servers, restart transparently on the next request), an opt-in **REST/OpenAPI surface** per server (`/s/<slug>/rest/<tool>` + a generated `openapi.json`), and a **multi-user control plane** (admin/member roles, per-user server ownership and token scoping, a per-user local-runner permission, and login-token credentials minted from Settings → Users — see README Security for the trust model).
 

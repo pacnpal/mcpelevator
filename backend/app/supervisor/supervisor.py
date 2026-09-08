@@ -201,6 +201,34 @@ class Supervisor:
         async with self._unit_lock:
             await self._stop(server_id)
 
+    async def restart(self, server_id: str, authorized=None) -> None:
+        """Bounce one desired server: stop its unit now, then queue a fresh activation.
+
+        The single restart primitive — the ``/servers/{id}/restart`` endpoint and a
+        group restart (which calls this per member) both go through here, so "restart"
+        means exactly one thing everywhere. Unlike :meth:`retry` it carries no state
+        precondition: it is the operator's "re-run the launch / pick up the upstream's
+        new tools" action and is valid from running, idle, starting, or failed. The
+        caller owns the desired-state check (an enabled server) — this never writes the
+        registry, so a restart leaves ``config_hash`` and ``updated_at`` untouched.
+
+        ``authorized`` follows :meth:`retry`: a zero-arg callable (it may raise) run
+        inside the unit lock both before and after the stop, so an ownership
+        reassignment committing in that gap can't have a former owner's queued
+        activation bounce the new owner's server.
+        """
+        async with self._unit_lock:
+            if authorized is not None:
+                authorized()
+            await self._stop(server_id)
+            if authorized is not None:
+                authorized()
+        # A quiesced server is desired-but-stopped; the activation request below clears
+        # the marker in reconcile, but discard it here too so nothing observes the id as
+        # idle (i.e. wakeable but not starting) in the gap before the sweep runs.
+        self._idle.discard(server_id)
+        self.request_activation(server_id)
+
     async def retry(self, server_id: str, authorized=None) -> bool:
         async with self._unit_lock:
             # ``authorized`` (a zero-arg callable, may raise) runs INSIDE the unit

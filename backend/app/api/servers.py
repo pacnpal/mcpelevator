@@ -847,6 +847,37 @@ async def retry_server(
     return _summary(server, sup, session, base_url(request))
 
 
+@router.post("/servers/{server_id}/restart", response_model=ServerSummary)
+async def restart_server(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    """Bounce a running (or idle, or failed) server without changing its config.
+
+    The operator's "pick up the upstream's new tools" button: the bridge is stopped and
+    re-activated, so discovery re-runs and every surface (MCP, REST, the group hub)
+    re-reads the tool list. Unlike ``retry`` it has no state precondition — only a
+    DESIRED (enabled) server can be restarted, since a disabled one has nothing to bounce
+    and Start is the action for it.
+    """
+    server = _visible(principal, session, server_id)
+    if not server.enabled:
+        raise HTTPException(status_code=409, detail="disabled servers cannot be restarted")
+    sup = request.app.state.supervisor
+
+    # Re-validate against the committed row at the supervisor's decision points — a
+    # restart isn't a DB write (the config lock doesn't govern it), so this is what
+    # keeps a former owner's queued restart from bouncing a just-reassigned server.
+    def _authorize() -> None:
+        if not _visible_now(server_id, principal):
+            raise HTTPException(status_code=404, detail="server not found")
+
+    await sup.restart(server_id, authorized=_authorize)
+    return _summary(server, sup, session, base_url(request))
+
+
 @router.post("/servers/import", response_model=ImportResult, status_code=201)
 async def import_servers(
     request: Request,

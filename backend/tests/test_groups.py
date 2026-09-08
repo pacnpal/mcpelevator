@@ -33,6 +33,7 @@ from app.groups.hub import GroupHub
 from app.main import app
 from app.registry import service
 from app.registry import settings as runtime_settings
+from app.supervisor.supervisor import Supervisor
 from app.util import hash_token, new_id, new_token
 
 
@@ -51,6 +52,12 @@ def clean_settings():
     yield
     with Session(get_engine()) as session:
         runtime_settings.write(session, {"groups": {}, "default_auth_provider": "none"})
+
+
+async def _parked_reconciler(self):
+    """Park the reconcile loop so a queued activation stays observable in the
+    supervisor instead of being consumed by the next pass."""
+    await asyncio.Event().wait()
 
 
 def _write_groups(groups: dict, **changes) -> None:
@@ -911,3 +918,56 @@ def test_s_all_is_just_an_ordinary_server(clean_settings):
     finally:
         with Session(get_engine()) as session:
             repo.delete_server(session, sid)
+
+
+def test_group_restart_bounces_enabled_members_only(clean_settings, monkeypatch):
+    """A group owns no process — restarting it restarts each ENABLED member through the
+    same per-server primitive. A disabled member has no bridge to bounce, so it comes
+    back as skipped rather than failing the call."""
+    monkeypatch.setattr(Supervisor, "run_forever", _parked_reconciler)
+    with Session(get_engine()) as session:
+        on = _mk_server(session, "Bounce On")
+        off = _mk_server(session, "Bounce Off")
+        service.set_enabled(session, on.id, True)
+    try:
+        _write_groups({"team": [on.id, off.id]})
+        with TestClient(app) as client:
+            client.app.state.supervisor.on_converged = None
+            sup = client.app.state.supervisor
+            sup.cancel_activation_request(on.id)
+            sup.cancel_activation_request(off.id)
+
+            r = client.post("/api/groups/team/restart", headers=LOOPBACK)
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body == {"name": "team", "restarted": [on.id], "skipped": [off.id]}
+            assert sup.activation_requested_at(on.id) is not None
+            assert sup.activation_requested_at(off.id) is None
+
+            assert client.post("/api/groups/ghost/restart", headers=LOOPBACK).status_code == 404
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, on.id)
+            repo.delete_server(session, off.id)
+
+
+def test_group_restart_resolves_the_wildcard(clean_settings, monkeypatch):
+    """A wildcard group restarts every registered (enabled) server — membership comes
+    from the registry's own resolution, not a second copy of the rule."""
+    monkeypatch.setattr(Supervisor, "run_forever", _parked_reconciler)
+    with Session(get_engine()) as session:
+        a = _mk_server(session, "Wild A")
+        b = _mk_server(session, "Wild B")
+        service.set_enabled(session, a.id, True)
+        service.set_enabled(session, b.id, True)
+    try:
+        _write_groups({"everything": "*"})
+        with TestClient(app) as client:
+            client.app.state.supervisor.on_converged = None
+            r = client.post("/api/groups/everything/restart", headers=LOOPBACK)
+            assert r.status_code == 200, r.text
+            assert set(r.json()["restarted"]) >= {a.id, b.id}
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, a.id)
+            repo.delete_server(session, b.id)

@@ -24,7 +24,12 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
 
 - **Desired-state reconciliation.** SQLite is the source of truth. A background supervisor task
   (`supervisor/`) converges running processes to the desired state (Kubernetes-style), so the
-  system is idempotent and survives restarts. It also owns **idle quiescence**: an enabled server
+  system is idempotent and survives restarts. Operator lifecycle actions write desired
+  state or queue an activation — they never spawn or kill directly. `Supervisor.restart`
+  is the ONE restart primitive (stop the unit, queue a fresh activation, no config write);
+  `POST /api/servers/{id}/restart` and `POST /api/groups/{name}/restart` (per enabled
+  member) both go through it, and the UI's single `RestartButton` calls those.
+  The supervisor also owns **idle quiescence**: an enabled server
   with no proxy traffic inside its idle window (per-server `idle_timeout_s`, else the
   `idle_timeout_s` runtime setting; 0 = off) is stopped into an `idle` state, and the proxy wakes
   it on the next `/s` request, holding the request until readiness (ADR-0002).
@@ -97,7 +102,15 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
 - **Catalog** (`catalog/`): backend proxies public MCP directories (official registry, Glama) into
   reviewable launch specs; the SPA stays same-origin.
 - **Frontend** (`frontend/src/`): SvelteKit (Svelte 5) SPA, `adapter-static`, no SSR — rendered
-  entirely in the browser, served by the backend catch-all. Charts are
+  entirely in the browser, served by the backend catch-all. Lifecycle controls are shared
+  components, not per-page copies: `ServerActionButton` (start/stop/retry, with
+  `primaryServerAction` deciding which) and `RestartButton` (a server or a whole group) are
+  rendered by the dashboard card, the server page header, and the group member rows alike;
+  both expose a bindable `busy` so a page can gate its own work on the op it started. Tool
+  labels are edited in exactly one place too — `ToolLabelModal`, a dialog holding a local
+  draft that Save stages into the page's batch (the tool rows clamp long descriptions and
+  only open it), and the batch's Apply bar floats above the page so it is reachable from
+  anywhere in a long tool list. Charts are
   [LayerChart](https://layerchart.com) (the Svelte 5 charting library shadcn-svelte's charts
   are built on); it takes its colours from CSS variables, which `app.css` maps onto this
   app's tokens (`.lc-root-container` / `.lc-tooltip-root`) so charts inherit the one-accent

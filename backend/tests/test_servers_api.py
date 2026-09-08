@@ -413,3 +413,103 @@ def test_enable_docker_server_gated_returns_400():
             assert "disabled" in resp.json()["detail"].lower()
         finally:
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_restart_bounces_the_unit_and_requeues_without_changing_config(monkeypatch):
+    """Restart stops the live unit and queues a fresh activation. It is desired-state
+    neutral: config_hash/updated_at are untouched (so it isn't an edit), and the
+    response reads as a queued start."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Restart", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            sup = c.app.state.supervisor
+            with Session(get_engine()) as session:
+                server = service.set_enabled(session, server_id, True)
+                before = (server.config_hash, server.updated_at)
+                unit = ServerUnit(server)
+                unit.state = "running"
+                unit.port = 49998
+                sup.units[server_id] = unit
+
+            restarted = c.post(f"/api/servers/{server_id}/restart", headers=LOOPBACK)
+            assert restarted.status_code == 200, restarted.text
+            body = restarted.json()
+            assert body["state"] == "starting"
+            assert body["startup_status"]["phase"] == "queued"
+            # The running unit is gone and an activation is queued for the reconciler.
+            assert server_id not in sup.units
+            assert sup.activation_requested_at(server_id) is not None
+
+            with Session(get_engine()) as session:
+                current = repo.get_server(session, server_id)
+                assert current is not None
+                assert (current.config_hash, current.updated_at) == before
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_restart_wakes_an_idle_server(monkeypatch):
+    """An idle server is desired-but-quiesced. Restarting clears the marker and queues
+    an activation, so the operator's button works from `idle` exactly like from
+    `running` — no need to send traffic first."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Idle restart", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            sup = c.app.state.supervisor
+            with Session(get_engine()) as session:
+                service.set_enabled(session, server_id, True)
+                repo.upsert_runtime(session, server_id, state="idle", tools=[])
+            sup._idle.add(server_id)
+
+            restarted = c.post(f"/api/servers/{server_id}/restart", headers=LOOPBACK)
+            assert restarted.status_code == 200, restarted.text
+            assert restarted.json()["state"] == "starting"
+            assert not sup.is_idle(server_id)
+            assert sup.activation_requested_at(server_id) is not None
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_restart_rejects_a_disabled_server(monkeypatch):
+    """A disabled server has no bridge to bounce — Start is the action for it."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Off", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            r = c.post(f"/api/servers/{server_id}/restart", headers=LOOPBACK)
+            assert r.status_code == 409
+            assert "restarted" in r.json()["detail"]
+            assert c.app.state.supervisor.activation_requested_at(server_id) is None
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_restart_404s_for_an_unknown_server():
+    with TestClient(app) as c:
+        assert c.post("/api/servers/ghost/restart", headers=LOOPBACK).status_code == 404

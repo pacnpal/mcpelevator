@@ -17,7 +17,7 @@ from sqlmodel import Session
 from starlette.requests import Request
 from starlette.responses import Response
 
-from app.api.schemas import GroupInfo, GroupUpsert
+from app.api.schemas import GroupInfo, GroupRestart, GroupUpsert
 from app.api.util import base_url, resync_groups
 from app.auth import principal as principal_mod
 from app.auth.principal import Principal, require_admin
@@ -94,6 +94,40 @@ async def upsert_group(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await resync_groups(request)
     return GroupInfo(name=name, members=stored[name], url=_url(request, name))
+
+
+@router.post("/groups/{name}/restart", response_model=GroupRestart)
+async def restart_group(
+    name: str,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    """Bounce every enabled member of a group so the bundle picks up their new tools.
+
+    A group owns no process of its own — it is a hub mounting a proxy per RUNNING
+    member — so restarting one is exactly "restart each member", through the same
+    ``Supervisor.restart`` primitive the per-server endpoint uses. Members are resolved
+    through the registry, so a wildcard group restarts every registered server.
+
+    The hub is deliberately NOT resynced here: the members are down for the moment this
+    returns, and the supervisor's post-reconcile hook remounts each one as it comes back.
+    """
+    members = registry.resolve(session, name)
+    if members is None:
+        raise HTTPException(status_code=404, detail="group not found")
+    sup = request.app.state.supervisor
+    restarted: list[str] = []
+    skipped: list[str] = []
+    for server_id in members:
+        server = repo.get_server(session, server_id)
+        if server is None:
+            continue  # deleted between resolve and here; the registry prunes it
+        if not server.enabled:
+            skipped.append(server_id)  # nothing running to bounce
+            continue
+        await sup.restart(server_id)
+        restarted.append(server_id)
+    return GroupRestart(name=name, restarted=restarted, skipped=skipped)
 
 
 @router.delete("/groups/{name}", status_code=204)
