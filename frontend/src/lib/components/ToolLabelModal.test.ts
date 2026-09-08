@@ -1,0 +1,178 @@
+import { flushSync, mount, unmount, type ComponentProps } from 'svelte';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import type { ToolOverride } from '$lib/types';
+import ToolLabelModal from './ToolLabelModal.svelte';
+
+let dispose: (() => void) | undefined;
+
+function render(props: ComponentProps<typeof ToolLabelModal>) {
+	const target = document.createElement('div');
+	document.body.append(target);
+	const component = mount(ToolLabelModal, { target, props });
+	flushSync();
+	dispose = () => void unmount(component);
+	return target;
+}
+
+function field(target: HTMLElement, label: string): HTMLInputElement | HTMLTextAreaElement {
+	const wrapper = [...target.querySelectorAll('label')].find((el) =>
+		el.textContent?.trim().startsWith(label)
+	);
+	const el = wrapper?.querySelector('input, textarea');
+	if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) {
+		throw new Error(`${label} field not found`);
+	}
+	return el;
+}
+
+function button(target: HTMLElement, label: string): HTMLButtonElement {
+	const found = [...target.querySelectorAll('button')].find(
+		(el) => el.textContent?.trim() === label
+	);
+	if (!(found instanceof HTMLButtonElement)) throw new Error(`${label} button not found`);
+	return found;
+}
+
+function type(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
+	el.value = value;
+	el.dispatchEvent(new Event('input', { bubbles: true }));
+	flushSync();
+}
+
+afterEach(() => {
+	dispose?.();
+	dispose = undefined;
+	document.body.innerHTML = '';
+	vi.clearAllMocks();
+});
+
+describe('ToolLabelModal', () => {
+	it('opens on the staged override and saves a trimmed one', () => {
+		const onsave = vi.fn();
+		const onclose = vi.fn();
+		const target = render({
+			upstreamName: 'search_repos',
+			override: { name: 'search' } satisfies ToolOverride,
+			servedDescription: 'Search all the repositories.',
+			onsave,
+			onclose
+		});
+
+		expect(field(target, 'Name').value).toBe('search');
+		type(field(target, 'Description'), '  Find repos.  ');
+		button(target, 'Save').click();
+
+		expect(onsave).toHaveBeenCalledWith({ name: 'search', description: 'Find repos.' });
+		expect(onclose).toHaveBeenCalled();
+		expect((target.querySelector('dialog') as HTMLDialogElement).open).toBe(false);
+	});
+
+	it('drops a cleared field so the upstream label is restored', () => {
+		const onsave = vi.fn();
+		const target = render({
+			upstreamName: 'search_repos',
+			override: { name: 'search', description: 'Old text.' },
+			onsave
+		});
+
+		type(field(target, 'Name'), '');
+		type(field(target, 'Description'), '   ');
+		button(target, 'Save').click();
+
+		// An override with nothing left means "keep the upstream's" for both fields.
+		expect(onsave).toHaveBeenCalledWith({});
+	});
+
+	it('discards the draft on cancel, through the dialog so focus returns', () => {
+		const onsave = vi.fn();
+		const onclose = vi.fn();
+		const target = render({ upstreamName: 'tool', override: {}, onsave, onclose });
+		const dialog = target.querySelector('dialog') as HTMLDialogElement;
+
+		type(field(target, 'Name'), 'renamed');
+		button(target, 'Cancel').click();
+
+		expect(onsave).not.toHaveBeenCalled();
+		expect(onclose).toHaveBeenCalled();
+		// Cancel must close the DIALOG, not just tell the caller: unmounting an open
+		// dialog skips the browser's focus restoration to the edit button that opened it.
+		expect(dialog.open).toBe(false);
+	});
+
+	it('warns when the rename lands on a name another exposed tool holds', () => {
+		const target = render({
+			upstreamName: 'tool_a',
+			override: {},
+			takenNames: new Set(['tool_b'])
+		});
+
+		expect(target.textContent).not.toContain('will refuse this rename');
+		type(field(target, 'Name'), 'tool_b');
+		expect(target.textContent).toContain('will refuse this rename');
+
+		// The tool's own upstream name is never a collision with itself.
+		type(field(target, 'Name'), 'tool_a');
+		expect(target.textContent).not.toContain('will refuse this rename');
+	});
+
+	it("offers the served description as the placeholder, unless it is the text being cleared", () => {
+		const target = render({
+			upstreamName: 'tool',
+			override: {},
+			servedDescription: 'What the client sees now.'
+		});
+		expect(field(target, 'Description').placeholder).toBe('What the client sees now.');
+
+		dispose?.();
+		document.body.innerHTML = '';
+		const restoring = render({
+			upstreamName: 'tool',
+			override: {},
+			servedDescription: 'The override being removed.',
+			restoringDescription: true
+		});
+		expect(field(restoring, 'Description').placeholder).toBe("The upstream's description");
+	});
+
+	it('leaves an IME composition alone when Enter commits a candidate', () => {
+		const onsave = vi.fn();
+		const onclose = vi.fn();
+		const target = render({ upstreamName: 'tool', override: {}, onsave, onclose });
+		const name = field(target, 'Name');
+
+		type(name, 'partial-candidate');
+		// Enter with an IME open commits the candidate, not the dialog.
+		name.dispatchEvent(
+			new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true })
+		);
+		flushSync();
+		expect(onsave).not.toHaveBeenCalled();
+		expect(onclose).not.toHaveBeenCalled();
+
+		// The same key, composition finished, saves.
+		name.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+		flushSync();
+		expect(onsave).toHaveBeenCalledWith({ name: 'partial-candidate' });
+	});
+
+	it('opens as a real modal and reports every close through one path', () => {
+		const onclose = vi.fn();
+		const target = render({ upstreamName: 'tool', override: {}, onclose });
+		const dialog = target.querySelector('dialog');
+		if (!(dialog instanceof HTMLDialogElement)) throw new Error('no dialog rendered');
+
+		// showModal (not show) is what gives the focus trap, the inert background, and
+		// Escape — the reason this is a native dialog rather than a positioned div.
+		expect(dialog.open).toBe(true);
+		// ...and it has to announce what it is: the heading is only the dialog's
+		// accessible name if the dialog points at it.
+		expect(dialog.getAttribute('aria-labelledby')).toBe('tool-label-modal-title');
+		expect(target.querySelector('#tool-label-modal-title')).not.toBeNull();
+
+		// Escape, the close button, Cancel, and a backdrop click all end at the dialog's
+		// own close event, so the caller has exactly one signal to handle.
+		dialog.close();
+		expect(onclose).toHaveBeenCalledTimes(1);
+	});
+});

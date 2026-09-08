@@ -15,6 +15,10 @@ _Avoid_: Process start, startup attempt
 **Startup attempt**:
 One pass through setup, bridge launch, and readiness checking during a Server activation. A failed attempt may be retried, and each retry runs the full pass again.
 
+**Server restart**:
+An operator-requested Server activation for a Server that is already desired: the bridge is stopped and re-activated from unchanged saved configuration, so readiness re-runs discovery and the Server picks up its upstream's current tools. Unlike a retry it carries no state precondition (a running, idle, starting, or failed Server can all be restarted), and unlike an edit it changes nothing about the launch spec. Restarting a group is exactly restarting each of its enabled members — a group runs no process of its own.
+_Avoid_: Reboot, reload, refresh
+
 **Stable run**:
 A Server that has remained running without interruption for the configured stability window. Reaching a Stable run restores the retry budget for later recovery.
 

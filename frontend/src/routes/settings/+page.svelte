@@ -34,8 +34,12 @@
 	} from '$lib/types';
 	import { clearToken, setToken } from '$lib/auth';
 	import { isLoopbackHost, isPrivateIpHost, normalizeHost } from '$lib/host';
+	import { pollingInterval, shouldPollFast } from '$lib/startup';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import CopyMenu from '$lib/components/CopyMenu.svelte';
+	import RestartButton from '$lib/components/RestartButton.svelte';
+	import ServerActionButton from '$lib/components/ServerActionButton.svelte';
+	import StatePill from '$lib/components/StatePill.svelte';
 	import { flashToast } from '$lib/toast.svelte';
 
 	type LoadState = 'loading' | 'ready' | 'error';
@@ -87,6 +91,11 @@
 			users = usr;
 			hasUsableAdminCredential = auth.authenticated;
 			loadState = 'ready';
+			// A member can already be mid-transition when this page opens (someone started
+			// it from the dashboard a second ago). The group rows show its state, so the
+			// follow has to start from the FIRST list too, not only from a lifecycle
+			// action taken here — otherwise those pills stay frozen until a reload.
+			followMemberTransitions();
 		} catch (err) {
 			loadState = 'error';
 			loadError = errorMessage(err);
@@ -594,6 +603,82 @@
 			tools_count: 0
 		} satisfies ServerSummary;
 	}
+
+	/** A group's member servers, resolved the way the backend resolves them: the wildcard
+	 *  is every registered server, an explicit list keeps its registry order. An id with no
+	 *  server row is dropped — a deleted server is pruned from the registry, so this only
+	 *  shows up in the window between the delete and the next groups fetch. */
+	function groupMembers(group: GroupInfo): ServerSummary[] {
+		if (group.members === '*') return servers;
+		return group.members
+			.map((id) => servers.find((s) => s.id === id))
+			.filter((s): s is ServerSummary => s !== undefined);
+	}
+
+	/** Bumped whenever a lifecycle action installs a summary fresher than any list read
+	 *  already in flight can carry. A poll that started before the bump observed the row
+	 *  as it was BEFORE the action — landing it would put `running` + Stop back over a
+	 *  just-returned `stopping`, and with nothing transitional left the follow would then
+	 *  stop, stranding the page on that stale state until a reload. */
+	let serversRevision = 0;
+	/** Distinguishes concurrent list reads from each other, which `serversRevision` can't:
+	 *  a group restart's refresh and a poll tick can be in flight at once, and the slower
+	 *  one landing last would install the older snapshot — and then, if nothing in it is
+	 *  transitional, stop the follow on that stale state. Only the newest read applies. */
+	let serversSequence = 0;
+
+	/** Fold one server's refreshed summary back into the list, so a member acted on from
+	 *  a group row updates its own pill and button label (the same rows also feed the
+	 *  token scope picker and the group builder). */
+	function applyServerUpdate(next: ServerSummary) {
+		serversRevision += 1;
+		servers = servers.map((s) => (s.id === next.id ? { ...s, ...next } : s));
+		followMemberTransitions();
+	}
+
+	/** Re-read every server summary. A GROUP restart bounces many members at once and
+	 *  answers with ids, not summaries — and this page has no status polling of its own,
+	 *  so without this each member row would keep showing its pre-restart state (often
+	 *  `running` + Stop) until a reload. Silent on the polling path: a transient failure
+	 *  there is retried on the next tick, not worth a toast per tick. */
+	async function refreshServers(silent = false) {
+		const revision = serversRevision;
+		const sequence = ++serversSequence;
+		try {
+			const next = await listServers();
+			// Superseded while this was in flight — by a lifecycle action, or by a later
+			// read that already landed. Drop it rather than undo the newer state; the
+			// follow still runs below, since that state may itself be transitional.
+			if (revision !== serversRevision || sequence !== serversSequence) return;
+			servers = next;
+		} catch (err) {
+			if (!silent) flashToast(errorMessage(err));
+		} finally {
+			followMemberTransitions();
+		}
+	}
+
+	// A lifecycle action answers as soon as desired state is written, so the summary it
+	// returns is `starting`/`stopping` — the supervisor converges after. Follow those rows
+	// until they settle (`shouldPollFast` is the same predicate the dashboard polls on),
+	// then stop: the rest of Settings is configuration, not a status view.
+	let memberPollTimer: ReturnType<typeof setTimeout> | undefined;
+	// Cleared on teardown: clearing the timer alone isn't enough, because a refresh still
+	// in flight when the page is destroyed reaches its `finally` afterwards and would
+	// schedule the next tick from an abandoned page — forever, while the states it last
+	// saw stay transitional.
+	let memberPollingLive = true;
+
+	function followMemberTransitions() {
+		clearTimeout(memberPollTimer);
+		if (!memberPollingLive || !servers.some(shouldPollFast)) return;
+		memberPollTimer = setTimeout(() => void refreshServers(true), pollingInterval(servers));
+	}
+
+	$effect(() => () => {
+		memberPollingLive = false;
+		clearTimeout(memberPollTimer);
+	});
 
 	function toggleNewGroupServer(id: string, included: boolean) {
 		newGroupSelection = included
@@ -1704,6 +1789,14 @@
 									<div class="flex shrink-0 items-center gap-1.5">
 										<CopyMenu server={groupSummary(group)} />
 										{#if confirmDeleteGroup !== group.name}
+											<!-- A group owns no process: restarting it bounces each enabled
+											     member through the same per-server restart, so the bundle
+											     re-reads their tools. Same component as the server pages. -->
+											<RestartButton
+												target={{ kind: 'group', name: group.name }}
+												size="sm"
+												onrestarted={() => void refreshServers()}
+											/>
 											<button
 												type="button"
 												onclick={() => editGroup(group)}
@@ -1754,6 +1847,62 @@
 								<code class="min-w-0 truncate font-mono text-[11px] text-[var(--color-ink-dim)]">
 									{group.url}
 								</code>
+
+								<!-- Members, each with its own controls. A group is only a view over its
+								     servers: what it serves is exactly what its RUNNING members expose, so
+								     starting, stopping, or restarting one from here is the same action as
+								     on its own page — same components, same endpoints. -->
+								{#if groupMembers(group).length === 0}
+									<p class="text-[11px] text-[var(--color-ink-dim)]">
+										No members yet — this group serves an empty bundle.
+									</p>
+								{:else}
+									<details class="mt-0.5">
+										<summary
+											class="cursor-pointer text-[11px] font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
+										>
+											Members ({groupMembers(group).length})
+										</summary>
+										<ul class="mt-1.5 flex flex-col divide-y divide-[var(--color-line)]">
+											{#each groupMembers(group) as member (member.id)}
+												<li class="flex flex-wrap items-center justify-between gap-2 py-1.5">
+													<a
+														href={`/server/${member.id}`}
+														class="flex min-w-0 flex-1 basis-40 items-center gap-2 rounded-md outline-offset-4 transition-opacity hover:opacity-80"
+													>
+														<StatePill
+															state={member.state}
+															startupStatus={member.startup_status}
+														/>
+														<span class="min-w-0 truncate text-xs text-[var(--color-ink)]">
+															{member.name}
+														</span>
+														<span
+															class="min-w-0 truncate font-mono text-[11px] text-[var(--color-ink-dim)]"
+														>
+															{member.slug}
+														</span>
+													</a>
+													<div class="flex shrink-0 items-center gap-1.5">
+														<ServerActionButton
+															server={member}
+															size="sm"
+															onchange={applyServerUpdate}
+															onerror={flashToast}
+														/>
+														{#if member.enabled}
+															<RestartButton
+																target={{ kind: 'server', id: member.id }}
+																size="sm"
+																onrestarted={(next) => next && applyServerUpdate(next)}
+															/>
+														{/if}
+													</div>
+												</li>
+											{/each}
+										</ul>
+									</details>
+								{/if}
 							</li>
 						{/each}
 					</ul>

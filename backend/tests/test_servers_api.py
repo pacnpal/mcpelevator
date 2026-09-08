@@ -7,16 +7,21 @@ when a disabled docker server is enabled while the root-equivalent runner is sti
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
+import pytest
 from fastapi.testclient import TestClient
+from mcp.shared.auth import OAuthToken
 from sqlmodel import Session
 
 from conftest import LOOPBACK
 
+from app.auth.oauth_store import ServerTokenStorage
 from app.db import get_engine, repo
 from app.main import app
 from app.registry import service
-from app.supervisor.supervisor import Supervisor
+from app.db.models import utcnow
+from app.supervisor.supervisor import Supervisor, _Quarantine
 from app.supervisor.unit import ServerUnit
 
 
@@ -413,3 +418,266 @@ def test_enable_docker_server_gated_returns_400():
             assert "disabled" in resp.json()["detail"].lower()
         finally:
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_restart_bounces_the_unit_and_requeues_without_changing_config(monkeypatch):
+    """Restart stops the live unit and queues a fresh activation. It is desired-state
+    neutral: config_hash/updated_at are untouched (so it isn't an edit), and the
+    response reads as a queued start."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Restart", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            sup = c.app.state.supervisor
+            with Session(get_engine()) as session:
+                server = service.set_enabled(session, server_id, True)
+                before = (server.config_hash, server.updated_at)
+                unit = ServerUnit(server)
+                unit.state = "running"
+                unit.port = 49998
+                sup.units[server_id] = unit
+
+            restarted = c.post(f"/api/servers/{server_id}/restart", headers=LOOPBACK)
+            assert restarted.status_code == 200, restarted.text
+            body = restarted.json()
+            assert body["state"] == "starting"
+            assert body["startup_status"]["phase"] == "queued"
+            # The running unit is gone and an activation is queued for the reconciler.
+            assert server_id not in sup.units
+            assert sup.activation_requested_at(server_id) is not None
+
+            with Session(get_engine()) as session:
+                current = repo.get_server(session, server_id)
+                assert current is not None
+                assert (current.config_hash, current.updated_at) == before
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_restart_wakes_an_idle_server(monkeypatch):
+    """An idle server is desired-but-quiesced. Restarting clears the marker and queues
+    an activation, so the operator's button works from `idle` exactly like from
+    `running` — no need to send traffic first."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Idle restart", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            sup = c.app.state.supervisor
+            with Session(get_engine()) as session:
+                service.set_enabled(session, server_id, True)
+                repo.upsert_runtime(session, server_id, state="idle", tools=[])
+            sup._idle.add(server_id)
+
+            restarted = c.post(f"/api/servers/{server_id}/restart", headers=LOOPBACK)
+            assert restarted.status_code == 200, restarted.text
+            assert restarted.json()["state"] == "starting"
+            assert not sup.is_idle(server_id)
+            assert sup.activation_requested_at(server_id) is not None
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_restart_rejects_a_disabled_server(monkeypatch):
+    """A disabled server has no bridge to bounce — Start is the action for it."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Off", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            r = c.post(f"/api/servers/{server_id}/restart", headers=LOOPBACK)
+            assert r.status_code == 409
+            assert "restarted" in r.json()["detail"]
+            assert c.app.state.supervisor.activation_requested_at(server_id) is None
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_restart_404s_for_an_unknown_server():
+    with TestClient(app) as c:
+        assert c.post("/api/servers/ghost/restart", headers=LOOPBACK).status_code == 404
+
+
+def test_restart_refuses_when_a_disable_lands_during_teardown(monkeypatch):
+    """The endpoint promises to bounce only a DESIRED server, but stopping the unit
+    awaits process teardown — long enough for a disable to commit. The authorization
+    hook re-reads the committed row at the supervisor's decision points, so the stop
+    stands (that IS the new desired state) and no fresh activation is queued."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Raced", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            sup = c.app.state.supervisor
+            with Session(get_engine()) as session:
+                server = service.set_enabled(session, server_id, True)
+                unit = ServerUnit(server)
+                unit.state = "running"
+                unit.port = 49997
+                sup.units[server_id] = unit
+
+            async def disabling_stop():
+                # Stands in for a slow teardown that a concurrent disable commits during.
+                with Session(get_engine()) as session:
+                    service.set_enabled(session, server_id, False)
+
+            monkeypatch.setattr(unit, "stop", disabling_stop)
+
+            r = c.post(f"/api/servers/{server_id}/restart", headers=LOOPBACK)
+            assert r.status_code == 409, r.text
+            assert "restarted" in r.json()["detail"]
+            assert server_id not in sup.units  # the stop stands: it's the desired state
+            assert sup.activation_requested_at(server_id) is None
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_delete_stops_a_server_relaunched_during_the_delete(monkeypatch):
+    """The delete's stop runs while the row still exists, so a reconcile pass can consume
+    a queued activation (an operator restart) in the gap and relaunch the server before
+    the row is removed. The delete cancels and stops again afterwards, so nothing is left
+    running for a server that no longer exists."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Raced delete", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        sup = c.app.state.supervisor
+        with Session(get_engine()) as session:
+            server = service.set_enabled(session, server_id, True)
+
+        # Stand in for the reconciler winning the gap: the first stop (before the row is
+        # removed) is followed by a relaunch, exactly as a consumed activation would.
+        relaunched = ServerUnit(server)
+        relaunched.state = "running"
+        relaunched.port = 49996
+        real_stop = Supervisor._stop
+        stops: list[str] = []
+
+        async def relaunching_stop(self, sid):
+            await real_stop(self, sid)
+            stops.append(sid)
+            if len(stops) == 1:
+                self.units[sid] = relaunched  # the reconciler's replacement
+
+        monkeypatch.setattr(Supervisor, "_stop", relaunching_stop)
+        sup.request_activation(server_id)
+
+        assert c.delete(f"/api/servers/{server_id}", headers=LOOPBACK).status_code == 204
+        assert server_id not in sup.units  # the relaunch was torn down too
+        assert sup.activation_requested_at(server_id) is None
+
+
+def test_delete_cleans_up_even_when_the_final_teardown_fails(monkeypatch):
+    """The row is already gone by the second stop, so a teardown that raises there can't
+    be retried through this endpoint — a second DELETE 404s at its lookup. The credential
+    file and the group remount only ever happen here, so they must happen either way; the
+    process itself is the supervisor's problem (it keeps the unit and retries the stop)."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Wedged delete", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+
+        store = ServerTokenStorage(server_id)
+        asyncio.run(store.set_tokens(OAuthToken(access_token="AT", token_type="Bearer")))
+        assert store.path.exists()
+
+        stops: list[str] = []
+        real_stop = Supervisor.stop
+
+        async def wedged_second_stop(self, sid):
+            stops.append(sid)
+            if len(stops) == 2:  # the one after the row is gone
+                raise RuntimeError("docker daemon is wedged")
+            await real_stop(self, sid)
+
+        monkeypatch.setattr(Supervisor, "stop", wedged_second_stop)
+
+        with pytest.raises(RuntimeError):
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+        assert len(stops) == 2
+        assert not store.path.exists()  # no orphan credential file for a deleted server
+
+
+def test_summary_reports_why_a_teardown_is_being_retried(monkeypatch):
+    """An enabled server whose unit is mid-stop renders as a queued restart — which is
+    what a quarantined unit looks like too, except its stop keeps FAILING and the
+    supervisor is retrying it on a backoff. Without the reason attached, the operator
+    watches a spinner that never resolves and never says why."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Wedged stop", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            with Session(get_engine()) as session:
+                server = service.set_enabled(session, server_id, True)
+                unit = ServerUnit(server)
+            unit.state = "stopping"
+            unit.last_error = "stop failed: docker daemon is wedged"
+            sup = c.app.state.supervisor
+            sup.units[server_id] = unit
+            sup._teardown_failed[server_id] = _Quarantine(
+                retry_at=utcnow() + timedelta(seconds=30), delay=1.0
+            )
+
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK).json()
+            assert detail["state"] == "starting"  # a restart really is pending
+            assert "wedged" in (detail["last_error"] or "")
+            # And in the startup status, which is the line the UI actually renders: both
+            # the card and the detail page hide last_error while a startup is active.
+            assert "wedged" in (detail["startup_status"]["message"] or "")
+        finally:
+            sup.units.pop(server_id, None)
+            sup._teardown_failed.pop(server_id, None)
+            with Session(get_engine()) as session:
+                repo.delete_server(session, server_id)

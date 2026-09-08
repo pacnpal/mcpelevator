@@ -508,6 +508,18 @@ export interface GroupInfo {
 	url: string;
 }
 
+/** Result of POST /api/groups/{name}/restart. A group owns no process of its own, so
+ * restarting it restarts each ENABLED member. `skipped` carries the members with no
+ * bridge to bounce (disabled before or during the batch) and `failed` those whose
+ * teardown raised — reported rather than aborting the rest. All three hold server ids. */
+export interface GroupRestartResult {
+	name: string;
+	restarted: string[];
+	skipped: string[];
+	/** Absent on a backend older than this field; treat as empty. */
+	failed?: string[];
+}
+
 /** The authenticated principal. `id` is null for the synthetic admins
  * (enforcement off / MCPE_ADMIN_TOKEN / a pre-multi-user control token). */
 export interface AuthUser {

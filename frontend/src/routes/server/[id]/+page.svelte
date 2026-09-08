@@ -4,14 +4,11 @@
 	import {
 		cloneServer,
 		deleteServer,
-		disableServer,
 		disconnectOauth,
 		downloadMcpb,
-		enableServer,
 		errorMessage,
 		getServer,
 		getServerUsage,
-		retryServer,
 		startOauth,
 		updateServer
 	} from '$lib/api';
@@ -21,15 +18,17 @@
 		formatElapsed,
 		hasActiveStartup,
 		pollingInterval,
-		primaryServerAction,
 		startupPhaseLabel
 	} from '$lib/startup';
 	import type { ServerDetail, ServerTool, ServerUsage, ToolOverride } from '$lib/types';
 	import { effectiveWindowDays, toolBadge } from '$lib/usage';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
+	import RestartButton from '$lib/components/RestartButton.svelte';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
+	import ServerActionButton from '$lib/components/ServerActionButton.svelte';
 	import StatePill from '$lib/components/StatePill.svelte';
+	import ToolLabelModal from '$lib/components/ToolLabelModal.svelte';
 	import ToolRunner from '$lib/components/ToolRunner.svelte';
 	import UsageChart from '$lib/components/UsageChart.svelte';
 	import { flashToast } from '$lib/toast.svelte';
@@ -43,7 +42,14 @@
 	let loadState = $state<LoadState>('loading');
 	let loadError = $state<string | null>(null);
 
-	let busy = $state(false); // start/stop/retry in flight
+	// Lifecycle ops in flight, owned by the buttons that run them (bound below). Tool
+	// edits, a clone, and the status poll all gate on these: each bounces the bridge, so
+	// they must not race one another.
+	let busy = $state(false); // start/stop/retry
+	let restarting = $state(false);
+	// Declared with the other lifecycle flags, not with the OAuth block below, because
+	// `toolEditsBlocked` reads it: a disconnect restarts the server like the rest.
+	let oauthBusy = $state(false); // authorize / disconnect in flight
 	let deleting = $state(false);
 	let confirmDelete = $state(false);
 	let cloning = $state(false);
@@ -80,7 +86,6 @@
 	}
 
 	const activeStartup = $derived(server ? hasActiveStartup(server) : false);
-	const action = $derived(server ? primaryServerAction(server) : 'start');
 	const startup = $derived(server?.startup_status ?? null);
 	const startupElapsed = $derived(startup ? formatElapsed(startup.activation_started_at) : null);
 	const startupCountdown = $derived(
@@ -90,32 +95,6 @@
 		!!server && !activeStartup && (server.state === 'failed' || server.state === 'unhealthy')
 	);
 	const priorityLogs = $derived(activeStartup || terminalFailure);
-
-	async function runPrimaryAction() {
-		// Not while a tool Apply is in flight: its PATCH restarts the bridge, so a stop or
-		// retry raced against it would compete with that restart.
-		if (!server || busy || applyingTools) return;
-		busy = true;
-		// Capture the id this action targets. Clone reuses this component (same-route
-		// nav), so if the route changes mid-flight the resolved summary belongs to the
-		// *previous* server — drop it instead of clobbering the copy with the source.
-		const requestedId = id;
-		try {
-			const updated =
-				action === 'stop'
-					? await disableServer(requestedId)
-					: action === 'retry'
-						? await retryServer(requestedId)
-						: await enableServer(requestedId);
-			if (requestedId !== id || !server) return; // route changed mid-flight
-			mutationRevision += 1;
-			server = { ...server, ...updated };
-		} catch (err) {
-			if (requestedId === id) flashToast(errorMessage(err));
-		} finally {
-			busy = false;
-		}
-	}
 
 	let downloadingMcpb = $state(false);
 
@@ -171,7 +150,12 @@
 	const effectiveOverrides = $derived(pendingOverrides ?? baseOverrides);
 
 	let applyingTools = $state(false); // Apply PATCH + reload in flight
-	let editingTool = $state<string | null>(null); // upstream name whose label form is open
+	// The tool the label dialog is open on, SNAPSHOT at open time — never re-derived from
+	// live discovery. A background poll during a restart (another tab, a group action) can
+	// answer with an empty tool list, and re-deriving would drop the row, unmount the
+	// dialog, and take the operator's unsaved typing with it.
+	let editing = $state<{ key: string; tool: ServerTool } | null>(null);
+	const editingTool = $derived(editing?.key ?? null); // the open row, for the list's state
 
 	function setsEqual(a: Set<string>, b: Set<string>): boolean {
 		return a.size === b.size && [...a].every((x) => b.has(x));
@@ -208,7 +192,7 @@
 			stagedForServerId = sid;
 			pendingDisabled = null;
 			pendingOverrides = null;
-			editingTool = null;
+			editing = null;
 		}
 	});
 
@@ -280,9 +264,37 @@
 		return new Set([...counts].filter(([, n]) => n > 1).map(([name]) => name));
 	});
 
+	/** Exposed names OTHER live tools already answer to — what the dialog warns a rename
+	 *  against. Same discovered-only rule as `collidingNames`: a hidden or unconfirmed row
+	 *  can't be confirmed to exist upstream, so it claims no name. */
+	function namesTakenExcluding(key: string): Set<string> {
+		const taken = new Set<string>();
+		for (const row of toolRows) {
+			if (row.key === key || !row.enabled || !row.discovered) continue;
+			taken.add(exposedName(row.key));
+		}
+		return taken;
+	}
+
+	/** True when a SAVED description override is staged for removal: the description the
+	 *  bridge currently serves is the very text being cleared, and the upstream's own
+	 *  wording isn't available here to show instead. */
+	function isRestoringDescription(key: string): boolean {
+		return !effectiveOverrides[key]?.description?.trim() && !!baseOverrides[key]?.description;
+	}
+
 	// Local-only edits: stage the change, don't touch the server until Apply. Skipped while
 	// an Apply or a lifecycle op (start/stop/delete/clone) is in flight.
-	const toolEditsBlocked = $derived(applyingTools || busy || deleting || cloning);
+	const toolEditsBlocked = $derived(
+		applyingTools || busy || restarting || deleting || cloning || oauthBusy
+	);
+
+	// Delete waits for every other op in flight. The one that bites is an OAuth
+	// disconnect: it stops the bridge, clears the token store and re-activates, all
+	// re-reading the row — so a delete landing mid-flight turns it into a 404 the
+	// operator never asked for. The others (a start/stop, a restart, an Apply, a clone)
+	// would likewise be acting on a server that is about to stop existing.
+	const deleteBlocked = $derived(applyingTools || busy || restarting || cloning || oauthBusy);
 
 	function toggleToolPending(key: string, enable: boolean) {
 		if (!server || toolEditsBlocked) return;
@@ -293,7 +305,11 @@
 		pendingDisabled = setsEqual(next, baseDisabled) ? null : next;
 	}
 
-	function setOverridePending(key: string, field: keyof ToolOverride, value: string) {
+	/** Stage one tool's labels from the editor dialog (the only writer of this map).
+	 *  `override` arrives already trimmed with blank fields dropped, so an entry with
+	 *  nothing left removes the tool's override entirely — matching what the backend
+	 *  would store, so clearing a field never reads as a pending change. */
+	function saveOverride(key: string, override: ToolOverride) {
 		if (!server || toolEditsBlocked) return;
 		// Null-prototype: a tool named `__proto__` is a legal upstream name, and assigning it
 		// into an ordinary object hits the prototype setter instead of creating an own
@@ -302,11 +318,7 @@
 		// replaced wholesale).
 		const next: Record<string, ToolOverride> = Object.create(null);
 		for (const [k, v] of Object.entries(pendingOverrides ?? baseOverrides)) next[k] = { ...v };
-		const entry = { ...(next[key] ?? {}), [field]: value };
-		// Drop blank fields (and an entry with nothing left) so the staged map matches what
-		// the backend would store — otherwise clearing a field would read as a pending change.
-		if (!value.trim()) delete entry[field];
-		if (Object.keys(entry).length > 0) next[key] = entry;
+		if (Object.keys(override).length > 0) next[key] = override;
 		else delete next[key];
 		pendingOverrides = overridesEqual(next, baseOverrides) ? null : next;
 	}
@@ -315,7 +327,7 @@
 		if (applyingTools) return;
 		pendingDisabled = null;
 		pendingOverrides = null;
-		editingTool = null;
+		editing = null;
 	}
 
 	async function applyToolChanges() {
@@ -344,7 +356,7 @@
 			// Cleared only once `base*` really is what was saved.
 			pendingDisabled = null;
 			pendingOverrides = null;
-			editingTool = null;
+			editing = null;
 		} catch (err) {
 			if (requestedId === id) flashToast(errorMessage(err));
 		} finally {
@@ -360,7 +372,7 @@
 		// flight — the toggle response is id-guarded above, but blocking here keeps the source
 		// page from kicking off conflicting actions right before it navigates away (and a
 		// navigate mid-apply is exactly what would strand the apply flag on the next view).
-		if (!server || cloning || busy || deleting || applyingTools) return;
+		if (!server || cloning || busy || restarting || deleting || applyingTools) return;
 		// Capture the route + target id: if the user leaves this page before the
 		// clone resolves, don't navigate to the copy or toast on the wrong route.
 		const requestedId = id;
@@ -381,7 +393,6 @@
 		}
 	}
 
-	let oauthBusy = $state(false); // authorize / disconnect in flight
 	let oauthPopupWatch: ReturnType<typeof setInterval> | undefined;
 	let oauthGraceTimer: ReturnType<typeof setTimeout> | undefined;
 	// Nonce of the flow THIS page started; broadcasts carrying any other nonce belong
@@ -502,9 +513,11 @@
 	});
 
 	async function doDisconnect() {
-		// Disconnecting restarts the server, so it must not race an in-flight tool Apply
-		// (which triggers its own restart) — same reason start/stop/retry/delete are guarded.
-		if (!server || oauthBusy || applyingTools) return;
+		// Disconnecting RESTARTS the server, so it belongs in the same interlock as every
+		// other bridge-bouncing action: a tool Apply, a start/stop/retry, a restart, a
+		// delete. The gate runs both ways — the lifecycle controls below take `oauthBusy`
+		// for the same reason.
+		if (!server || oauthBusy || applyingTools || busy || restarting || deleting) return;
 		oauthBusy = true;
 		try {
 			const updated = await disconnectOauth(server.id);
@@ -536,8 +549,9 @@
 	}
 
 	async function doDelete() {
-		// Not while a tool Apply is in flight — the PATCH would land on a deleted server.
-		if (!server || deleting || applyingTools) return;
+		// Not while anything else is in flight (see `deleteBlocked`) — an Apply's PATCH
+		// would land on a deleted server, and a disconnect would 404 mid-flight.
+		if (!server || deleting || deleteBlocked) return;
 		deleting = true;
 		try {
 			await deleteServer(server.id);
@@ -576,11 +590,12 @@
 	$effect(() => {
 		void pollTick;
 		void busy;
+		void restarting;
 		void deleting;
 		void oauthBusy;
 		if (loadState !== 'ready' || !server || server.id !== id) return;
 		const timer = setTimeout(async () => {
-			if (!busy && !deleting && !oauthBusy) await load(true);
+			if (!busy && !restarting && !deleting && !oauthBusy) await load(true);
 			pollTick += 1;
 		}, pollingInterval([server]));
 		return () => clearTimeout(timer);
@@ -773,7 +788,10 @@
 	<title>{pageTitle}</title>
 </svelte:head>
 
-<section class="mx-auto flex w-full max-w-3xl flex-col gap-6">
+<section
+	class="mx-auto flex w-full max-w-3xl flex-col gap-6"
+	class:pb-24={toolChangesDirty}
+>
 	<!-- Back -->
 	<a
 		href="/"
@@ -840,44 +858,42 @@
 			</div>
 
 			<div class="flex flex-wrap items-center justify-end gap-2">
-				<button
-					type="button"
-					onclick={runPrimaryAction}
-					disabled={busy || applyingTools}
-					aria-busy={busy}
-					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
-					style={action === 'stop'
-						? 'color: var(--color-ink-muted); border: 1px solid var(--color-line);'
-						: 'color: var(--color-accent-ink); background-color: var(--color-accent);'}
-				>
-					{#if busy}
-						<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-							<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
-							<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-						</svg>
-						{action === 'stop' ? 'Stopping' : action === 'retry' ? 'Retrying' : 'Starting'}
-					{:else if action === 'stop'}
-						<svg class="size-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-							<rect x="7" y="7" width="10" height="10" rx="1.5" />
-						</svg>
-						Stop
-					{:else if action === 'retry'}
-						<svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-							<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" />
-						</svg>
-						Retry
-					{:else}
-						<svg class="size-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-							<path d="M8 5v14l11-7z" />
-						</svg>
-						Start
-					{/if}
-				</button>
+				<ServerActionButton
+					{server}
+					bind:busy
+					disabled={cloning || deleting || applyingTools || restarting || oauthBusy}
+					onchange={(next) => {
+						// Match the response to the server on screen: this component is reused
+						// across same-route navigations (clone, sidebar), so a summary that
+						// arrives after the route changed belongs to the PREVIOUS server.
+						if (!server || next.id !== server.id) return;
+						mutationRevision += 1;
+						server = { ...server, ...next };
+					}}
+					onerror={flashToast}
+				/>
+
+				{#if server.enabled}
+					<!-- Only for a DESIRED server: a stopped one has no bridge to bounce, and its
+					     primary action above is already Start. -->
+					<RestartButton
+						target={{ kind: 'server', id: server.id }}
+						bind:busy={restarting}
+						disabled={busy || cloning || deleting || applyingTools || oauthBusy}
+						onrestarted={(next) => {
+							// Same id guard as the action button: a summary that lands after a
+							// same-route navigation belongs to the server we just left.
+							if (!next || !server || next.id !== server.id) return;
+							mutationRevision += 1;
+							server = { ...server, ...next };
+						}}
+					/>
+				{/if}
 
 				<button
 					type="button"
 					onclick={doClone}
-					disabled={cloning || busy || deleting || applyingTools}
+					disabled={cloning || busy || restarting || deleting || applyingTools}
 					aria-busy={cloning}
 					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3.5 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
 				>
@@ -1268,10 +1284,10 @@
 				{:else}
 					<p class="text-xs text-[var(--color-ink-dim)]">
 						Toggle tools off to hide them from clients (MCP, REST, and groups); hidden tools
-						are also refused if called. <strong>Rename</strong> a tool or rewrite its
-						description when the upstream's wording trips up models — clients see only your
-						version. Changes are staged — click <strong>Apply</strong> to save them in one
-						restart.
+						are also refused if called. Use <strong>edit</strong> to <strong>rename</strong>
+						a tool or rewrite its description when the upstream's wording trips up models —
+						clients see only your version. Changes are staged — <strong>Apply</strong>
+						saves them all in one restart, from the bar that follows the page.
 					</p>
 					<ul class="flex flex-col divide-y divide-[var(--color-line)]">
 						{#each toolRows as { key, tool, enabled, discovered } (key)}
@@ -1281,9 +1297,9 @@
 							     what the bridge currently serves — i.e. the very override being cleared —
 							     so falling back to it would show text that Apply removes, and the upstream's
 							     own wording isn't available here to show instead (the bridge serves the
-							     overridden one). Say what will happen rather than display a stale value. -->
-							{@const restoringDescription =
-								!override.description?.trim() && !!baseOverrides[key]?.description}
+							     overridden one). Say what will happen rather than display a stale value.
+							     Same predicate the editor dialog reads. -->
+							{@const restoringDescription = isRestoringDescription(key)}
 							{@const changed =
 								baseDisabled.has(key) === enabled ||
 								!sameLabel(override.name, baseOverrides[key]?.name) ||
@@ -1341,52 +1357,16 @@
 										<span class="text-xs leading-relaxed text-[var(--color-ink-dim)] italic">
 											The upstream's description is restored on Apply.
 										</span>
-									{:else if override.description || tool.description}
-										<span class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+					{:else if override.description || tool.description}
+										<!-- Clamped: some upstream descriptions run to paragraphs, and the list
+										     is for scanning. The full text is in the editor dialog (and in the
+										     title tooltip), so nothing is lost by not printing it here. -->
+										<span
+											class="line-clamp-2 text-xs leading-relaxed text-[var(--color-ink-muted)]"
+											title={override.description || tool.description}
+										>
 											{override.description || tool.description}
 										</span>
-									{/if}
-
-									{#if editingTool === key}
-										<!-- Label editor. Both fields are optional and independent: clearing one
-										     restores what the upstream declares for it. -->
-										<div class="mt-1.5 flex flex-col gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] p-3">
-											<label class="flex flex-col gap-1">
-												<span class="text-[11px] font-medium text-[var(--color-ink-muted)]">
-													Name
-												</span>
-												<input
-													type="text"
-													value={override.name ?? ''}
-													placeholder={key}
-													spellcheck="false"
-													disabled={toolEditsBlocked}
-													oninput={(e) =>
-														setOverridePending(key, 'name', e.currentTarget.value)}
-													class="rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] px-2 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
-												/>
-											</label>
-											<label class="flex flex-col gap-1">
-												<span class="text-[11px] font-medium text-[var(--color-ink-muted)]">
-													Description
-												</span>
-												<textarea
-													rows="3"
-													value={override.description ?? ''}
-													placeholder={restoringDescription
-														? "The upstream's description"
-														: tool.description || "The upstream's description"}
-													disabled={toolEditsBlocked}
-													oninput={(e) =>
-														setOverridePending(key, 'description', e.currentTarget.value)}
-													class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] px-2 py-1.5 text-xs leading-relaxed text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
-												></textarea>
-											</label>
-											<p class="text-[11px] text-[var(--color-ink-dim)]">
-												Leave a field empty to keep the upstream's. A renamed tool answers to
-												its new name only — clients using the old one must be updated.
-											</p>
-										</div>
 									{/if}
 
 									<!-- Playground only for a tool that's actually there: a row synthesized
@@ -1406,11 +1386,12 @@
 								<div class="flex shrink-0 items-center gap-1.5">
 									<button
 										type="button"
+										aria-haspopup="dialog"
 										aria-expanded={editingTool === key}
 										aria-label={`Edit labels for ${key}`}
 										title="Rename this tool or rewrite its description"
 										disabled={toolEditsBlocked}
-										onclick={() => (editingTool = editingTool === key ? null : key)}
+										onclick={() => (editing = { key, tool })}
 										class="rounded-md border border-[var(--color-line)] p-1.5 text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50 {editingTool ===
 										key
 											? 'border-[var(--color-accent)] text-[var(--color-accent)]'
@@ -1452,40 +1433,6 @@
 							</li>
 						{/each}
 					</ul>
-					{#if toolChangesDirty}
-						<div
-							class="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[var(--color-accent)] bg-[var(--color-surface-2)] px-4 py-3"
-						>
-							<p class="text-xs text-[var(--color-ink-dim)]">
-								{#if collidingNames.size > 0}
-									<span style="color: var(--color-state-failed);">
-										Two exposed tools would share the same name — the second rename won't be
-										applied until you change it.
-									</span>
-								{:else}
-									Unsaved tool changes. Applying restarts the server once.
-								{/if}
-							</p>
-							<div class="flex items-center gap-2">
-								<button
-									type="button"
-									onclick={revertToolChanges}
-									disabled={applyingTools}
-									class="rounded-md border border-[var(--color-line)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink)] transition hover:bg-[var(--color-surface)] disabled:cursor-not-allowed disabled:opacity-50"
-								>
-									Revert
-								</button>
-								<button
-									type="button"
-									onclick={applyToolChanges}
-									disabled={toolEditsBlocked}
-									class="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-								>
-									{applyingTools ? 'Applying…' : 'Apply changes'}
-								</button>
-							</div>
-						</div>
-					{/if}
 				{/if}
 			</div>
 		{/if}
@@ -1623,7 +1570,7 @@
 					<button
 						type="button"
 						onclick={() => (confirmDelete = true)}
-						disabled={applyingTools}
+						disabled={deleteBlocked}
 						class="shrink-0 rounded-lg border px-3.5 py-2 text-sm font-medium transition active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50"
 						style="border-color: color-mix(in oklab, var(--color-state-failed) 40%, transparent); color: var(--color-state-failed);"
 					>
@@ -1640,7 +1587,7 @@
 						<button
 							type="button"
 							onclick={doDelete}
-							disabled={deleting || applyingTools}
+							disabled={deleting || deleteBlocked}
 							aria-busy={deleting}
 							class="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
 							style="background-color: var(--color-state-failed);"
@@ -1667,5 +1614,64 @@
 				</div>
 			{/if}
 		</div>
+
+		<!-- Staged tool changes. The bar floats above the page rather than sitting under the
+		     tool list: the list runs long, and toggling a tool at the top must not mean
+		     scrolling back down to save. One bar for the whole staged batch — hides, renames,
+		     and rewritten descriptions all apply in the same PATCH. -->
+		{#if toolChangesDirty}
+			<div class="pointer-events-none fixed inset-x-0 bottom-0 z-40 px-4 pb-4">
+				<div
+					class="pointer-events-auto mx-auto flex w-full max-w-3xl flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[var(--color-accent)] bg-[var(--color-elevated)] px-4 py-3 shadow-2xl"
+				>
+					<p class="text-xs text-[var(--color-ink-dim)]">
+						{#if collidingNames.size > 0}
+							<span style="color: var(--color-state-failed);">
+								Two exposed tools would share the same name — the second rename won't be
+								applied until you change it.
+							</span>
+						{:else}
+							Unsaved tool changes. Applying restarts the server once.
+						{/if}
+					</p>
+					<div class="flex items-center gap-2">
+						<button
+							type="button"
+							onclick={revertToolChanges}
+							disabled={applyingTools}
+							class="rounded-md border border-[var(--color-line)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink)] transition hover:bg-[var(--color-surface)] disabled:cursor-not-allowed disabled:opacity-50"
+						>
+							Revert
+						</button>
+						<button
+							type="button"
+							onclick={applyToolChanges}
+							disabled={toolEditsBlocked}
+							class="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+						>
+							{applyingTools ? 'Applying…' : 'Apply changes'}
+						</button>
+					</div>
+				</div>
+			</div>
+		{/if}
+
+		<!-- The one editor for a tool's exposed name and description. Keyed on the row so
+		     opening a different tool remounts it with that tool's draft. -->
+		{#if editing}
+			{@const open = editing}
+			{#key open.key}
+				<ToolLabelModal
+					upstreamName={open.key}
+					override={effectiveOverrides[open.key] ?? {}}
+					servedDescription={open.tool.description}
+					restoringDescription={isRestoringDescription(open.key)}
+					takenNames={namesTakenExcluding(open.key)}
+					disabled={toolEditsBlocked}
+					onsave={(next) => saveOverride(open.key, next)}
+					onclose={() => (editing = null)}
+				/>
+			{/key}
+		{/if}
 	{/if}
 </section>

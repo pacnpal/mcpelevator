@@ -24,7 +24,11 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
 
 - **Desired-state reconciliation.** SQLite is the source of truth. A background supervisor task
   (`supervisor/`) converges running processes to the desired state (Kubernetes-style), so the
-  system is idempotent and survives restarts.
+  system is idempotent and survives restarts. Operator lifecycle actions write desired
+  state or queue an activation — they never spawn or kill directly. `Supervisor.restart`
+  is the ONE restart primitive (stop the unit, queue a fresh activation, no config write);
+  `POST /api/servers/{id}/restart` and `POST /api/groups/{name}/restart` (per enabled
+  member) both go through it, and the UI's single `RestartButton` calls those.
 - **One bridge process per enabled server** (`bridge/`, `runners/`): each runs its own uvicorn on
   a loopback port hosting a FastMCP proxy of the stdio command (or an upstream HTTP/SSE URL),
   fault-isolated with a real PID and logs.

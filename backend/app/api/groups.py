@@ -11,17 +11,19 @@ mounted set is never serveable before the reconciler fires.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from sqlmodel import Session
 from starlette.requests import Request
 from starlette.responses import Response
 
-from app.api.schemas import GroupInfo, GroupUpsert
+from app.api.schemas import GroupInfo, GroupRestart, GroupUpsert
 from app.api.util import base_url, resync_groups
 from app.auth import principal as principal_mod
 from app.auth.principal import Principal, require_admin
-from app.db import get_session, repo
+from app.db import get_engine, get_session, repo
 from app.groups import registry
 from app.registry import service
 
@@ -34,7 +36,15 @@ def _url(request: Request, name: str) -> str:
     return f"{base_url(request)}/g/{name}/mcp"
 
 
+logger = logging.getLogger(__name__)
+
 _FORBIDDEN = HTTPException(status_code=403, detail="admin role required")
+
+
+class _MemberDisabled(Exception):
+    """A member was disabled after the restart loop read it. Raised by the per-member
+    authorization hook so the loop records it as ``skipped`` — which is exactly what it
+    now is — instead of restarting a server whose desired state says stopped."""
 
 
 def _delete_group_and_tokens(session: Session, name: str, principal: Principal) -> bool:
@@ -94,6 +104,82 @@ async def upsert_group(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await resync_groups(request)
     return GroupInfo(name=name, members=stored[name], url=_url(request, name))
+
+
+@router.post("/groups/{name}/restart", response_model=GroupRestart)
+async def restart_group(
+    name: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_admin),
+):
+    """Bounce every enabled member of a group so the bundle picks up their new tools.
+
+    A group owns no process of its own — it is a hub mounting a proxy per RUNNING
+    member — so restarting one is exactly "restart each member", through the same
+    ``Supervisor.restart`` primitive the per-server endpoint uses. Members are resolved
+    through the registry, so a wildcard group restarts every registered server.
+
+    Each member's restart carries an authorization hook, for the same reason the
+    per-server route does: stopping a unit awaits process teardown, and a group can hold
+    that await open for as long as it has members, so a demotion (or a revoked control
+    token) committing mid-loop must stop the rest — the entry-time ``require_admin`` is
+    an entry-time fact only.
+
+    Members are bounced one at a time — ``Supervisor.restart`` takes the unit lock, the
+    same lock the reconciler's own stops take — so a big group's restart takes as long as
+    the sum of its teardowns. A member whose teardown raises is reported in ``failed``
+    and the batch continues; only the caller losing admin stops it.
+
+    The hub is deliberately NOT resynced here: the members are down for the moment this
+    returns, and the supervisor's post-reconcile hook remounts each one as it comes back.
+    """
+    members = registry.resolve(session, name)
+    if members is None:
+        raise HTTPException(status_code=404, detail="group not found")
+
+    def _authorize(server_id: str):
+        """One member's hook, re-judged on committed truth in its own session — the
+        request session's identity map would otherwise answer from the entry-time row."""
+
+        def check_now() -> None:
+            with Session(get_engine()) as check:
+                if not principal_mod.admin_now(check, principal):
+                    raise _FORBIDDEN
+                row = repo.get_server(check, server_id)
+                if row is None or not row.enabled:
+                    raise _MemberDisabled(server_id)
+
+        return check_now
+
+    sup = request.app.state.supervisor
+    restarted: list[str] = []
+    skipped: list[str] = []
+    failed: list[str] = []
+    for server_id in members:
+        server = repo.get_server(session, server_id)
+        if server is None:
+            continue  # deleted between resolve and here; the registry prunes it
+        if not server.enabled:
+            skipped.append(server_id)  # nothing running to bounce
+            continue
+        try:
+            await sup.restart(server_id, authorized=_authorize(server_id))
+        except _MemberDisabled:
+            # Disabled (or deleted) while the loop was working. A denial after the stop
+            # leaves it stopped, which is the desired state that write just set.
+            skipped.append(server_id)
+        except HTTPException:
+            raise  # the caller lost admin: the rest of the group is not theirs to bounce
+        except Exception:
+            # One member's teardown must not abandon the others mid-batch, nor lose the
+            # report of what was already bounced — the members before this one are
+            # stopped and queued, and the caller needs to know which.
+            logger.exception("group %s: restarting member %s failed", name, server_id)
+            failed.append(server_id)
+        else:
+            restarted.append(server_id)
+    return GroupRestart(name=name, restarted=restarted, skipped=skipped, failed=failed)
 
 
 @router.delete("/groups/{name}", status_code=204)

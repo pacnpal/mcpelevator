@@ -53,7 +53,7 @@ from app.registry import settings as runtime_settings
 router = APIRouter()
 
 
-def _queued_status(server: Server, started_at=None) -> StartupStatus:
+def _queued_status(server: Server, started_at=None, message=None) -> StartupStatus:
     started_at = started_at or server.updated_at
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=timezone.utc)
@@ -62,6 +62,7 @@ def _queued_status(server: Server, started_at=None) -> StartupStatus:
         attempt=1,
         max_attempts=get_settings().restart_budget,
         activation_started_at=started_at,
+        message=message,
     )
 
 
@@ -70,12 +71,26 @@ def _live_state(server: Server, sup, session: Session):
     requested_at = sup.activation_requested_at(server.id)
     runtime = repo.get_runtime(session, server.id)
     if server.enabled:
+        # A unit whose teardown FAILED is still a restart in progress — the supervisor
+        # retries the stop on a backoff — but one with a reason. It reaches the same
+        # "starting" shape as any queued restart below, so carry the reason with it
+        # rather than leaving the operator on a spinner that never explains itself.
+        # It goes in the STATUS message, not just last_error: while a startup is active
+        # both the card and the detail page hide last_error and render the status
+        # message, so that is the only line an operator would actually see.
+        stop_error = sup.teardown_error(server.id)
         if requested_at is not None:
-            return "starting", None, None, None, [], _queued_status(server, requested_at)
+            return (
+                "starting", stop_error, None, None, [],
+                _queued_status(server, requested_at, stop_error),
+            )
         if unit is not None and (
             unit.config_hash != server.config_hash or unit.state in ("stopped", "stopping")
         ):
-            return "starting", None, None, None, [], _queued_status(server)
+            return (
+                "starting", stop_error, None, None, [],
+                _queued_status(server, message=stop_error),
+            )
         if unit is None:
             # "idle" is a deliberate quiescence, not a startup in progress: surface it
             # as-is (with the cached tool list) instead of the queued/starting shape.
@@ -154,15 +169,23 @@ def _fresh(session: Session, principal: Principal) -> Principal:
     return fresh
 
 
-def _visible_now(server_id: str, principal: Principal) -> bool:
-    """Is the server visible to the principal RIGHT NOW, judged on a fresh session
-    (committed truth, no request-session identity map)? For revalidating after an
-    await — a long playground call, a supervisor stop, a live log stream — where an
-    owner reassignment may have landed since the entry-time check."""
+def _visible_enabled_now(server_id: str, principal: Principal) -> tuple[bool, bool]:
+    """``(visible, enabled)`` judged on a fresh session (committed truth, no
+    request-session identity map). For revalidating after an await — a long playground
+    call, a supervisor stop, a live log stream — where an owner reassignment or a
+    desired-state toggle may have landed since the entry-time check. Both flags are read
+    inside the session, so no caller touches a detached row."""
     with Session(get_engine()) as check:
         row = repo.get_server(check, server_id)
         fresh = principal_mod.refresh(check, principal)
-        return row is not None and fresh is not None and policy.can_view_server(fresh, row)
+        if row is None or fresh is None or not policy.can_view_server(fresh, row):
+            return (False, False)
+        return (True, bool(row.enabled))
+
+
+def _visible_now(server_id: str, principal: Principal) -> bool:
+    """Is the server visible to the principal RIGHT NOW? (See ``_visible_enabled_now``.)"""
+    return _visible_enabled_now(server_id, principal)[0]
 
 
 def _set_enabled_visible(
@@ -607,14 +630,28 @@ async def delete_server(
     # write lock, so the wait must not sit on the event loop.
     if not await run_in_threadpool(_prune_then_delete, session, server_id, principal):
         raise HTTPException(status_code=404, detail="server not found")
-    # Cancel any in-flight authorization and drop stored upstream OAuth credentials for this
-    # (now-deleted) server — otherwise a late callback could re-promote tokens and leave an
-    # orphan credential file on disk for a server that no longer exists. ``deleted=True``
-    # so the waiting callback reports "server deleted" rather than sending the operator to
-    # inspect a configuration that is gone.
-    oauth_flow.cancel_pending(server_id, deleted=True)
-    ServerTokenStorage(server_id).clear()
-    await resync_groups(request)
+    # The stop above ran while the row still existed, so a reconcile pass could have
+    # consumed a queued activation (an operator restart) in the gap and relaunched the
+    # server before this delete committed. Cancel and stop again now that the row is
+    # gone: both are no-ops in the common case, and they close that window here rather
+    # than leaving a process for a deleted server running until the next sweep.
+    sup.cancel_activation_request(server_id)
+    # In a ``finally``: the row is already gone, so a teardown that raises here can't be
+    # retried through this endpoint (a second DELETE 404s at its lookup) and would strand
+    # the credential file and leave the deleted server mounted in its groups. The
+    # supervisor keeps a unit whose stop failed and retries it each sweep, so the process
+    # is still converged — but this cleanup only ever runs here, so it runs either way.
+    try:
+        await sup.stop(server_id)
+    finally:
+        # Cancel any in-flight authorization and drop stored upstream OAuth credentials for
+        # this (now-deleted) server — otherwise a late callback could re-promote tokens and
+        # leave an orphan credential file on disk for a server that no longer exists.
+        # ``deleted=True`` so the waiting callback reports "server deleted" rather than
+        # sending the operator to inspect a configuration that is gone.
+        oauth_flow.cancel_pending(server_id, deleted=True)
+        ServerTokenStorage(server_id).clear()
+        await resync_groups(request)
     return Response(status_code=204)
 
 
@@ -844,6 +881,44 @@ async def retry_server(
 
     if not await sup.retry(server_id, authorized=_authorize):
         raise HTTPException(status_code=409, detail="server is no longer retryable")
+    return _summary(server, sup, session, base_url(request))
+
+
+@router.post("/servers/{server_id}/restart", response_model=ServerSummary)
+async def restart_server(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    """Bounce a running (or idle, or failed) server without changing its config.
+
+    The operator's "pick up the upstream's new tools" button: the bridge is stopped and
+    re-activated, so discovery re-runs and every surface (MCP, REST, the group hub)
+    re-reads the tool list. Unlike ``retry`` it has no state precondition — only a
+    DESIRED (enabled) server can be restarted, since a disabled one has nothing to bounce
+    and Start is the action for it.
+    """
+    server = _visible(principal, session, server_id)
+    if not server.enabled:
+        raise HTTPException(status_code=409, detail="disabled servers cannot be restarted")
+    sup = request.app.state.supervisor
+
+    # Re-validate against the COMMITTED row at the supervisor's decision points — a
+    # restart isn't a DB write (the config lock doesn't govern it), so this is what keeps
+    # a former owner's queued restart from bouncing a just-reassigned server, and what
+    # keeps a disable that commits while the stop awaits teardown from being followed by
+    # a fresh activation this endpoint promised not to queue.
+    def _authorize() -> None:
+        visible, enabled = _visible_enabled_now(server_id, principal)
+        if not visible:
+            raise HTTPException(status_code=404, detail="server not found")
+        if not enabled:
+            # A post-stop denial leaves the server stopped, which is exactly the desired
+            # state the concurrent disable just wrote — no fresh activation is queued.
+            raise HTTPException(status_code=409, detail="disabled servers cannot be restarted")
+
+    await sup.restart(server_id, authorized=_authorize)
     return _summary(server, sup, session, base_url(request))
 
 
