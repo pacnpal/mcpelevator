@@ -187,7 +187,7 @@
 		<div class="flex items-center justify-end gap-2">
 			<button
 				type="button"
-				onclick={() => onclose?.()}
+				onclick={dismiss}
 				class="rounded-md border border-[var(--color-line)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
 			>
 				Cancel

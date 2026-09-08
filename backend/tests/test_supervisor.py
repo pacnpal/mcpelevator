@@ -313,3 +313,26 @@ async def test_reconcile_replaces_unhealthy_but_keeps_failed_terminal(monkeypatc
         with Session(get_engine()) as session:
             repo.delete_server(session, unhealthy_id)
             repo.delete_server(session, failed_id)
+
+
+async def test_reconcile_forgets_activation_requests_for_deleted_servers():
+    """Reconcile only consumes an activation request while iterating servers that EXIST,
+    so one queued against a server being deleted — an operator restart racing the
+    delete's own teardown — would sit in the map forever. The sweep drops any id the
+    server table no longer knows, so the cleanup can't depend on every caller's cancel
+    ordering."""
+    with Session(get_engine()) as session:
+        live = service.create_server(
+            session, name="Still here", runner="command", command="/bin/true"
+        )
+        live_id = live.id
+    sup = Supervisor()
+    try:
+        sup.request_activation("deleted-id-that-has-no-row")
+        sup.request_activation(live_id)  # a real, disabled server keeps its request path
+        await sup.reconcile_once()
+
+        assert sup.activation_requested_at("deleted-id-that-has-no-row") is None
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, live_id)

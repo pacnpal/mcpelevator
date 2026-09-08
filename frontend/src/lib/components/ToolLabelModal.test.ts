@@ -65,6 +65,7 @@ describe('ToolLabelModal', () => {
 
 		expect(onsave).toHaveBeenCalledWith({ name: 'search', description: 'Find repos.' });
 		expect(onclose).toHaveBeenCalled();
+		expect((target.querySelector('dialog') as HTMLDialogElement).open).toBe(false);
 	});
 
 	it('drops a cleared field so the upstream label is restored', () => {
@@ -83,16 +84,20 @@ describe('ToolLabelModal', () => {
 		expect(onsave).toHaveBeenCalledWith({});
 	});
 
-	it('discards the draft on cancel', () => {
+	it('discards the draft on cancel, through the dialog so focus returns', () => {
 		const onsave = vi.fn();
 		const onclose = vi.fn();
 		const target = render({ upstreamName: 'tool', override: {}, onsave, onclose });
+		const dialog = target.querySelector('dialog') as HTMLDialogElement;
 
 		type(field(target, 'Name'), 'renamed');
 		button(target, 'Cancel').click();
 
 		expect(onsave).not.toHaveBeenCalled();
 		expect(onclose).toHaveBeenCalled();
+		// Cancel must close the DIALOG, not just tell the caller: unmounting an open
+		// dialog skips the browser's focus restoration to the edit button that opened it.
+		expect(dialog.open).toBe(false);
 	});
 
 	it('warns when the rename lands on a name another exposed tool holds', () => {

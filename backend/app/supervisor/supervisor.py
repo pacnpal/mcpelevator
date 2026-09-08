@@ -223,11 +223,14 @@ class Supervisor:
             await self._stop(server_id)
             if authorized is not None:
                 authorized()
-        # A quiesced server is desired-but-stopped; the activation request below clears
-        # the marker in reconcile, but discard it here too so nothing observes the id as
-        # idle (i.e. wakeable but not starting) in the gap before the sweep runs.
-        self._idle.discard(server_id)
-        self.request_activation(server_id)
+            # A quiesced server is desired-but-stopped; the activation request clears the
+            # marker in reconcile, but discard it here too so nothing observes the id as
+            # idle (i.e. wakeable but not starting) in the gap before the sweep runs.
+            self._idle.discard(server_id)
+            # Queue INSIDE the lock. A delete cancels the activation request and then
+            # waits for this lock to stop the unit; queueing after releasing it would
+            # land the request in that wait — after the cancel, before the row is gone.
+            self.request_activation(server_id)
 
     async def retry(self, server_id: str, authorized=None) -> bool:
         async with self._unit_lock:
@@ -360,6 +363,16 @@ class Supervisor:
                     last_health=None,
                     tools=[],
                 )
+
+        # Forget queued activations for ids that have no row at all. Reconcile only
+        # consumes a request while iterating servers that EXIST, so one queued against a
+        # server being deleted (an operator restart racing the delete's own teardown)
+        # would otherwise sit in the map forever. Deriving this from the row set makes it
+        # self-healing rather than dependent on every caller's cancel ordering.
+        registered = {sv.id for sv in servers}
+        for server_id in list(self._activation_requests):
+            if server_id not in registered:
+                self._activation_requests.pop(server_id, None)
 
         # Quiescence bookkeeping only tracks desired servers: an id that left the
         # desired set (disabled, deleted, forbidden) must not resume a stale idle
