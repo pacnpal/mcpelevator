@@ -154,15 +154,23 @@ def _fresh(session: Session, principal: Principal) -> Principal:
     return fresh
 
 
-def _visible_now(server_id: str, principal: Principal) -> bool:
-    """Is the server visible to the principal RIGHT NOW, judged on a fresh session
-    (committed truth, no request-session identity map)? For revalidating after an
-    await — a long playground call, a supervisor stop, a live log stream — where an
-    owner reassignment may have landed since the entry-time check."""
+def _visible_enabled_now(server_id: str, principal: Principal) -> tuple[bool, bool]:
+    """``(visible, enabled)`` judged on a fresh session (committed truth, no
+    request-session identity map). For revalidating after an await — a long playground
+    call, a supervisor stop, a live log stream — where an owner reassignment or a
+    desired-state toggle may have landed since the entry-time check. Both flags are read
+    inside the session, so no caller touches a detached row."""
     with Session(get_engine()) as check:
         row = repo.get_server(check, server_id)
         fresh = principal_mod.refresh(check, principal)
-        return row is not None and fresh is not None and policy.can_view_server(fresh, row)
+        if row is None or fresh is None or not policy.can_view_server(fresh, row):
+            return (False, False)
+        return (True, bool(row.enabled))
+
+
+def _visible_now(server_id: str, principal: Principal) -> bool:
+    """Is the server visible to the principal RIGHT NOW? (See ``_visible_enabled_now``.)"""
+    return _visible_enabled_now(server_id, principal)[0]
 
 
 def _set_enabled_visible(
@@ -867,12 +875,19 @@ async def restart_server(
         raise HTTPException(status_code=409, detail="disabled servers cannot be restarted")
     sup = request.app.state.supervisor
 
-    # Re-validate against the committed row at the supervisor's decision points — a
-    # restart isn't a DB write (the config lock doesn't govern it), so this is what
-    # keeps a former owner's queued restart from bouncing a just-reassigned server.
+    # Re-validate against the COMMITTED row at the supervisor's decision points — a
+    # restart isn't a DB write (the config lock doesn't govern it), so this is what keeps
+    # a former owner's queued restart from bouncing a just-reassigned server, and what
+    # keeps a disable that commits while the stop awaits teardown from being followed by
+    # a fresh activation this endpoint promised not to queue.
     def _authorize() -> None:
-        if not _visible_now(server_id, principal):
+        visible, enabled = _visible_enabled_now(server_id, principal)
+        if not visible:
             raise HTTPException(status_code=404, detail="server not found")
+        if not enabled:
+            # A post-stop denial leaves the server stopped, which is exactly the desired
+            # state the concurrent disable just wrote — no fresh activation is queued.
+            raise HTTPException(status_code=409, detail="disabled servers cannot be restarted")
 
     await sup.restart(server_id, authorized=_authorize)
     return _summary(server, sup, session, base_url(request))

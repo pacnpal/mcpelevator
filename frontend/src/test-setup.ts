@@ -45,6 +45,26 @@ if (typeof window !== 'undefined') {
 			dispatchEvent: () => false
 		})) as typeof window.matchMedia;
 	}
+	// jsdom renders <dialog> as an element but implements none of its modal behavior —
+	// no showModal/show/close, and no close event — so a component that opens a real
+	// modal dialog can't even mount under it. Minimal stand-in: track `open` and let
+	// close() fire the event components listen for. The focus trap and inert background
+	// are the browser's to provide; nothing here pretends to test those.
+	const dialogProto = window.HTMLDialogElement?.prototype;
+	if (dialogProto && !dialogProto.showModal) {
+		const open = function (this: HTMLDialogElement) {
+			this.open = true;
+		};
+		dialogProto.showModal = open;
+		dialogProto.show = open;
+		dialogProto.close = function (this: HTMLDialogElement, returnValue?: string) {
+			if (!this.open) return;
+			this.open = false;
+			if (returnValue !== undefined) this.returnValue = returnValue;
+			this.dispatchEvent(new Event('close'));
+		};
+	}
+
 	if (!window.ResizeObserver) {
 		window.ResizeObserver = class {
 			observe(): void {}

@@ -971,3 +971,35 @@ def test_group_restart_resolves_the_wildcard(clean_settings, monkeypatch):
         with Session(get_engine()) as session:
             repo.delete_server(session, a.id)
             repo.delete_server(session, b.id)
+
+
+def test_group_restart_stops_when_the_caller_stops_being_an_admin(clean_settings, monkeypatch):
+    """`require_admin` is an ENTRY-time fact, and a group restart holds the request open
+    across one process teardown per member. A demotion (or a revoked control token)
+    committing mid-loop must stop the remaining members, not ride the entry check."""
+    monkeypatch.setattr(Supervisor, "run_forever", _parked_reconciler)
+    with Session(get_engine()) as session:
+        a = _mk_server(session, "Demote A")
+        b = _mk_server(session, "Demote B")
+        service.set_enabled(session, a.id, True)
+        service.set_enabled(session, b.id, True)
+    try:
+        _write_groups({"team": [a.id, b.id]})
+        with TestClient(app) as client:
+            client.app.state.supervisor.on_converged = None
+            sup = client.app.state.supervisor
+            sup.cancel_activation_request(a.id)
+            sup.cancel_activation_request(b.id)
+
+            import app.api.groups as groups_api
+
+            monkeypatch.setattr(groups_api.principal_mod, "admin_now", lambda *_: False)
+            r = client.post("/api/groups/team/restart", headers=LOOPBACK)
+            assert r.status_code == 403, r.text
+            # Denied at the FIRST member's first decision point: nothing was queued.
+            assert sup.activation_requested_at(a.id) is None
+            assert sup.activation_requested_at(b.id) is None
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, a.id)
+            repo.delete_server(session, b.id)

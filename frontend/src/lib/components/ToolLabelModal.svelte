@@ -46,6 +46,7 @@
 	// svelte-ignore state_referenced_locally
 	let description = $state(override.description ?? '');
 
+	let dialogEl = $state<HTMLDialogElement>();
 	let nameEl = $state<HTMLInputElement>();
 
 	const trimmedName = $derived(name.trim());
@@ -61,42 +62,45 @@
 		return next;
 	}
 
+	/** The single exit path: close the native dialog, whose `close` event tells the
+	 *  caller. Falls back to notifying directly if the element isn't there to close. */
+	function dismiss() {
+		if (dialogEl?.open) dialogEl.close();
+		else onclose?.();
+	}
+
 	function save() {
 		if (disabled) return;
 		onsave?.(draft());
-		onclose?.();
+		dismiss();
 	}
 
-	// Open focused on the first field, so the dialog is usable from the keyboard alone.
+	// `showModal` is what makes this a real modal: the browser traps Tab inside the
+	// dialog, makes the rest of the page inert (so the lifecycle and tool controls
+	// underneath can't be focused or activated through it), handles Escape, and returns
+	// focus to the button that opened it on close. Then focus the first field, so the
+	// editor is usable from the keyboard alone.
 	$effect(() => {
+		if (dialogEl && !dialogEl.open) dialogEl.showModal();
 		nameEl?.focus();
 		nameEl?.select();
 	});
 </script>
 
-<svelte:window
-	onkeydown={(e) => {
-		if (e.key === 'Escape') onclose?.();
+<!-- A native modal dialog: the browser owns the focus trap, the inert background,
+     Escape, and returning focus to the opener — a hand-rolled overlay owns none of that.
+     A click that lands on the dialog element itself is a backdrop click (the panel below
+     covers the rest), so it dismisses. -->
+<dialog
+	bind:this={dialogEl}
+	onclose={() => onclose?.()}
+	onclick={(e) => {
+		if (e.target === dialogEl) dismiss();
 	}}
-/>
-
-<div
-	class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:items-center"
+	class="m-auto w-full max-w-lg bg-transparent p-0 text-[var(--color-ink)] backdrop:bg-black/50"
 >
-	<!-- The backdrop is a real button so dismissing by clicking outside is keyboard- and
-	     screen-reader-reachable rather than a click handler on a bare div. -->
-	<button
-		type="button"
-		aria-label="Close tool label editor"
-		onclick={() => onclose?.()}
-		class="fixed inset-0 cursor-default bg-black/50 backdrop-blur-[2px]"
-	></button>
-
 	<div
-		role="dialog"
-		aria-modal="true"
-		aria-labelledby="tool-label-modal-title"
-		class="relative my-auto flex w-full max-w-lg flex-col gap-4 rounded-[var(--radius-card)] border border-[var(--color-line-strong)] bg-[var(--color-elevated)] p-5 shadow-2xl"
+		class="flex w-full flex-col gap-4 rounded-[var(--radius-card)] border border-[var(--color-line-strong)] bg-[var(--color-elevated)] p-5 shadow-2xl"
 	>
 		<div class="flex items-start justify-between gap-3">
 			<div class="min-w-0">
@@ -109,7 +113,7 @@
 			</div>
 			<button
 				type="button"
-				onclick={() => onclose?.()}
+				onclick={dismiss}
 				aria-label="Close"
 				class="rounded-md p-1 text-[var(--color-ink-dim)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
 			>
@@ -198,4 +202,4 @@
 			</button>
 		</div>
 	</div>
-</div>
+</dialog>

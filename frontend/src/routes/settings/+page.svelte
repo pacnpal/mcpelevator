@@ -616,6 +616,18 @@
 		servers = servers.map((s) => (s.id === next.id ? { ...s, ...next } : s));
 	}
 
+	/** Re-read every server summary. A GROUP restart bounces many members at once and
+	 *  answers with ids, not summaries — and this page has no status polling of its own,
+	 *  so without this each member row would keep showing its pre-restart state (often
+	 *  `running` + Stop) until a reload. */
+	async function refreshServers() {
+		try {
+			servers = await listServers();
+		} catch (err) {
+			flashToast(errorMessage(err));
+		}
+	}
+
 	function toggleNewGroupServer(id: string, included: boolean) {
 		newGroupSelection = included
 			? [...newGroupSelection, id]
@@ -1731,6 +1743,7 @@
 											<RestartButton
 												target={{ kind: 'group', name: group.name }}
 												size="sm"
+												onrestarted={() => void refreshServers()}
 											/>
 											<button
 												type="button"

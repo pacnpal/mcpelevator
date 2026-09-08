@@ -21,7 +21,7 @@ from app.api.schemas import GroupInfo, GroupRestart, GroupUpsert
 from app.api.util import base_url, resync_groups
 from app.auth import principal as principal_mod
 from app.auth.principal import Principal, require_admin
-from app.db import get_session, repo
+from app.db import get_engine, get_session, repo
 from app.groups import registry
 from app.registry import service
 
@@ -101,6 +101,7 @@ async def restart_group(
     name: str,
     request: Request,
     session: Session = Depends(get_session),
+    principal: Principal = Depends(require_admin),
 ):
     """Bounce every enabled member of a group so the bundle picks up their new tools.
 
@@ -109,12 +110,26 @@ async def restart_group(
     ``Supervisor.restart`` primitive the per-server endpoint uses. Members are resolved
     through the registry, so a wildcard group restarts every registered server.
 
+    Each member's restart carries an authorization hook, for the same reason the
+    per-server route does: stopping a unit awaits process teardown, and a group can hold
+    that await open for as long as it has members, so a demotion (or a revoked control
+    token) committing mid-loop must stop the rest — the entry-time ``require_admin`` is
+    an entry-time fact only.
+
     The hub is deliberately NOT resynced here: the members are down for the moment this
     returns, and the supervisor's post-reconcile hook remounts each one as it comes back.
     """
     members = registry.resolve(session, name)
     if members is None:
         raise HTTPException(status_code=404, detail="group not found")
+
+    def _still_admin() -> None:
+        # Committed truth in its own session — the request session's identity map would
+        # otherwise answer from the entry-time row.
+        with Session(get_engine()) as check:
+            if not principal_mod.admin_now(check, principal):
+                raise _FORBIDDEN
+
     sup = request.app.state.supervisor
     restarted: list[str] = []
     skipped: list[str] = []
@@ -125,7 +140,7 @@ async def restart_group(
         if not server.enabled:
             skipped.append(server_id)  # nothing running to bounce
             continue
-        await sup.restart(server_id)
+        await sup.restart(server_id, authorized=_still_admin)
         restarted.append(server_id)
     return GroupRestart(name=name, restarted=restarted, skipped=skipped)
 

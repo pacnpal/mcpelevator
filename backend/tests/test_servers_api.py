@@ -513,3 +513,44 @@ def test_restart_rejects_a_disabled_server(monkeypatch):
 def test_restart_404s_for_an_unknown_server():
     with TestClient(app) as c:
         assert c.post("/api/servers/ghost/restart", headers=LOOPBACK).status_code == 404
+
+
+def test_restart_refuses_when_a_disable_lands_during_teardown(monkeypatch):
+    """The endpoint promises to bounce only a DESIRED server, but stopping the unit
+    awaits process teardown — long enough for a disable to commit. The authorization
+    hook re-reads the committed row at the supervisor's decision points, so the stop
+    stands (that IS the new desired state) and no fresh activation is queued."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Raced", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            sup = c.app.state.supervisor
+            with Session(get_engine()) as session:
+                server = service.set_enabled(session, server_id, True)
+                unit = ServerUnit(server)
+                unit.state = "running"
+                unit.port = 49997
+                sup.units[server_id] = unit
+
+            async def disabling_stop():
+                # Stands in for a slow teardown that a concurrent disable commits during.
+                with Session(get_engine()) as session:
+                    service.set_enabled(session, server_id, False)
+
+            monkeypatch.setattr(unit, "stop", disabling_stop)
+
+            r = c.post(f"/api/servers/{server_id}/restart", headers=LOOPBACK)
+            assert r.status_code == 409, r.text
+            assert "restarted" in r.json()["detail"]
+            assert server_id not in sup.units  # the stop stands: it's the desired state
+            assert sup.activation_requested_at(server_id) is None
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)

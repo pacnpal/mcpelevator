@@ -130,11 +130,19 @@ describe('ToolLabelModal', () => {
 		expect(field(restoring, 'Description').placeholder).toBe("The upstream's description");
 	});
 
-	it('closes on Escape', () => {
+	it('opens as a real modal and reports every close through one path', () => {
 		const onclose = vi.fn();
-		render({ upstreamName: 'tool', override: {}, onclose });
+		const target = render({ upstreamName: 'tool', override: {}, onclose });
+		const dialog = target.querySelector('dialog');
+		if (!(dialog instanceof HTMLDialogElement)) throw new Error('no dialog rendered');
 
-		window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-		expect(onclose).toHaveBeenCalled();
+		// showModal (not show) is what gives the focus trap, the inert background, and
+		// Escape — the reason this is a native dialog rather than a positioned div.
+		expect(dialog.open).toBe(true);
+
+		// Escape, the close button, Cancel, and a backdrop click all end at the dialog's
+		// own close event, so the caller has exactly one signal to handle.
+		dialog.close();
+		expect(onclose).toHaveBeenCalledTimes(1);
 	});
 });
