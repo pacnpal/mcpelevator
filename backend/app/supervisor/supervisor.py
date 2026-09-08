@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import datetime
-from typing import Awaitable, Callable, Optional
+from datetime import datetime, timedelta
+from typing import Awaitable, Callable, NamedTuple, Optional
 
 from sqlmodel import Session
 
@@ -32,6 +32,21 @@ from app.supervisor.unit import ServerUnit
 # `docker ps` Go-template that prints "<container-id> <server-id-label>" per line, so the
 # boot sweep can keep only containers whose label value is a server in THIS instance's DB.
 _PS_FORMAT = '{{.ID}} {{.Label "' + LABEL_KEY + '"}}'
+
+# Backoff bounds for retrying a teardown that raised (see ``Supervisor._stop``). A
+# failing stop is often instant (a missing docker binary, a refused socket), and the
+# "stopping" state it sets on the way notifies the supervisor, which nudges the
+# reconcile loop past its interval wait — so an unthrottled retry would spin.
+_TEARDOWN_RETRY_MIN_S = 1.0
+_TEARDOWN_RETRY_MAX_S = 60.0
+
+
+class _Quarantine(NamedTuple):
+    """A unit whose teardown failed: when its stop may be retried, and the delay that
+    produced that time (doubled on each further failure, capped)."""
+
+    retry_at: datetime
+    delay: float
 
 
 async def _run_docker_capture(argv: list[str], *, timeout: float) -> Optional[str]:
@@ -79,8 +94,8 @@ class Supervisor:
         # Units whose ``stop()`` RAISED and were put back (see ``_stop``). The unit is
         # registered but its process may still be alive, and its state ("stopping")
         # matches none of the re-derive branches in the sweep — so the id is quarantined
-        # here and reconcile retries the teardown until it succeeds.
-        self._teardown_failed: set[str] = set()
+        # here and reconcile retries the teardown, on a backoff, until it succeeds.
+        self._teardown_failed: dict[str, _Quarantine] = {}
         self._unit_lock = asyncio.Lock()
         self._nudge = asyncio.Event()
         self._stopping = False
@@ -195,7 +210,7 @@ class Supervisor:
     async def _stop(self, server_id: str) -> None:
         unit = self.units.pop(server_id, None)
         if unit is None:
-            self._teardown_failed.discard(server_id)
+            self._teardown_failed.pop(server_id, None)
             return
         try:
             await unit.stop()
@@ -209,9 +224,17 @@ class Supervisor:
             # re-derive branch, so without the marker it would sit there unreachable
             # until an operator acted on it by hand.
             self.units[server_id] = unit
-            self._teardown_failed.add(server_id)
+            previous = self._teardown_failed.get(server_id)
+            delay = (
+                _TEARDOWN_RETRY_MIN_S
+                if previous is None
+                else min(previous.delay * 2, _TEARDOWN_RETRY_MAX_S)
+            )
+            self._teardown_failed[server_id] = _Quarantine(
+                retry_at=utcnow() + timedelta(seconds=delay), delay=delay
+            )
             raise
-        self._teardown_failed.discard(server_id)
+        self._teardown_failed.pop(server_id, None)
 
     async def _stop_quietly(self, server_id: str) -> bool:
         """:meth:`_stop` that reports a failed teardown instead of raising it.
@@ -220,8 +243,18 @@ class Supervisor:
         through here: a raise there would abandon the rest of the pass (no other server
         started, no runtime row written) for as long as the one unit stays wedged, which
         is exactly when the others most need converging. The unit stays quarantined by
-        :meth:`_stop`, so the next pass retries it.
+        :meth:`_stop`, so a later pass retries it.
+
+        A quarantined unit is retried on a backoff, and this is the one place that owns
+        it — an operator's own stop/restart goes through :meth:`_stop` and is never
+        throttled. Without it a fast-failing teardown spins: ``unit.stop()`` sets
+        "stopping" before it fails, and that state notification nudges the loop past its
+        interval wait, straight into the next identical attempt. Returns False without
+        attempting anything while the backoff is unspent.
         """
+        quarantined = self._teardown_failed.get(server_id)
+        if quarantined is not None and utcnow() < quarantined.retry_at:
+            return False
         try:
             await self._stop(server_id)
         except Exception as exc:

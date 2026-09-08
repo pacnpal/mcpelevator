@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from datetime import timedelta
 from types import SimpleNamespace
 
 from sqlmodel import Session
@@ -448,7 +449,12 @@ async def test_reconcile_retries_a_quarantined_teardown_and_starts_after_it(monk
         assert sup.units[server_id] is unit
         assert started == []
 
-        # The sweep retries the teardown it was left with, and only then starts.
+        # The sweep retries the teardown it was left with, and only then starts. (The
+        # retry carries a backoff — see the next test — so let this one's lapse.)
+        quarantined = sup._teardown_failed[server_id]
+        sup._teardown_failed[server_id] = quarantined._replace(
+            retry_at=quarantined.retry_at - timedelta(seconds=quarantined.delay + 1)
+        )
         await sup.reconcile_once()
 
         assert attempts == [server_id, server_id]
@@ -509,3 +515,57 @@ async def test_reconcile_keeps_sweeping_when_one_teardown_fails(monkeypatch):
         with Session(get_engine()) as session:
             repo.delete_server(session, wedged_id)
             repo.delete_server(session, other_id)
+
+
+async def test_reconcile_backs_off_repeated_teardown_attempts(monkeypatch):
+    """A stop that fails FAST would otherwise spin the loop: ``unit.stop()`` sets
+    "stopping" before it raises, that state notification nudges the supervisor, and
+    ``run_forever`` then skips its interval wait — straight into an identical attempt.
+    A quarantined unit is retried on a backoff instead (an operator's own stop still
+    isn't throttled: that path goes through ``_stop``)."""
+    with Session(get_engine()) as session:
+        server = service.create_server(
+            session, name="Always wedged", runner="command", command="/bin/true"
+        )
+        service.set_enabled(session, server.id, True)
+        session.refresh(server)
+        server_id = server.id
+        unit = SimpleNamespace(**vars(_fake_unit(server)))
+
+    sup = Supervisor()
+    attempts: list[str] = []
+
+    async def always_wedged():
+        attempts.append(server_id)
+        unit.state = "stopping"
+        raise RuntimeError("docker daemon is wedged")
+
+    unit.stop = always_wedged
+    sup.units[server_id] = unit
+    sup.request_activation(server_id)
+    try:
+        await sup.reconcile_once()
+        assert len(attempts) == 1
+
+        # The nudge the failed attempt raised brings the next sweep immediately; the
+        # backoff is what keeps it from repeating the teardown.
+        await sup.reconcile_once()
+        assert len(attempts) == 1
+
+        # Once it comes due, the retry happens — and the next delay is longer.
+        first = sup._teardown_failed[server_id]
+        sup._teardown_failed[server_id] = first._replace(
+            retry_at=first.retry_at - timedelta(seconds=first.delay + 1)
+        )
+        await sup.reconcile_once()
+        assert len(attempts) == 2
+        assert sup._teardown_failed[server_id].delay > first.delay
+
+        # An operator asking for it directly is never throttled.
+        with pytest.raises(RuntimeError):
+            await sup.restart(server_id)
+        assert len(attempts) == 3
+    finally:
+        sup.units.clear()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, server_id)
