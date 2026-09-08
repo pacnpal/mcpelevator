@@ -385,7 +385,17 @@ class Supervisor:
 
         # start / restart desired
         now = utcnow()
-        for server_id, server in desired.items():
+        # Requested activations go FIRST. A restart frees the slot it is about to reuse,
+        # and this loop starts every unitless enabled row in created_at order — so at
+        # max_running an older row that has been starved (it failed at the limit before)
+        # would claim that slot, leaving the server the operator just restarted down with
+        # "max_running reached" after an endpoint that reported it starting. A wake, a
+        # start, and a retry have the same claim: someone asked for THIS server now.
+        # Stable sort, so everything else keeps its created_at order.
+        ordered = sorted(
+            desired.items(), key=lambda item: item[0] not in self._activation_requests
+        )
+        for server_id, server in ordered:
             unit = self.units.get(server_id)
             requested_at = self._activation_requests.pop(server_id, None)
             if requested_at is not None:

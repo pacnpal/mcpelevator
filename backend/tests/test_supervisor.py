@@ -336,3 +336,40 @@ async def test_reconcile_forgets_activation_requests_for_deleted_servers():
     finally:
         with Session(get_engine()) as session:
             repo.delete_server(session, live_id)
+
+
+async def test_reconcile_starts_requested_activations_before_starved_rows(monkeypatch):
+    """A restart frees the very slot it means to reuse. The start loop otherwise walks
+    enabled rows in created_at order and starts every unitless one, so at ``max_running``
+    an older row that had been starved would take that slot — and the server the operator
+    just restarted would come back "max_running reached" after an endpoint that reported
+    it starting. Whoever was asked for goes first."""
+    with Session(get_engine()) as session:
+        older = service.create_server(
+            session, name="Older starved", runner="command", command="/bin/true"
+        )
+        newer = service.create_server(
+            session, name="Newer restarted", runner="command", command="/bin/true"
+        )
+        service.set_enabled(session, older.id, True)
+        service.set_enabled(session, newer.id, True)
+        older_id, newer_id = older.id, newer.id
+
+    sup = Supervisor()
+    started: list[str] = []
+
+    async def record_start(server, *, activation_started_at=None):
+        started.append(server.id)
+        return None
+
+    monkeypatch.setattr(sup, "_try_start", record_start)
+    try:
+        sup.request_activation(newer_id)  # what restart queues
+        await sup.reconcile_once()
+
+        assert started[0] == newer_id, started
+        assert older_id in started  # the starved row still gets its turn, just after
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, older_id)
+            repo.delete_server(session, newer_id)
