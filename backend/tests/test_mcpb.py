@@ -7,6 +7,7 @@ import json
 import zipfile
 from pathlib import Path
 
+import jsonschema
 import pytest
 from fastapi.testclient import TestClient
 
@@ -24,11 +25,13 @@ OFFICIAL_SCHEMA = Path(__file__).parent / "fixtures" / "mcpb-manifest-v0.2.schem
 
 
 def _manifest_from(body: bytes) -> dict:
+    """The parsed ``manifest.json`` inside a downloaded ``.mcpb`` zip."""
     with zipfile.ZipFile(io.BytesIO(body)) as zf:
         return json.loads(zf.read("manifest.json"))
 
 
 def test_mcpb_download_round_trip():
+    """The endpoint serves a zip whose manifest mirrors the row's launch spec."""
     with TestClient(app) as c:
         created = c.post(
             "/api/servers",
@@ -93,6 +96,7 @@ def test_mcpb_rejects_unexportable_launch_context():
 
 
 def test_mcpb_rejects_relative_command_paths():
+    """A ``./server``-style command resolves only inside the elevator's cwd — 400."""
     with TestClient(app) as c:
         created = c.post(
             "/api/servers",
@@ -110,6 +114,7 @@ def test_mcpb_rejects_relative_command_paths():
 
 
 def _row(runner: str, command: str, **kw) -> Server:
+    """An unsaved ``Server`` row for exercising ``mcpb.manifest`` without the API."""
     return Server(id="x", slug="s", name="S", runner=runner, command=command,
                   args=kw.pop("args", []), env=kw.pop("env", {}), **kw)
 
@@ -118,6 +123,7 @@ def test_mcpb_command_path_classification():
     """Both path flavors: relative rejects, PATH-names and absolute paths export."""
 
     def row(command: str) -> Server:
+        """A ``command``-runner row launching ``command``."""
         return _row("command", command)
 
     for cmd in (r".\server.exe", r"bin\server.exe", "./server", "bin/server"):
@@ -131,6 +137,7 @@ def test_mcpb_command_path_classification():
 
 
 def test_mcpb_rejects_remote_servers():
+    """A remote server has nothing to run locally — 400."""
     with TestClient(app) as c:
         created = c.post(
             "/api/servers",
@@ -187,7 +194,6 @@ def test_mcpb_docker_bundle_drops_reaping_label():
 def test_mcpb_manifest_matches_official_schema():
     """Every exportable runner shape validates against the official 0.2 schema —
     the same strict shape Claude Desktop checks at install."""
-    jsonschema = pytest.importorskip("jsonschema")  # transitive via the mcp SDK
     validator = jsonschema.Draft7Validator(json.loads(OFFICIAL_SCHEMA.read_text()))
     rows = [
         _row("npx", "npx", args=["-y", "@modelcontextprotocol/server-everything"], env={"FOO": "bar"}),
