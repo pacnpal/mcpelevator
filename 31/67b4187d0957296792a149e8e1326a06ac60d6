@@ -1,0 +1,23 @@
+backend/tests/test_mcpb.py
+  s_36668e4478df67::t_ff5c78f8e1f95c 8,10,15-16,18-23,57,112-116,121,148-200
+backend/app/mcpb.py
+  s_36668e4478df67::t_eb6221dc9d3552 22-36,75-80,82-94,113-118
+backend/tests/fixtures/mcpb-manifest-v0.2.schema.json
+  s_36668e4478df67::t_ff5c78f8e1f95c 1-327
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "3167b4187d0957296792a149e8e1326a06ac60d6",
+  "prompts": {},
+  "sessions": {
+    "s_36668e4478df67": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "356ff560-f25a-4309-ada1-7262ec26fc88",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "pacnpal <183241239+pacnpal@users.noreply.github.com>"
+    }
+  }
+}
