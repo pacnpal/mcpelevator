@@ -19,6 +19,21 @@ import zipfile
 from app import __version__
 from app.db.models import Server
 from app.runners import build_spec
+from app.runners.docker import server_label
+
+
+def _semver(raw: str) -> str:
+    """``raw`` (a release tag / pyproject version) as a strict ``MAJOR.MINOR.PATCH``.
+
+    Claude Desktop parses the manifest version with node ``semver`` and a string it
+    rejects is fatal: the extension installs, then the app crashes on every launch
+    until the bundle is deleted by hand (anthropics/mcpb#226). So this never emits
+    anything but three plain integers — a leading ``v``, a PEP 440 suffix
+    (``1.7.0rc1``, ``1.7.0.dev0``), ``0.0.0+unknown`` or a four-part date all fall
+    back to a valid core; ``int()`` also strips a leading zero, which semver forbids.
+    """
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", raw)
+    return ".".join(str(int(g)) for g in m.groups()) if m else "0.0.0"
 
 
 def manifest(server: Server) -> dict:
@@ -57,14 +72,26 @@ def manifest(server: Server) -> dict:
             "which won't resolve outside the elevator"
         )
     # Version = elevator release (release-tag-derived, never hardcoded — see
-    # app.__init__) + the row's config_hash as semver build metadata (hex + dots,
-    # which is valid there), so a same-release config edit still yields a
-    # distinguishable version string. Split off any existing build metadata
-    # (the "0.0.0+unknown" fallback) — semver allows only one "+".
-    version = __version__.lstrip("v").split("+", 1)[0]
-    if server.config_hash:
+    # app.__init__), coerced to strict semver, + the row's config_hash as build
+    # metadata (``hex.hex`` — valid there) so a same-release config edit still
+    # yields a distinguishable version string. The metadata is guarded by semver's
+    # own identifier grammar: an invalid tail would be as fatal as an invalid core.
+    version = _semver(__version__)
+    if server.config_hash and re.fullmatch(r"[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*", server.config_hash):
         version = f"{version}+{server.config_hash}"
-    mcp_config: dict = {"command": spec.command, "args": list(spec.args)}
+    args = list(spec.args)
+    if server.runner == "docker":
+        # The docker runner labels its containers so the elevator can ``docker rm -f``
+        # them (boot orphan sweep, unit stop). A bundle run against the SAME daemon —
+        # Claude Desktop beside a locally hosted elevator — must not carry that mark,
+        # or the elevator would reap the user's own container. The builder emits
+        # exactly one adjacent ``--label <selector>`` pair (before any run_args, and
+        # the service refuses operator-set reserved labels), so drop just that pair.
+        for i in range(len(args) - 1):
+            if args[i] == "--label" and args[i + 1] == server_label(server.id):
+                del args[i : i + 2]
+                break
+    mcp_config: dict = {"command": spec.command, "args": args}
     if spec.env:
         mcp_config["env"] = dict(spec.env)
     return {
@@ -83,6 +110,12 @@ def manifest(server: Server) -> dict:
         "server": {
             # "binary": the bundle ships no code — mcp_config invokes the
             # host's own npx/uvx/docker/executable, same argv as the bridge.
+            # Claude Desktop routes a binary bundle to plain exec: it resolves a
+            # bare command against the user's login-shell PATH (probing
+            # .exe/.bat/.cmd/.ps1 on Windows and wrapping a .cmd shim in
+            # ``cmd.exe /C`` itself) and merges ``env`` into the child's
+            # environment — so no ``platform_overrides``/``npx.cmd`` shims,
+            # ``user_config`` indirection, or newer manifest_version is needed.
             "type": "binary",
             "entry_point": spec.command,
             "mcp_config": mcp_config,
