@@ -164,11 +164,18 @@ def test_mcpb_rejects_remote_servers():
         ("0.0.0+unknown", "0.0.0"),  # app.__init__ fallback
         ("2024.03.31.01", "2024.3.31"),  # the anthropics/mcpb#226 crash string
         ("garbage", "0.0.0"),
+        ("1.7.0-rc.1", "1.7.0-rc.1"),  # a release-workflow prerelease tag survives
+        ("v1.7.0-beta.2+meta", "1.7.0-beta.2"),
+        ("1.7.0-rc.01", "1.7.0"),  # numeric prerelease id with a leading zero is invalid
+        ("1.7.0-", "1.7.0"),
+        ("9007199254740991.0.0", "9007199254740991.0.0"),  # node-semver's ceiling
+        ("9007199254740992.0.0", "0.0.0"),  # one past it
     ],
 )
 def test_mcpb_version_is_strict_semver(monkeypatch, raw, expected):
     """Claude Desktop crashes on every launch once a bundle with a non-semver
-    version is installed (anthropics/mcpb#226) — the core is always M.m.p."""
+    version is installed (anthropics/mcpb#226) — the core is always M.m.p within
+    node-semver's bounds, and only an already-valid prerelease is carried."""
     monkeypatch.setattr("app.mcpb.__version__", raw)
     row = _row("command", "/bin/true", config_hash="ab12.0123456789abcdef")
     assert mcpb.manifest(row)["version"] == f"{expected}+ab12.0123456789abcdef"

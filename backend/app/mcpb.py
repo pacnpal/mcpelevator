@@ -22,18 +22,36 @@ from app.runners import build_spec
 from app.runners.docker import server_label
 
 
+# One SemVer prerelease identifier (semver.org grammar): a numeric one can't have
+# leading zeroes, an alphanumeric one needs a letter or hyphen.
+_PRERELEASE_ID = r"(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
+# node-semver refuses a numeric component above JavaScript's Number.MAX_SAFE_INTEGER.
+_MAX_SAFE_INTEGER = 2**53 - 1
+
+
 def _semver(raw: str) -> str:
-    """``raw`` (a release tag / pyproject version) as a strict ``MAJOR.MINOR.PATCH``.
+    """``raw`` (a release tag / pyproject version) as strict SemVer.
 
     Claude Desktop parses the manifest version with node ``semver`` and a string it
     rejects is fatal: the extension installs, then the app crashes on every launch
-    until the bundle is deleted by hand (anthropics/mcpb#226). So this never emits
-    anything but three plain integers — a leading ``v``, a PEP 440 suffix
-    (``1.7.0rc1``, ``1.7.0.dev0``), ``0.0.0+unknown`` or a four-part date all fall
-    back to a valid core; ``int()`` also strips a leading zero, which semver forbids.
+    until the bundle is deleted by hand (anthropics/mcpb#226). So the core is always
+    three plain integers within node-semver's bounds — a leading ``v``, a PEP 440
+    suffix (``1.7.0rc1``, ``1.7.0.dev0``), ``0.0.0+unknown`` or a four-part date all
+    fall back to a valid core (``int()`` also strips a leading zero, which semver
+    forbids), and an oversized component falls back to ``0.0.0``. A prerelease that
+    is already valid SemVer (``1.7.0-rc.1`` — the release workflow admits these)
+    is kept: it sorts BELOW the stable release, so a consumer comparing versions
+    sees the later stable bundle as an upgrade rather than the same version.
     """
     m = re.search(r"(\d+)\.(\d+)\.(\d+)", raw)
-    return ".".join(str(int(g)) for g in m.groups()) if m else "0.0.0"
+    if not m:
+        return "0.0.0"
+    parts = [int(g) for g in m.groups()]
+    if max(parts) > _MAX_SAFE_INTEGER:
+        return "0.0.0"
+    core = ".".join(map(str, parts))
+    pre = re.match(rf"-({_PRERELEASE_ID}(?:\.{_PRERELEASE_ID})*)(?:\+|$)", raw[m.end():])
+    return f"{core}-{pre.group(1)}" if pre else core
 
 
 def manifest(server: Server) -> dict:
