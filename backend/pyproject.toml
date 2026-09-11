@@ -24,6 +24,10 @@ dev = [
     # falls back to httpx. The app's runtime HTTP client stays on `httpx` above; only the test
     # client needs httpx2, so it lives here.
     "httpx2>=2.7",
+    # The MCPB manifest tests validate generated bundles against the official JSON schema.
+    # jsonschema already arrives transitively via the mcp SDK; pinning it here keeps that
+    # oracle from silently vanishing if the SDK ever drops the dependency.
+    "jsonschema>=4",
 ]
 
 [tool.uv]
