@@ -10,7 +10,10 @@ to an empty list instead of surfacing that error.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -91,7 +94,7 @@ def test_build_proxy_installs_custom_roots_handler():
     deprecated FastMCP.as_proxy path."""
     proxy = MagicMock()
     with (
-        patch.object(host, "ProxyClient", autospec=True) as proxy_client_cls,
+        patch.object(host, "_HandshakeOnceProxyClient", autospec=True) as proxy_client_cls,
         patch.object(host, "create_proxy", return_value=proxy) as create_proxy_mock,
     ):
         result = host.build_proxy({"command": "echo", "args": ["hi"], "name": "t"})
@@ -139,11 +142,73 @@ async def test_proxy_preserves_tool_output_schema():
     assert tools["unstructured"].outputSchema is None
 
 
+_STRICT_STDIO_FIXTURE = str(Path(__file__).with_name("strict_stdio_server_fixture.py"))
+
+
+def _strict_stdio_proxy():
+    """A bridge proxy over a REAL stdio child that, like the Go SDK, rejects a second
+    ``initialize`` on its connection. Returns the proxy and its (kept-alive) transport."""
+    transport = host._build_transport(
+        {"command": sys.executable, "args": [_STRICT_STDIO_FIXTURE], "name": "strict"}
+    )
+    with patch.object(host, "_build_transport", return_value=transport):
+        return host.build_proxy({"command": "ignored", "name": "strict"}), transport
+
+
+@pytest.mark.asyncio
+async def test_kept_alive_stdio_child_is_initialized_once_across_requests():
+    """Every proxied request runs on a fresh client copy, but a stdio child is kept
+    alive, so all copies share one connection. Re-sending ``initialize`` on it made a
+    strict upstream answer ``duplicate "initialize" received`` and the bridge served an
+    empty tool list — the handshake must happen once per connection."""
+    proxy, transport = _strict_stdio_proxy()
+    try:
+        for _ in range(3):
+            async with Client(proxy) as client:
+                assert [t.name for t in await client.list_tools()] == ["ping"]
+                result = await client.call_tool("ping", {})
+                assert result.content[0].text == "pong"
+    finally:
+        await transport.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_requests_share_one_connection_and_handshake():
+    """Requests racing onto a cold stdio child must all attach to the one connection
+    the spawn produces (FastMCP's connect handed the losers no session: "Client is not
+    connected") and must not each send ``initialize`` on it."""
+    proxy, transport = _strict_stdio_proxy()
+
+    async def list_names():
+        async with Client(proxy) as client:
+            return [t.name for t in await client.list_tools()]
+
+    try:
+        assert await asyncio.gather(*(list_names() for _ in range(5))) == [["ping"]] * 5
+    finally:
+        await transport.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_respawned_stdio_child_is_initialized_afresh():
+    """The cached handshake belongs to one connection: once the child is gone, its
+    replacement (which refuses requests before a handshake) must be initialized anew."""
+    proxy, transport = _strict_stdio_proxy()
+    try:
+        async with Client(proxy) as client:
+            assert [t.name for t in await client.list_tools()] == ["ping"]
+        await transport.disconnect()  # child exits; the next request respawns it
+        async with Client(proxy) as client:
+            assert [t.name for t in await client.list_tools()] == ["ping"]
+    finally:
+        await transport.disconnect()
+
+
 def test_build_transport_stdio_is_default():
     """No transport / "stdio" → a StdioTransport from command/args (unchanged path)."""
     with (
         patch.dict(host.os.environ, {"PATH": "/bin", "HOME": "/tmp"}, clear=True),
-        patch.object(host, "StdioTransport", autospec=True) as stdio,
+        patch.object(host, "_SharedStdioTransport", autospec=True) as stdio,
     ):
         host._build_transport({"command": "npx", "args": ["-y", "pkg"], "env": {"K": "v"}})
     kwargs = stdio.call_args.kwargs
@@ -167,7 +232,7 @@ def test_build_transport_streamable_http_uses_url_and_headers():
     }
     with (
         patch.object(host, "StreamableHttpTransport", autospec=True) as shttp,
-        patch.object(host, "StdioTransport", side_effect=AssertionError("must not spawn stdio")),
+        patch.object(host, "_SharedStdioTransport", side_effect=AssertionError("must not spawn stdio")),
     ):
         host._build_transport(spec)
     kwargs = shttp.call_args.kwargs
@@ -179,7 +244,7 @@ def test_build_transport_sse_uses_url_and_headers():
     spec = {"command": "https://up.example/sse", "env": {"X": "1"}, "transport": "sse"}
     with (
         patch.object(host, "SSETransport", autospec=True) as sse,
-        patch.object(host, "StdioTransport", side_effect=AssertionError("must not spawn stdio")),
+        patch.object(host, "_SharedStdioTransport", side_effect=AssertionError("must not spawn stdio")),
     ):
         host._build_transport(spec)
     kwargs = sse.call_args.kwargs
