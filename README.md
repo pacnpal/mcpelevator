@@ -290,10 +290,10 @@ A stdio server (`npx`, `uvx`, `command`, `docker`) is different: its bridge runs
 process for every connected client, and a request from that process doesn't say which
 client it's for.
 
-- **Default (off): refused.** On a stdio server, `roots/list` is answered with no roots,
-  and sampling and elicitation are declined with an error that names the setting below.
-  The server's log notifications go to the server's log in mcpelevator, not to a
-  client. Progress notifications still reach the client whose call they belong to,
+- **Default (off): refused.** On a stdio server, `roots/list` is answered with no roots.
+  Sampling and elicitation aren't offered to the server at all, so a well-behaved server
+  falls back to working without them; one that asks anyway is declined. The server's log
+  notifications go to the server's log in mcpelevator, not to a client. Progress notifications still reach the client whose call they belong to,
   because each one carries that call's progress token.
 - **On: one request at a time.** Turn on **Client requests** on the server's edit form
   (`serialize_client_requests`; the toggle only appears for stdio runners and the
@@ -305,6 +305,18 @@ client it's for.
   the default. The cost: other requests to **this server** wait their turn (MCP and
   REST alike), so a slow tool call holds up everyone using it. Other servers are
   unaffected.
+
+  Two limits to know before turning it on:
+  - A request is matched to a client only by **timing**: the server's request doesn't
+    say which call it's for, so it goes to whoever's call is running when it arrives. A
+    server that waits until after a call has finished, then asks during the next client's
+    call, gets that next client's answer. Turn this on only for servers that ask while
+    handling the call that needs the answer, which is the usual pattern.
+  - If a client cancels a call, the server keeps working on it, because MCP doesn't pass
+    cancellations on. The next call waits up to 10 seconds for the server to finish.
+    After that the queue moves on. Until the cancelled call finishes, the server's
+    requests are refused for everyone. A call the server never finishes leaves them
+    refused until the server is restarted.
 
 Over the API: `PATCH /api/servers/<id>` with `{"serialize_client_requests": true}`.
 Changing it restarts the server's bridge.

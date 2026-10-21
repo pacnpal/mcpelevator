@@ -1469,9 +1469,15 @@ async def test_default_stdio_never_forwards_roots_to_any_client():
         await transport.disconnect()
 
 
+async def _advertised(client: Client) -> set[str]:
+    result = await client.call_tool_mcp("client_capabilities", {})
+    return set(json.loads(result.content[0].text))
+
+
 @pytest.mark.asyncio
 async def test_default_stdio_declines_sampling_and_elicitation():
-    """Default: sampling and elicitation are refused with an error naming the opt-in —
+    """Default: sampling and elicitation aren't advertised to the child (so a well-behaved
+    server takes its no-capability fallback), and one that asks anyway is declined —
     promptly, not by hanging, and without ever reaching a client's handler."""
     sampled = AsyncMock(side_effect=_sample_reply)
     elicited = AsyncMock(side_effect=_elicit_reply)
@@ -1481,13 +1487,15 @@ async def test_default_stdio_declines_sampling_and_elicitation():
             with anyio.fail_after(10):
                 sampling = await _ask(c, "sampling/createMessage")
                 elicitation = await _ask(c, "elicitation/create")
+                advertised = await _advertised(c)
     finally:
         await transport.disconnect()
     for outcome in (sampling, elicitation):
-        assert "result" not in outcome
-        assert "serialize_client_requests" in outcome["error"]["message"]
+        assert "result" not in outcome and outcome["error"]["message"]
     sampled.assert_not_called()
     elicited.assert_not_called()
+    assert "sampling" not in advertised and "elicitation" not in advertised
+    assert "roots" in advertised  # answered with [], which is harmless to advertise
 
 
 @pytest.mark.asyncio
@@ -1583,10 +1591,12 @@ async def test_serialized_stdio_forwards_sampling_only_to_a_capable_caller():
                 elicitation = await _ask(capable, "elicitation/create")
                 refused = await _ask(plain, "sampling/createMessage")
                 refused_elicit = await _ask(plain, "elicitation/create")
+                advertised = await _advertised(plain)
     finally:
         await transport.disconnect()
     assert sampling["result"]["content"]["text"] == "sampled"
     assert elicitation["result"] == {"action": "accept", "content": {"name": "alice"}}
+    assert {"roots", "sampling", "elicitation"} <= advertised
     assert sampled.await_count == 1 and elicited.await_count == 1
     assert "sampling" in refused["error"]["message"]
     assert "elicitation" in refused_elicit["error"]["message"]
@@ -1674,6 +1684,38 @@ async def test_serialized_stdio_request_cancelled_mid_call_reaches_no_one():
     finally:
         await transport.disconnect()
     assert [_root_uris(h) for h in history] == [[], ["file:///bob"]]
+
+
+@pytest.mark.asyncio
+async def test_serialized_stdio_call_abandoned_past_the_drain_bound_frees_the_child():
+    """Opt-in: a cancelled call the child is slow to finish (or never finishes) can't
+    queue every later request behind it — past the drain bound the turn is released.
+    Until the abandoned call finishes, though, no server request is forwarded to anyone,
+    since nothing says whether it's the abandoned call's or the new caller's."""
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        with patch.object(host, "_CANCELLED_CALL_DRAIN_S", 0.2):
+            async with (
+                Client(proxy, roots=["file:///alice"]) as alice,
+                Client(proxy, roots=["file:///bob"]) as bob,
+            ):
+                await _history(alice)  # alice connects the child first
+                # The child asks for alice's call at ~0.8s — after her cancel (~0.15s) and the
+                # drain bound, so while bob's own call (asking at ~1.4s) holds the turn.
+                await _cancel_server_side(
+                    alice, alice.call_tool_mcp("ask", {"method": "roots/list", "delay": 0.8})
+                )
+                with anyio.fail_after(3):  # not queued behind alice's call
+                    bob_roots = _root_uris(await _ask(bob, "roots/list", delay=1.0))
+                history = await _history(bob)
+                abandoned = set(transport.routing.abandoned)
+    finally:
+        await transport.disconnect()
+    # alice's late request reached nobody — least of all bob, who held the turn — and
+    # once her call finished, bob's own request was his again.
+    assert [_root_uris(h) for h in history] == [[], ["file:///bob"]]
+    assert bob_roots == ["file:///bob"]
+    assert abandoned == set()
 
 
 @pytest.mark.asyncio

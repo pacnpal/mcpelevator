@@ -216,12 +216,16 @@ class _StdioRouting:
     transport and so shared by every ``client.new()`` copy — never ``get_context()``:
 
     * **Default** (``serialize`` off): the slot is never filled, so nothing reaches a
-      client. ``roots/list`` answers ``[]``, sampling and elicitation are declined with an
-      error naming the opt-in, and log notifications go to the bridge's own log.
+      client. ``roots/list`` answers ``[]`` and log notifications go to the bridge's own
+      log. Sampling and elicitation aren't even ADVERTISED to the child — a callback that
+      can only refuse would tell a well-behaved server to try them and fail, instead of
+      taking its no-capability fallback — so the SDK's own handlers decline any that come.
     * **serialize_client_requests**: :class:`_SerializeClientRequests` runs one proxied
       request at a time and fills the slot for its duration, so a request from the child
       can only be for that caller. It's forwarded when the caller declares the capability;
-      with the slot empty (the child asked between calls) it's refused as above.
+      with the slot empty (the child asked between calls) it's refused, as it is while a
+      call its caller abandoned is still running upstream (``abandoned``, see
+      :meth:`_HandshakeOnceProxyClient._await_with_session_monitoring`).
 
     Progress is the exception: it's tied to its request by token (see :func:`_progress_to`).
     """
@@ -230,34 +234,50 @@ class _StdioRouting:
         self.serialize = serialize
         self.lock = asyncio.Lock()
         self.caller: _Caller | None = None
+        # Upstream calls whose caller gave up while the child was still working on them.
+        # The child may still ask something for one, and nothing says which, so while any
+        # is outstanding no server request is forwarded at all.
+        self.abandoned: set[asyncio.Future] = set()
         self._forward_sampling = create_sampling_callback(default_proxy_sampling_handler)
         self._forward_elicitation = create_elicitation_callback(
             default_proxy_elicitation_handler
         )
 
     def session_callbacks(self) -> dict:
+        # None restores the SDK's default callback, which declines AND leaves the
+        # capability out of the handshake (ClientSession advertises exactly the callbacks
+        # that aren't its defaults).
+        forwards = self.serialize
         return {
             "list_roots_callback": self._list_roots,
-            "sampling_callback": self._sampling,
-            "elicitation_callback": self._elicitation,
+            "sampling_callback": self._sampling if forwards else None,
+            "elicitation_callback": self._elicitation if forwards else None,
             "logging_callback": self._log,
         }
 
+    def abandon(self, call: asyncio.Future) -> None:
+        self.abandoned.add(call)
+        call.add_done_callback(self.abandoned.discard)
+        _UPSTREAM_LOG.warning(
+            "a cancelled call is still running upstream; server-initiated requests are "
+            "refused until it finishes"
+        )
+
+    def _current(self) -> _Caller | None:
+        """The caller a server request may be forwarded to, if any."""
+        return None if self.abandoned else self.caller
+
     def _refusal(self, what: str) -> ErrorData:
-        if self.serialize:
-            message = (
+        return ErrorData(
+            code=INVALID_REQUEST,
+            message=(
                 f"server-initiated {what} is only forwarded while a client request is in "
                 "progress (serialize_client_requests); none is"
-            )
-        else:
-            message = (
-                f"server-initiated {what} is disabled for shared stdio servers; "
-                "enable serialize_client_requests"
-            )
-        return ErrorData(code=INVALID_REQUEST, message=message)
+            ),
+        )
 
     async def _list_roots(self, context) -> ListRootsResult:
-        caller = self.caller
+        caller = self._current()
         if caller is None:
             return ListRootsResult(roots=[])
         with _acting_as(caller) as ctx:
@@ -266,7 +286,7 @@ class _StdioRouting:
     async def _forward(
         self, what: str, capability: ClientCapabilities, forward, context, params
     ):
-        caller = self.caller
+        caller = self._current()
         if caller is None:
             return self._refusal(what)
         with _acting_as(caller) as ctx:
@@ -294,7 +314,7 @@ class _StdioRouting:
             message, extra = str(data["msg"]), data.get("extra")
         else:
             message, extra = data if isinstance(data, str) else json.dumps(data), None
-        caller = self.caller
+        caller = self._current()
         if caller is not None:
             with _acting_as(caller) as ctx:
                 if ctx is not None:
@@ -372,6 +392,10 @@ class _Handshake:
         self.result: InitializeResult | None = None
 
 
+# How long a serialized child stays reserved for a call its caller cancelled (see
+# _HandshakeOnceProxyClient._await_with_session_monitoring).
+_CANCELLED_CALL_DRAIN_S = 10.0
+
 _HANDSHAKES: weakref.WeakKeyDictionary[ClientSession, _Handshake] = weakref.WeakKeyDictionary()
 
 
@@ -425,25 +449,44 @@ class _HandshakeOnceProxyClient(ProxyClient):
         )
 
     async def _await_with_session_monitoring(self, coro):
-        """Keep a serialized child reserved until it has answered a cancelled call.
+        """Keep a serialized child reserved while it finishes a cancelled call — for a while.
 
         MCP doesn't pass a caller's cancellation on to the upstream, so the child carries on
         with the call — and may still send a request back for it. Releasing the lock at once
         would let the next caller's slot answer that request. Instead the caller's slot is
         emptied (so anything the child asks from here on is refused) and its turn is held
         until the child's answer arrives; then the cancellation proceeds.
+
+        Held for at most ``_CANCELLED_CALL_DRAIN_S``, though: a call the child never answers
+        would otherwise queue every later request to this server behind it until a restart.
+        Past that, the call is marked abandoned and the turn released — later requests are
+        served, but no server request is forwarded to anyone until the call finishes.
         """
         routing = self._routing()
         caller = _TURN.get()
         if routing is None or caller is None or routing.caller is not caller:
             return await super()._await_with_session_monitoring(coro)
-        call = asyncio.ensure_future(super()._await_with_session_monitoring(coro))
-        try:
+        # The upstream request runs as its own task on the SHARED session, so nothing this
+        # copy does once its caller is gone (its session runner stopping, say) can end it
+        # early; the copy only ever monitors a shielded view of it. A child that dies still
+        # ends it: the session fails every pending request when its stream closes.
+        call = asyncio.ensure_future(coro)
+
+        async def until_answered():
             return await asyncio.shield(call)
+
+        try:
+            return await super()._await_with_session_monitoring(until_answered())
         except asyncio.CancelledError:
             routing.caller = None
             with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
-                await call
+                with anyio.move_on_after(_CANCELLED_CALL_DRAIN_S):
+                    await asyncio.shield(call)
+            if not call.done():
+                routing.abandon(call)
+            raise
+        except BaseException:
+            call.cancel()  # this copy's session failed: nobody will read the answer
             raise
 
 

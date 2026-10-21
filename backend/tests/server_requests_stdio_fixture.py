@@ -13,6 +13,7 @@ front-end client, so a request the child sends (``roots/list``,
   LATER, while no call is in flight (an unsolicited server request).
 * ``history``: every server-request outcome so far, in order, tagged with how it was sent.
 * ``max_inflight``: the most tool calls this child ever had in flight at once.
+* ``client_capabilities``: the capabilities the client declared in ``initialize``.
 
 Requests are answered out of order (a pending map, plus timer threads for delays), so
 concurrent calls really are concurrent unless the bridge serializes them.
@@ -31,6 +32,7 @@ _history: list[dict] = []
 _inflight = 0
 _max_inflight = 0
 _next_id = 0
+_client_caps: dict = {}
 
 _PARAMS = {
     "roots/list": {},
@@ -108,6 +110,12 @@ def _ask(rid, args: dict, meta: dict) -> None:
     _ask_client(method, "solicited", rid)
 
 
+def _later(delay: float, fn, *args) -> None:
+    timer = threading.Timer(delay, fn, args)
+    timer.daemon = True  # never keeps a stopped child alive
+    timer.start()
+
+
 def _handle_call(rid, params: dict) -> None:
     name = params.get("name")
     args = params.get("arguments") or {}
@@ -116,16 +124,18 @@ def _handle_call(rid, params: dict) -> None:
         _start_call()
         delay = float(args.get("delay") or 0)
         if delay:
-            threading.Timer(delay, _ask, (rid, args, meta)).start()
+            _later(delay, _ask, rid, args, meta)
         else:
             _ask(rid, args, meta)
     elif name == "arm":
         _text(rid, "armed")
-        threading.Timer(float(args["delay"]), _ask_client, (args["method"], "unsolicited", None)).start()
+        _later(float(args["delay"]), _ask_client, args["method"], "unsolicited", None)
     elif name == "history":
         with _state_lock:
             snapshot = list(_history)
         _text(rid, json.dumps(snapshot))
+    elif name == "client_capabilities":
+        _text(rid, json.dumps(_client_caps))
     elif name == "max_inflight":
         with _state_lock:
             peak = _max_inflight
@@ -136,7 +146,7 @@ def _handle_call(rid, params: dict) -> None:
 
 _TOOLS = [
     {"name": name, "inputSchema": {"type": "object"}}
-    for name in ("ask", "arm", "history", "max_inflight")
+    for name in ("ask", "arm", "history", "max_inflight", "client_capabilities")
 ]
 
 for line in sys.stdin:
@@ -151,6 +161,7 @@ for line in sys.stdin:
         continue  # notifications (initialized, cancelled, ...)
     method, rid = msg["method"], msg["id"]
     if method == "initialize":
+        _client_caps = msg["params"].get("capabilities") or {}
         _send(
             {
                 "jsonrpc": "2.0",
