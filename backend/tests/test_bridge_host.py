@@ -1403,3 +1403,320 @@ def test_normalized_schema_tolerates_a_non_string_dialect():
     STRING: left exactly as declared."""
     for bad in ({"$schema": ["draft-07"]}, {"$schema": {"uri": "x"}}, {"$schema": 7}):
         assert host._ToolTransform._normalized_schema(bad) is bad
+
+
+# --- server-initiated requests over a shared stdio child (issue #143) ---------
+#
+# The bridge keeps ONE stdio child per server, shared by every front-end client, and that
+# child's session receive loop keeps the ContextVars of whichever request first connected
+# it. A request the child sends back (roots/list, sampling, elicitation) — and the log and
+# progress notifications it emits — used to resolve to that first caller, whoever is
+# actually calling now. These tests drive a real stdio child that asks its client things
+# mid-call (tests/server_requests_stdio_fixture.py).
+
+_ASKER_FIXTURE = str(Path(__file__).with_name("server_requests_stdio_fixture.py"))
+
+
+def _asker_proxy(serialize: bool = False, **extra):
+    """A bridge proxy over a real stdio child that sends requests back to its client.
+    Returns the proxy and its kept-alive transport (the caller disconnects it)."""
+    spec = {"command": sys.executable, "args": [_ASKER_FIXTURE], "name": "asker", **extra}
+    if serialize:
+        spec["serialize_client_requests"] = True
+    transport = host._build_transport(spec)
+    with patch.object(host, "_build_transport", return_value=transport):
+        return host.build_proxy(spec), transport
+
+
+async def _ask(client: Client, method: str, **args) -> dict:
+    result = await client.call_tool_mcp("ask", {"method": method, **args})
+    return json.loads(result.content[0].text)
+
+
+async def _history(client: Client) -> list[dict]:
+    result = await client.call_tool_mcp("history", {})
+    return json.loads(result.content[0].text)
+
+
+def _root_uris(outcome: dict) -> list[str]:
+    return [r["uri"] for r in outcome["result"]["roots"]]
+
+
+async def _sample_reply(messages, params, context):
+    return "sampled"
+
+
+async def _elicit_reply(message, response_type, params, context):
+    return {"name": "alice"}
+
+
+@pytest.mark.asyncio
+async def test_default_stdio_never_forwards_roots_to_any_client():
+    """Default (no serialization): a shared stdio child's ``roots/list`` reaches no
+    front-end client at all — each caller's tool sees ``[]``, and in particular nobody
+    sees the roots of the client that happened to connect the child first."""
+    proxy, transport = _asker_proxy()
+    try:
+        async with (
+            Client(proxy, roots=["file:///alice"]) as alice,
+            Client(proxy, roots=["file:///bob"]) as bob,
+        ):
+            assert _root_uris(await _ask(alice, "roots/list")) == []
+            assert _root_uris(await _ask(bob, "roots/list")) == []
+            both = await asyncio.gather(_ask(alice, "roots/list"), _ask(bob, "roots/list"))
+            assert [_root_uris(o) for o in both] == [[], []]
+    finally:
+        await transport.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_default_stdio_declines_sampling_and_elicitation():
+    """Default: sampling and elicitation are refused with an error naming the opt-in —
+    promptly, not by hanging, and without ever reaching a client's handler."""
+    sampled = AsyncMock(side_effect=_sample_reply)
+    elicited = AsyncMock(side_effect=_elicit_reply)
+    proxy, transport = _asker_proxy()
+    try:
+        async with Client(proxy, sampling_handler=sampled, elicitation_handler=elicited) as c:
+            with anyio.fail_after(10):
+                sampling = await _ask(c, "sampling/createMessage")
+                elicitation = await _ask(c, "elicitation/create")
+    finally:
+        await transport.disconnect()
+    for outcome in (sampling, elicitation):
+        assert "result" not in outcome
+        assert "serialize_client_requests" in outcome["error"]["message"]
+    sampled.assert_not_called()
+    elicited.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_default_stdio_keeps_upstream_logs_off_the_wire(caplog):
+    """Default: the child's log notifications go to the bridge's own log, not to a
+    client — least of all to one that isn't even the caller."""
+    alice_logs, bob_logs = [], []
+
+    async def to(sink):
+        async def handler(message):
+            sink.append(message)
+
+        return handler
+
+    proxy, transport = _asker_proxy()
+    caplog.set_level("INFO", logger="mcpelevator.bridge.upstream")
+    try:
+        async with (
+            Client(proxy, log_handler=await to(alice_logs)) as alice,
+            Client(proxy, log_handler=await to(bob_logs)) as bob,
+        ):
+            await _ask(alice, "roots/list")
+            await _ask(bob, "roots/list")
+    finally:
+        await transport.disconnect()
+    assert alice_logs == [] and bob_logs == []
+    assert "asking roots/list" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stdio_progress_reaches_only_the_calling_request():
+    """Progress carries the upstream request's own token, so it CAN be tied to the call
+    that caused it — and must be, rather than going wherever the first caller was."""
+    alice_progress, bob_progress = [], []
+
+    def recorder(sink):
+        async def handler(progress, total, message):
+            sink.append((progress, total))
+
+        return handler
+
+    proxy, transport = _asker_proxy()
+    try:
+        async with Client(proxy) as alice, Client(proxy) as bob:
+            await alice.call_tool_mcp("history", {})  # alice connects the child first
+            await bob.call_tool_mcp(
+                "ask", {"method": "roots/list"}, progress_handler=recorder(bob_progress)
+            )
+            await alice.call_tool_mcp(
+                "ask", {"method": "roots/list"}, progress_handler=recorder(alice_progress)
+            )
+    finally:
+        await transport.disconnect()
+    assert bob_progress == [(1, 2)]
+    assert alice_progress == [(1, 2)]
+
+
+@pytest.mark.asyncio
+async def test_serialized_stdio_routes_each_server_request_to_its_caller():
+    """Opt-in: concurrent callers each see only their OWN roots, a caller without the
+    roots capability gets ``[]``, and the child only ever has one call in flight."""
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        async with (
+            Client(proxy, roots=["file:///alice"]) as alice,
+            Client(proxy, roots=["file:///bob"]) as bob,
+            Client(proxy) as nobody,
+        ):
+            calls = [c for _ in range(3) for c in (alice, bob, nobody)]
+            outcomes = await asyncio.gather(*(_ask(c, "roots/list") for c in calls))
+            peak = (await alice.call_tool_mcp("max_inflight", {})).content[0].text
+    finally:
+        await transport.disconnect()
+    expected = {alice: ["file:///alice"], bob: ["file:///bob"], nobody: []}
+    assert [_root_uris(o) for o in outcomes] == [expected[c] for c in calls]
+    assert peak == "1"
+
+
+@pytest.mark.asyncio
+async def test_serialized_stdio_forwards_sampling_only_to_a_capable_caller():
+    """Opt-in: sampling and elicitation reach the calling client when it declares the
+    capability, and are declined (not hung, not sent elsewhere) when it doesn't."""
+    sampled = AsyncMock(side_effect=_sample_reply)
+    elicited = AsyncMock(side_effect=_elicit_reply)
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        async with (
+            Client(proxy, sampling_handler=sampled, elicitation_handler=elicited) as capable,
+            Client(proxy) as plain,
+        ):
+            with anyio.fail_after(10):
+                sampling = await _ask(capable, "sampling/createMessage")
+                elicitation = await _ask(capable, "elicitation/create")
+                refused = await _ask(plain, "sampling/createMessage")
+                refused_elicit = await _ask(plain, "elicitation/create")
+    finally:
+        await transport.disconnect()
+    assert sampling["result"]["content"]["text"] == "sampled"
+    assert elicitation["result"] == {"action": "accept", "content": {"name": "alice"}}
+    assert sampled.await_count == 1 and elicited.await_count == 1
+    assert "sampling" in refused["error"]["message"]
+    assert "elicitation" in refused_elicit["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_serialized_stdio_refuses_unsolicited_server_requests():
+    """Opt-in: a request the child sends while NO call is in flight belongs to nobody —
+    roots come back empty and sampling is declined, even with a capable client connected."""
+    sampled = AsyncMock(side_effect=_sample_reply)
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        async with Client(proxy, roots=["file:///alice"], sampling_handler=sampled) as alice:
+            await alice.call_tool_mcp("arm", {"method": "roots/list", "delay": 0.2})
+            await alice.call_tool_mcp("arm", {"method": "sampling/createMessage", "delay": 0.2})
+            with anyio.fail_after(10):
+                while len(history := await _history(alice)) < 2:
+                    await asyncio.sleep(0.05)
+    finally:
+        await transport.disconnect()
+    by_outcome = {("result" in h): h for h in history}
+    assert by_outcome[True] == {"kind": "unsolicited", "result": {"roots": []}}
+    assert "serialize_client_requests" in by_outcome[False]["error"]["message"]
+    sampled.assert_not_called()
+
+
+async def _cancel_server_side(client: Client, call) -> None:
+    """Start ``call`` on ``client`` and return once the SERVER has cancelled it — the way
+    a real client abandons a request (``notifications/cancelled``), not just a local
+    cancel that leaves the bridge still working on it."""
+    request_id = client.session._request_id  # the id the next request will carry
+    task = asyncio.create_task(call)
+    await asyncio.sleep(0.15)
+    await client.cancel(request_id)
+    with anyio.move_on_after(5):
+        with pytest.raises(Exception):
+            await task
+    task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_serialized_stdio_request_cancelled_in_the_queue_frees_its_place():
+    """Opt-in: a request cancelled while it waits its turn never reaches the child, and
+    leaves neither the lock held nor its context in the caller slot."""
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        async with (
+            Client(proxy, roots=["file:///alice"]) as alice,
+            Client(proxy, roots=["file:///bob"]) as bob,
+            Client(proxy, roots=["file:///carol"]) as carol,
+        ):
+            first = asyncio.create_task(_ask(alice, "roots/list", delay=0.6))
+            await asyncio.sleep(0.05)
+            await _cancel_server_side(bob, bob.call_tool_mcp("ask", {"method": "roots/list"}))
+            assert _root_uris(await first) == ["file:///alice"]
+            with anyio.fail_after(5):
+                assert _root_uris(await _ask(carol, "roots/list")) == ["file:///carol"]
+            history = await _history(alice)
+            routing = transport.routing
+            assert not routing.lock.locked() and routing.caller is None
+    finally:
+        await transport.disconnect()
+    assert [_root_uris(h) for h in history] == [["file:///alice"], ["file:///carol"]]
+
+
+@pytest.mark.asyncio
+async def test_serialized_stdio_request_cancelled_mid_call_reaches_no_one():
+    """Opt-in: a caller that abandons a call the child is still working on releases its
+    slot at once — the child's late ``roots/list`` for that call goes to nobody — but the
+    child stays reserved until it answers, so the next caller's roots can't be handed to
+    the abandoned call either."""
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        async with (
+            Client(proxy, roots=["file:///alice"]) as alice,
+            Client(proxy, roots=["file:///bob"]) as bob,
+        ):
+            await _history(alice)  # alice connects the child first
+            await _cancel_server_side(
+                alice, alice.call_tool_mcp("ask", {"method": "roots/list", "delay": 0.5})
+            )
+            with anyio.fail_after(5):
+                assert _root_uris(await _ask(bob, "roots/list")) == ["file:///bob"]
+            history = await _history(bob)
+    finally:
+        await transport.disconnect()
+    assert [_root_uris(h) for h in history] == [[], ["file:///bob"]]
+
+
+@pytest.mark.asyncio
+async def test_serialized_stdio_rest_surface_is_serialized_too():
+    """The REST surface lists and calls through in-memory clients against the same
+    proxy, so its requests take their turn like any MCP request (no deadlock), and its
+    roots-less in-memory client gets ``[]``."""
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        routes = host.build_rest_routes(proxy, {"name": "asker"})
+        call = next(r for r in routes if r.path == "/rest/{tool}")
+        request = MagicMock()
+        request.path_params = {"tool": "ask"}
+        request.body = AsyncMock(return_value=b'{"method": "roots/list"}')
+        with anyio.fail_after(10):
+            responses = await asyncio.gather(
+                *(call.endpoint(request) for _ in range(3)), asyncio.sleep(0)
+            )
+        request.path_params = {"tool": "max_inflight"}
+        request.body = AsyncMock(return_value=b"")
+        peak = json.loads((await call.endpoint(request)).body)["content"][0]["text"]
+    finally:
+        await transport.disconnect()
+    for response in responses[:3]:
+        envelope = json.loads(response.body)
+        assert json.loads(envelope["content"][0]["text"]) == {"result": {"roots": []}}
+    assert peak == "1"
+
+
+def test_serialize_flag_is_ignored_for_remote_transports():
+    """Remote upstreams open a session per request, so they never had the bug: the flag
+    adds no request lock to them, and their roots keep the per-request path."""
+    transport = host.StreamableHttpTransport(url="https://up.example/mcp")
+    spec = {"name": "remote", "transport": "streamable-http", "serialize_client_requests": True}
+    with patch.object(host, "_build_transport", return_value=transport):
+        proxy = host.build_proxy(spec)
+    assert not any(isinstance(m, host._SerializeClientRequests) for m in proxy.middleware)
+
+
+def test_serialize_flag_installs_the_request_lock_for_stdio():
+    proxy, transport = _asker_proxy(serialize=True)
+    assert transport.routing.serialize is True
+    assert sum(isinstance(m, host._SerializeClientRequests) for m in proxy.middleware) == 1
+    proxy, transport = _asker_proxy()
+    assert transport.routing.serialize is False
+    assert not any(isinstance(m, host._SerializeClientRequests) for m in proxy.middleware)

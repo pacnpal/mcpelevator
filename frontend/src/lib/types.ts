@@ -249,6 +249,10 @@ export interface ServerDetail extends ServerSummary {
 	 * schema to 2020-12 before advertising it, so a strict client stops refusing every
 	 * tool this server declares (issue #123). Opt-in; default false. */
 	normalize_schema_dialect: boolean;
+	/** Stdio runners: forward the child's roots/sampling/elicitation requests to the
+	 * calling client, serving one request at a time. Default false refuses them, since one
+	 * child serves every client (issue #143). Ignored for `remote`. */
+	serialize_client_requests: boolean;
 	config_hash: string;
 	source: string;
 	tools: ServerTool[];
@@ -302,6 +306,9 @@ export interface ServerCreate {
 	/** Rewrite a legacy `$schema` dialect (draft-07, …) on every tool's parameters/output
 	 * schema to 2020-12 before advertising it. Forced false unless set (issue #123). */
 	normalize_schema_dialect?: boolean;
+	/** Stdio runners: forward the child's roots/sampling/elicitation requests to the
+	 * calling client, one request at a time (issue #143). Ignored for `remote`. */
+	serialize_client_requests?: boolean;
 	enabled?: boolean;
 	/** Provenance. Only a `catalog:<id>` value is honored server-side (a registry install). */
 	source?: string | null;

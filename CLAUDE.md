@@ -47,7 +47,13 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   between the bridge and the discovery probe (`supervisor.unit.tool_summary`), which lifts it to
   `upstream_name` so the UI keys per-tool state off a stable identity instead of reversing the
   rename map (an exposed name isn't unique). Both are part of `config_hash`, so a change
-  restarts the bridge.
+  restarts the bridge. A stdio child is ONE kept-alive connection shared by every client, so
+  what it sends back (roots/sampling/elicitation requests, logs) can't be attributed by the
+  connection: `_StdioRouting` replaces the session's callbacks and reads a single caller slot,
+  never `get_context()`. By default nothing reaches a client (roots `[]`, sampling/elicitation
+  declined, logs to the bridge log); the per-server `serialize_client_requests` flag runs one
+  proxied request at a time (`_SerializeClientRequests` middleware) and fills the slot, so the
+  child can only be asking that caller (issue #143). Progress is bound per call by its token.
 - **Upstream OAuth** (`auth/oauth_store.py`, `auth/oauth_flow.py`): a `remote` server can
   authenticate to its upstream via OAuth instead of static `env` headers. The interactive
   authorization-code grant (DCR + PKCE) runs in the control plane (`/api/servers/{id}/oauth/authorize`

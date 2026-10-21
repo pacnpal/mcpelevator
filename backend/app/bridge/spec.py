@@ -47,6 +47,10 @@ def bridge_payload(spec, name: str, *, mcp_http: bool, rest_openapi: bool) -> di
     # is a no-op for the bridge, not a behavior change.
     if spec.normalize_schema_dialect:
         payload["normalize_schema_dialect"] = True
+    # Same rule, same reason: a new key, so present only when on. The bridge reads a missing
+    # key as off (`spec.get("serialize_client_requests")` in `_build_transport`).
+    if spec.serialize_client_requests:
+        payload["serialize_client_requests"] = True
     return payload
 
 

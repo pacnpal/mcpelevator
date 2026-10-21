@@ -114,6 +114,17 @@ class Server(SQLModel, table=True):
     # (config_hash), so a change restarts the bridge.
     normalize_schema_dialect: bool = False
 
+    # Stdio runners only (ignored by the bridge for `remote`): let the shared stdio child's
+    # server-initiated requests (roots/list, sampling, elicitation) reach the client whose
+    # request it is serving. The bridge keeps ONE child per server for every client, and a
+    # request from the child names no caller, so by default those requests are refused
+    # (roots answer [], sampling/elicitation are declined) rather than risk reaching the
+    # wrong client (issue #143). On, the bridge runs one proxied request at a time per child
+    # so the child can only be asking the current caller — correct routing for a throughput
+    # cost on this server only. Part of the launch spec (config_hash), so a change restarts
+    # the bridge.
+    serialize_client_requests: bool = False
+
     # uvx runner only: launch with the Python mcp SDK held below 2.0
     # (``uvx --with "mcp<2" <package>``) — a compatibility escape hatch for servers
     # that haven't caught up with the SDK's 2.x line. The runner injects the pin at

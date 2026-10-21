@@ -315,6 +315,30 @@ def test_normalize_schema_dialect_applies_to_every_runner(session):
     assert remote.normalize_schema_dialect is True
 
 
+def test_serialize_client_requests_default_false(session):
+    """Opt-in: by default a shared stdio child's server-initiated requests are refused
+    rather than serialized (issue #143)."""
+    assert _mk(session).serialize_client_requests is False
+
+
+def test_serialize_client_requests_change_bounces_bridge(session):
+    """The bridge decides at proxy build time whether to serialize, so toggling the flag
+    must change config_hash (and so restart the bridge) — both ways."""
+    a = _mk(session)
+    before = a.config_hash
+    service.update_server(session, a.id, {"serialize_client_requests": True})
+    on = repo.get_server(session, a.id).config_hash
+    assert on != before
+    service.update_server(session, a.id, {"serialize_client_requests": False})
+    assert repo.get_server(session, a.id).config_hash == before
+
+
+def test_serialize_client_requests_survives_clone(session):
+    a = _mk(session, serialize_client_requests=True)
+    clone = service.clone_server(session, a.id)
+    assert clone.serialize_client_requests is True
+
+
 # --- tool overrides (issue #112) ----------------------------------------------
 
 

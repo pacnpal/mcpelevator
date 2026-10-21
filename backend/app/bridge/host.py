@@ -8,7 +8,8 @@ down the control plane or its peers) and a real PID/port for supervision.
 The control plane resolves the runner -> a literal ProcessSpec, then launches this
 module as a subprocess, passing the spec + port via environment variables:
 
-    MCPE_BRIDGE_SPEC  JSON: {command, args, env, cwd, name, transport, mcp_http, rest_openapi}
+    MCPE_BRIDGE_SPEC  JSON: {command, args, env, cwd, name, transport, mcp_http, rest_openapi,
+                      serialize_client_requests, ...}
     MCPE_BRIDGE_HOST  loopback host (default 127.0.0.1)
     MCPE_BRIDGE_PORT  port to listen on
 
@@ -19,7 +20,11 @@ is the upstream HTTP headers).
 Session isolation: the proxy serves each request from a fresh upstream client (no
 cross-client context mixing). A remote upstream gets a fresh session per request; a
 stdio child is kept alive, so its one connection — and its one ``initialize``
-handshake — is shared across requests (see :class:`_HandshakeOnceProxyClient`).
+handshake — is shared across requests (see :class:`_HandshakeOnceProxyClient`). What
+that shared child sends BACK (roots/sampling/elicitation requests, log and progress
+notifications) can't be attributed to a caller by the connection alone, so it's routed
+by :class:`_StdioRouting`: refused by default, or — with ``serialize_client_requests`` —
+sent to the one caller the child is serving at the time.
 
 When the spec sets ``rest_openapi``, the same app additionally serves each tool as
 plain REST (``POST /rest/<tool>``, body = the tool's JSON arguments) plus a
@@ -31,49 +36,63 @@ Actions) can call the server's tools through the identical auth/proxy path. See
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 import os
 import re
 import weakref
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextvars import ContextVar
 
 import anyio
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
+from fastmcp.client.elicitation import create_elicitation_callback
+from fastmcp.client.sampling import create_sampling_callback
 from fastmcp.server import create_proxy
-from fastmcp.server.dependencies import get_context
-from fastmcp.server.providers.proxy import ProxyClient
+from fastmcp.server.context import Context, _current_context
+from fastmcp.server.dependencies import _current_server, get_context
+from fastmcp.server.middleware import Middleware
+from fastmcp.server.providers.proxy import (
+    ProxyClient,
+    default_proxy_elicitation_handler,
+    default_proxy_sampling_handler,
+)
 from fastmcp.server.transforms import ToolTransform
 from fastmcp.tools.tool import Tool
 from fastmcp.tools.tool_transform import ToolTransformConfig
 from fastmcp.utilities.timeout import normalize_timeout_to_seconds
 from mcp import ClientSession
-from mcp.types import ClientCapabilities, InitializeResult, Root, RootsCapability
+from mcp.server.lowlevel.server import request_ctx
+from mcp.shared.context import RequestContext
+from mcp.types import (
+    INVALID_REQUEST,
+    ClientCapabilities,
+    ElicitationCapability,
+    ErrorData,
+    InitializeResult,
+    ListRootsResult,
+    Root,
+    RootsCapability,
+    SamplingCapability,
+)
 
 
-async def _forward_roots(context) -> list[Root]:
-    """Roots handler for the proxy's upstream (stdio) client.
+async def _caller_roots(ctx) -> list[Root]:
+    """The roots of the client behind ``ctx`` — or ``[]`` if it can't give any.
 
-    An upstream MCP server may ask its client — here, this proxy — to list the
-    caller's filesystem roots. FastMCP's default proxy handler forwards that
-    request straight to whichever client is connected to the elevator over HTTP.
-    But many MCP clients (Claude.ai, and anything that connects without declaring
-    the ``roots`` capability) reject ``roots/list``, and the upstream server then
+    Many MCP clients (Claude.ai, and anything that connects without declaring the
+    ``roots`` capability) reject ``roots/list``, and an upstream server that asked then
     logs the rejection as a noisy, recurring::
 
         [FastMCP error] received error listing roots.
         McpError: MCP error -32603
 
-    Forward the request only when the connected client actually advertises roots
-    support, and degrade to an empty list on any failure. A client that can't
-    list roots simply gets ``[]`` instead of a spurious error — which is exactly
-    what "no roots" means to the upstream server.
+    So the request is forwarded only when the client actually advertises roots support,
+    and any failure degrades to an empty list — which is exactly what "no roots" means to
+    the upstream server.
     """
-    try:
-        ctx = get_context()
-    except RuntimeError:
-        # No active request context (e.g. the upstream asks during handshake).
-        return []
     try:
         if not ctx.session.check_client_capability(
             ClientCapabilities(roots=RootsCapability())
@@ -86,8 +105,241 @@ async def _forward_roots(context) -> list[Root]:
         return []
 
 
+async def _forward_roots(context) -> list[Root]:
+    """Roots handler for a REMOTE upstream's client (see :func:`_caller_roots`).
+
+    A remote upstream gets a fresh session per request, whose receive loop starts inside
+    that request — so ``get_context()`` really is the caller there. A shared stdio child's
+    loop is not, which is why its handlers are swapped for :class:`_StdioRouting`'s at
+    connect time and this one never runs for it.
+    """
+    try:
+        ctx = get_context()
+    except RuntimeError:
+        # No active request context (e.g. the upstream asks during handshake).
+        return []
+    return await _caller_roots(ctx)
+
+
+# A request's FastMCP context, reduced to what outlives the request's task: its
+# RequestContext plus a weakref to the server. Never a live ``Context`` — its properties
+# read ContextVars, which hold someone else's values in the session's receive loop (the
+# same reason FastMCP's ``StatefulProxyClient`` stashes this tuple).
+_Caller = tuple[RequestContext, "weakref.ref[FastMCP]"]
+
+# The caller whose turn the current task is running (set by _SerializeClientRequests), so
+# code below the middleware can tell its own turn from somebody else's.
+_TURN: ContextVar[_Caller | None] = ContextVar("mcpe_bridge_turn", default=None)
+
+# Where a shared stdio child's log notifications go when no caller may have them: the
+# bridge's own log, which the supervisor captures with the server's output.
+_UPSTREAM_LOG = logging.getLogger("mcpelevator.bridge.upstream")
+_LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "notice": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "critical": logging.CRITICAL,
+    "alert": logging.CRITICAL,
+    "emergency": logging.CRITICAL,
+}
+
+
+def _caller_of(ctx: Context | None) -> _Caller | None:
+    request_context = ctx.request_context if ctx is not None else None
+    return None if request_context is None else (request_context, ctx._fastmcp)
+
+
+def _current_caller() -> _Caller | None:
+    try:
+        return _caller_of(get_context())
+    except RuntimeError:
+        return None
+
+
+@contextlib.contextmanager
+def _acting_as(caller: _Caller) -> Iterator[Context | None]:
+    """Run a handler as ``caller``'s request: point the request/context/server
+    ContextVars at it for the duration, then put back whatever the (long-lived) receive
+    loop had. Yields the caller's ``Context``, or None once its server is gone."""
+    request_context, server_ref = caller
+    server = server_ref()
+    if server is None:
+        yield None
+        return
+    ctx = Context(server)
+    tokens = (
+        request_ctx.set(request_context),
+        _current_context.set(ctx),
+        _current_server.set(server_ref),
+    )
+    try:
+        yield ctx
+    finally:
+        _current_server.reset(tokens[2])
+        _current_context.reset(tokens[1])
+        request_ctx.reset(tokens[0])
+
+
+def _progress_to(caller: _Caller | None):
+    """A progress handler for ONE upstream call, bound to the caller that made it.
+
+    Progress needs no slot: the upstream echoes the progress token its request carried,
+    and the session hands each token's notifications to that request's own handler — so
+    binding the handler to the caller when the call is made ties progress to exactly the
+    right request, concurrent calls included. Without a caller there is nowhere to send it.
+    """
+
+    async def report(progress: float, total: float | None, message: str | None) -> None:
+        if caller is None:
+            return
+        with _acting_as(caller) as ctx:
+            if ctx is not None:
+                await ctx.report_progress(progress, total, message)
+
+    return report
+
+
+class _StdioRouting:
+    """Decides where a shared stdio child's server-initiated messages go (issue #143).
+
+    The child's one ``ClientSession`` receive loop is started inside whichever request
+    first connected it, and its callbacks come from that request's client copy — so
+    FastMCP's forwarding handlers (and ``get_context()`` in general) resolve to the FIRST
+    caller, not the current one, and a ``roots/list``/sampling/elicitation request could
+    land on another client, or on a request that already finished. A request from the
+    server names no caller, so the connection alone can't say who it's for.
+
+    These handlers replace the per-copy ones on the shared session (see
+    :meth:`_SharedStdioTransport.connect`) and read ``caller`` — ONE slot, owned by the
+    transport and so shared by every ``client.new()`` copy — never ``get_context()``:
+
+    * **Default** (``serialize`` off): the slot is never filled, so nothing reaches a
+      client. ``roots/list`` answers ``[]``, sampling and elicitation are declined with an
+      error naming the opt-in, and log notifications go to the bridge's own log.
+    * **serialize_client_requests**: :class:`_SerializeClientRequests` runs one proxied
+      request at a time and fills the slot for its duration, so a request from the child
+      can only be for that caller. It's forwarded when the caller declares the capability;
+      with the slot empty (the child asked between calls) it's refused as above.
+
+    Progress is the exception: it's tied to its request by token (see :func:`_progress_to`).
+    """
+
+    def __init__(self, serialize: bool) -> None:
+        self.serialize = serialize
+        self.lock = asyncio.Lock()
+        self.caller: _Caller | None = None
+        self._forward_sampling = create_sampling_callback(default_proxy_sampling_handler)
+        self._forward_elicitation = create_elicitation_callback(
+            default_proxy_elicitation_handler
+        )
+
+    def session_callbacks(self) -> dict:
+        return {
+            "list_roots_callback": self._list_roots,
+            "sampling_callback": self._sampling,
+            "elicitation_callback": self._elicitation,
+            "logging_callback": self._log,
+        }
+
+    def _refusal(self, what: str) -> ErrorData:
+        if self.serialize:
+            message = (
+                f"server-initiated {what} is only forwarded while a client request is in "
+                "progress (serialize_client_requests); none is"
+            )
+        else:
+            message = (
+                f"server-initiated {what} is disabled for shared stdio servers; "
+                "enable serialize_client_requests"
+            )
+        return ErrorData(code=INVALID_REQUEST, message=message)
+
+    async def _list_roots(self, context) -> ListRootsResult:
+        caller = self.caller
+        if caller is None:
+            return ListRootsResult(roots=[])
+        with _acting_as(caller) as ctx:
+            return ListRootsResult(roots=[] if ctx is None else await _caller_roots(ctx))
+
+    async def _forward(
+        self, what: str, capability: ClientCapabilities, forward, context, params
+    ):
+        caller = self.caller
+        if caller is None:
+            return self._refusal(what)
+        with _acting_as(caller) as ctx:
+            if ctx is None or not ctx.session.check_client_capability(capability):
+                return ErrorData(
+                    code=INVALID_REQUEST, message=f"the calling client does not support {what}"
+                )
+            return await forward(context, params)
+
+    async def _sampling(self, context, params):
+        capability = ClientCapabilities(sampling=SamplingCapability())
+        return await self._forward(
+            "sampling", capability, self._forward_sampling, context, params
+        )
+
+    async def _elicitation(self, context, params):
+        capability = ClientCapabilities(elicitation=ElicitationCapability())
+        return await self._forward(
+            "elicitation", capability, self._forward_elicitation, context, params
+        )
+
+    async def _log(self, params) -> None:
+        data = params.data
+        if isinstance(data, dict) and "msg" in data:  # FastMCP's own log shape
+            message, extra = str(data["msg"]), data.get("extra")
+        else:
+            message, extra = data if isinstance(data, str) else json.dumps(data), None
+        caller = self.caller
+        if caller is not None:
+            with _acting_as(caller) as ctx:
+                if ctx is not None:
+                    with contextlib.suppress(Exception):
+                        await ctx.log(
+                            message, level=params.level, logger_name=params.logger, extra=extra
+                        )
+                    return
+        prefix = f"[{params.logger}] " if params.logger else ""
+        _UPSTREAM_LOG.log(_LOG_LEVELS.get(params.level, logging.INFO), "%s%s", prefix, message)
+
+
+class _SerializeClientRequests(Middleware):
+    """``serialize_client_requests``: one proxied request at a time per stdio child, with
+    the caller slot naming it (see :class:`_StdioRouting`).
+
+    Every MCP request that reaches the child holds the lock for its whole lifetime — the
+    REST surface's too, since its in-memory clients request through this same proxy.
+    ``initialize`` is the exception: after the child's first handshake it never reaches
+    the child (it's answered from the cache, see :class:`_HandshakeOnceProxyClient`), and
+    queueing it behind someone's long tool call would stall every new client's connect
+    past its init timeout. A request cancelled while queued never takes the lock;
+    ``async with`` and the ``finally`` give it back and empty the slot on every exit.
+    """
+
+    def __init__(self, routing: _StdioRouting) -> None:
+        self.routing = routing
+
+    async def on_request(self, context, call_next):
+        if context.method == "initialize":
+            return await call_next(context)
+        caller = _caller_of(context.fastmcp_context)
+        async with self.routing.lock:
+            self.routing.caller = caller
+            turn = _TURN.set(caller)
+            try:
+                return await call_next(context)
+            finally:
+                _TURN.reset(turn)
+                self.routing.caller = None
+
+
 class _SharedStdioTransport(StdioTransport):
-    """A ``StdioTransport`` whose connect is safe to race.
+    """A ``StdioTransport`` whose connect is safe to race, and whose session routes what
+    the child sends back through :class:`_StdioRouting`.
 
     The kept-alive child is one connection shared by every per-request client, and
     FastMCP's ``connect`` returns early for a second caller once the spawn has STARTED
@@ -95,15 +347,20 @@ class _SharedStdioTransport(StdioTransport):
     burst of tools/prompts/resources lists, a wake from idle) got no session and failed
     with "Client is not connected". Serializing connect makes the later callers wait for
     the spawn and then attach to the session it produced.
+
+    The session's callbacks are whatever the FIRST connecting copy passed, so they're
+    replaced here with the routing's — the one set every copy shares.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, serialize_client_requests: bool = False, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._connect_lock = asyncio.Lock()
+        self.routing = _StdioRouting(serialize_client_requests)
 
     async def connect(self, **session_kwargs):
         async with self._connect_lock:
-            return await super().connect(**session_kwargs)
+            callbacks = self.routing.session_callbacks()
+            return await super().connect(**{**session_kwargs, **callbacks})
 
 
 class _Handshake:
@@ -153,6 +410,41 @@ class _HandshakeOnceProxyClient(ProxyClient):
             raise RuntimeError("Failed to initialize server session") from e
         self._session_state.initialize_result = handshake.result
         return handshake.result
+
+    def _routing(self) -> _StdioRouting | None:
+        transport = self.transport
+        return transport.routing if isinstance(transport, _SharedStdioTransport) else None
+
+    async def call_tool_mcp(self, name, arguments, progress_handler=None, timeout=None, meta=None):
+        # The inherited progress handler resolves its caller with get_context(), which in a
+        # shared stdio session's receive loop is the FIRST caller — bind it to this one.
+        if progress_handler is None and self._routing() is not None:
+            progress_handler = _progress_to(_current_caller())
+        return await super().call_tool_mcp(
+            name, arguments, progress_handler=progress_handler, timeout=timeout, meta=meta
+        )
+
+    async def _await_with_session_monitoring(self, coro):
+        """Keep a serialized child reserved until it has answered a cancelled call.
+
+        MCP doesn't pass a caller's cancellation on to the upstream, so the child carries on
+        with the call — and may still send a request back for it. Releasing the lock at once
+        would let the next caller's slot answer that request. Instead the caller's slot is
+        emptied (so anything the child asks from here on is refused) and its turn is held
+        until the child's answer arrives; then the cancellation proceeds.
+        """
+        routing = self._routing()
+        caller = _TURN.get()
+        if routing is None or caller is None or routing.caller is not caller:
+            return await super()._await_with_session_monitoring(coro)
+        call = asyncio.ensure_future(super()._await_with_session_monitoring(coro))
+        try:
+            return await asyncio.shield(call)
+        except asyncio.CancelledError:
+            routing.caller = None
+            with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
+                await call
+            raise
 
 
 # SSOT for which env keys the docker CLI itself consumes lives in the docker runner (the
@@ -1121,6 +1413,7 @@ def _build_transport(spec: dict):
         args=list(spec.get("args") or []),
         env=_child_env(spec),
         cwd=spec.get("cwd") or None,
+        serialize_client_requests=bool(spec.get("serialize_client_requests")),
     )
 
 
@@ -1132,6 +1425,9 @@ def build_proxy(spec: dict) -> FastMCP:
     roots handler (see :func:`_forward_roots`) and a handshake-once guard for a
     kept-alive stdio child (see :class:`_HandshakeOnceProxyClient`); all other advanced
     forwarding and the fresh-client-per-request isolation keep FastMCP's proxy defaults.
+    A stdio child's server-initiated messages are routed by :class:`_StdioRouting`
+    instead, one request at a time when ``serialize_client_requests`` is set (ignored for
+    a remote upstream, whose per-request sessions already know their caller).
     """
     transport = _build_transport(spec)
     # Wrap the transport in a ProxyClient ourselves so we can install a roots
@@ -1148,6 +1444,8 @@ def build_proxy(spec: dict) -> FastMCP:
     # overrides, the transform strips our reserved identity key from upstream tools, and a
     # server can forge that key whether or not anyone has set a policy on it.
     proxy.add_transform(_tool_transform(spec))
+    if isinstance(transport, _SharedStdioTransport) and transport.routing.serialize:
+        proxy.add_middleware(_SerializeClientRequests(transport.routing))
     # The outer proxy already authenticated the caller. Forwarding its headers from
     # this bridge to a remote MCP server would disclose bearer/OAuth credentials to
     # that upstream. Static headers and upstream OAuth live on the transport itself.
@@ -1298,6 +1596,13 @@ def main() -> None:
     spec = json.loads(os.environ["MCPE_BRIDGE_SPEC"])
     host = os.environ.get("MCPE_BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ["MCPE_BRIDGE_PORT"])
+
+    # The upstream's log notifications land here when no client may have them (see
+    # _StdioRouting); stderr is captured with the server's own output.
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s upstream: %(message)s"))
+    _UPSTREAM_LOG.addHandler(handler)
+    _UPSTREAM_LOG.setLevel(logging.INFO)
 
     proxy = build_proxy(spec)
     if spec.get("rest_openapi"):
