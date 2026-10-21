@@ -16,10 +16,10 @@ module as a subprocess, passing the spec + port via environment variables:
 ``streamable-http`` / ``sse`` (front a remote URL; ``command`` is the URL and ``env``
 is the upstream HTTP headers).
 
-Session isolation: ``FastMCP.as_proxy(transport)`` gives a fresh upstream session
-per request (no cross-client context mixing). "Sharing one subprocess" means
-sharing this process + the package install across the MCP and REST surfaces —
-never a single shared MCP session.
+Session isolation: the proxy serves each request from a fresh upstream client (no
+cross-client context mixing). A remote upstream gets a fresh session per request; a
+stdio child is kept alive, so its one connection — and its one ``initialize``
+handshake — is shared across requests (see :class:`_HandshakeOnceProxyClient`).
 
 When the spec sets ``rest_openapi``, the same app additionally serves each tool as
 plain REST (``POST /rest/<tool>``, body = the tool's JSON arguments) plus a
@@ -30,11 +30,14 @@ Actions) can call the server's tools through the identical auth/proxy path. See
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import weakref
 from collections.abc import Callable, Sequence
 
+import anyio
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
 from fastmcp.server import create_proxy
@@ -43,7 +46,9 @@ from fastmcp.server.providers.proxy import ProxyClient
 from fastmcp.server.transforms import ToolTransform
 from fastmcp.tools.tool import Tool
 from fastmcp.tools.tool_transform import ToolTransformConfig
-from mcp.types import ClientCapabilities, Root, RootsCapability
+from fastmcp.utilities.timeout import normalize_timeout_to_seconds
+from mcp import ClientSession
+from mcp.types import ClientCapabilities, InitializeResult, Root, RootsCapability
 
 
 async def _forward_roots(context) -> list[Root]:
@@ -79,6 +84,75 @@ async def _forward_roots(context) -> list[Root]:
         # Client advertised roots but failed to deliver them — don't surface the
         # failure to the upstream server as an internal error.
         return []
+
+
+class _SharedStdioTransport(StdioTransport):
+    """A ``StdioTransport`` whose connect is safe to race.
+
+    The kept-alive child is one connection shared by every per-request client, and
+    FastMCP's ``connect`` returns early for a second caller once the spawn has STARTED
+    rather than finished — so concurrent first requests on a cold child (a client's
+    burst of tools/prompts/resources lists, a wake from idle) got no session and failed
+    with "Client is not connected". Serializing connect makes the later callers wait for
+    the spawn and then attach to the session it produced.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._connect_lock = asyncio.Lock()
+
+    async def connect(self, **session_kwargs):
+        async with self._connect_lock:
+            return await super().connect(**session_kwargs)
+
+
+class _Handshake:
+    """One upstream ``ClientSession``'s handshake: its cached result, plus the lock
+    that keeps concurrent first requests from racing two ``initialize`` calls."""
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.result: InitializeResult | None = None
+
+
+_HANDSHAKES: weakref.WeakKeyDictionary[ClientSession, _Handshake] = weakref.WeakKeyDictionary()
+
+
+class _HandshakeOnceProxyClient(ProxyClient):
+    """A ``ProxyClient`` that runs the MCP handshake once per upstream session.
+
+    The proxy serves each request from a fresh ``client.new()`` copy, and every copy
+    auto-initializes on connect. Over HTTP/SSE each connect opens a new upstream
+    session, so that is one ``initialize`` per session as the spec requires. But
+    ``StdioTransport`` keeps its child alive (``keep_alive`` defaults on), so every copy
+    attaches to the SAME ``ClientSession`` and re-sends ``initialize`` on the same
+    connection. The Python/TS SDKs tolerate that; strict servers — the official Go SDK
+    (e.g. github-mcp-server) — reject it with ``duplicate "initialize" received``, and
+    every list/call after the first fails (the proxy logs it as "Error during
+    list_tools from provider ProxyProvider()" and serves an empty tool list).
+
+    So cache the result on the live session: the first copy on a session does the real
+    handshake, later copies reuse it. Keyed weakly by the session object, a respawned
+    child (a new session) handshakes afresh; a failed handshake caches nothing, so the
+    next request retries it. The init timeout covers the wait for the lock too, so a
+    request queued behind a hung handshake fails within its own deadline instead of
+    after every attempt ahead of it.
+    """
+
+    async def initialize(self, timeout=None) -> InitializeResult:
+        if self.initialize_result is not None:
+            return self.initialize_result
+        timeout = self._init_timeout if timeout is None else normalize_timeout_to_seconds(timeout)
+        handshake = _HANDSHAKES.setdefault(self.session, _Handshake())
+        try:
+            with anyio.fail_after(timeout):
+                async with handshake.lock:
+                    if handshake.result is None:
+                        handshake.result = await super().initialize(timeout)
+        except TimeoutError as e:
+            raise RuntimeError("Failed to initialize server session") from e
+        self._session_state.initialize_result = handshake.result
+        return handshake.result
 
 
 # SSOT for which env keys the docker CLI itself consumes lives in the docker runner (the
@@ -1042,7 +1116,7 @@ def _build_transport(spec: dict):
         return StreamableHttpTransport(url=spec["command"], headers=headers, auth=auth)
     if kind == "sse":
         return SSETransport(url=spec["command"], headers=headers, auth=auth)
-    return StdioTransport(
+    return _SharedStdioTransport(
         command=spec["command"],
         args=list(spec.get("args") or []),
         env=_child_env(spec),
@@ -1055,15 +1129,17 @@ def build_proxy(spec: dict) -> FastMCP:
 
     The upstream — a local stdio process or a remote HTTP/SSE URL, per
     :func:`_build_transport` — is wrapped in a ``ProxyClient`` carrying our tolerant
-    roots handler (see :func:`_forward_roots`); all other advanced forwarding and the
-    fresh-session-per-request isolation keep FastMCP's proxy defaults.
+    roots handler (see :func:`_forward_roots`) and a handshake-once guard for a
+    kept-alive stdio child (see :class:`_HandshakeOnceProxyClient`); all other advanced
+    forwarding and the fresh-client-per-request isolation keep FastMCP's proxy defaults.
     """
     transport = _build_transport(spec)
     # Wrap the transport in a ProxyClient ourselves so we can install a roots
-    # handler that tolerates clients without roots support (see _forward_roots).
+    # handler that tolerates clients without roots support (see _forward_roots), and
+    # handshake a shared stdio session only once (see _HandshakeOnceProxyClient).
     # Everything else — sampling, elicitation, logging, progress forwarding, and
-    # the fresh-session-per-request isolation — keeps FastMCP's proxy defaults.
-    client = ProxyClient(transport, roots=_forward_roots)
+    # the fresh-client-per-request isolation — keeps FastMCP's proxy defaults.
+    client = _HandshakeOnceProxyClient(transport, roots=_forward_roots)
     proxy = create_proxy(client, name=spec.get("name") or "mcpelevator-proxy")
     # Apply the operator's per-tool policy (hidden tools, renames, descriptions) to every
     # surface (MCP list/call, REST, group hub) — they all resolve tools through this
