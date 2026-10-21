@@ -37,6 +37,7 @@ import re
 import weakref
 from collections.abc import Callable, Sequence
 
+import anyio
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
 from fastmcp.server import create_proxy
@@ -45,6 +46,7 @@ from fastmcp.server.providers.proxy import ProxyClient
 from fastmcp.server.transforms import ToolTransform
 from fastmcp.tools.tool import Tool
 from fastmcp.tools.tool_transform import ToolTransformConfig
+from fastmcp.utilities.timeout import normalize_timeout_to_seconds
 from mcp import ClientSession
 from mcp.types import ClientCapabilities, InitializeResult, Root, RootsCapability
 
@@ -132,17 +134,24 @@ class _HandshakeOnceProxyClient(ProxyClient):
     So cache the result on the live session: the first copy on a session does the real
     handshake, later copies reuse it. Keyed weakly by the session object, a respawned
     child (a new session) handshakes afresh; a failed handshake caches nothing, so the
-    next request retries it.
+    next request retries it. The init timeout covers the wait for the lock too, so a
+    request queued behind a hung handshake fails within its own deadline instead of
+    after every attempt ahead of it.
     """
 
     async def initialize(self, timeout=None) -> InitializeResult:
         if self.initialize_result is not None:
             return self.initialize_result
+        timeout = self._init_timeout if timeout is None else normalize_timeout_to_seconds(timeout)
         handshake = _HANDSHAKES.setdefault(self.session, _Handshake())
-        async with handshake.lock:
-            if handshake.result is None:
-                handshake.result = await super().initialize(timeout)
-            self._session_state.initialize_result = handshake.result
+        try:
+            with anyio.fail_after(timeout):
+                async with handshake.lock:
+                    if handshake.result is None:
+                        handshake.result = await super().initialize(timeout)
+        except TimeoutError as e:
+            raise RuntimeError("Failed to initialize server session") from e
+        self._session_state.initialize_result = handshake.result
         return handshake.result
 
 

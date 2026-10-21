@@ -13,13 +13,16 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import FastMCPTransport
 from fastmcp.exceptions import ToolError
+from fastmcp.server.providers.proxy import ProxyClient
 from fastmcp.tools.tool import Tool as FastMCPTool
 from mcp.server.session import ServerSession
 from mcp.types import Root
@@ -202,6 +205,36 @@ async def test_respawned_stdio_child_is_initialized_afresh():
             assert [t.name for t in await client.list_tools()] == ["ping"]
     finally:
         await transport.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_handshake_timeout_covers_the_wait_for_the_lock():
+    """Requests queued behind a hung handshake must each fail within their own init
+    deadline — not wait out every attempt ahead of them one after another."""
+
+    class _Session:  # stands in for the one shared upstream ClientSession
+        pass
+
+    async def hang(self, timeout=None):  # a real handshake attempt, bounded like FastMCP's
+        try:
+            with anyio.fail_after(self._init_timeout if timeout is None else timeout):
+                await anyio.sleep_forever()
+        except TimeoutError as e:
+            raise RuntimeError("Failed to initialize server session") from e
+
+    session = _Session()
+    clients = []
+    for _ in range(3):
+        client = host._HandshakeOnceProxyClient(FastMCPTransport(FastMCP("x")), init_timeout=0.3)
+        client._session_state.session = session
+        clients.append(client)
+
+    started = time.monotonic()
+    with patch.object(ProxyClient, "initialize", hang):
+        results = await asyncio.gather(*(c.initialize() for c in clients), return_exceptions=True)
+
+    assert all(isinstance(r, RuntimeError) for r in results), results
+    assert time.monotonic() - started < 0.6  # serialized attempts would take ~0.9s
 
 
 def test_build_transport_stdio_is_default():
