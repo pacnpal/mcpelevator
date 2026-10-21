@@ -1337,6 +1337,10 @@ def _hash_payload(server: Server) -> dict[str, Any]:
         # Rewriting the advertised schema dialect is applied by the same bridge
         # transform as the two fields above, so a toggle must restart the bridge.
         "normalize_schema_dialect": bool(server.normalize_schema_dialect),
+        # How the bridge routes the stdio child's server-initiated requests (refuse vs one
+        # request at a time) is decided when the bridge builds its proxy, so a toggle must
+        # restart the bridge.
+        "serialize_client_requests": bool(server.serialize_client_requests),
         # OAuth config drives how the bridge authenticates upstream, so it IS part
         # of the launch spec — a change must restart the bridge. (The tokens live in
         # a file store, not the row, so *authenticating* leaves the hash untouched.)
@@ -1800,6 +1804,7 @@ def create_server(
     disabled_tools: Optional[list[str]] = None,
     tool_overrides: Optional[dict[str, dict[str, str]]] = None,
     normalize_schema_dialect: bool = False,
+    serialize_client_requests: bool = False,
     auth_provider: str = "inherit",
     oauth: bool = False,
     oauth_scopes: str = "",
@@ -1878,6 +1883,7 @@ def create_server(
         disabled_tools=disabled_tools,
         tool_overrides=tool_overrides,
         normalize_schema_dialect=bool(normalize_schema_dialect),
+        serialize_client_requests=bool(serialize_client_requests),
         auth_provider=auth_provider,
         oauth=oauth,
         oauth_scopes=oauth_scopes,
@@ -1914,6 +1920,7 @@ _MUTABLE_FIELDS = {
     "disabled_tools",
     "tool_overrides",
     "normalize_schema_dialect",
+    "serialize_client_requests",
     "auth_provider",
     "oauth",
     "oauth_scopes",
@@ -2078,6 +2085,7 @@ def clone_server(
         disabled_tools=list(src.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (src.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(src.normalize_schema_dialect),
+        serialize_client_requests=bool(src.serialize_client_requests),
         auth_provider=src.auth_provider,
         oauth=bool(src.oauth),
         oauth_scopes=src.oauth_scopes or "",

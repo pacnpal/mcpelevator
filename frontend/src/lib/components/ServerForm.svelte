@@ -152,6 +152,7 @@
 			mcpHttp: init.mcp_http ?? true,
 			restOpenapi: init.rest_openapi ?? false,
 			normalizeSchemaDialect: init.normalize_schema_dialect ?? false,
+			serializeClientRequests: init.serialize_client_requests ?? false,
 			// Blank = inherit the global default (null); "0" pins the server always-on.
 			idleTimeoutText:
 				init.idle_timeout_s === null || init.idle_timeout_s === undefined
@@ -217,6 +218,8 @@
 	let mcpHttp = $state(seed.mcpHttp);
 	let restOpenapi = $state(seed.restOpenapi);
 	let normalizeSchemaDialect = $state(seed.normalizeSchemaDialect);
+	// Stdio runners only: route the child's roots/sampling/elicitation to the caller.
+	let serializeClientRequests = $state(seed.serializeClientRequests);
 	let idleTimeoutText = $state(seed.idleTimeoutText);
 	let authProvider = $state<ServerAuthProvider>(seed.authProvider);
 	let startAfter = $state(seed.startAfter);
@@ -428,6 +431,9 @@
 			mcp_http: mcpHttp,
 			rest_openapi: restOpenapi,
 			normalize_schema_dialect: normalizeSchemaDialect,
+			// Stdio runners only; a remote upstream has its own session per request, so the
+			// bridge ignores it there — keep the payload honest on a runner switch.
+			serialize_client_requests: !isRemote && serializeClientRequests,
 			idle_timeout_s: idleTimeoutText.trim() === '' ? null : Number(idleTimeoutText.trim()),
 			auth_provider: authProvider,
 			// Upstream OAuth only applies to remote; the backend forces it off elsewhere,
@@ -1277,6 +1283,35 @@
 				></span>
 			</span>
 		</label>
+		<!-- A stdio child is one connection shared by every client, and a request it sends
+		     back names no caller — so by default those are refused (issue #143). -->
+		{#if !isRemote}
+			<label
+				class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
+			>
+				<span class="flex flex-col gap-0.5">
+					<span class="text-sm font-medium text-[var(--color-ink)]">
+						Client requests <span class="font-normal text-[var(--color-ink-dim)]">(roots, sampling, elicitation)</span>
+					</span>
+					<span class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+						Let this server ask the connected client for roots, sampling and elicitation.
+						Requests to this server are handled one at a time. Off, the server sees no
+						roots and its sampling and elicitation requests are declined, because one
+						process serves every client and couldn't otherwise tell whose request it is.
+					</span>
+				</span>
+				<input type="checkbox" bind:checked={serializeClientRequests} class="peer sr-only" />
+				<span
+					class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
+					style="background-color: {serializeClientRequests ? '' : 'var(--color-line-strong)'};"
+				>
+					<span
+						class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
+						style={serializeClientRequests ? 'transform: translateX(16px);' : ''}
+					></span>
+				</span>
+			</label>
+		{/if}
 
 		<!-- Idle shutdown (wake-on-request) -->
 		<div class="flex flex-col gap-1.5">

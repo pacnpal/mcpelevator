@@ -371,6 +371,16 @@ def test_normalize_schema_dialect_omitted_from_payload_when_off(tmp_path):
     assert ServerUnit(server)._bridge_payload()["normalize_schema_dialect"] is True
 
 
+def test_serialize_client_requests_lands_in_payload_only_when_on(tmp_path):
+    """Like `normalize_schema_dialect`, a NEW payload key: omitted when off so upgrading
+    never grows an already-persisted spec, and the bridge reads it missing as off."""
+    server = _server(tmp_path, setup_script="")
+    assert "serialize_client_requests" not in ServerUnit(server)._bridge_payload()
+
+    server.serialize_client_requests = True
+    assert ServerUnit(server)._bridge_payload()["serialize_client_requests"] is True
+
+
 def test_tool_summary_lifts_the_upstream_name_out_of_meta():
     """A renamed tool's cached entry carries `upstream_name` so the UI has a stable
     identity for it; an un-renamed tool carries none (its `name` IS the upstream name)."""

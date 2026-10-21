@@ -279,6 +279,9 @@ class ServerDetail(ServerSummary):
     # before advertising it, so a strict client stops refusing every tool this server
     # declares. Opt-in; default false leaves the upstream's declared dialect untouched.
     normalize_schema_dialect: bool = False
+    # Stdio runners: forward the child's roots/sampling/elicitation requests to the calling
+    # client, serving one request at a time (issue #143). Default false refuses them.
+    serialize_client_requests: bool = False
     config_hash: str = ""
     source: str = "manual"
     # Whether GET /servers/{id}/mcpb would produce a bundle (app.mcpb.exportable);
@@ -313,6 +316,9 @@ class ServerCreate(BaseModel):
     # Rewrite a legacy `$schema` dialect (draft-07, …) on every tool's schema to 2020-12
     # before advertising it (issue #123). Opt-in; default false.
     normalize_schema_dialect: bool = False
+    # Stdio runners: forward the child's roots/sampling/elicitation requests to the calling
+    # client, serving one request at a time (issue #143). Opt-in; ignored for `remote`.
+    serialize_client_requests: bool = False
     auth_provider: AuthProvider = "inherit"
     # Upstream OAuth (remote runner only; forced off elsewhere server-side).
     oauth: bool = False
@@ -355,6 +361,8 @@ class ServerUpdate(BaseModel):
     tool_overrides: Optional[dict[StrictStr, ToolOverride]] = None
     # Omitted (null) = unchanged.
     normalize_schema_dialect: Optional[bool] = None
+    # Omitted (null) = unchanged.
+    serialize_client_requests: Optional[bool] = None
     auth_provider: Optional[AuthProvider] = None
     # StrictBool (unlike mcp_http/rest_openapi above): oauth gates a security-sensitive
     # upstream-auth mode, so a truthy-coerced "yes"/1 must never silently flip it on — the

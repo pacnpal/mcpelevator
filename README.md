@@ -280,6 +280,47 @@ the API: `PATCH /api/servers/<id>` with
 `{"tool_overrides": {"do_thing": {"name": "run_report", "description": "Runs the report."}}}`
 (send `{}` to restore every tool's upstream labels).
 
+### Server requests: roots, sampling and elicitation
+
+An MCP server can send requests back to its client: `roots/list` (which directories
+the client is working in), `sampling/createMessage` (ask the client's model to generate
+text), and `elicitation/create` (ask the user for input). A `remote` server's bridge
+opens a separate upstream session for each request, so these reach the right client.
+A stdio server (`npx`, `uvx`, `command`, `docker`) is different: its bridge runs **one**
+process for every connected client, and a request from that process doesn't say which
+client it's for.
+
+- **Default (off): refused.** On a stdio server, `roots/list` is answered with no roots.
+  Sampling and elicitation aren't offered to the server at all, so a well-behaved server
+  falls back to working without them; one that asks anyway is declined. The server's log
+  notifications go to the server's log in mcpelevator, not to a client. Progress notifications still reach the client whose call they belong to,
+  because each one carries that call's progress token.
+- **On: one request at a time.** Turn on **Client requests** on the server's edit form
+  (`serialize_client_requests`; the toggle only appears for stdio runners and the
+  setting is ignored for `remote`). The bridge then sends only one request at a time to
+  the process, so a request from the process can only be for the client whose call is
+  running. It goes to that client if it supports the feature (a client without roots
+  support gets no roots; sampling or elicitation is declined), and so do the server's
+  log messages. A request the process sends while no call is running is refused as in
+  the default. The cost: other requests to **this server** wait their turn (MCP and
+  REST alike), so a slow tool call holds up everyone using it. Other servers are
+  unaffected.
+
+  Two limits to know before turning it on:
+  - A request is matched to a client only by **timing**: the server's request doesn't
+    say which call it's for, so it goes to whoever's call is running when it arrives. A
+    server that waits until after a call has finished, then asks during the next client's
+    call, gets that next client's answer. Turn this on only for servers that ask while
+    handling the call that needs the answer, which is the usual pattern.
+  - If a client cancels a call, the server keeps working on it, because MCP doesn't pass
+    cancellations on. The next call waits up to 10 seconds for the server to finish.
+    After that the queue moves on. Until the cancelled call finishes, the server's
+    requests are refused for everyone. A call the server never finishes leaves them
+    refused until the server is restarted.
+
+Over the API: `PATCH /api/servers/<id>` with `{"serialize_client_requests": true}`.
+Changing it restarts the server's bridge.
+
 ### Usage stats (per server, per tool)
 
 **Usage** in the header opens the instance-wide dashboard: totals across every server
@@ -543,6 +584,8 @@ When control-plane auth is enforced, the SPA shows a login screen. The admin tok
 **Multi-user control plane** — the control plane supports multiple identities with two roles. An **admin** sees and manages everything (this is what every credential above resolves to, including pre-multi-user tokens and `MCPE_ADMIN_TOKEN`, so upgrades change nothing). A **member** sees and manages only the servers they create (or are assigned by an admin reassigning a server's owner) and mints data-plane tokens only for those servers — never `all`-, `control`-, or group-scoped ones; settings, groups, and user management are admin-only, and servers a member can't see 404 exactly like nonexistent ones (slugs and ids don't leak, including on `/api/health/*`). Users hold no passwords: an admin creates a user in **Settings → Users** and mints them a **login token** (a `control`-scoped token bound to the user, shown once) that they paste at the same login screen. Deleting a user revokes all their tokens and is refused while they still own servers, and the last admin login can't be demoted or deleted (`MCPE_ADMIN_TOKEN` lifts that guard).
 
 > **Trust caveat — authorization, not isolation.** The **local runners** (`npx`, `uvx`, `command`, and `docker`) execute operator-supplied code as the mcpelevator process user, with filesystem access to the data directory (the SQLite database, other servers' env values, OAuth token files). The per-user **"local runners"** permission (off by default for new users) controls who may configure such servers — a member without it can only create `remote` servers and can start/stop but not reshape a local server an admin provisioned for them. Grant it only to people you trust with the machine itself: multi-user separates *management* views, it does not sandbox server processes from each other.
+
+**Server-initiated requests on stdio servers** — one stdio process serves every client of that server, and a `roots/list`, sampling or elicitation request it sends doesn't say which client it's for. By default those requests are therefore refused: no roots, and sampling and elicitation declined. That way one client's roots, prompts or form answers can never reach another client. **Client requests** (`serialize_client_requests`) routes them to the calling client instead, by running one request at a time on that server. See [Server requests](#server-requests-roots-sampling-and-elicitation).
 
 **Groups** — a group served at `/g/<name>/mcp` bundles the tools of its running members (see **Route reference** for how a group is declared). No groups exist by default (one URL reaching many servers' tools widens exposure, so you declare each one deliberately). A group sits behind the same Host/Origin guard as every `/s` route and authenticates with the **default auth provider**. Under `bearer`, only a `group:<name>`-scoped token (or an *all*-scoped one) is accepted. A protected member is included only when it uses the same provider as the group; `bearer` and `oauth` credentials are not interchangeable. Explicitly open members may sit behind either protected group provider.
 

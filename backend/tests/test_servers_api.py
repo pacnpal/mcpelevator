@@ -119,6 +119,48 @@ def test_normalize_schema_dialect_api_round_trip():
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
+def test_serialize_client_requests_api_round_trip():
+    """serialize_client_requests defaults false, is accepted on create, echoed on GET,
+    and PATCH-able (issue #143)."""
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "Asker",
+                "runner": "command",
+                "command": "/bin/true",
+                "serialize_client_requests": True,
+            },
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["serialize_client_requests"] is True
+
+            patched = c.patch(
+                f"/api/servers/{server_id}",
+                json={"serialize_client_requests": False},
+                headers=LOOPBACK,
+            )
+            assert patched.status_code == 200, patched.text
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["serialize_client_requests"] is False
+
+            other = c.post(
+                "/api/servers",
+                json={"name": "Plain", "runner": "command", "command": "/bin/true"},
+                headers=LOOPBACK,
+            )
+            assert other.status_code == 201, other.text
+            other_detail = c.get(f"/api/servers/{other.json()['id']}", headers=LOOPBACK)
+            assert other_detail.json()["serialize_client_requests"] is False
+            c.delete(f"/api/servers/{other.json()['id']}", headers=LOOPBACK)
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
 def test_tool_overrides_api_round_trip():
     """tool_overrides is accepted on create, normalized, echoed on GET, replaceable via
     PATCH ({} restores the upstream labels), and an unusable rename is a 400."""

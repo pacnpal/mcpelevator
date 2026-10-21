@@ -45,6 +45,10 @@ class ProcessSpec:
     # inputSchema/outputSchema to 2020-12 before advertising it — see
     # app.bridge.host._tool_transform and Server.normalize_schema_dialect.
     normalize_schema_dialect: bool = False
+    # Route a stdio child's server-initiated requests to the calling client by serving one
+    # request at a time — see app.bridge.host._StdioRouting and
+    # Server.serialize_client_requests. The bridge ignores it for a remote transport.
+    serialize_client_requests: bool = False
     transport: str = "stdio"  # stdio | streamable-http | sse
     # For a remote runner that authenticates via OAuth: the config the bridge needs to
     # build an OAuth httpx auth on the upstream transport (server id -> token file,
@@ -89,4 +93,5 @@ def passthrough(server: Server) -> ProcessSpec:
         disabled_tools=list(server.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),
+        serialize_client_requests=bool(server.serialize_client_requests),
     )
