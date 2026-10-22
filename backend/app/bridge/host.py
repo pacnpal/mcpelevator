@@ -1479,7 +1479,9 @@ def build_proxy(spec: dict) -> FastMCP:
     # Everything else — sampling, elicitation, logging, progress forwarding, and
     # the fresh-client-per-request isolation — keeps FastMCP's proxy defaults.
     client = _HandshakeOnceProxyClient(transport, roots=_forward_roots)
-    proxy = create_proxy(client, name=spec.get("name") or "mcpelevator-proxy")
+    # Only the built-in server carries instructions (app.runners.builtin).
+    extra = {"instructions": spec["instructions"]} if spec.get("instructions") else {}
+    proxy = create_proxy(client, name=spec.get("name") or "mcpelevator-proxy", **extra)
     # Apply the operator's per-tool policy (hidden tools, renames, descriptions) to every
     # surface (MCP list/call, REST, group hub) — they all resolve tools through this
     # proxy. See _tool_transform.
@@ -1492,8 +1494,10 @@ def build_proxy(spec: dict) -> FastMCP:
     # The outer proxy already authenticated the caller. Forwarding its headers from
     # this bridge to a remote MCP server would disclose bearer/OAuth credentials to
     # that upstream. Static headers and upstream OAuth live on the transport itself.
+    # The one exception is the built-in server, whose upstream is the control plane
+    # itself and must authorize each call as the caller (app.runners.builtin).
     if hasattr(transport, "forward_incoming_headers"):
-        transport.forward_incoming_headers = False
+        transport.forward_incoming_headers = bool(spec.get("forward_authorization"))
     return proxy
 
 

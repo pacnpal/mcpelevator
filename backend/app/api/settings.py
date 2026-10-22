@@ -16,20 +16,25 @@ from app.auth.control_plane import (
 )
 from app.auth.principal import Principal, require_admin
 from app.db import get_engine, get_session
+from app.registry import service
 from app.registry import settings as runtime_settings
 
 router = APIRouter()
 
 
-def _info(values: dict) -> SettingsInfo:
+def _info(values: dict, session: Session) -> SettingsInfo:
     # SettingsInfo declares the SPA-facing subset; the group registry is served by its
     # own /api/groups router, so drop any keys (e.g. "groups") not in the model.
-    return SettingsInfo(**{k: values[k] for k in SettingsInfo.model_fields if k in values})
+    info = SettingsInfo(**{k: values[k] for k in SettingsInfo.model_fields if k in values})
+    # control_mcp isn't a stored setting: it IS the built-in server's enabled flag.
+    builtin = service.get_builtin(session)
+    info.control_mcp = bool(builtin and builtin.enabled)
+    return info
 
 
 @router.get("/settings", response_model=SettingsInfo)
 async def get_settings(session: Session = Depends(get_session)):
-    return _info(runtime_settings.read_all(session))
+    return _info(runtime_settings.read_all(session), session)
 
 
 # GET stays readable by any authenticated principal — the SPA's add-server form
@@ -42,8 +47,27 @@ async def update_settings(
     principal: Principal = Depends(require_admin),
 ):
     changes = {k: v for k, v in payload.model_dump().items() if v is not None}
+    control_mcp = changes.pop("control_mcp", None)
+    if control_mcp is not None and service.get_builtin(session) is None:
+        # Checked before any write so the rest of the patch isn't committed either.
+        raise HTTPException(
+            status_code=409,
+            detail="the built-in mcpelevator server isn't provisioned (MCPE_CONTROL_MCP=false)",
+        )
+
+    toggled: list[str] = []
 
     def guard(s: Session) -> None:
+        # control_mcp is the built-in row's enabled flag, staged in this same
+        # transaction (and flushed, so even a toggle-only patch takes the write
+        # lock): the checks below then cover it, and it commits or rolls back with
+        # the rest of the patch.
+        builtin = service.get_builtin(s)
+        if control_mcp is not None and builtin is not None and builtin.enabled != control_mcp:
+            builtin.enabled = control_mcp
+            s.add(builtin)
+            s.flush()
+            toggled.append(builtin.id)
         # Both checks run inside the settings write transaction (under the write
         # lock, AFTER the staged changes flushed), so nothing can change between
         # check and commit:
@@ -87,11 +111,11 @@ async def update_settings(
             # old bundle between invalidation and commit. Requests see 503 until the
             # new provider's member set is ready.
             async with request.app.state.groups.auth_transition():
-                result = _info(runtime_settings.write(session, changes, guard=guard))
+                values = runtime_settings.write(session, changes, guard=guard)
         else:
             # Invariants (enum settings + the host allowlist) are enforced in the SSOT
             # writer; the guard runs under its write lock. Surface ValueError as a 400.
-            result = _info(runtime_settings.write(session, changes, guard=guard))
+            values = runtime_settings.write(session, changes, guard=guard)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -103,6 +127,15 @@ async def update_settings(
     # dropping it to 0 resumes already-idle servers).
     if changes.keys() & {"docker_runner", "idle_timeout_s"}:
         request.app.state.supervisor.nudge()
+    if toggled:
+        # Same supervisor follow-up as POST /servers/{id}/enable|disable on that row.
+        sup = request.app.state.supervisor
+        if control_mcp:
+            sup.request_activation(toggled[0])
+        else:
+            sup.cancel_activation_request(toggled[0])
+            sup.nudge()
+    result = _info(values, session)
     # A default-auth change must converge the group hub BEFORE this returns, not on the
     # next reconcile: every /g dispatcher enforces the NEW default auth on the very next
     # request, so a bearer->none downgrade must not leave a group's OLD mounted set

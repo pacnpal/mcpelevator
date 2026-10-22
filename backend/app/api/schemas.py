@@ -454,6 +454,8 @@ class SettingsInfo(BaseModel):
     # How long per-server / per-tool usage counters are kept (0 = forever).
     usage_retention_days: int = 30
     upstream_oauth_client_mode: UpstreamOauthClientMode = "auto"
+    # The global switch for the built-in mcpelevator MCP server, which is its row's `enabled`.
+    control_mcp: bool = True
 
 
 class SettingsUpdate(BaseModel):
@@ -480,6 +482,7 @@ class SettingsUpdate(BaseModel):
     # reason as idle_timeout_s — a JSON `true` must not become a 1-day retention.
     usage_retention_days: Optional[StrictInt] = None
     upstream_oauth_client_mode: Optional[UpstreamOauthClientMode] = None
+    control_mcp: Optional[StrictBool] = None
 
 
 # ---- Groups (the /g/<name> registry) ----------------------------------------
@@ -542,6 +545,8 @@ class UserInfo(BaseModel):
     name: str
     role: Role
     local_runners: bool
+    # May this user drive the control plane through the built-in mcpelevator MCP server?
+    control_mcp: bool = True
     servers_count: int = 0  # servers owned (drives the delete guard in the UI)
     tokens_count: int = 0  # tokens bound to this user (control + data-plane)
     created_at: datetime
@@ -553,12 +558,14 @@ class UserCreate(BaseModel):
     # StrictBool: gates code execution on this box — a truthy-coerced value must
     # never silently widen an account (same rationale as docker_runner).
     local_runners: StrictBool = False
+    control_mcp: StrictBool = True
 
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
     role: Optional[Role] = None
     local_runners: Optional[StrictBool] = None
+    control_mcp: Optional[StrictBool] = None
 
 
 class UserCredential(BaseModel):

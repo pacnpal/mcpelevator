@@ -20,12 +20,12 @@ from functools import lru_cache, wraps
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.bridge.spec import BRIDGE_SPEC_MAX_BYTES, bridge_payload, oversize, serialize
 from app.config import get_settings
 from app.db import repo
-from app.db.models import RUNNERS, Server
+from app.db.models import BUILTIN_RUNNER, RUNNERS, Server
 from app.registry import settings as runtime_settings
 from app.runners import build_spec
 from app.runners import remote as remote_runner
@@ -1934,6 +1934,64 @@ _MUTABLE_FIELDS = {
 }
 
 
+# The built-in control-plane server (app.control_mcp). Its launch spec is derived by
+# its runner, never stored, so only exposure, tool policy, naming, auth and idle are
+# the operator's to edit, the same fields any server exposes beyond its launch line.
+# REST is left out: the bridge's REST surface calls its proxy in-process, so the
+# caller's Authorization never reaches /api/mcp and every tool would 401.
+_BUILTIN_EDITABLE = {
+    "name",
+    "mcp_http",
+    "disabled_tools",
+    "tool_overrides",
+    "normalize_schema_dialect",
+    "auth_provider",
+    "idle_timeout_s",
+}
+
+
+def get_builtin(session: Session) -> Optional[Server]:
+    """The built-in mcpelevator server row, or None before it is provisioned."""
+    return session.exec(select(Server).where(Server.runner == BUILTIN_RUNNER)).first()
+
+
+@_serialized_write
+def ensure_builtin(session: Session) -> Optional[Server]:
+    """Provision the built-in mcpelevator server on boot when it's missing. Every
+    install, fresh or upgraded, gets exactly one. Enabled, behind ``bearer`` so a
+    client needs a token even when control-plane auth is off. Returns the new row,
+    or None when it already exists (turning it off is ``enabled``, not deletion)."""
+    if get_builtin(session) is not None:
+        return None
+    server = Server(
+        id=new_id(),
+        slug=_unique_slug(session, BUILTIN_RUNNER),
+        name="mcpelevator",
+        runner=BUILTIN_RUNNER,
+        command="",
+        args=[],
+        env={},
+        auth_provider="bearer",
+        enabled=True,
+        source="builtin",
+    )
+    server.config_hash = compute_hash(server)
+    return repo.create_server(session, server)
+
+
+def _require_builtin_editable(server: Server, changes: dict[str, Any]) -> None:
+    """Refuse a change to the built-in server's derived launch spec. An unchanged value
+    passes (the edit form sends every field back), with empty/None/False alike."""
+    for key, value in changes.items():
+        if key in _MUTABLE_FIELDS and key not in _BUILTIN_EDITABLE:
+            if (value or None) != (getattr(server, key) or None):
+                raise ValueError(f"{key} can't be changed on the built-in mcpelevator server")
+    if "auth_provider" in changes and changes["auth_provider"] not in ("none", "bearer"):
+        # /api/mcp authorizes each call by the caller's control-plane identity; an OAuth
+        # access token carries none. "inherit" is refused too: the default may be oauth.
+        raise ValueError("the built-in mcpelevator server supports none or bearer auth")
+
+
 @_serialized_write
 def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> Server:
     server = repo.get_server(session, server_id)
@@ -1945,6 +2003,10 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     # below would run on a stale snapshot that no longer describes the final row.
     # Re-read from the DB now that we hold the write lock.
     session.refresh(server)
+    if server.runner == BUILTIN_RUNNER:
+        _require_builtin_editable(server, changes)
+    elif changes.get("runner") == BUILTIN_RUNNER:
+        raise ValueError("the built-in mcpelevator runner can't be assigned to a server")
     # Pre-edit runner: converting a NON-docker server INTO a docker one newly grants the
     # root-equivalent runner, so it must be gated like create/enable. Merely editing a row that
     # was ALREADY docker is not gated (so a broken image/env can be fixed while the runner is
@@ -1957,7 +2019,7 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     for key, value in changes.items():
         if key in _MUTABLE_FIELDS:
             setattr(server, key, value)
-    if server.runner not in RUNNERS:
+    if server.runner not in RUNNERS and server.runner != BUILTIN_RUNNER:
         raise ValueError(f"unknown runner {server.runner!r}")
     # A local-exec runner (npx/uvx/command) pointed at the docker CLI IS the docker runner (see
     # create) — reclassify so it can't launch containers ungated/unhardened via passthrough.
@@ -2066,6 +2128,8 @@ def clone_server(
     src = repo.get_server(session, server_id)
     if src is None:
         raise KeyError(server_id)
+    if src.runner == BUILTIN_RUNNER:
+        raise ValueError("the built-in mcpelevator server can't be cloned")
     new_name = (name or "").strip() or f"{src.name} copy"
     return create_server(
         session,

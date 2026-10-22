@@ -75,9 +75,19 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   setting). Each runner is a pure `Server -> ProcessSpec` builder; `docker` stores the canonical
   image+container-args+env shape and synthesizes a hardened `docker run` (the bridge scrubs the
   child env for docker units so a `-e KEY` passthrough can't reach the control plane's secrets).
+- **Built-in control MCP** (`control_mcp.py`, `runners/builtin.py`): `/api/mcp` serves the control
+  plane as MCP tools, each a thin in-process call to one `/api` route carrying the caller's headers,
+  so auth and policy are never re-derived. Clients reach it as the `mcpelevator` server, one row
+  (`runner="mcpelevator"`, outside `RUNNERS`) that `service.ensure_builtin` provisions on boot
+  (`MCPE_CONTROL_MCP=false` skips that). It runs through an ordinary remote bridge that forwards the
+  caller's Authorization (`ProcessSpec.forward_authorization`, on for this runner only) plus a
+  per-process internal header. Only MCP exposure, tool policy, name, slug, auth (`none`/`bearer`) and
+  idle are editable (REST stays off: its in-process proxy call can't forward the caller's token). It can't be deleted, cloned or reassigned (it stays admin-owned, since its `enabled` is a global setting), it never joins a group (`"*"` skips it, an explicit
+  member list naming it is refused), and the bearer provider accepts control tokens for it. The global switch is the row's `enabled` (surfaced as the `control_mcp`
+  setting) and the per-user switch is `User.control_mcp`. `/api/mcp` checks both on every request.
 - **Group registry** (`groups/`): the `groups` runtime setting is the single source of truth
   mapping a group name to its members — either `"*"` (every registered server, present and
-  future) or an ordered list of server ids. Each group is served at `/g/<name>/mcp`: a
+  future, except the built-in control MCP server) or an ordered list of server ids. Each group is served at `/g/<name>/mcp`: a
   control-plane-hosted FastMCP mounting a proxy per running member, tools namespaced by slug,
   rebuilt-and-swapped per group after each reconcile via the supervisor's `on_converged` hook
   (the hub owns each sub-app's lifespan; Starlette doesn't run mounted lifespans). There is no

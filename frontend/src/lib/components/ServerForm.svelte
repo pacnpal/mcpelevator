@@ -301,7 +301,9 @@
 	const dockerDisabled = $derived(isDocker && dockerEnabled === false);
 	const dockerBlocked = $derived(dockerDisabled && mode === 'create' && startAfter);
 	const nameValid = $derived(name.trim().length > 0);
-	const commandValid = $derived(command.trim().length > 0);
+	// The built-in mcpelevator server has no stored launch line (its runner derives it).
+	const isBuiltin = $derived(runner === 'mcpelevator');
+	const commandValid = $derived(isBuiltin || command.trim().length > 0);
 	// Blank = inherit; otherwise a whole non-negative number of seconds.
 	const idleTimeoutValid = $derived(
 		idleTimeoutText.trim() === '' || /^\d+$/.test(idleTimeoutText.trim())
@@ -530,679 +532,690 @@
 		</div>
 	{/if}
 
-	<!-- Runner -->
-	<fieldset class="flex flex-col gap-2 border-0 p-0">
-		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Runner</legend>
-		<div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
-			{#each offeredRunners as r (r.value)}
+	{#if isBuiltin}
+		<p
+			class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3 text-xs leading-relaxed text-[var(--color-ink-muted)]"
+		>
+			The built-in <span class="font-mono">mcpelevator</span> server is the control plane
+			itself, so it has no launch command. Each tool call runs with the caller's own
+			permissions; turn it off for everyone, or per user, in
+			<a href="/settings" class="underline decoration-dotted underline-offset-2">Settings</a>.
+		</p>
+	{:else}
+		<!-- Runner -->
+		<fieldset class="flex flex-col gap-2 border-0 p-0">
+			<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Runner</legend>
+			<div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+				{#each offeredRunners as r (r.value)}
+					<label
+						class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+						style={runner === r.value
+							? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+							: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+					>
+						<span class="flex items-center gap-2">
+							<input
+								type="radio"
+								name="runner"
+								value={r.value}
+								checked={runner === r.value}
+								onchange={() => {
+									runner = r.value;
+									onRunnerChange();
+								}}
+								class="sr-only"
+							/>
+							<span
+								class="font-mono text-sm font-semibold"
+								style={runner === r.value
+									? 'color: var(--color-accent);'
+									: 'color: var(--color-ink);'}
+							>
+								{r.label}
+							</span>
+						</span>
+						<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+							{r.hint}
+						</span>
+					</label>
+				{/each}
+			</div>
+		</fieldset>
+
+		<!-- Friendly per-runner input -->
+		{#if friendly}
+			<div class="flex flex-col gap-2">
 				<label
-					class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
-					style={runner === r.value
-						? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
-						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+					for="srv-pkg"
+					class="text-sm font-medium text-[var(--color-ink)]"
 				>
-					<span class="flex items-center gap-2">
-						<input
-							type="radio"
-							name="runner"
-							value={r.value}
-							checked={runner === r.value}
-							onchange={() => {
-								runner = r.value;
-								onRunnerChange();
-							}}
-							class="sr-only"
-						/>
+					{pkgLabel}
+				</label>
+				<input
+					id="srv-pkg"
+					type="text"
+					bind:value={pkg}
+					oninput={syncFromFriendly}
+					autocomplete="off"
+					spellcheck="false"
+					placeholder={pkgPlaceholder}
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				/>
+				<label
+					for="srv-extra-args"
+					class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]"
+				>
+					Extra arguments <span class="text-[var(--color-ink-dim)]">(optional, one per line)</span>
+				</label>
+				<textarea
+					id="srv-extra-args"
+					bind:value={extraArgsText}
+					oninput={syncFromFriendly}
+					rows="2"
+					spellcheck="false"
+					placeholder="--port&#10;8000"
+					class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				></textarea>
+				{#if runner === 'uvx'}
+					<!-- Compatibility escape hatch: hold the Python mcp SDK on 1.x for
+					     packages the 2.x line broke. Injected at launch, not into args. -->
+					<label
+						class="mt-1 flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
+					>
+						<span class="flex flex-col gap-0.5">
+							<span class="text-sm font-medium text-[var(--color-ink)]">
+								Pin mcp SDK &lt; 2 <span class="font-normal text-[var(--color-ink-dim)]">(compatibility)</span>
+							</span>
+							<span class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+								Launch with <code class="font-mono text-[var(--color-ink-muted)]">--with "mcp&lt;2"</code>
+								so the package resolves the 1.x Python mcp SDK. Turn this on if the server
+								fails at startup with an mcp import error (the failure message will suggest
+								it); turn it off once the package supports mcp 2.x.
+							</span>
+						</span>
+						<input type="checkbox" bind:checked={pinMcp1} class="peer sr-only" />
 						<span
-							class="font-mono text-sm font-semibold"
-							style={runner === r.value
-								? 'color: var(--color-accent);'
-								: 'color: var(--color-ink);'}
+							class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
+							style="background-color: {pinMcp1 ? '' : 'var(--color-line-strong)'};"
 						>
-							{r.label}
+							<span
+								class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
+								style={pinMcp1 ? 'transform: translateX(16px);' : ''}
+							></span>
 						</span>
-					</span>
-					<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
-						{r.hint}
-					</span>
-				</label>
-			{/each}
-		</div>
-	</fieldset>
-
-	<!-- Friendly per-runner input -->
-	{#if friendly}
-		<div class="flex flex-col gap-2">
-			<label
-				for="srv-pkg"
-				class="text-sm font-medium text-[var(--color-ink)]"
-			>
-				{pkgLabel}
-			</label>
-			<input
-				id="srv-pkg"
-				type="text"
-				bind:value={pkg}
-				oninput={syncFromFriendly}
-				autocomplete="off"
-				spellcheck="false"
-				placeholder={pkgPlaceholder}
-				class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-			/>
-			<label
-				for="srv-extra-args"
-				class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]"
-			>
-				Extra arguments <span class="text-[var(--color-ink-dim)]">(optional, one per line)</span>
-			</label>
-			<textarea
-				id="srv-extra-args"
-				bind:value={extraArgsText}
-				oninput={syncFromFriendly}
-				rows="2"
-				spellcheck="false"
-				placeholder="--port&#10;8000"
-				class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-			></textarea>
-			{#if runner === 'uvx'}
-				<!-- Compatibility escape hatch: hold the Python mcp SDK on 1.x for
-				     packages the 2.x line broke. Injected at launch, not into args. -->
-				<label
-					class="mt-1 flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
-				>
-					<span class="flex flex-col gap-0.5">
-						<span class="text-sm font-medium text-[var(--color-ink)]">
-							Pin mcp SDK &lt; 2 <span class="font-normal text-[var(--color-ink-dim)]">(compatibility)</span>
-						</span>
-						<span class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
-							Launch with <code class="font-mono text-[var(--color-ink-muted)]">--with "mcp&lt;2"</code>
-							so the package resolves the 1.x Python mcp SDK. Turn this on if the server
-							fails at startup with an mcp import error (the failure message will suggest
-							it); turn it off once the package supports mcp 2.x.
-						</span>
-					</span>
-					<input type="checkbox" bind:checked={pinMcp1} class="peer sr-only" />
-					<span
-						class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
-						style="background-color: {pinMcp1 ? '' : 'var(--color-line-strong)'};"
-					>
-						<span
-							class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
-							style={pinMcp1 ? 'transform: translateX(16px);' : ''}
-						></span>
-					</span>
-				</label>
-			{/if}
-		</div>
-	{:else if isRemote}
-		<!-- runner === remote: an already-remote MCP URL we proxy. command = URL,
-		     args = [transport], env = upstream headers. No local process. -->
-		<div class="flex flex-col gap-2">
-			<label for="srv-url" class="text-sm font-medium text-[var(--color-ink)]">
-				Upstream URL
-			</label>
-			<input
-				id="srv-url"
-				type="url"
-				inputmode="url"
-				bind:value={command}
-				autocomplete="off"
-				spellcheck="false"
-				placeholder="https://example.com/mcp"
-				class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-			/>
-			{#if command.trim() && !remoteUrlValid}
-				<p class="text-xs text-[var(--color-state-failed)]">
-					Enter an http(s):// URL to the remote MCP endpoint.
-				</p>
-			{/if}
-			<label for="srv-transport" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
-				Transport
-			</label>
-			<div class="relative inline-flex items-center">
-				<select
-					id="srv-transport"
-					bind:value={transport}
-					class="w-full cursor-pointer appearance-none rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 pr-9 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
-				>
-					{#each REMOTE_TRANSPORTS as t (t.value)}
-						<option value={t.value}>{t.label}</option>
-					{/each}
-				</select>
-				<svg class="pointer-events-none absolute right-3 size-4 text-[var(--color-ink-dim)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<path d="m6 9 6 6 6-6" />
-				</svg>
+					</label>
+				{/if}
 			</div>
-			<p class="text-xs text-[var(--color-ink-dim)]">
-				mcpelevator proxies this endpoint and fronts it with its own auth. Choose how it
-				authenticates <span class="font-medium">to the upstream</span> below.
-			</p>
-
-			<!-- Upstream authentication: static Headers vs OAuth sign-in. -->
-			<span class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
-				Upstream authentication
-			</span>
-			<div class="grid grid-cols-2 gap-2">
-				<label
-					class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
-					style={!oauth
-						? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
-						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
-				>
-					<span class="flex items-center gap-2">
-						<input type="radio" name="upstream-auth" checked={!oauth} onchange={() => (oauth = false)} />
-						<span class="text-sm font-medium text-[var(--color-ink)]">Headers</span>
-					</span>
-					<span class="text-xs text-[var(--color-ink-dim)]">API key / static bearer token</span>
+		{:else if isRemote}
+			<!-- runner === remote: an already-remote MCP URL we proxy. command = URL,
+			     args = [transport], env = upstream headers. No local process. -->
+			<div class="flex flex-col gap-2">
+				<label for="srv-url" class="text-sm font-medium text-[var(--color-ink)]">
+					Upstream URL
 				</label>
-				<label
-					class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
-					style={oauth
-						? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
-						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
-				>
-					<span class="flex items-center gap-2">
-						<input type="radio" name="upstream-auth" checked={oauth} onchange={() => (oauth = true)} />
-						<span class="text-sm font-medium text-[var(--color-ink)]">OAuth</span>
-					</span>
-					<span class="text-xs text-[var(--color-ink-dim)]">Sign in with the provider</span>
-				</label>
-			</div>
-
-			<!-- Which to pick: most servers support both, but not all. -->
-			<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
-				Most remote MCP servers accept <span class="font-medium">both</span> a static token
-				header and OAuth, but some support only one — check the server's docs to be sure. A
-				long-lived <span class="font-medium">token/API key</span> (under Headers) is the more
-				permanent option; <span class="font-medium">OAuth</span> is best when the provider
-				requires it or doesn't issue static tokens.
-			</p>
-
-			{#if oauth}
-				<div class="mt-1 flex flex-col gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-3">
-					<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
-						{#if mode === 'create'}
-							After you create this server, open it and click
-							<span class="font-medium text-[var(--color-ink)]">Authenticate with provider</span>
-							to sign in — mcpelevator stores the tokens and refreshes them automatically.
-						{:else}
-							Use <span class="font-medium text-[var(--color-ink)]">Authenticate with provider</span>
-							on the server page to sign in — mcpelevator stores the tokens and refreshes them
-							automatically.
-						{/if}
+				<input
+					id="srv-url"
+					type="url"
+					inputmode="url"
+					bind:value={command}
+					autocomplete="off"
+					spellcheck="false"
+					placeholder="https://example.com/mcp"
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				/>
+				{#if command.trim() && !remoteUrlValid}
+					<p class="text-xs text-[var(--color-state-failed)]">
+						Enter an http(s):// URL to the remote MCP endpoint.
 					</p>
-					<p
-						class="flex items-start gap-2 text-xs leading-relaxed text-[var(--color-ink-muted)]"
+				{/if}
+				<label for="srv-transport" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
+					Transport
+				</label>
+				<div class="relative inline-flex items-center">
+					<select
+						id="srv-transport"
+						bind:value={transport}
+						class="w-full cursor-pointer appearance-none rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 pr-9 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 					>
-						<svg class="mt-0.5 size-4 shrink-0 text-[var(--color-ink-dim)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-							<circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
+						{#each REMOTE_TRANSPORTS as t (t.value)}
+							<option value={t.value}>{t.label}</option>
+						{/each}
+					</select>
+					<svg class="pointer-events-none absolute right-3 size-4 text-[var(--color-ink-dim)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<path d="m6 9 6 6 6-6" />
+					</svg>
+				</div>
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					mcpelevator proxies this endpoint and fronts it with its own auth. Choose how it
+					authenticates <span class="font-medium">to the upstream</span> below.
+				</p>
+
+				<!-- Upstream authentication: static Headers vs OAuth sign-in. -->
+				<span class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
+					Upstream authentication
+				</span>
+				<div class="grid grid-cols-2 gap-2">
+					<label
+						class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+						style={!oauth
+							? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+							: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+					>
+						<span class="flex items-center gap-2">
+							<input type="radio" name="upstream-auth" checked={!oauth} onchange={() => (oauth = false)} />
+							<span class="text-sm font-medium text-[var(--color-ink)]">Headers</span>
+						</span>
+						<span class="text-xs text-[var(--color-ink-dim)]">API key / static bearer token</span>
+					</label>
+					<label
+						class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+						style={oauth
+							? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+							: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+					>
+						<span class="flex items-center gap-2">
+							<input type="radio" name="upstream-auth" checked={oauth} onchange={() => (oauth = true)} />
+							<span class="text-sm font-medium text-[var(--color-ink)]">OAuth</span>
+						</span>
+						<span class="text-xs text-[var(--color-ink-dim)]">Sign in with the provider</span>
+					</label>
+				</div>
+
+				<!-- Which to pick: most servers support both, but not all. -->
+				<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+					Most remote MCP servers accept <span class="font-medium">both</span> a static token
+					header and OAuth, but some support only one — check the server's docs to be sure. A
+					long-lived <span class="font-medium">token/API key</span> (under Headers) is the more
+					permanent option; <span class="font-medium">OAuth</span> is best when the provider
+					requires it or doesn't issue static tokens.
+				</p>
+
+				{#if oauth}
+					<div class="mt-1 flex flex-col gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-3">
+						<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+							{#if mode === 'create'}
+								After you create this server, open it and click
+								<span class="font-medium text-[var(--color-ink)]">Authenticate with provider</span>
+								to sign in — mcpelevator stores the tokens and refreshes them automatically.
+							{:else}
+								Use <span class="font-medium text-[var(--color-ink)]">Authenticate with provider</span>
+								on the server page to sign in — mcpelevator stores the tokens and refreshes them
+								automatically.
+							{/if}
+						</p>
+						<p
+							class="flex items-start gap-2 text-xs leading-relaxed text-[var(--color-ink-muted)]"
+						>
+							<svg class="mt-0.5 size-4 shrink-0 text-[var(--color-ink-dim)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
+							</svg>
+							<span>
+								OAuth sessions can expire. Refresh is automatic, but if the provider's refresh
+								window lapses you'll need to re-authenticate here to keep the server working —
+								check on it periodically.
+							</span>
+						</p>
+
+						<div class="flex flex-col gap-2">
+							<label for="srv-oauth-scopes" class="text-xs font-medium text-[var(--color-ink-muted)]">
+								Scopes <span class="text-[var(--color-ink-dim)]">(optional, space-separated)</span>
+							</label>
+							<p id="srv-oauth-scopes-help" class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+								Usually leave this blank: at sign-in mcpelevator discovers the provider's
+								scopes automatically and requests
+								<span class="font-mono text-[var(--color-ink-muted)]">offline_access</span>
+								so it issues a refresh token (renewed in the background). Add a scope here
+								only if the provider needs one it doesn't advertise — e.g. its own scope for
+								offline/refresh access, or a resource it won't grant unless asked.
+							</p>
+							<input
+								id="srv-oauth-scopes"
+								aria-describedby="srv-oauth-scopes-help"
+								type="text"
+								bind:value={oauthScopes}
+								autocomplete="off"
+								spellcheck="false"
+								placeholder="read write"
+								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							/>
+						</div>
+
+						<!-- Static client credentials: optional. Blank = Dynamic Client Registration. -->
+						<div class="flex flex-col gap-2">
+							<button
+								type="button"
+								onclick={() => (oauthClientOpen = !oauthClientOpen)}
+								class="flex w-fit items-center gap-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
+							>
+								<svg class="size-3.5 transition-transform" style={oauthClientOpen ? 'transform: rotate(90deg);' : ''} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+									<path d="m9 18 6-6-6-6" />
+								</svg>
+								Client credentials (advanced)
+							</button>
+							{#if oauthClientOpen}
+								<div class="flex flex-col gap-2">
+									<input
+										type="text"
+										aria-label="OAuth client ID"
+										bind:value={oauthClientId}
+										autocomplete="off"
+										spellcheck="false"
+										placeholder="Client ID — optional, blank auto-registers"
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+									/>
+									<input
+										type="password"
+										aria-label="OAuth client secret"
+										bind:value={oauthClientSecret}
+										disabled={mode === 'edit' && oauthHasSecret && oauthRemoveSecret}
+										autocomplete="off"
+										spellcheck="false"
+										placeholder={oauthHasSecret ? 'Set — leave blank to keep current' : 'Client secret — optional'}
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+									/>
+									<p class="text-xs text-[var(--color-ink-dim)]">
+										Leave blank to register automatically (Dynamic Client Registration). Fill these
+										in only if the provider issued you a pre-registered client.
+									</p>
+									<label class="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+										<span class="shrink-0 font-medium">Client identity</span>
+										<select
+											bind:value={oauthClientMode}
+											aria-label="OAuth client identity mode"
+											class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-2 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+										>
+											<option value="inherit">inherit (Settings)</option>
+											<option value="auto">auto — probe, fall back to DCR</option>
+											<option value="cimd">CIMD — always offer the URL client id</option>
+											<option value="dcr">DCR — always register a client</option>
+										</select>
+									</label>
+									<p class="text-xs text-[var(--color-ink-dim)]">
+										How the sign-in identifies this instance when no client ID is set above.
+										<span class="font-mono">inherit</span> follows the instance-wide choice on the
+										Settings page; pick one here to override it for this server only.
+									</p>
+									{#if mode === 'edit' && oauthHasSecret}
+										<label class="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+											<input type="checkbox" bind:checked={oauthRemoveSecret} />
+											Remove the stored client secret (switch to a public client)
+										</label>
+									{/if}
+								</div>
+							{/if}
+						</div>
+					</div>
+				{/if}
+			</div>
+		{:else if isDocker}
+			<!-- runner === docker: command = OCI image ref, args = the container's own args.
+			     The backend synthesizes the hardened `docker run …` (see dockerPreview). -->
+			<div class="flex flex-col gap-2">
+				{#if dockerDisabled}
+					<p
+						class="flex items-start gap-2 rounded-lg border px-3 py-2.5 text-xs leading-relaxed"
+						style="border-color: color-mix(in oklab, var(--color-state-failed) 30%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 8%, transparent); color: var(--color-ink-muted);"
+					>
+						<svg class="mt-0.5 size-4 shrink-0 text-[var(--color-state-failed)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+							<path d="M12 9v4M12 17h.01" />
 						</svg>
 						<span>
-							OAuth sessions can expire. Refresh is automatic, but if the provider's refresh
-							window lapses you'll need to re-authenticate here to keep the server working —
-							check on it periodically.
+							The Docker runner is disabled (it's root-equivalent). You can still
+							{mode === 'create' ? 'save this server disabled' : 'edit and save it'} for review — but
+							enable the runner on the
+							<a href="/settings" class="font-medium text-[var(--color-ink)] underline decoration-dotted underline-offset-2">Settings</a>
+							page before starting it.
+							{#if dockerBlocked}
+								<span class="font-medium text-[var(--color-ink)]">Turn off “Start after creating” below to save it now.</span>
+							{/if}
 						</span>
 					</p>
-
-					<div class="flex flex-col gap-2">
-						<label for="srv-oauth-scopes" class="text-xs font-medium text-[var(--color-ink-muted)]">
-							Scopes <span class="text-[var(--color-ink-dim)]">(optional, space-separated)</span>
-						</label>
-						<p id="srv-oauth-scopes-help" class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
-							Usually leave this blank: at sign-in mcpelevator discovers the provider's
-							scopes automatically and requests
-							<span class="font-mono text-[var(--color-ink-muted)]">offline_access</span>
-							so it issues a refresh token (renewed in the background). Add a scope here
-							only if the provider needs one it doesn't advertise — e.g. its own scope for
-							offline/refresh access, or a resource it won't grant unless asked.
-						</p>
-						<input
-							id="srv-oauth-scopes"
-							aria-describedby="srv-oauth-scopes-help"
-							type="text"
-							bind:value={oauthScopes}
-							autocomplete="off"
-							spellcheck="false"
-							placeholder="read write"
-							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-						/>
-					</div>
-
-					<!-- Static client credentials: optional. Blank = Dynamic Client Registration. -->
-					<div class="flex flex-col gap-2">
-						<button
-							type="button"
-							onclick={() => (oauthClientOpen = !oauthClientOpen)}
-							class="flex w-fit items-center gap-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
-						>
-							<svg class="size-3.5 transition-transform" style={oauthClientOpen ? 'transform: rotate(90deg);' : ''} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-								<path d="m9 18 6-6-6-6" />
-							</svg>
-							Client credentials (advanced)
-						</button>
-						{#if oauthClientOpen}
-							<div class="flex flex-col gap-2">
-								<input
-									type="text"
-									aria-label="OAuth client ID"
-									bind:value={oauthClientId}
-									autocomplete="off"
-									spellcheck="false"
-									placeholder="Client ID — optional, blank auto-registers"
-									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-								/>
-								<input
-									type="password"
-									aria-label="OAuth client secret"
-									bind:value={oauthClientSecret}
-									disabled={mode === 'edit' && oauthHasSecret && oauthRemoveSecret}
-									autocomplete="off"
-									spellcheck="false"
-									placeholder={oauthHasSecret ? 'Set — leave blank to keep current' : 'Client secret — optional'}
-									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-								/>
-								<p class="text-xs text-[var(--color-ink-dim)]">
-									Leave blank to register automatically (Dynamic Client Registration). Fill these
-									in only if the provider issued you a pre-registered client.
-								</p>
-								<label class="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
-									<span class="shrink-0 font-medium">Client identity</span>
-									<select
-										bind:value={oauthClientMode}
-										aria-label="OAuth client identity mode"
-										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-2 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
-									>
-										<option value="inherit">inherit (Settings)</option>
-										<option value="auto">auto — probe, fall back to DCR</option>
-										<option value="cimd">CIMD — always offer the URL client id</option>
-										<option value="dcr">DCR — always register a client</option>
-									</select>
-								</label>
-								<p class="text-xs text-[var(--color-ink-dim)]">
-									How the sign-in identifies this instance when no client ID is set above.
-									<span class="font-mono">inherit</span> follows the instance-wide choice on the
-									Settings page; pick one here to override it for this server only.
-								</p>
-								{#if mode === 'edit' && oauthHasSecret}
-									<label class="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
-										<input type="checkbox" bind:checked={oauthRemoveSecret} />
-										Remove the stored client secret (switch to a public client)
-									</label>
-								{/if}
-							</div>
-						{/if}
-					</div>
-				</div>
-			{/if}
-		</div>
-	{:else if isDocker}
-		<!-- runner === docker: command = OCI image ref, args = the container's own args.
-		     The backend synthesizes the hardened `docker run …` (see dockerPreview). -->
-		<div class="flex flex-col gap-2">
-			{#if dockerDisabled}
-				<p
-					class="flex items-start gap-2 rounded-lg border px-3 py-2.5 text-xs leading-relaxed"
-					style="border-color: color-mix(in oklab, var(--color-state-failed) 30%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 8%, transparent); color: var(--color-ink-muted);"
-				>
-					<svg class="mt-0.5 size-4 shrink-0 text-[var(--color-state-failed)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-						<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
-						<path d="M12 9v4M12 17h.01" />
-					</svg>
-					<span>
-						The Docker runner is disabled (it's root-equivalent). You can still
-						{mode === 'create' ? 'save this server disabled' : 'edit and save it'} for review — but
-						enable the runner on the
-						<a href="/settings" class="font-medium text-[var(--color-ink)] underline decoration-dotted underline-offset-2">Settings</a>
-						page before starting it.
-						{#if dockerBlocked}
-							<span class="font-medium text-[var(--color-ink)]">Turn off “Start after creating” below to save it now.</span>
-						{/if}
-					</span>
+				{/if}
+				<label for="srv-image" class="text-sm font-medium text-[var(--color-ink)]">
+					Image
+				</label>
+				<input
+					id="srv-image"
+					type="text"
+					bind:value={command}
+					autocomplete="off"
+					spellcheck="false"
+					placeholder="ghcr.io/github/github-mcp-server"
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				/>
+				<label for="srv-docker-run-args" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
+					Docker run options <span class="text-[var(--color-ink-dim)]">(optional, one per line — before the image)</span>
+				</label>
+				<textarea
+					id="srv-docker-run-args"
+					bind:value={runArgsText}
+					rows="2"
+					spellcheck="false"
+					placeholder="--name&#10;my-mcp&#10;--shm-size=1g"
+					class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				></textarea>
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					Extra <code class="font-mono text-[var(--color-ink-muted)]">docker run</code> flags
+					placed before the image (e.g.
+					<code class="font-mono text-[var(--color-ink-muted)]">--name</code>,
+					<code class="font-mono text-[var(--color-ink-muted)]">--shm-size=1g</code>). They come
+					after mcpelevator's defaults, so repeating a flag (e.g.
+					<code class="font-mono text-[var(--color-ink-muted)]">--memory 2g</code>) overrides it.
+					<code class="font-mono text-[var(--color-ink-muted)]">-e</code>/<code class="font-mono text-[var(--color-ink-muted)]">--env-file</code>
+					and <code class="font-mono text-[var(--color-ink-muted)]">-d</code> aren't allowed here —
+					use <span class="font-medium">Environment</span> below for variables. Note a fixed
+					<code class="font-mono text-[var(--color-ink-muted)]">--name</code> can collide if two
+					sessions of this server overlap (docker rejects duplicate container names).
 				</p>
-			{/if}
-			<label for="srv-image" class="text-sm font-medium text-[var(--color-ink)]">
-				Image
-			</label>
-			<input
-				id="srv-image"
-				type="text"
-				bind:value={command}
-				autocomplete="off"
-				spellcheck="false"
-				placeholder="ghcr.io/github/github-mcp-server"
-				class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-			/>
-			<label for="srv-docker-run-args" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
-				Docker run options <span class="text-[var(--color-ink-dim)]">(optional, one per line — before the image)</span>
-			</label>
-			<textarea
-				id="srv-docker-run-args"
-				bind:value={runArgsText}
-				rows="2"
-				spellcheck="false"
-				placeholder="--name&#10;my-mcp&#10;--shm-size=1g"
-				class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-			></textarea>
-			<p class="text-xs text-[var(--color-ink-dim)]">
-				Extra <code class="font-mono text-[var(--color-ink-muted)]">docker run</code> flags
-				placed before the image (e.g.
-				<code class="font-mono text-[var(--color-ink-muted)]">--name</code>,
-				<code class="font-mono text-[var(--color-ink-muted)]">--shm-size=1g</code>). They come
-				after mcpelevator's defaults, so repeating a flag (e.g.
-				<code class="font-mono text-[var(--color-ink-muted)]">--memory 2g</code>) overrides it.
-				<code class="font-mono text-[var(--color-ink-muted)]">-e</code>/<code class="font-mono text-[var(--color-ink-muted)]">--env-file</code>
-				and <code class="font-mono text-[var(--color-ink-muted)]">-d</code> aren't allowed here —
-				use <span class="font-medium">Environment</span> below for variables. Note a fixed
-				<code class="font-mono text-[var(--color-ink-muted)]">--name</code> can collide if two
-				sessions of this server overlap (docker rejects duplicate container names).
-			</p>
-			<label for="srv-docker-args" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
-				Container arguments <span class="text-[var(--color-ink-dim)]">(optional, one per line — after the image)</span>
-			</label>
-			<textarea
-				id="srv-docker-args"
-				bind:value={argsText}
-				rows="2"
-				spellcheck="false"
-				placeholder="--toolsets&#10;repos"
-				class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-			></textarea>
-			<p class="text-xs text-[var(--color-ink-dim)]">
-				Arguments for the MCP server inside the container. mcpelevator adds the hardening,
-				cleanup and secret-passing flags. Put env/API keys under
-				<span class="font-medium">Environment</span> below — they're passed to the
-				container by name (never embedded in the command).
-			</p>
-		</div>
-	{:else}
-		<!-- runner === command: command + args are the friendly fields -->
-		<div class="flex flex-col gap-2">
-			<label
-				for="srv-command"
-				class="text-sm font-medium text-[var(--color-ink)]"
-			>
-				Command
-			</label>
-			<input
-				id="srv-command"
-				type="text"
-				bind:value={command}
-				oninput={onCommandInput}
-				autocomplete="off"
-				spellcheck="false"
-				placeholder="/usr/local/bin/my-mcp-server"
-				class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-			/>
-			<label
-				for="srv-args"
-				class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]"
-			>
-				Arguments <span class="text-[var(--color-ink-dim)]">(one per line)</span>
-			</label>
-			<textarea
-				id="srv-args"
-				bind:value={argsText}
-				rows="3"
-				spellcheck="false"
-				placeholder="--config&#10;/etc/server.toml"
-				class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-			></textarea>
-		</div>
-	{/if}
-
-	{#if isRemote}
-		<!-- Remote endpoint preview (no local process to spawn) -->
-		<div class="flex flex-col gap-1.5">
-			<span class="text-xs font-medium text-[var(--color-ink-muted)]">Proxies</span>
-			<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
-				{#if command.trim()}
-					<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
-						{transport} → {command.trim()}
-					</code>
-				{:else}
-					<code class="font-mono text-xs text-[var(--color-ink-dim)]">(URL not set)</code>
-				{/if}
+				<label for="srv-docker-args" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
+					Container arguments <span class="text-[var(--color-ink-dim)]">(optional, one per line — after the image)</span>
+				</label>
+				<textarea
+					id="srv-docker-args"
+					bind:value={argsText}
+					rows="2"
+					spellcheck="false"
+					placeholder="--toolsets&#10;repos"
+					class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				></textarea>
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					Arguments for the MCP server inside the container. mcpelevator adds the hardening,
+					cleanup and secret-passing flags. Put env/API keys under
+					<span class="font-medium">Environment</span> below — they're passed to the
+					container by name (never embedded in the command).
+				</p>
 			</div>
-		</div>
-	{:else if isDocker}
-		<!-- Docker: show the hardened `docker run …` the backend synthesizes. -->
-		<div class="flex flex-col gap-1.5">
-			<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
-			<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
-				<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
-					{dockerPreview}
-				</code>
-			</div>
-		</div>
-	{:else}
-		<!-- Resolved command preview -->
-		<div class="flex flex-col gap-1.5">
-			<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
-			<div
-				class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5"
-			>
-				{#if previewCommand}
-					<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
-						{previewCommand}
-					</code>
-				{:else}
-					<code class="font-mono text-xs text-[var(--color-ink-dim)]">
-						(command not set)
-					</code>
-				{/if}
-			</div>
-		</div>
-	{/if}
-
-	<!-- Advanced disclosure: raw launch config + optional pre-start setup. -->
-	<div
-		class="overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]"
-	>
-		<button
-			type="button"
-			onclick={() => (advancedOpen = !advancedOpen)}
-			aria-expanded={advancedOpen}
-			class="flex w-full items-center justify-between gap-3 px-3.5 py-3 text-left transition hover:bg-[var(--color-surface-2)]"
-		>
-			<span class="flex flex-col gap-0.5">
-				<span class="text-sm font-medium text-[var(--color-ink)]">Advanced</span>
-				<span class="text-xs text-[var(--color-ink-dim)]">
-					Setup script{setupAllowed ? ' and raw launch configuration' : ''}
-				</span>
-			</span>
-			<svg
-				class="size-4 shrink-0 text-[var(--color-ink-muted)] transition-transform"
-				style={advancedOpen ? 'transform: rotate(180deg);' : ''}
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="2"
-				stroke-linecap="round"
-				stroke-linejoin="round"
-				aria-hidden="true"
-			>
-				<path d="m6 9 6 6 6-6" />
-			</svg>
-		</button>
-
-		{#if advancedOpen}
-			<div
-				class="flex flex-col gap-3 border-t border-[var(--color-line)] px-3.5 py-3.5"
-			>
-				<div class="flex flex-col gap-1.5">
-					<label for="srv-setup-script" class="text-xs font-medium text-[var(--color-ink-muted)]">
-						Setup script <span class="text-[var(--color-ink-dim)]">(optional)</span>
-					</label>
-					<textarea
-						id="srv-setup-script"
-						bind:value={setupScript}
-						rows="5"
-						spellcheck="false"
-						placeholder="npm install @playwright/test&#10;npx playwright install"
-						aria-describedby={setupBlocked ? 'setup-warning setup-validation' : 'setup-warning'}
-						aria-invalid={setupBlocked}
-						class="resize-y rounded-md border bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
-						style={setupBlocked
-							? 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'
-							: 'border-color: var(--color-line);'}
-					></textarea>
-					{#if setupBlocked}
-						<p id="setup-validation" role="alert" class="text-xs text-[var(--color-state-failed)]">
-							{setupUsesDocker
-								? 'Setup scripts are not supported for Docker servers. Put setup in the image, or clear this field.'
-								: 'Setup scripts are not supported for remote servers. Clear this field.'}
-						</p>
-					{/if}
-					<p id="setup-warning" class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
-						Scripts run with <code class="font-mono text-[var(--color-ink-muted)]">/bin/sh -e -c</code>
-						as the mcpelevator process user. They receive the effective server environment and
-						working directory, are stored as plain config, can modify mounted data, may
-						rerun during recovery, and output appears in logs. Shell-local changes do not carry
-						into the MCP process.
-					</p>
-				</div>
-
-				{#if setupAllowed}
-					<div class="flex flex-col gap-1.5 border-t border-[var(--color-line)] pt-3">
-						<label
-							for="adv-command"
-							class="text-xs font-medium text-[var(--color-ink-muted)]"
-						>
-							command
-						</label>
-						<input
-							id="adv-command"
-							type="text"
-							bind:value={command}
-							oninput={onCommandInput}
-							autocomplete="off"
-							spellcheck="false"
-							class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
-						/>
-					</div>
-					<div class="flex flex-col gap-1.5">
-						<label
-							for="adv-args"
-							class="text-xs font-medium text-[var(--color-ink-muted)]"
-						>
-							args <span class="text-[var(--color-ink-dim)]">(one per line)</span>
-						</label>
-						<textarea
-							id="adv-args"
-							bind:value={argsText}
-							rows="4"
-							spellcheck="false"
-							class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
-						></textarea>
-					</div>
-					{#if friendly}
-						<p class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
-							Editing here overrides the friendly fields above. Changing the
-							package field again will rebuild these.
-						</p>
-					{/if}
-				{/if}
+		{:else}
+			<!-- runner === command: command + args are the friendly fields -->
+			<div class="flex flex-col gap-2">
+				<label
+					for="srv-command"
+					class="text-sm font-medium text-[var(--color-ink)]"
+				>
+					Command
+				</label>
+				<input
+					id="srv-command"
+					type="text"
+					bind:value={command}
+					oninput={onCommandInput}
+					autocomplete="off"
+					spellcheck="false"
+					placeholder="/usr/local/bin/my-mcp-server"
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				/>
+				<label
+					for="srv-args"
+					class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]"
+				>
+					Arguments <span class="text-[var(--color-ink-dim)]">(one per line)</span>
+				</label>
+				<textarea
+					id="srv-args"
+					bind:value={argsText}
+					rows="3"
+					spellcheck="false"
+					placeholder="--config&#10;/etc/server.toml"
+					class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				></textarea>
 			</div>
 		{/if}
-	</div>
 
-	<!-- Environment variables (upstream headers when remote) -->
-	<fieldset class="flex flex-col gap-2 border-0 p-0">
-		<div class="flex items-center justify-between">
-			<legend class="text-sm font-medium text-[var(--color-ink)]">
-				{isRemote ? (oauth ? 'Extra headers' : 'Headers') : 'Environment'}
-			</legend>
+		{#if isRemote}
+			<!-- Remote endpoint preview (no local process to spawn) -->
+			<div class="flex flex-col gap-1.5">
+				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Proxies</span>
+				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
+					{#if command.trim()}
+						<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
+							{transport} → {command.trim()}
+						</code>
+					{:else}
+						<code class="font-mono text-xs text-[var(--color-ink-dim)]">(URL not set)</code>
+					{/if}
+				</div>
+			</div>
+		{:else if isDocker}
+			<!-- Docker: show the hardened `docker run …` the backend synthesizes. -->
+			<div class="flex flex-col gap-1.5">
+				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
+				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
+					<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
+						{dockerPreview}
+					</code>
+				</div>
+			</div>
+		{:else}
+			<!-- Resolved command preview -->
+			<div class="flex flex-col gap-1.5">
+				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
+				<div
+					class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5"
+				>
+					{#if previewCommand}
+						<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
+							{previewCommand}
+						</code>
+					{:else}
+						<code class="font-mono text-xs text-[var(--color-ink-dim)]">
+							(command not set)
+						</code>
+					{/if}
+				</div>
+			</div>
+		{/if}
+
+		<!-- Advanced disclosure: raw launch config + optional pre-start setup. -->
+		<div
+			class="overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]"
+		>
 			<button
 				type="button"
-				onclick={addEnvRow}
-				class="inline-flex items-center gap-1 rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+				onclick={() => (advancedOpen = !advancedOpen)}
+				aria-expanded={advancedOpen}
+				class="flex w-full items-center justify-between gap-3 px-3.5 py-3 text-left transition hover:bg-[var(--color-surface-2)]"
 			>
+				<span class="flex flex-col gap-0.5">
+					<span class="text-sm font-medium text-[var(--color-ink)]">Advanced</span>
+					<span class="text-xs text-[var(--color-ink-dim)]">
+						Setup script{setupAllowed ? ' and raw launch configuration' : ''}
+					</span>
+				</span>
 				<svg
-					class="size-3.5"
+					class="size-4 shrink-0 text-[var(--color-ink-muted)] transition-transform"
+					style={advancedOpen ? 'transform: rotate(180deg);' : ''}
 					viewBox="0 0 24 24"
 					fill="none"
 					stroke="currentColor"
-					stroke-width="2.5"
+					stroke-width="2"
 					stroke-linecap="round"
+					stroke-linejoin="round"
 					aria-hidden="true"
 				>
-					<path d="M12 5v14M5 12h14" />
+					<path d="m6 9 6 6 6-6" />
 				</svg>
-				Add
 			</button>
-		</div>
-		{#if envRows.length === 0}
-			<p
-				class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-3 text-xs text-[var(--color-ink-dim)]"
-			>
-				{isRemote
-					? oauth
-						? 'No extra headers. OAuth supplies the Authorization header; add others only if the upstream needs them.'
-						: 'No headers. Add upstream auth (e.g. Authorization) the remote endpoint needs.'
-					: 'No environment variables. Add API keys or config the server needs.'}
-			</p>
-		{:else}
-			<div class="flex flex-col gap-2">
-				{#each envRows as row (row.id)}
-					<div class="flex items-center gap-2">
-						<input
-							type="text"
-							bind:value={row.key}
-							autocomplete="off"
+
+			{#if advancedOpen}
+				<div
+					class="flex flex-col gap-3 border-t border-[var(--color-line)] px-3.5 py-3.5"
+				>
+					<div class="flex flex-col gap-1.5">
+						<label for="srv-setup-script" class="text-xs font-medium text-[var(--color-ink-muted)]">
+							Setup script <span class="text-[var(--color-ink-dim)]">(optional)</span>
+						</label>
+						<textarea
+							id="srv-setup-script"
+							bind:value={setupScript}
+							rows="5"
 							spellcheck="false"
-							placeholder="KEY"
-							aria-label="Environment variable name"
-							class="w-2/5 rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-						/>
-						<input
-							type="text"
-							bind:value={row.value}
-							autocomplete="off"
-							spellcheck="false"
-							placeholder="value"
-							aria-label="Environment variable value"
-							class="min-w-0 flex-1 rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-						/>
-						<button
-							type="button"
-							onclick={() => removeEnvRow(row.id)}
-							aria-label="Remove variable"
-							class="shrink-0 rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1.5 text-[var(--color-ink-dim)] transition hover:border-[var(--color-state-failed)] hover:text-[var(--color-state-failed)]"
-						>
-							<svg
-								class="size-3.5"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2"
-								stroke-linecap="round"
-								aria-hidden="true"
-							>
-								<path d="M18 6 6 18M6 6l12 12" />
-							</svg>
-						</button>
+							placeholder="npm install @playwright/test&#10;npx playwright install"
+							aria-describedby={setupBlocked ? 'setup-warning setup-validation' : 'setup-warning'}
+							aria-invalid={setupBlocked}
+							class="resize-y rounded-md border bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+							style={setupBlocked
+								? 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'
+								: 'border-color: var(--color-line);'}
+						></textarea>
+						{#if setupBlocked}
+							<p id="setup-validation" role="alert" class="text-xs text-[var(--color-state-failed)]">
+								{setupUsesDocker
+									? 'Setup scripts are not supported for Docker servers. Put setup in the image, or clear this field.'
+									: 'Setup scripts are not supported for remote servers. Clear this field.'}
+							</p>
+						{/if}
+						<p id="setup-warning" class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
+							Scripts run with <code class="font-mono text-[var(--color-ink-muted)]">/bin/sh -e -c</code>
+							as the mcpelevator process user. They receive the effective server environment and
+							working directory, are stored as plain config, can modify mounted data, may
+							rerun during recovery, and output appears in logs. Shell-local changes do not carry
+							into the MCP process.
+						</p>
 					</div>
-				{/each}
+
+					{#if setupAllowed}
+						<div class="flex flex-col gap-1.5 border-t border-[var(--color-line)] pt-3">
+							<label
+								for="adv-command"
+								class="text-xs font-medium text-[var(--color-ink-muted)]"
+							>
+								command
+							</label>
+							<input
+								id="adv-command"
+								type="text"
+								bind:value={command}
+								oninput={onCommandInput}
+								autocomplete="off"
+								spellcheck="false"
+								class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+							/>
+						</div>
+						<div class="flex flex-col gap-1.5">
+							<label
+								for="adv-args"
+								class="text-xs font-medium text-[var(--color-ink-muted)]"
+							>
+								args <span class="text-[var(--color-ink-dim)]">(one per line)</span>
+							</label>
+							<textarea
+								id="adv-args"
+								bind:value={argsText}
+								rows="4"
+								spellcheck="false"
+								class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+							></textarea>
+						</div>
+						{#if friendly}
+							<p class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
+								Editing here overrides the friendly fields above. Changing the
+								package field again will rebuild these.
+							</p>
+						{/if}
+					{/if}
+				</div>
+			{/if}
+		</div>
+
+		<!-- Environment variables (upstream headers when remote) -->
+		<fieldset class="flex flex-col gap-2 border-0 p-0">
+			<div class="flex items-center justify-between">
+				<legend class="text-sm font-medium text-[var(--color-ink)]">
+					{isRemote ? (oauth ? 'Extra headers' : 'Headers') : 'Environment'}
+				</legend>
+				<button
+					type="button"
+					onclick={addEnvRow}
+					class="inline-flex items-center gap-1 rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+				>
+					<svg
+						class="size-3.5"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.5"
+						stroke-linecap="round"
+						aria-hidden="true"
+					>
+						<path d="M12 5v14M5 12h14" />
+					</svg>
+					Add
+				</button>
+			</div>
+			{#if envRows.length === 0}
+				<p
+					class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-3 text-xs text-[var(--color-ink-dim)]"
+				>
+					{isRemote
+						? oauth
+							? 'No extra headers. OAuth supplies the Authorization header; add others only if the upstream needs them.'
+							: 'No headers. Add upstream auth (e.g. Authorization) the remote endpoint needs.'
+						: 'No environment variables. Add API keys or config the server needs.'}
+				</p>
+			{:else}
+				<div class="flex flex-col gap-2">
+					{#each envRows as row (row.id)}
+						<div class="flex items-center gap-2">
+							<input
+								type="text"
+								bind:value={row.key}
+								autocomplete="off"
+								spellcheck="false"
+								placeholder="KEY"
+								aria-label="Environment variable name"
+								class="w-2/5 rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							/>
+							<input
+								type="text"
+								bind:value={row.value}
+								autocomplete="off"
+								spellcheck="false"
+								placeholder="value"
+								aria-label="Environment variable value"
+								class="min-w-0 flex-1 rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							/>
+							<button
+								type="button"
+								onclick={() => removeEnvRow(row.id)}
+								aria-label="Remove variable"
+								class="shrink-0 rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1.5 text-[var(--color-ink-dim)] transition hover:border-[var(--color-state-failed)] hover:text-[var(--color-state-failed)]"
+							>
+								<svg
+									class="size-3.5"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									aria-hidden="true"
+								>
+									<path d="M18 6 6 18M6 6l12 12" />
+								</svg>
+							</button>
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</fieldset>
+
+		<!-- Working directory (not applicable to a remote upstream or a docker container) -->
+		{#if !isRemote && !isDocker}
+			<div class="flex flex-col gap-2">
+				<label for="srv-cwd" class="text-sm font-medium text-[var(--color-ink)]">
+					Working directory <span class="font-normal text-[var(--color-ink-dim)]">(optional)</span>
+				</label>
+				<input
+					id="srv-cwd"
+					type="text"
+					bind:value={cwd}
+					autocomplete="off"
+					spellcheck="false"
+					placeholder="/path/to/project"
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				/>
 			</div>
 		{/if}
-	</fieldset>
-
-	<!-- Working directory (not applicable to a remote upstream or a docker container) -->
-	{#if !isRemote && !isDocker}
-		<div class="flex flex-col gap-2">
-			<label for="srv-cwd" class="text-sm font-medium text-[var(--color-ink)]">
-				Working directory <span class="font-normal text-[var(--color-ink-dim)]">(optional)</span>
-			</label>
-			<input
-				id="srv-cwd"
-				type="text"
-				bind:value={cwd}
-				autocomplete="off"
-				spellcheck="false"
-				placeholder="/path/to/project"
-				class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-			/>
-		</div>
 	{/if}
 
 	<!-- Exposure toggles -->
@@ -1228,28 +1241,30 @@
 				></span>
 			</span>
 		</label>
-		<label
-			class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
-		>
-			<span class="flex flex-col gap-0.5">
-				<span class="text-sm font-medium text-[var(--color-ink)]">REST / OpenAPI</span>
-				<span class="text-xs text-[var(--color-ink-dim)]">
-					Also serve each tool as plain REST
-					(<code class="font-mono">POST /s/&lt;slug&gt;/rest/&lt;tool&gt;</code>) with a
-					generated OpenAPI document — for curl, automation, and GPT Actions.
-				</span>
-			</span>
-			<input type="checkbox" bind:checked={restOpenapi} class="peer sr-only" />
-			<span
-				class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
-				style="background-color: {restOpenapi ? '' : 'var(--color-line-strong)'};"
+		{#if !isBuiltin}
+			<label
+				class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
 			>
+				<span class="flex flex-col gap-0.5">
+					<span class="text-sm font-medium text-[var(--color-ink)]">REST / OpenAPI</span>
+					<span class="text-xs text-[var(--color-ink-dim)]">
+						Also serve each tool as plain REST
+						(<code class="font-mono">POST /s/&lt;slug&gt;/rest/&lt;tool&gt;</code>) with a
+						generated OpenAPI document — for curl, automation, and GPT Actions.
+					</span>
+				</span>
+				<input type="checkbox" bind:checked={restOpenapi} class="peer sr-only" />
 				<span
-					class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
-					style={restOpenapi ? 'transform: translateX(16px);' : ''}
-				></span>
-			</span>
-		</label>
+					class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
+					style="background-color: {restOpenapi ? '' : 'var(--color-line-strong)'};"
+				>
+					<span
+						class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
+						style={restOpenapi ? 'transform: translateX(16px);' : ''}
+					></span>
+				</span>
+			</label>
+		{/if}
 		<!-- Compatibility escape hatch: the MCP TypeScript SDK hardcodes a draft-07
 		     $schema with no config option, which a strict client's 2020-12-only
 		     validator refuses outright (issue #123). -->
@@ -1285,7 +1300,7 @@
 		</label>
 		<!-- A stdio child is one connection shared by every client, and a request it sends
 		     back names no caller — so by default those are refused (issue #143). -->
-		{#if !isRemote}
+		{#if !isRemote && !isBuiltin}
 			<label
 				class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
 			>
@@ -1352,7 +1367,7 @@
 		<div
 			class="grid grid-cols-2 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1 sm:grid-cols-4"
 		>
-			{#each AUTH_OPTIONS as opt (opt.value)}
+			{#each isBuiltin ? AUTH_OPTIONS.filter((o) => o.value === 'none' || o.value === 'bearer') : AUTH_OPTIONS as opt (opt.value)}
 				<label
 					class="flex cursor-pointer items-center justify-center rounded-md px-3 py-1.5 font-mono text-xs font-semibold transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
 					style={authProvider === opt.value

@@ -207,17 +207,41 @@
 									{onerror}
 								/>
 							{/if}
-							<button
-								type="button"
-								role="menuitem"
-								onclick={doClone}
-								disabled={cloning}
-								aria-busy={cloning}
-								class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-[var(--color-ink-muted)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
-							>
-								{#if cloning}
-									{@render spinner('size-4')}
-								{:else}
+							{#if server.runner !== 'mcpelevator'}
+								<button
+									type="button"
+									role="menuitem"
+									onclick={doClone}
+									disabled={cloning}
+									aria-busy={cloning}
+									class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-[var(--color-ink-muted)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
+								>
+									{#if cloning}
+										{@render spinner('size-4')}
+									{:else}
+										<svg
+											class="size-4"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											aria-hidden="true"
+										>
+											<rect x="9" y="9" width="11" height="11" rx="2" />
+											<path d="M5 15V5a2 2 0 0 1 2-2h10" />
+										</svg>
+									{/if}
+									Clone
+								</button>
+								<button
+									type="button"
+									role="menuitem"
+									onclick={() => (confirmDelete = true)}
+									class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition hover:bg-[color-mix(in_oklab,var(--color-state-failed)_12%,transparent)]"
+									style="color: var(--color-state-failed);"
+								>
 									<svg
 										class="size-4"
 										viewBox="0 0 24 24"
@@ -228,33 +252,11 @@
 										stroke-linejoin="round"
 										aria-hidden="true"
 									>
-										<rect x="9" y="9" width="11" height="11" rx="2" />
-										<path d="M5 15V5a2 2 0 0 1 2-2h10" />
+										<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
 									</svg>
-								{/if}
-								Clone
-							</button>
-							<button
-								type="button"
-								role="menuitem"
-								onclick={() => (confirmDelete = true)}
-								class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition hover:bg-[color-mix(in_oklab,var(--color-state-failed)_12%,transparent)]"
-								style="color: var(--color-state-failed);"
-							>
-								<svg
-									class="size-4"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="2"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									aria-hidden="true"
-								>
-									<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-								</svg>
-								Delete
-							</button>
+									Delete
+								</button>
+							{/if}
 						{:else}
 							<div class="flex flex-col gap-2 px-3 py-2.5">
 								<p class="text-xs leading-snug text-[var(--color-ink)]">

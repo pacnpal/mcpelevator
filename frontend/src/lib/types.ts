@@ -2,7 +2,8 @@
 // These mirror the FastAPI backend's response shapes exactly (verified against
 // the live backend's OpenAPI schema at /openapi.json).
 
-export type Runner = 'npx' | 'uvx' | 'command' | 'docker' | 'remote';
+/** `mcpelevator` is the built-in control-plane server: provisioned, never created. */
+export type Runner = 'npx' | 'uvx' | 'command' | 'docker' | 'remote' | 'mcpelevator';
 
 export type ServerState =
 	| 'stopped'
@@ -501,6 +502,8 @@ export interface SettingsInfo {
 	usage_retention_days: number;
 	/** Upstream-OAuth client identity: probed CIMD with DCR fallback, or an explicit pick. */
 	upstream_oauth_client_mode: UpstreamOauthClientMode;
+	/** The built-in mcpelevator MCP server's global switch (that server's `enabled`). */
+	control_mcp: boolean;
 }
 
 /** A group's members: the wildcard "*" (every registered server, present and
@@ -552,6 +555,8 @@ export interface UserInfo {
 	name: string;
 	role: 'admin' | 'member';
 	local_runners: boolean;
+	/** May this user drive the control plane through the built-in mcpelevator MCP server? */
+	control_mcp: boolean;
 	servers_count: number;
 	tokens_count: number;
 	created_at: string;

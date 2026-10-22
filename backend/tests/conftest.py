@@ -9,6 +9,8 @@ import os
 import tempfile
 
 os.environ.setdefault("MCPE_DATA_DIR", tempfile.mkdtemp(prefix="mcpe-tests-"))
+# Tests count and spawn servers; the built-in one is provisioned explicitly where tested.
+os.environ.setdefault("MCPE_CONTROL_MCP", "false")
 
 import pytest  # noqa: E402
 from sqlmodel import Session  # noqa: E402  (the env pin above must precede app imports)

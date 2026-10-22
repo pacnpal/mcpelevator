@@ -25,6 +25,9 @@ def utcnow() -> datetime:
 # --- enums kept as plain string constants for deterministic SQLite storage ---
 
 RUNNERS = ("npx", "uvx", "command", "docker", "remote")
+# The built-in control-plane server (app.control_mcp): provisioned on boot, exactly one
+# row, never creatable through the API, so deliberately NOT in RUNNERS.
+BUILTIN_RUNNER = "mcpelevator"
 # Control-plane roles. "admin" sees and manages everything; "member" sees only the
 # servers/tokens they own. Plain strings (not Enum) for deterministic SQLite storage.
 ROLES = ("admin", "member")
@@ -51,6 +54,10 @@ class User(SQLModel, table=True):
     name: str
     role: str = "member"  # one of ROLES
     local_runners: bool = True
+    # May this user drive the control plane through the built-in mcpelevator MCP
+    # server? Admin-set, like local_runners; the global switch is that server's own
+    # ``enabled`` flag.
+    control_mcp: bool = True
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

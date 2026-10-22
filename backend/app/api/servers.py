@@ -17,6 +17,7 @@ from datetime import timezone
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
 from sqlmodel import Session
 from starlette.responses import Response, StreamingResponse
 
@@ -45,7 +46,8 @@ from app.auth.principal import Principal, current_principal
 from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
 from app.db import get_engine, get_session, repo
-from app.db.models import Server
+from app.db.models import BUILTIN_RUNNER, Server
+from app.runners.builtin import ORIGINAL_HOST_HEADER
 from app.groups import registry as group_registry
 from app.registry import service
 from app.registry import settings as runtime_settings
@@ -434,6 +436,12 @@ async def update_server(
     if owner_change_requested:
         if not principal.is_admin:
             raise HTTPException(status_code=403, detail="only admins may reassign owners")
+        if existing_row.runner == BUILTIN_RUNNER:
+            # An owner gets lifecycle access, and this row's enabled flag IS the
+            # admin-only control_mcp setting.
+            raise HTTPException(
+                status_code=400, detail="the built-in mcpelevator server stays admin-owned"
+            )
         if new_owner is not None and repo.get_user(session, new_owner) is None:
             raise HTTPException(status_code=400, detail=f"unknown user {new_owner!r}")
 
@@ -623,7 +631,11 @@ async def delete_server(
     session: Session = Depends(get_session),
     principal: Principal = Depends(current_principal),
 ):
-    _visible(principal, session, server_id)
+    if _visible(principal, session, server_id).runner == BUILTIN_RUNNER:
+        raise HTTPException(
+            status_code=409,
+            detail="the built-in mcpelevator server can't be deleted, disable it instead",
+        )
     sup = request.app.state.supervisor
     sup.cancel_activation_request(server_id)
     await sup.stop(server_id)  # tear down the process before removing desired state
@@ -963,7 +975,9 @@ async def import_servers(
     )
 
 
-async def _call_bridge_tool(url: str, name: str, arguments: dict, timeout: float):
+async def _call_bridge_tool(
+    url: str, name: str, arguments: dict, timeout: float, headers: dict | None = None
+):
     """One playground invocation against a bridge's loopback MCP endpoint.
 
     A fresh short-lived FastMCP client session per call — matching the bridge's own
@@ -972,7 +986,8 @@ async def _call_bridge_tool(url: str, name: str, arguments: dict, timeout: float
     (isError) as data rather than an exception; transport failures still raise.
     Module-level so tests can monkeypatch the bridge hop."""
     async with asyncio.timeout(timeout + 5):  # backstop over the per-call timeout
-        async with Client(url, timeout=timeout) as client:
+        transport = StreamableHttpTransport(url, headers=headers or {})
+        async with Client(transport, timeout=timeout) as client:
             return await client.call_tool(
                 name, arguments, timeout=timeout, raise_on_error=False
             )
@@ -993,11 +1008,19 @@ async def call_server_tool(
     trying a tool never needs a data-plane bearer token. MCP error semantics are
     mirrored: a tool's own failure comes back as ``is_error`` in a 200, while an
     unreachable/broken bridge is a 502 and a timeout a 504."""
-    _visible(principal, session, server_id)
+    server = _visible(principal, session, server_id)
     sup = request.app.state.supervisor
     unit = sup.unit(server_id)
     if unit is None or unit.state != "running" or unit.port is None:
         raise HTTPException(status_code=409, detail="server is not running")
+    # The built-in server's tools authorize as the caller (app.runners.builtin), so
+    # its bridge needs the caller's credential. No other bridge ever gets it.
+    extra = {}
+    if server.runner == BUILTIN_RUNNER and request.headers.get("authorization"):
+        extra["headers"] = {
+            "authorization": request.headers["authorization"],
+            ORIGINAL_HOST_HEADER: request.headers.get("host", ""),
+        }
     if not any(t.get("name") == tool_name for t in unit.tools or []):
         raise HTTPException(status_code=404, detail=f"tool {tool_name!r} not found")
     timeout = min(max(float(payload.timeout_s), 1.0), 300.0)
@@ -1008,7 +1031,7 @@ async def call_server_tool(
     sup.request_started(server_id)
     try:
         result = await _call_bridge_tool(
-            f"http://{unit.host}:{unit.port}/mcp", tool_name, payload.arguments, timeout
+            f"http://{unit.host}:{unit.port}/mcp", tool_name, payload.arguments, timeout, **extra
         )
     except (asyncio.TimeoutError, TimeoutError) as exc:
         raise HTTPException(

@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     # MCPE_DOCKER_RUNNER=true. Seeds only when the setting has never been written; the
     # Settings UI is authoritative afterwards.
     docker_runner: bool = False
+    # Provision the built-in mcpelevator MCP server (the control plane as MCP, at
+    # /s/mcpelevator/mcp) on boot when it's missing. MCPE_CONTROL_MCP=false skips that;
+    # an existing one is left as is. Turn it off in Settings instead.
+    control_mcp: bool = True
 
     # --- data / persistence ---
     data_dir: Path = Path("./data")

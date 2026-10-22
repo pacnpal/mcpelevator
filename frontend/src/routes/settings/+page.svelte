@@ -1208,6 +1208,14 @@
 											local runners
 										</span>
 									{/if}
+									{#if !user.control_mcp}
+										<span
+											class="shrink-0 rounded-full border border-[var(--color-line)] px-2 py-0.5 text-[10px] font-medium whitespace-nowrap text-[var(--color-ink-muted)]"
+											title="Can't use the built-in mcpelevator MCP server"
+										>
+											no control MCP
+										</span>
+									{/if}
 								</span>
 								<span class="text-xs text-[var(--color-ink-dim)]">
 									{user.servers_count} server{user.servers_count === 1 ? '' : 's'} ·
@@ -1259,6 +1267,14 @@
 										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
 									>
 										{user.local_runners ? 'Revoke local runners' : 'Allow local runners'}
+									</button>
+									<button
+										type="button"
+										onclick={() => patchUser(user, { control_mcp: !user.control_mcp })}
+										disabled={busyUserId !== null}
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+									>
+										{user.control_mcp ? 'Revoke control MCP' : 'Allow control MCP'}
 									</button>
 									<button
 										type="button"
@@ -1616,6 +1632,35 @@
 						</div>
 					</div>
 				{/if}
+			</fieldset>
+
+			<!-- Built-in mcpelevator MCP server (the control plane as MCP) -->
+			<fieldset class="flex flex-col gap-2 border-0 p-0">
+				<legend class="text-sm font-medium text-[var(--color-ink)]">mcpelevator MCP server</legend>
+				<label
+					class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+				>
+					<input
+						type="checkbox"
+						checked={settings.control_mcp}
+						onchange={(e) =>
+							patchSettings({ control_mcp: e.currentTarget.checked }, 'control_mcp')}
+						disabled={savingField !== null}
+						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+					/>
+					<span class="flex flex-col gap-0.5">
+						<span class="text-sm font-medium text-[var(--color-ink)]">
+							Serve the control plane as an MCP server
+						</span>
+						<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+							Lets an agent manage servers, groups, tokens, users and settings through the
+							built-in <code class="font-mono">mcpelevator</code> server on the dashboard, where it
+							is edited like any other server (hide or rename tools, auth, idle). Every tool call
+							runs with the caller's own permissions; with control-plane auth on, connect with a
+							login (control) token. Individual users can be excluded under Users.
+						</span>
+					</span>
+				</label>
 			</fieldset>
 
 			<!-- Idle shutdown (wake-on-request) -->

@@ -62,6 +62,13 @@ class ProcessSpec:
     # reach the operator-declared vars, never the elevator's own secrets (admin token,
     # DB creds). Harmless for other stdio runners, so it stays a plain opt-in flag.
     minimal_env: bool = False
+    # Forward the caller's Authorization (and other request headers) to a remote
+    # upstream. Off for every real upstream, since it would disclose the caller's credential,
+    # and on only for the built-in server, whose upstream is this control plane itself.
+    forward_authorization: bool = False
+    # MCP server instructions for the bridge to answer initialize with (the built-in
+    # server's; a real upstream's never reach a proxy). Empty = none.
+    instructions: str = ""
 
 
 Builder = Callable[[Server], ProcessSpec]

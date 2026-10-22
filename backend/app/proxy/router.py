@@ -29,6 +29,8 @@ from app import usage
 from app.auth.middleware import enforce
 from app.config import get_settings
 from app.db import get_engine, repo
+from app.db.models import BUILTIN_RUNNER
+from app.runners.builtin import ORIGINAL_HOST_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +136,12 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
         query = request.url.query
         target = f"http://{host}:{port}/{path}" + (f"?{query}" if query else "")
         body = await request.body()
-        fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
+        fwd_headers = {
+            k: v for k, v in request.headers.items()
+            if k.lower() not in _HOP and k.lower() != ORIGINAL_HOST_HEADER
+        }
+        if server.runner == BUILTIN_RUNNER:
+            fwd_headers[ORIGINAL_HOST_HEADER] = request.headers.get("host", "")
 
         client: httpx.AsyncClient = request.app.state.http
         upstream = await client.send(
