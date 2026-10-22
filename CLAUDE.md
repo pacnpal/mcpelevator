@@ -95,7 +95,7 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   switch is `User.control_mcp`. `/api/mcp` checks both on every request.
 - **Debug mode** (`debug.py`, `MCPE_DEBUG=true`): deliberately maximal. TRACE logging for every
   logger in the control plane and every bridge (they inherit the env; bridges also run uvicorn at
-  `trace`), SQL with parameters, `TraceMiddleware` logging each request's arrival, headers, body,
+  `trace`), every SQL statement (values hidden by `hide_parameters`), `TraceMiddleware` logging each request's arrival, headers, body,
   response start, every streamed chunk and a summary, excepthooks + faulthandler + asyncio debug,
   and the admin-only `GET /api/debug` bundle. Every line passes through `debug.scrub` (and headers
   through `debug.fingerprint`): never log a usable credential. Off, none of it is installed and the

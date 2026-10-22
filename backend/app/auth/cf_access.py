@@ -53,15 +53,28 @@ def _keys(team: str) -> jwt.PyJWKClient:
 # this: otherwise every junk assertion would cost a blocking outbound request.
 _REFETCH_S = 300.0
 _last_refetch: dict[str, float] = {}
+# After a failed fetch (the certs endpoint down or slow), refuse for this long
+# instead of letting every queued assertion block on another doomed fetch.
+_FAILED_BACKOFF_S = 30.0
+_last_failure: dict[str, float] = {}
+
+
+def _fetch(team: str, *, refresh: bool) -> dict[str, Any]:
+    if time.monotonic() - _last_failure.get(team, -_FAILED_BACKOFF_S) < _FAILED_BACKOFF_S:
+        raise jwt.PyJWKClientConnectionError("Cloudflare's signing keys were unreachable moments ago")
+    try:
+        return {k.key_id: k.key for k in _keys(team).get_signing_keys(refresh=refresh)}
+    except jwt.PyJWKClientConnectionError:
+        _last_failure[team] = time.monotonic()
+        raise
 
 
 def _signing_key(team: str, token: str) -> Any:
     kid = jwt.get_unverified_header(token).get("kid")
-    client = _keys(team)
-    keys = {k.key_id: k.key for k in client.get_signing_keys()}
+    keys = _fetch(team, refresh=False)
     if kid not in keys and time.monotonic() - _last_refetch.get(team, -_REFETCH_S) >= _REFETCH_S:
         _last_refetch[team] = time.monotonic()
-        keys = {k.key_id: k.key for k in client.get_signing_keys(refresh=True)}
+        keys = _fetch(team, refresh=True)
     if kid not in keys:
         raise jwt.InvalidTokenError("signed with a key the team doesn't publish")
     return keys[kid]

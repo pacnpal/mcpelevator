@@ -554,6 +554,7 @@ def cf(monkeypatch):
 
     monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(get_signing_keys=get_signing_keys))
     monkeypatch.setattr(cf_access, "_last_refetch", {})
+    monkeypatch.setattr(cf_access, "_last_failure", {})
 
     def assertion(email: str, aud: str = "aud-1", kid: str = "k1", exp: int = 60,
                   iss: str = "https://team.example") -> dict:
@@ -654,3 +655,30 @@ def test_unknown_signing_key_refetches_at_most_once_per_window(cf):
         assert cf_access.email(request(cf("ada@example.com", kid="junk"))) is None
     assert cf.fetches.count(True) == 1  # junk kids can't force a fetch per request
     assert cf_access.email(request(cf("ada@example.com"))) == "ada@example.com"
+
+
+def test_unreachable_signing_keys_back_off_instead_of_blocking_each_request(monkeypatch, cf):
+    from types import SimpleNamespace
+
+    import jwt
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    calls = []
+
+    def down(refresh: bool = False):
+        calls.append(refresh)
+        raise jwt.PyJWKClientConnectionError("timed out")
+
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(get_signing_keys=down))
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+    for _ in range(5):
+        assert cf_access.email(req) is None
+    assert len(calls) == 1  # one blocking attempt, then the backoff answers
+
+
+def test_sql_logging_never_shows_bound_values():
+    from app.db import get_engine
+
+    assert get_engine().hide_parameters is True

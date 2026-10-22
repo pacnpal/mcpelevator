@@ -4,7 +4,7 @@ It is as verbose as it can be on purpose. When it's on:
 - Every logger in the process logs at TRACE (below DEBUG) to stderr with a timestamp,
   logger name and thread: mcpelevator itself, FastMCP, the MCP SDK (every JSON-RPC
   message), httpx and httpcore (every outbound connection), uvicorn (every connection),
-  SSE framing, and every SQL statement with its parameters. Bridges inherit the
+  SSE framing, and every SQL statement (bound values hidden). Bridges inherit the
   variable, so each server's own log (the one the UI shows) gets the same detail.
 - Every HTTP request is traced: a line when it arrives (method, path, query, peer,
   headers, body), a line when the response starts (status, headers), a line per
@@ -54,8 +54,8 @@ RECORDS: collections.deque = collections.deque(maxlen=5000)
 
 TRACE = 5  # uvicorn's level below DEBUG (connection lifecycle)
 _FORMAT = "%(asctime)s %(levelname)s %(name)s [%(threadName)s]: %(message)s"
-# INFO is where SQLAlchemy logs each statement and its parameters; DEBUG adds every
-# fetched row, which is the data itself rather than what happened to it.
+# INFO is where SQLAlchemy logs each statement (the engine hides bound values); DEBUG adds every
+# fetched row, which is the data itself, secrets included, rather than what happened to it.
 _LEVELS = {"sqlalchemy.engine": logging.INFO, "sqlalchemy.pool": logging.DEBUG}
 _SECRET_WORDS = ("token", "secret", "password", "key", "assertion", "cookie", "authorization")
 _BODY_LIMIT = 16384
