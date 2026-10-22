@@ -77,7 +77,10 @@ def _seg(value: str) -> str:
 
 
 _READ = {"readOnlyHint": True, "openWorldHint": False}
-_WRITE = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False}
+# Purely additive writes (create, start). Anything that overwrites or stops uses
+# _WRITE, which leaves destructiveHint out: absent means "may be destructive".
+_ADD = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False}
+_WRITE = {"readOnlyHint": False, "openWorldHint": False}
 _DESTRUCTIVE = {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False}
 
 
@@ -162,7 +165,7 @@ def build(app: FastAPI) -> "_Gate":
         status, tools, and its /s/<slug> URLs."""
         return await api("GET", f"/api/servers/{_seg(server_id)}")
 
-    @mcp.tool(annotations=_WRITE)
+    @mcp.tool(annotations=_ADD)
     async def create_server(spec: ServerCreate) -> Any:
         """Register a server. ``runner`` is one of npx, uvx, command, remote (``command``
         is then the upstream MCP URL), or docker (``command`` is the image). Created
@@ -182,18 +185,18 @@ def build(app: FastAPI) -> "_Gate":
         """Stop and permanently delete a server, its tokens, and its group memberships."""
         return await api("DELETE", f"/api/servers/{_seg(server_id)}")
 
-    @mcp.tool(annotations=_WRITE)
+    @mcp.tool(annotations=_ADD)
     async def clone_server(server_id: str, name: Optional[str] = None) -> Any:
         """Copy a server's configuration into a new, disabled server."""
         return await api("POST", f"/api/servers/{_seg(server_id)}/clone", json={"name": name})
 
-    @mcp.tool(annotations=_WRITE)
+    @mcp.tool(annotations=_ADD)
     async def import_servers(config: dict) -> Any:
         """Bulk-create from a standard ``{"mcpServers": {...}}`` config (as used by
         Claude Desktop and others). Imported servers start disabled."""
         return await api("POST", "/api/servers/import", json=config)
 
-    @mcp.tool(annotations=_WRITE)
+    @mcp.tool(annotations=_ADD)
     async def enable_server(server_id: str) -> Any:
         """Set a server desired-running; the supervisor starts it."""
         return await api("POST", f"/api/servers/{_seg(server_id)}/enable")
@@ -203,7 +206,7 @@ def build(app: FastAPI) -> "_Gate":
         """Set a server desired-stopped; the supervisor stops it."""
         return await api("POST", f"/api/servers/{_seg(server_id)}/disable")
 
-    @mcp.tool(annotations=_WRITE)
+    @mcp.tool(annotations=_ADD)
     async def retry_server(server_id: str) -> Any:
         """Start a fresh activation of a failed server."""
         return await api("POST", f"/api/servers/{_seg(server_id)}/retry")
@@ -254,7 +257,8 @@ def build(app: FastAPI) -> "_Gate":
             principal = principal_mod.resolve(get_http_request(), session)
         if principal is None or not servers_api._visible_now(server_id, principal):
             raise ToolError("404: server not found")
-        return {"running": True, "state": unit.state, "lines": lines}
+        # A retained failed/unhealthy unit still has logs but isn't serving.
+        return {"running": unit.state == "running", "state": unit.state, "lines": lines}
 
     @mcp.tool(annotations=_READ)
     async def wait_for_server(
@@ -287,7 +291,7 @@ def build(app: FastAPI) -> "_Gate":
         and a series."""
         return await api("GET", f"/api/servers/{_seg(server_id)}/usage", params={"days": days})
 
-    @mcp.tool(annotations=_WRITE)
+    @mcp.tool(annotations=_ADD)
     async def start_server_oauth(server_id: str) -> Any:
         """Begin the upstream OAuth sign-in for a remote server with ``oauth`` on.
         Returns the authorization URL a human must open in a browser to finish it."""
@@ -328,7 +332,7 @@ def build(app: FastAPI) -> "_Gate":
         """Tokens visible to the caller (prefix and scope only, never the secret)."""
         return await api("GET", "/api/tokens")
 
-    @mcp.tool(annotations=_WRITE)
+    @mcp.tool(annotations=_ADD)
     async def create_token(name: str, scope: str = "all") -> Any:
         """Mint a token. ``scope``: "all" (every bearer-protected server), a server id,
         "group:<name>", or "control" (control plane). The plaintext is returned once."""
@@ -346,7 +350,7 @@ def build(app: FastAPI) -> "_Gate":
         """Every user with role, local-runner permission, and owned server/token counts."""
         return await api("GET", "/api/users")
 
-    @mcp.tool(annotations=_WRITE)
+    @mcp.tool(annotations=_ADD)
     async def create_user(
         name: str, role: Role = "member", local_runners: bool = False, control_mcp: bool = True
     ) -> Any:
@@ -380,7 +384,7 @@ def build(app: FastAPI) -> "_Gate":
         """Delete a user and their tokens (refused while they still own servers)."""
         return await api("DELETE", f"/api/users/{_seg(user_id)}")
 
-    @mcp.tool(annotations=_WRITE)
+    @mcp.tool(annotations=_ADD)
     async def create_user_credential(user_id: str) -> Any:
         """Mint a control-plane login token for a user; the plaintext is returned once."""
         return await api("POST", f"/api/users/{_seg(user_id)}/credentials")
@@ -421,7 +425,7 @@ def build(app: FastAPI) -> "_Gate":
         """The published versions of a catalog entry."""
         return await api("GET", "/api/catalog/server/versions", params={"id": id, "source": source})
 
-    @mcp.tool(annotations={**_WRITE, "openWorldHint": True})
+    @mcp.tool(annotations={**_ADD, "openWorldHint": True})
     async def install_from_catalog(
         id: str,
         source: Optional[str] = None,

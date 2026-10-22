@@ -174,6 +174,8 @@ def test_builtin_row_guards(client):
     assert client.patch(url, json={"auth_provider": "oauth"}, headers=LOOPBACK).status_code == 400
     assert client.patch(url, json={"auth_provider": "inherit"}, headers=LOOPBACK).status_code == 400
     assert client.patch(url, json={"rest_openapi": True}, headers=LOOPBACK).status_code == 400
+    ada = client.post("/api/users", json={"name": "Ada"}, headers=LOOPBACK).json()
+    assert client.patch(url, json={"owner_id": ada["id"]}, headers=LOOPBACK).status_code == 400
     r = client.patch(
         url,
         json={"name": "Control", "runner": BUILTIN_RUNNER, "env": {}, "disabled_tools": ["delete_user"]},
@@ -235,7 +237,11 @@ def test_logs_recheck_visibility_after_the_await(client, monkeypatch):
                            host="127.0.0.1", last_error=None, startup_status=None, tools=[])
     monkeypatch.setattr(client.app.state.supervisor, "unit", lambda sid: unit)
     is_error, out = _call(client, "get_server_logs", {"server_id": b.id})
-    assert not is_error and out["lines"] == ["secret line"]
+    assert not is_error and out["lines"] == ["secret line"] and out["running"] is True
+    unit.state = "failed"
+    is_error, out = _call(client, "get_server_logs", {"server_id": b.id})
+    assert out["running"] is False and out["state"] == "failed"
+    unit.state = "running"
     monkeypatch.setattr(servers_api, "_visible_now", lambda sid, p: False)  # transferred away
     is_error, out = _call(client, "get_server_logs", {"server_id": b.id})
     assert is_error and "secret" not in json.dumps(out)
@@ -373,3 +379,12 @@ def test_install_from_catalog_drops_warnings_the_caller_filled(client, monkeypat
         client, "install_from_catalog", {"id": "io.example/keyed", "env": {"API_KEY": "k"}}
     )
     assert not is_error and out["warnings"] == [] and out["server"]["enabled"] is True
+
+
+def test_annotations_only_call_additive_tools_non_destructive(client):
+    status, msg = _rpc(client, "tools/list")
+    hints = {t["name"]: (t.get("annotations") or {}).get("destructiveHint") for t in msg["result"]["tools"]}
+    for name in ("update_settings", "update_server", "update_user", "put_group", "call_server_tool"):
+        assert hints[name] is not False, name
+    for name in ("create_server", "create_token", "install_from_catalog"):
+        assert hints[name] is False, name

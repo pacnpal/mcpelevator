@@ -435,6 +435,12 @@ async def update_server(
     if owner_change_requested:
         if not principal.is_admin:
             raise HTTPException(status_code=403, detail="only admins may reassign owners")
+        if existing_row.runner == BUILTIN_RUNNER:
+            # An owner gets lifecycle access, and this row's enabled flag IS the
+            # admin-only control_mcp setting.
+            raise HTTPException(
+                status_code=400, detail="the built-in mcpelevator server stays admin-owned"
+            )
         if new_owner is not None and repo.get_user(session, new_owner) is None:
             raise HTTPException(status_code=400, detail=f"unknown user {new_owner!r}")
 

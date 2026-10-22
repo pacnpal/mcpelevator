@@ -82,7 +82,7 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   (`MCPE_CONTROL_MCP=false` skips that). It runs through an ordinary remote bridge that forwards the
   caller's Authorization (`ProcessSpec.forward_authorization`, on for this runner only) plus a
   per-process internal header. Only MCP exposure, tool policy, name, slug, auth (`none`/`bearer`) and
-  idle are editable (REST stays off: its in-process proxy call can't forward the caller's token). It can't be deleted or cloned, it never joins a group (`"*"` skips it, an explicit
+  idle are editable (REST stays off: its in-process proxy call can't forward the caller's token). It can't be deleted, cloned or reassigned (it stays admin-owned, since its `enabled` is a global setting), it never joins a group (`"*"` skips it, an explicit
   member list naming it is refused), and the bearer provider accepts control tokens for it. The global switch is the row's `enabled` (surfaced as the `control_mcp`
   setting) and the per-user switch is `User.control_mcp`. `/api/mcp` checks both on every request.
 - **Group registry** (`groups/`): the `groups` runtime setting is the single source of truth

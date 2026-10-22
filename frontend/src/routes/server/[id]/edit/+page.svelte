@@ -31,7 +31,8 @@
 			loadState = 'ready';
 			try {
 				const auth = await getAuthStatus();
-				if (auth.user?.role !== 'member') {
+				// The built-in server stays admin-owned (its enabled flag is a global setting).
+				if (auth.user?.role !== 'member' && server.runner !== 'mcpelevator') {
 					usersList = await listUsers();
 					canReassign = true;
 				}
