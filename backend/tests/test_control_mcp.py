@@ -733,3 +733,40 @@ def test_restart_group_refuses_its_own_bridge(client):
     assert is_error and "can't restart itself" in json.dumps(out)
     is_error, _ = _call(client, "restart_group", {"name": "plain"}, headers=internal)
     assert not is_error
+
+
+def test_failed_refetch_doesnt_hold_the_refetch_window(monkeypatch, cf):
+    from types import SimpleNamespace
+
+    import jwt
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    real = cf_access._keys("https://team.example")
+    state = {"down": True}
+
+    def get_signing_keys(refresh: bool = False):
+        if refresh and state["down"]:
+            raise jwt.PyJWKClientConnectionError("timed out")
+        keys = real.get_signing_keys()
+        return [*keys, SimpleNamespace(key_id="rotated", key=keys[0].key)] if refresh else keys
+
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+        get_signing_keys=get_signing_keys, jwk_set_cache=None))
+    req = Request({"type": "http", "headers": [
+        (k.encode(), v.encode()) for k, v in cf("ada@example.com", kid="rotated").items()]})
+    assert cf_access.email(req) is None  # the refetch fails during the outage
+    state["down"] = False
+    cf_access._last_failure.clear()  # the 30s failure backoff has passed
+    assert cf_access.email(req) == "ada@example.com"  # no five-minute wait
+
+
+def test_debug_bridges_keep_uvicorn_off_its_own_handlers(monkeypatch):
+    from app import debug
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "debug", True)
+    assert debug.uvicorn_logging() == {"log_config": None}
+    monkeypatch.setattr(get_settings(), "debug", False)
+    assert debug.uvicorn_logging() == {}

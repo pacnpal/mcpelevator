@@ -148,6 +148,13 @@ def configure_logging(*, keep: bool) -> None:
     faulthandler.enable()  # a hard crash (segfault, deadlock dump) still leaves a traceback
 
 
+def uvicorn_logging() -> dict[str, Any]:
+    """Extra ``uvicorn.run`` kwargs for a process that already ran ``configure_logging``.
+    uvicorn's default ``log_config`` would install fresh, unscrubbed handlers on its own
+    loggers; ``None`` leaves them propagating to the scrubbed root handlers instead."""
+    return {"log_config": None} if enabled() else {}
+
+
 # ---- credential fingerprints ---------------------------------------------------
 
 
@@ -228,10 +235,12 @@ _SECRET_FIELD = re.compile(
     re.IGNORECASE,
 )
 
-# A secret query parameter in a URL inside any line (uvicorn's access log prints the
-# full request target): an OAuth callback's code/state, ?access_token=, ?api_key=.
+# A secret query parameter inside any line: in a URL (uvicorn's access log prints the
+# full request target) or at the start of a quoted raw query string (uvicorn's ASGI
+# trace prints 'query_string': b'code=...'). An OAuth callback's code/state,
+# access_token=, api_key=.
 _SECRET_QUERY = re.compile(
-    r"([?&](?:code|state|[^=&\s\"']*(?:token|secret|password|key|assertion)[^=&\s\"']*)=)"
+    r"([?&'\"](?:code|state|[^=&\s\"']*(?:token|secret|password|key|assertion)[^=&\s\"']*)=)"
     r"[^&\s\"']*",
     re.IGNORECASE,
 )

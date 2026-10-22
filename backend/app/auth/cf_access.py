@@ -79,8 +79,11 @@ def _signing_key(team: str, token: str) -> Any:
     kid = jwt.get_unverified_header(token).get("kid")
     keys = _fetch(team, refresh=False)
     if kid not in keys and time.monotonic() - _last_refetch.get(team, -_REFETCH_S) >= _REFETCH_S:
-        _last_refetch[team] = time.monotonic()
         keys = _fetch(team, refresh=True)
+        # Only a refetch that worked starts the window: one that failed is covered by
+        # the shorter failure backoff, so a key rotated during an outage is picked up
+        # as soon as Cloudflare answers again.
+        _last_refetch[team] = time.monotonic()
     if kid not in keys:
         raise jwt.InvalidTokenError("signed with a key the team doesn't publish")
     return keys[kid]

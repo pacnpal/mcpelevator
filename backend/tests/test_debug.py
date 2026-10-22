@@ -78,6 +78,9 @@ def test_scrub_catches_query_secrets_in_any_line():
     line = 'GET /api/oauth/callback?code=abc123&state=xyz&page=2&api_key=k HTTP/1.1" 303'
     out = debug.scrub(line)
     assert "abc123" not in out and "xyz" not in out and "=k " not in out and "page=2" in out
+    asgi = "Started scope={'path': '/mcp', 'query_string': b'code=abc123&state=xyz&page=2'}"
+    out = debug.scrub(asgi)
+    assert "abc123" not in out and "xyz" not in out and "page=2" in out
 
 
 def test_query_strings_are_scrubbed():

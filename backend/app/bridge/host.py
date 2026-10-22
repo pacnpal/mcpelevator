@@ -1669,12 +1669,12 @@ def main() -> None:
         app = build_app(spec, proxy)
         if debug.enabled():
             app = debug.TraceMiddleware(app)
-        uvicorn.run(app, host=host, port=port, log_level=level)
+        uvicorn.run(app, host=host, port=port, log_level=level, **debug.uvicorn_logging())
     elif debug.enabled():
         import uvicorn
 
         uvicorn.run(debug.TraceMiddleware(build_app(spec, proxy)), host=host, port=port,
-                    log_level=level)
+                    log_level=level, **debug.uvicorn_logging())
     else:
         # run() handles uvicorn + the Streamable HTTP session-manager lifespan for us.
         proxy.run(transport="http", host=host, port=port, show_banner=False)
