@@ -444,3 +444,13 @@ def test_builtin_refuses_to_reconfigure_itself_through_its_bridge(client):
     is_error, out = _call(client, "update_server",
                           {"server_id": b.id, "changes": {"name": "Ctl"}}, headers=internal)
     assert not is_error and out["name"] == "Ctl"
+
+
+def test_non_ascii_internal_header_is_just_a_mismatch(client):
+    r = client.post(
+        "/api/mcp",
+        content=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+        headers={**MCP_HEADERS, "content-type": "application/json",
+                 INTERNAL_HEADER: b"\xe9"},
+    )
+    assert r.status_code == 200  # auth off: the local operator, not a 500

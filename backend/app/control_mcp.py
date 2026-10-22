@@ -607,7 +607,10 @@ def _refuse_self(server_id: str, what: str) -> None:
 
 def _internal(request: Request) -> bool:
     """Did this request come through the built-in server's own bridge?"""
-    return secrets.compare_digest(request.headers.get(INTERNAL_HEADER, ""), INTERNAL_SECRET)
+    # Bytes: compare_digest raises on a non-ASCII str, which a client can send.
+    return secrets.compare_digest(
+        request.headers.get(INTERNAL_HEADER, "").encode(), INTERNAL_SECRET.encode()
+    )
 
 
 def _authorize(request: Request, session: Session) -> None:
