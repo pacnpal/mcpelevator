@@ -76,6 +76,17 @@ class _Scrubbed(logging.Formatter):
         return scrub(super().format(record))
 
 
+class _ScrubFilter(logging.Filter):
+    """Installed on every handler that exists when debug mode starts, not just ours:
+    a library's own handler (the bridge's upstream log, uvicorn's) would otherwise
+    write the unscrubbed line before the record reaches the root."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = scrub(record.getMessage())
+        record.args = None
+        return True
+
+
 class _Ring(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -118,6 +129,10 @@ def configure_logging(*, keep: bool) -> None:
         if name == "fastmcp" or name.startswith("fastmcp."):
             log.handlers.clear()  # fastmcp's own rich handler: route through ours instead
             log.propagate = True
+    for log in [root, *(logging.getLogger(n) for n in logging.root.manager.loggerDict)]:
+        for handler in log.handlers:
+            if not any(isinstance(f, _ScrubFilter) for f in handler.filters):
+                handler.addFilter(_ScrubFilter())
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         logging.getLogger(name).setLevel(TRACE)
     for name, level in _LEVELS.items():
@@ -264,21 +279,25 @@ class TraceMiddleware:
             "headers": headers_for_log(scope["headers"]),
         }
 
-        # Read the whole request body up front (bounded for logging, never for the
-        # app), log it, then replay it to the app unchanged.
+        # Read the start of the body (up to _BODY_LIMIT, so a huge upload can't fill
+        # memory), log it, then replay what was read and hand the rest of the stream
+        # to the app untouched.
         buffered: list[Message] = []
         chunks: list[bytes] = []
-        while True:
+        complete = False
+        while sum(map(len, chunks)) <= _BODY_LIMIT:
             message = await receive()
             buffered.append(message)
             if message["type"] != "http.request":
                 break
             chunks.append(message.get("body", b""))
             if not message.get("more_body", False):
+                complete = True
                 break
         if any(chunks):
-            entry["body"] = _body_text(chunks, _BODY_LIMIT)
-            entry["rpc"] = _rpc_summary(b"".join(chunks))
+            entry["body"] = _body_text(chunks, _BODY_LIMIT) + ("" if complete else " …(more)")
+            if complete:
+                entry["rpc"] = _rpc_summary(b"".join(chunks))
         logger.debug(
             "[%s] -> %s %s query=%s peer=%s headers=%s body=%s", rid, entry["method"],
             entry["path"], entry["query"], entry["peer"],
@@ -413,8 +432,9 @@ async def bundle(request: Request) -> dict[str, Any]:
             "owner_id": row.owner_id, "env_keys": sorted((row.env or {}).keys()),
             "state": unit.state if unit is not None else "stopped",
             "port": unit.port if unit is not None else None,
-            "last_error": unit.last_error if unit is not None else None,
-            "log_tail": unit.logs.snapshot()[-60:] if unit is not None else [],
+            # A server's own output never went through the log scrubber.
+            "last_error": scrub(unit.last_error) if unit is not None and unit.last_error else None,
+            "log_tail": [scrub(line) for line in unit.logs.snapshot()[-60:]] if unit is not None else [],
         })
     return {
         "versions": _versions(),

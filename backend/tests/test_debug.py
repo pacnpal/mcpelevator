@@ -40,6 +40,10 @@ def _restore_logging():
         log.setLevel(level)
         log.handlers[:] = handlers
         log.propagate = propagate
+    for log in [logging.getLogger(), *(logging.getLogger(n) for n in logging.root.manager.loggerDict)]:
+        for handler in log.handlers:
+            for f in [f for f in handler.filters if isinstance(f, debug._ScrubFilter)]:
+                handler.removeFilter(f)
     sys.excepthook, threading.excepthook = hooks[0], hooks[1]
     if not hooks[2]:
         faulthandler.disable()
@@ -76,6 +80,52 @@ def test_query_strings_are_scrubbed():
     assert out["api_key"] == "<redacted, 1 chars>" and out["page"] == "2"
     assert "z" * 20 not in out["q"]
     assert debug.query_for_log(b"") is None
+
+
+def test_handlers_installed_before_debug_mode_are_scrubbed():
+    import io
+
+    stream = io.StringIO()
+    early = logging.getLogger("mcpelevator.test.early")
+    early.addHandler(logging.StreamHandler(stream))
+    early.propagate = False
+    debug.configure_logging(keep=False)
+    early.warning("token=%s", "mcpe_" + "q" * 30)
+    assert "q" * 30 not in stream.getvalue()
+
+
+def test_trace_bounds_a_large_request_body():
+    import asyncio
+
+    seen = []
+
+    async def app(scope, receive, send):
+        total = 0
+        while True:
+            message = await receive()
+            total += len(message.get("body", b""))
+            if not message.get("more_body"):
+                break
+        seen.append(total)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    chunk = b"x" * 10000
+    messages = [{"type": "http.request", "body": chunk, "more_body": i < 99} for i in range(100)]
+    pulled = []
+
+    async def receive():
+        pulled.append(1)
+        return messages[len(pulled) - 1]
+
+    async def send(message):
+        pass
+
+    scope = {"type": "http", "method": "POST", "path": "/api/x", "headers": [], "query_string": b""}
+    asyncio.run(debug.TraceMiddleware(app)(scope, receive, send))
+    assert seen == [1_000_000]  # the app still gets the whole body
+    trace = debug.TRACES[-1]
+    assert trace["body"].endswith("…(more)") and len(trace["body"]) < 20000
 
 
 def test_bundle_needs_an_admin_when_auth_is_enforced(monkeypatch):
