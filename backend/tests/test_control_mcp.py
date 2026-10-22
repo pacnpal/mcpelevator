@@ -223,7 +223,7 @@ def test_playground_forwards_the_callers_credential_to_the_builtin_only(client, 
                         headers=LOOPBACK).json()
     unit.tools = [{"name": "list_servers"}]
     client.post(f"/api/servers/{other['id']}/tools/list_servers/call", json={}, headers=auth)
-    assert seen == [{"authorization": "Bearer abc"}, None]
+    assert seen == [{"authorization": "Bearer abc", "x-mcpe-original-host": "127.0.0.1"}, None]
 
 
 def test_logs_recheck_visibility_after_the_await(client, monkeypatch):
@@ -388,3 +388,28 @@ def test_annotations_only_call_additive_tools_non_destructive(client):
         assert hints[name] is not False, name
     for name in ("create_server", "create_token", "install_from_catalog"):
         assert hints[name] is False, name
+
+
+def test_break_glass_token_opens_the_builtin(client, monkeypatch):
+    import asyncio
+
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.auth.bearer import BearerProvider
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "admin_token", "break-glass")
+    req = Request({"type": "http", "headers": [(b"authorization", b"Bearer break-glass")]})
+    asyncio.run(BearerProvider().authenticate(req, _builtin()))
+    other = Server(id="other", slug="other", name="other", args=[], env={})
+    with pytest.raises(HTTPException):
+        asyncio.run(BearerProvider().authenticate(req, other))
+
+
+def test_urls_name_the_host_the_caller_used(client):
+    carried = {"x-mcpe-original-host": "localhost:9999"}
+    _, out = _call(client, "list_servers", headers=carried)  # no internal secret: ignored
+    assert out["items"][0]["urls"]["mcp"].startswith("http://127.0.0.1/")
+    _, out = _call(client, "list_servers", headers={**carried, INTERNAL_HEADER: INTERNAL_SECRET})
+    assert out["items"][0]["urls"]["mcp"].startswith("http://localhost:9999/")

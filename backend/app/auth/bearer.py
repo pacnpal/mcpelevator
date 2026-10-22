@@ -24,6 +24,11 @@ class BearerProvider:
                 detail="missing bearer token",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        if server.runner == BUILTIN_RUNNER:
+            from app.auth.control_plane import is_env_admin_token  # circular-import guard
+
+            if is_env_admin_token(token):
+                return  # the break-glass admin credential opens the control plane's server
         with Session(get_engine()) as session:
             record = repo.get_token_by_hash(session, hash_token(token))
             if record is None:

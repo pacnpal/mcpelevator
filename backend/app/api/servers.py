@@ -47,6 +47,7 @@ from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
 from app.db import get_engine, get_session, repo
 from app.db.models import BUILTIN_RUNNER, Server
+from app.runners.builtin import ORIGINAL_HOST_HEADER
 from app.groups import registry as group_registry
 from app.registry import service
 from app.registry import settings as runtime_settings
@@ -1016,7 +1017,10 @@ async def call_server_tool(
     # its bridge needs the caller's credential. No other bridge ever gets it.
     extra = {}
     if server.runner == BUILTIN_RUNNER and request.headers.get("authorization"):
-        extra["headers"] = {"authorization": request.headers["authorization"]}
+        extra["headers"] = {
+            "authorization": request.headers["authorization"],
+            ORIGINAL_HOST_HEADER: request.headers.get("host", ""),
+        }
     if not any(t.get("name") == tool_name for t in unit.tools or []):
         raise HTTPException(status_code=404, detail=f"tool {tool_name!r} not found")
     timeout = min(max(float(payload.timeout_s), 1.0), 300.0)

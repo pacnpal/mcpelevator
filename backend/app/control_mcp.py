@@ -54,7 +54,14 @@ from app.auth import principal as principal_mod
 from app.auth.control_plane import require_control_plane
 from app.db import get_engine, repo
 from app.registry import service
-from app.runners.builtin import INSTRUCTIONS, INTERNAL_HEADER, INTERNAL_SECRET, PATH, localize
+from app.runners.builtin import (
+    INSTRUCTIONS,
+    INTERNAL_HEADER,
+    INTERNAL_SECRET,
+    ORIGINAL_HOST_HEADER,
+    PATH,
+    localize,
+)
 from app.runners.remote import canonical_transport
 
 # Request headers that describe the MCP transport, not the caller. Everything
@@ -94,7 +101,13 @@ def build(app: FastAPI) -> "_Gate":
         method: str, path: str, *, json: Any = None, params: dict | None = None, raw: bool = False
     ) -> Any:
         outer = get_http_request()
-        headers = {k: v for k, v in outer.headers.items() if k not in _TRANSPORT_HEADERS}
+        headers = {
+            k: v for k, v in outer.headers.items()
+            if k not in _TRANSPORT_HEADERS and k != ORIGINAL_HOST_HEADER
+        }
+        original_host = outer.headers.get(ORIGINAL_HOST_HEADER)
+        if original_host and _internal(outer):
+            headers["host"] = original_host  # see app.runners.builtin.ORIGINAL_HOST_HEADER
         peer = (outer.client.host, outer.client.port) if outer.client else ("127.0.0.1", 0)
         transport = httpx.ASGITransport(app=app, client=peer)
         query = {k: v for k, v in (params or {}).items() if v is not None}
@@ -214,7 +227,7 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.tool(annotations=_WRITE)
     async def restart_server(server_id: str) -> Any:
         """Restart an enabled server's bridge from unchanged config (re-discovers tools)."""
-        if get_http_request().headers.get(INTERNAL_HEADER):
+        if _internal(get_http_request()):
             with Session(get_engine()) as session:
                 builtin = service.get_builtin(session)
             if builtin is not None and builtin.id == server_id:
@@ -568,12 +581,16 @@ class _Gate:
         await self.inner(scope, receive, send)
 
 
+def _internal(request: Request) -> bool:
+    """Did this request come through the built-in server's own bridge?"""
+    return secrets.compare_digest(request.headers.get(INTERNAL_HEADER, ""), INTERNAL_SECRET)
+
+
 def _authorize(request: Request, session: Session) -> None:
     builtin = service.get_builtin(session)
     if builtin is None or not builtin.enabled:
         raise HTTPException(status_code=404, detail="the mcpelevator MCP server is turned off")
-    internal = secrets.compare_digest(request.headers.get(INTERNAL_HEADER, ""), INTERNAL_SECRET)
-    if internal and not request.headers.get("authorization"):
+    if _internal(request) and not request.headers.get("authorization"):
         return  # the built-in bridge listing tools; calls still authenticate per route
     require_control_plane(request, session)
     principal = principal_mod.resolve(request, session)

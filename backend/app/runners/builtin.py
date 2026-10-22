@@ -20,6 +20,10 @@ from app.runners.base import ProcessSpec, register
 
 PATH = "/api/mcp"
 INTERNAL_HEADER = "x-mcpe-internal"
+# The Host the caller reached /s on (already Host-guard validated there). The proxy
+# sets it for this server only and /api/mcp trusts it only next to INTERNAL_HEADER,
+# so the API's copyable URLs and OAuth callback name the caller's address.
+ORIGINAL_HOST_HEADER = "x-mcpe-original-host"
 # Proves a request came through this process's own bridge (which only the /s gate or
 # the supervisor's discovery probe can reach). Never persisted: bridges restart on boot.
 INTERNAL_SECRET = secrets.token_urlsafe(32)
