@@ -375,6 +375,11 @@ def test_install_from_catalog_drops_warnings_the_caller_filled(client, monkeypat
     monkeypatch.setattr(base, "get_json", fake_get_json)
     is_error, out = _call(client, "install_from_catalog", {"id": "io.example/keyed"})
     assert not is_error and out["warnings"] and out["server"]["enabled"] is False
+    # A key that only happens to be a word in the warning ("set its value") fills nothing.
+    is_error, out = _call(
+        client, "install_from_catalog", {"id": "io.example/keyed", "env": {"value": "x"}}
+    )
+    assert not is_error and out["warnings"] and out["server"]["enabled"] is False
     is_error, out = _call(
         client, "install_from_catalog", {"id": "io.example/keyed", "env": {"API_KEY": "k"}}
     )
@@ -413,3 +418,29 @@ def test_urls_name_the_host_the_caller_used(client):
     assert out["items"][0]["urls"]["mcp"].startswith("http://127.0.0.1/")
     _, out = _call(client, "list_servers", headers={**carried, INTERNAL_HEADER: INTERNAL_SECRET})
     assert out["items"][0]["urls"]["mcp"].startswith("http://localhost:9999/")
+
+
+def test_per_user_switch_applies_with_control_auth_off(client):
+    user = client.post("/api/users", json={"name": "Bo", "control_mcp": False}, headers=LOOPBACK).json()
+    raw = new_token()
+    with Session(get_engine()) as s:
+        repo.create_token(
+            s,
+            Token(id=new_id(), name="bo", token_hash=hash_token(raw), prefix=raw[:12],
+                  scope="all", user_id=user["id"]),
+        )
+    assert _rpc(client, "tools/list", headers={"authorization": f"Bearer {raw}"})[0] == 403
+    assert _rpc(client, "tools/list")[0] == 200  # the local operator, no token
+
+
+def test_builtin_refuses_to_reconfigure_itself_through_its_bridge(client):
+    b = _builtin()
+    internal = {INTERNAL_HEADER: INTERNAL_SECRET}
+    is_error, out = _call(client, "update_server",
+                          {"server_id": b.id, "changes": {"disabled_tools": ["whoami"]}}, headers=internal)
+    assert is_error and "itself" in json.dumps(out)
+    is_error, out = _call(client, "disable_server", {"server_id": b.id}, headers=internal)
+    assert is_error and "itself" in json.dumps(out)
+    is_error, out = _call(client, "update_server",
+                          {"server_id": b.id, "changes": {"name": "Ctl"}}, headers=internal)
+    assert not is_error and out["name"] == "Ctl"

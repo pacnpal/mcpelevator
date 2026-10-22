@@ -54,6 +54,7 @@ from app.auth import principal as principal_mod
 from app.auth.control_plane import require_control_plane
 from app.db import get_engine, repo
 from app.registry import service
+from app.util import hash_token
 from app.runners.builtin import (
     INSTRUCTIONS,
     INTERNAL_HEADER,
@@ -189,6 +190,8 @@ def build(app: FastAPI) -> "_Gate":
     async def update_server(server_id: str, changes: ServerUpdate) -> Any:
         """Edit a server; only the fields given change (an explicit null resets the
         nullable ones to inherit). A launch-spec change restarts its bridge."""
+        if changes.model_fields_set & _RESTARTING_FIELDS:
+            _refuse_self(server_id, "change its exposure or tool policy")
         return await api(
             "PATCH", f"/api/servers/{_seg(server_id)}", json=changes.model_dump(exclude_unset=True)
         )
@@ -217,6 +220,7 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.tool(annotations=_WRITE)
     async def disable_server(server_id: str) -> Any:
         """Set a server desired-stopped; the supervisor stops it."""
+        _refuse_self(server_id, "disable")
         return await api("POST", f"/api/servers/{_seg(server_id)}/disable")
 
     @mcp.tool(annotations=_ADD)
@@ -227,13 +231,7 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.tool(annotations=_WRITE)
     async def restart_server(server_id: str) -> Any:
         """Restart an enabled server's bridge from unchanged config (re-discovers tools)."""
-        if _internal(get_http_request()):
-            with Session(get_engine()) as session:
-                builtin = service.get_builtin(session)
-            if builtin is not None and builtin.id == server_id:
-                # Restarting stops the bridge carrying this very call, which then
-                # can't deliver the result. Use the dashboard or POST /api/.../restart.
-                raise ToolError("the built-in server can't restart itself from here")
+        _refuse_self(server_id, "restart")
         return await api("POST", f"/api/servers/{_seg(server_id)}/restart")
 
     # No destructiveHint: whether a call destroys anything depends on the tool chosen,
@@ -483,10 +481,15 @@ def build(app: FastAPI) -> "_Gate":
                 "no installable package or remote endpoint; use create_server by hand. "
                 + " ".join(reasons + detail.get("notes", []))
             )
-        # Catalog warnings name the value they need ("Environment variable KEY is
-        # required"), so drop the ones the caller just filled in.
-        supplied = {k for k, v in (env or {}).items() if v}
-        warnings = [w for w in warnings if not supplied & set(w.replace(",", " ").split())]
+        # An env/header warning reads "Environment variable KEY ..." or "Header KEY ..."
+        # (app.catalog.mapping); drop exactly those the caller just filled in.
+        filled = tuple(
+            f"{label} {k} "
+            for k, v in (env or {}).items()
+            if v
+            for label in ("Environment variable", "Header")
+        )
+        warnings = [w for w in warnings if not w.startswith(filled)]
         tag = f"@{meta['version']}" if meta.get("version") else ""
         created = await api(
             "POST",
@@ -581,6 +584,27 @@ class _Gate:
         await self.inner(scope, receive, send)
 
 
+# The built-in server's editable fields that are part of config_hash: changing one
+# restarts its bridge.
+_RESTARTING_FIELDS = {"mcp_http", "disabled_tools", "tool_overrides", "normalize_schema_dialect"}
+
+
+def _refuse_self(server_id: str, what: str) -> None:
+    """Refuse an operation that would stop or restart the built-in server's bridge when
+    the call is travelling through that same bridge: the reconciler can stop it before
+    it relays the result, so the caller sees a transport error for a change that
+    landed. The dashboard and /api (or /api/mcp directly) still do it."""
+    if not _internal(get_http_request()):
+        return
+    with Session(get_engine()) as session:
+        builtin = service.get_builtin(session)
+    if builtin is not None and builtin.id == server_id:
+        raise ToolError(
+            f"the built-in server can't {what} itself through its own connection; "
+            "use the dashboard or the /api route"
+        )
+
+
 def _internal(request: Request) -> bool:
     """Did this request come through the built-in server's own bridge?"""
     return secrets.compare_digest(request.headers.get(INTERNAL_HEADER, ""), INTERNAL_SECRET)
@@ -594,8 +618,15 @@ def _authorize(request: Request, session: Session) -> None:
         return  # the built-in bridge listing tools; calls still authenticate per route
     require_control_plane(request, session)
     principal = principal_mod.resolve(request, session)
-    if principal is not None and principal.user_id is not None:
-        user = repo.get_user(session, principal.user_id)
+    user_id = principal.user_id if principal is not None else None
+    # With enforcement off every caller resolves to the local admin, but a presented
+    # token still names its user, and that user's switch still applies.
+    bearer = principal_mod._bearer(request)
+    row = repo.get_token_by_hash(session, hash_token(bearer)) if bearer else None
+    if row is not None and row.user_id is not None:
+        user_id = row.user_id
+    if user_id is not None:
+        user = repo.get_user(session, user_id)
         if user is None or not user.control_mcp:
             raise HTTPException(
                 status_code=403, detail="the mcpelevator MCP server is disabled for this user"
