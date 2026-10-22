@@ -207,6 +207,13 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.tool(annotations=_WRITE)
     async def restart_server(server_id: str) -> Any:
         """Restart an enabled server's bridge from unchanged config (re-discovers tools)."""
+        if get_http_request().headers.get(INTERNAL_HEADER):
+            with Session(get_engine()) as session:
+                builtin = service.get_builtin(session)
+            if builtin is not None and builtin.id == server_id:
+                # Restarting stops the bridge carrying this very call, which then
+                # can't deliver the result. Use the dashboard or POST /api/.../restart.
+                raise ToolError("the built-in server can't restart itself from here")
         return await api("POST", f"/api/servers/{server_id}/restart")
 
     @mcp.tool(annotations={**_WRITE, "openWorldHint": True})

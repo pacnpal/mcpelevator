@@ -1241,28 +1241,30 @@
 				></span>
 			</span>
 		</label>
-		<label
-			class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
-		>
-			<span class="flex flex-col gap-0.5">
-				<span class="text-sm font-medium text-[var(--color-ink)]">REST / OpenAPI</span>
-				<span class="text-xs text-[var(--color-ink-dim)]">
-					Also serve each tool as plain REST
-					(<code class="font-mono">POST /s/&lt;slug&gt;/rest/&lt;tool&gt;</code>) with a
-					generated OpenAPI document — for curl, automation, and GPT Actions.
-				</span>
-			</span>
-			<input type="checkbox" bind:checked={restOpenapi} class="peer sr-only" />
-			<span
-				class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
-				style="background-color: {restOpenapi ? '' : 'var(--color-line-strong)'};"
+		{#if !isBuiltin}
+			<label
+				class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
 			>
+				<span class="flex flex-col gap-0.5">
+					<span class="text-sm font-medium text-[var(--color-ink)]">REST / OpenAPI</span>
+					<span class="text-xs text-[var(--color-ink-dim)]">
+						Also serve each tool as plain REST
+						(<code class="font-mono">POST /s/&lt;slug&gt;/rest/&lt;tool&gt;</code>) with a
+						generated OpenAPI document — for curl, automation, and GPT Actions.
+					</span>
+				</span>
+				<input type="checkbox" bind:checked={restOpenapi} class="peer sr-only" />
 				<span
-					class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
-					style={restOpenapi ? 'transform: translateX(16px);' : ''}
-				></span>
-			</span>
-		</label>
+					class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
+					style="background-color: {restOpenapi ? '' : 'var(--color-line-strong)'};"
+				>
+					<span
+						class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
+						style={restOpenapi ? 'transform: translateX(16px);' : ''}
+					></span>
+				</span>
+			</label>
+		{/if}
 		<!-- Compatibility escape hatch: the MCP TypeScript SDK hardcodes a draft-07
 		     $schema with no config option, which a strict client's 2020-12-only
 		     validator refuses outright (issue #123). -->

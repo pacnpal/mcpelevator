@@ -1937,10 +1937,11 @@ _MUTABLE_FIELDS = {
 # The built-in control-plane server (app.control_mcp). Its launch spec is derived by
 # its runner, never stored, so only exposure, tool policy, naming, auth and idle are
 # the operator's to edit, the same fields any server exposes beyond its launch line.
+# REST is left out: the bridge's REST surface calls its proxy in-process, so the
+# caller's Authorization never reaches /api/mcp and every tool would 401.
 _BUILTIN_EDITABLE = {
     "name",
     "mcp_http",
-    "rest_openapi",
     "disabled_tools",
     "tool_overrides",
     "normalize_schema_dialect",

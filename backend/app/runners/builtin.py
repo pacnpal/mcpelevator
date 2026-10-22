@@ -27,8 +27,10 @@ INTERNAL_SECRET = secrets.token_urlsafe(32)
 def internal_url() -> str:
     settings = get_settings()
     host = settings.host
-    if host in ("", "0.0.0.0", "::", "localhost"):
+    if host in ("", "0.0.0.0", "localhost"):
         host = "127.0.0.1"
+    elif host == "::":
+        host = "::1"  # an IPv6 wildcard may be IPv6-only
     if ":" in host:
         host = f"[{host}]"
     return f"http://{host}:{settings.port}{PATH}"

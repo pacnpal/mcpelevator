@@ -159,6 +159,7 @@ def test_builtin_row_guards(client):
     assert client.patch(url, json={"command": "evil"}, headers=LOOPBACK).status_code == 400
     assert client.patch(url, json={"auth_provider": "oauth"}, headers=LOOPBACK).status_code == 400
     assert client.patch(url, json={"auth_provider": "inherit"}, headers=LOOPBACK).status_code == 400
+    assert client.patch(url, json={"rest_openapi": True}, headers=LOOPBACK).status_code == 400
     r = client.patch(
         url,
         json={"name": "Control", "runner": BUILTIN_RUNNER, "env": {}, "disabled_tools": ["delete_user"]},
@@ -224,6 +225,22 @@ def test_logs_recheck_visibility_after_the_await(client, monkeypatch):
     monkeypatch.setattr(servers_api, "_visible_now", lambda sid, p: False)  # transferred away
     is_error, out = _call(client, "get_server_logs", {"server_id": b.id})
     assert is_error and "secret" not in json.dumps(out)
+
+
+def test_builtin_refuses_to_restart_itself_through_its_bridge(client):
+    b = _builtin()
+    internal = {INTERNAL_HEADER: INTERNAL_SECRET}
+    is_error, out = _call(client, "restart_server", {"server_id": b.id}, headers=internal)
+    assert is_error and "itself" in json.dumps(out)
+
+
+def test_internal_url_follows_the_bind_family(monkeypatch):
+    from app.config import get_settings
+    from app.runners.builtin import internal_url
+
+    for host, want in (("0.0.0.0", "127.0.0.1"), ("::", "[::1]"), ("10.0.0.5", "10.0.0.5")):
+        monkeypatch.setattr(get_settings(), "host", host)
+        assert internal_url().startswith(f"http://{want}:")
 
 
 def test_bearer_accepts_control_tokens_for_the_builtin_only(client):
