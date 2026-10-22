@@ -558,7 +558,7 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_CONTROL_MCP` | `true` | Provision the built-in mcpelevator MCP server on boot when it's missing; `false` skips that (an existing one stays, turn it off in Settings) |
 | `MCPE_CF_ACCESS_TEAM_DOMAIN` | _(none)_ | Cloudflare Access team domain (`myteam.cloudflareaccess.com`). With `MCPE_CF_ACCESS_AUD`, the built-in server accepts Cloudflare Access sign-ins; see **Manage mcpelevator from an agent** |
 | `MCPE_CF_ACCESS_AUD` | _(none)_ | The Access application's AUD tag (comma-separated for several applications) |
-| `MCPE_DEBUG` | `false` | Debug mode: verbose logs everywhere, a trace of every request, and `GET /api/debug`; see **Debug mode** |
+| `MCPE_DEBUG` | `false` | Debug mode: TRACE-level logs everywhere (bridges too), a full trace of every request with secrets scrubbed, crash reporting, and `GET /api/debug`; see **Debug mode** |
 | `MCPE_APT_PACKAGES` | _(none)_ | Global, space-separated extra Debian packages installed before mcpelevator starts (Docker image only), not per-server `setup_script`. A failed install warns and boot continues; packages must be reinstalled after container replacement |
 | `MCPE_DATA_DIR` | `./data` | SQLite + caches |
 | `MCPE_FRONTEND_DIR` | `../frontend/build` | Built SPA to serve |
@@ -571,13 +571,36 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 
 ## Debug mode
 
-Set `MCPE_DEBUG=true` on the container and restart when something fails and the normal logs don't say why. It turns on everything a bug report needs, in one switch:
+Set `MCPE_DEBUG=true` on the container and restart when something fails and the normal logs don't say why. It's deliberately as verbose as it can be, so one run captures whatever the failure turns out to need:
 
-- **Verbose logs.** Every part of mcpelevator logs at DEBUG with timestamps and logger names, and so do FastMCP, the MCP SDK and uvicorn. Each server's bridge inherits the setting, so the log you see on a server's page also shows its MCP traffic with the upstream (every JSON-RPC message in and out) and the full traceback of any failure.
-- **A trace of every request.** One line per request to `/api`, `/s`, `/g` and the OAuth discovery routes: method, path, the JSON-RPC method and tool name for MCP calls, status, time to first byte, peer address, and every header. Credentials are reduced to something you can match but not reuse. An `mcpe_` token shows its first 12 characters (what the token list shows), a JWT shows its claims (issuer, audience, subject, email, expiry, and whether it's expired) but never its signature, cookies show only a count, and the bridge's internal header shows only whether it was valid. A 4xx or 5xx also logs the response body, so the reason for a refusal lands next to the request that got it.
-- **A diagnostics bundle.** `GET /api/debug` (admin only) returns one JSON document holding the version and library versions, the effective config with secrets shown as `<set>`, the runtime settings, whether control-plane auth is enforced, the users, every server's state, last error, env var names (never values) and last 60 log lines, every group's members and what it's actually serving, the last 500 request traces and the last 2000 log records. Save it to a file and attach it to an issue: `curl -H "Authorization: Bearer $TOKEN" https://mcp.example.com/api/debug > debug.json`.
+- **Everything logs at TRACE.** Every logger in the process is opened up, mcpelevator's own and every library's. That covers FastMCP, the MCP SDK (every JSON-RPC message in and out), httpx and httpcore (every outbound connection), uvicorn (every connection), SSE framing, and SQLAlchemy (every SQL statement with its parameters). Each line carries a timestamp, the logger name and the thread. Each server's bridge inherits the setting and also logs every ASGI message, so the log on a server's page shows its whole conversation with the upstream and the full traceback of any failure.
+- **Every request is traced.** For `/api`, `/s`, `/g` and the OAuth discovery routes you get:
+  - a line when the request arrives: method, path, query, peer, every header, the body
+  - a line when the response starts: status, headers, time to first byte
+  - a line per streamed chunk, so an MCP error inside an SSE stream shows up as text
+  - a summary line with the JSON-RPC method and tool name, the status, the total time and the response body
 
-When it's off, none of this runs and `/api/debug` returns 404. Turn it off once you're done. Tool arguments and results show up in the logs at this level, so treat a debug log like the data your servers handle.
+  Lines from one request share a short id, so you can follow it through a busy log.
+- **Failures can't go quiet.** Uncaught exceptions in any thread are logged with tracebacks. So are unhandled errors while serving a request. `faulthandler` dumps a traceback on a hard crash. Asyncio debug mode reports coroutines that were never awaited and callbacks that block the event loop for over 100ms.
+- **A diagnostics bundle.** `GET /api/debug` (admin only) returns one JSON document:
+  - the version and library versions
+  - the effective config, with secrets shown as `<set>`
+  - the runtime settings, and whether control-plane auth is enforced
+  - the users
+  - every server's state, last error, env var names (never values) and last 60 log lines
+  - every group's members, and what it's actually serving
+  - the last 500 request traces and the last 5000 log records
+
+  Save it and attach it to an issue: `curl -H "Authorization: Bearer $TOKEN" https://mcp.example.com/api/debug > debug.json`.
+
+Credentials and secrets are scrubbed from all of it, library output included:
+
+- An `mcpe_` token shows only its first 12 characters, the same prefix the token list shows.
+- A JWT in a header shows its claims (issuer, audience, subject, email, expiry, and whether it's expired) and never its signature. Anywhere else, a JWT becomes `<jwt>`.
+- Cookies show only a count. The bridge's internal header shows only whether it was valid.
+- Any JSON or Python field whose name looks secret (`*_TOKEN`, `API_KEY`, `password`, a freshly minted token) has its value replaced.
+
+Ordinary values aren't scrubbed. Tool arguments and results, prompts and file contents all show up, so treat a debug log like the data your servers handle. Turn it off once you're done. When it's off, none of this runs and `/api/debug` returns 404.
 
 ## Security
 

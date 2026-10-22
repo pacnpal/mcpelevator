@@ -93,11 +93,13 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   bridge's internal header (`runners.builtin.is_internal`), never on the rest of `/api` (CSRF). The
   global switch is the row's `enabled` (surfaced as the `control_mcp` setting) and the per-user
   switch is `User.control_mcp`. `/api/mcp` checks both on every request.
-- **Debug mode** (`debug.py`, `MCPE_DEBUG=true`): DEBUG logging in the control plane and every
-  bridge (they inherit the env), `TraceMiddleware` logging one line per request with credentials
-  fingerprinted (`debug.fingerprint`: never log a usable token), and the admin-only `GET /api/debug`
-  bundle. Off, none of it is installed and the route 404s. New failure paths should log through a
-  module `logger` so debug mode picks them up.
+- **Debug mode** (`debug.py`, `MCPE_DEBUG=true`): deliberately maximal. TRACE logging for every
+  logger in the control plane and every bridge (they inherit the env; bridges also run uvicorn at
+  `trace`), SQL with parameters, `TraceMiddleware` logging each request's arrival, headers, body,
+  response start, every streamed chunk and a summary, excepthooks + faulthandler + asyncio debug,
+  and the admin-only `GET /api/debug` bundle. Every line passes through `debug.scrub` (and headers
+  through `debug.fingerprint`): never log a usable credential. Off, none of it is installed and the
+  route 404s. New failure paths should log through a module `logger` so debug mode picks them up.
 - **Group registry** (`groups/`): the `groups` runtime setting is the single source of truth
   mapping a group name to its members — either `"*"` (every registered server, present and
   future, except the built-in control MCP server) or an ordered list of server ids. Each group is served at `/g/<name>/mcp`: a

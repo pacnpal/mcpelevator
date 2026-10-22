@@ -1,19 +1,25 @@
 """Debug mode (``MCPE_DEBUG=true``): one switch for everything a failure report needs.
+It is as verbose as it can be on purpose. When it's on:
 
-When it's on:
-
-- Every ``app.*`` logger, plus fastmcp, the MCP SDK and uvicorn, logs at DEBUG to
-  stderr with a timestamp and logger name. Bridges inherit the variable, so each
-  server's own log (the one the UI shows) gets the same detail, tracebacks included.
-- Every HTTP request to the control plane is traced in one line: method, path, the
-  JSON-RPC method (and tool name) for MCP traffic, status, time to first byte, peer,
-  and the headers, with credentials reduced to something you can match but not use.
-  A 4xx/5xx response also logs its body, so a refusal's reason lands in the log.
-- The latest traces and log records are kept in memory and served, with the
-  version, effective config, runtime settings and every server's state and log tail,
+- Every logger in the process logs at TRACE (below DEBUG) to stderr with a timestamp,
+  logger name and thread: mcpelevator itself, FastMCP, the MCP SDK (every JSON-RPC
+  message), httpx and httpcore (every outbound connection), uvicorn (every connection),
+  SSE framing, and every SQL statement with its parameters. Bridges inherit the
+  variable, so each server's own log (the one the UI shows) gets the same detail.
+- Every HTTP request is traced: a line when it arrives (method, path, query, peer,
+  headers, body), a line when the response starts (status, headers), a line per
+  streamed chunk (so an MCP error inside an SSE stream shows up), and a summary with
+  the JSON-RPC method, tool name, status and timing. Credentials are reduced to
+  something you can match but not reuse, and secret-looking values in bodies are
+  scrubbed.
+- Crashes don't go quiet: uncaught exceptions in any thread, unhandled errors while
+  serving a request, faulthandler tracebacks for hard crashes, and asyncio's debug
+  mode (never-awaited coroutines, callbacks that block the loop over 100ms).
+- The latest traces and log records are kept in memory and served, with the version,
+  effective config, runtime settings, users and every server's state and log tail,
   at ``GET /api/debug`` (admin only). One call gives a whole picture to paste.
 
-When it's off, none of this runs and ``/api/debug`` 404s. Debug output can hold tool
+When it's off, none of this runs and ``/api/debug`` 404s. Debug output holds tool
 arguments and results, so leave it off unless you're chasing something.
 """
 
@@ -21,11 +27,14 @@ from __future__ import annotations
 
 import base64
 import collections
+import faulthandler
 import json
 import logging
 import platform
+import re
 import secrets
 import sys
+import threading
 import time
 from importlib import metadata
 from typing import Any
@@ -40,21 +49,30 @@ from app.config import get_settings
 logger = logging.getLogger("app.debug")
 
 TRACES: collections.deque = collections.deque(maxlen=500)
-RECORDS: collections.deque = collections.deque(maxlen=2000)
+RECORDS: collections.deque = collections.deque(maxlen=5000)
 
-_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-# Chatty below these levels without saying anything a failure report needs.
-_QUIET = {"httpcore": logging.WARNING, "hpack": logging.WARNING, "multipart": logging.INFO,
-          "aiosqlite": logging.INFO, "watchfiles": logging.WARNING, "asyncio": logging.INFO,
-          "sse_starlette": logging.INFO}
+TRACE = 5  # uvicorn's level below DEBUG (connection lifecycle)
+_FORMAT = "%(asctime)s %(levelname)s %(name)s [%(threadName)s]: %(message)s"
+# INFO is where SQLAlchemy logs each statement and its parameters; DEBUG adds every
+# fetched row, which is the data itself rather than what happened to it.
+_LEVELS = {"sqlalchemy.engine": logging.INFO, "sqlalchemy.pool": logging.DEBUG}
 _SECRET_WORDS = ("token", "secret", "password", "key", "assertion", "cookie", "authorization")
-_BODY_LIMIT = 4096
+_BODY_LIMIT = 16384
+_CHUNK_LIMIT = 4096
 # The API, server and group endpoints, and OAuth discovery; not the SPA's assets.
 _TRACED = ("/api", "/s/", "/g/", "/.well-known", "/mcp", "/rest")
 
 
 def enabled() -> bool:
     return get_settings().debug
+
+
+class _Scrubbed(logging.Formatter):
+    """Every line, from any library, goes through ``scrub``: SQL parameters carry a
+    server's env, and the MCP SDK logs tool arguments verbatim."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return scrub(super().format(record))
 
 
 class _Ring(logging.Handler):
@@ -65,28 +83,47 @@ class _Ring(logging.Handler):
             pass
 
 
+def _log_uncaught(exc_type, exc, tb) -> None:
+    logging.getLogger("app.debug").critical("uncaught exception", exc_info=(exc_type, exc, tb))
+
+
+def _log_thread_uncaught(args: threading.ExceptHookArgs) -> None:
+    logging.getLogger("app.debug").critical(
+        "uncaught exception in thread %s", getattr(args.thread, "name", "?"),
+        exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+    )
+
+
 def configure_logging(*, keep: bool) -> None:
-    """Turn on DEBUG logging for this process. ``keep`` also records into the ring
-    that ``/api/debug`` serves (the control plane; a bridge has no such route)."""
+    """Turn on TRACE logging for this whole process. ``keep`` also records into the
+    ring that ``/api/debug`` serves (the control plane; a bridge has no such route)."""
     root = logging.getLogger()
     if any(isinstance(h, _Ring) or getattr(h, "_mcpe_debug", False) for h in root.handlers):
         return  # already on (a second app in the same process, e.g. tests)
-    root.setLevel(logging.DEBUG)
+    logging.addLevelName(TRACE, "TRACE")
+    root.setLevel(TRACE)
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
     if keep:
         handlers.append(_Ring())
     for handler in handlers:
         handler._mcpe_debug = True  # type: ignore[attr-defined]
-        handler.setFormatter(logging.Formatter(_FORMAT))
+        handler.setFormatter(_Scrubbed(_FORMAT))
         root.addHandler(handler)
-    for name, level in _QUIET.items():
+    # Libraries set their own levels (uvicorn INFO, fastmcp its own handler); open
+    # every logger that exists now, and let later ones inherit the root's TRACE.
+    for name in list(logging.root.manager.loggerDict):
+        log = logging.getLogger(name)
+        log.setLevel(logging.NOTSET)
+        if name == "fastmcp" or name.startswith("fastmcp."):
+            log.handlers.clear()  # fastmcp's own rich handler: route through ours instead
+            log.propagate = True
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(name).setLevel(TRACE)
+    for name, level in _LEVELS.items():
         logging.getLogger(name).setLevel(level)
-    for name in ("app", "mcpelevator", "fastmcp", "mcp", "uvicorn", "uvicorn.access", "httpx"):
-        logging.getLogger(name).setLevel(logging.DEBUG)
-    # fastmcp installs its own non-propagating handler; send it through ours instead.
-    fastmcp_log = logging.getLogger("fastmcp")
-    fastmcp_log.handlers.clear()
-    fastmcp_log.propagate = True
+    sys.excepthook = _log_uncaught
+    threading.excepthook = _log_thread_uncaught
+    faulthandler.enable()  # a hard crash (segfault, deadlock dump) still leaves a traceback
 
 
 # ---- credential fingerprints ---------------------------------------------------
@@ -149,6 +186,32 @@ def headers_for_log(raw: list[tuple[bytes, bytes]]) -> dict[str, Any]:
 
 # ---- request tracing -----------------------------------------------------------
 
+_MCPE_TOKEN = re.compile(r"mcpe_[A-Za-z0-9_-]{8,}")
+_JWT = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+# A secret-looking field in JSON ("API_KEY": "...") or a Python repr ('token': '...').
+_SECRET_FIELD = re.compile(
+    r"""(["'][^"']*(?:token|secret|password|key|authorization|assertion|cookie)[^"']*["']"""
+    r"""\s*:\s*)(["'])[^"']*\2""",
+    re.IGNORECASE,
+)
+
+
+def scrub(text: str) -> str:
+    """A body safe to log: mcpe_ tokens cut to their 12-character prefix, JWTs and
+    the values of secret-looking JSON fields (an env var named *_TOKEN or API_KEY, a
+    freshly minted token) replaced."""
+    text = _MCPE_TOKEN.sub(lambda m: m.group(0)[:12] + "…", text)
+    text = _JWT.sub("<jwt>", text)
+    return _SECRET_FIELD.sub(r"\1\2<redacted>\2", text)
+
+
+def _body_text(chunks: list[bytes], limit: int) -> str:
+    raw = b"".join(chunks)
+    text = raw[:limit].decode("utf-8", "replace")
+    if len(raw) > limit:
+        text += f"… ({len(raw)} bytes)"
+    return scrub(text)
+
 
 def _rpc_summary(body: bytes) -> Any:
     """``initialize`` / ``tools/call whoami`` for a JSON-RPC body (or a batch)."""
@@ -168,7 +231,7 @@ def _rpc_summary(body: bytes) -> Any:
 
 
 class TraceMiddleware:
-    """One log line (and one ``TRACES`` entry) per HTTP request; see the module doc."""
+    """Traces every HTTP request; see the module doc."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -178,7 +241,9 @@ class TraceMiddleware:
             await self.app(scope, receive, send)
             return
         started = time.monotonic()
+        rid = secrets.token_hex(4)  # ties a request's lines together in a busy log
         entry: dict[str, Any] = {
+            "id": rid,
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "method": scope["method"],
             "path": scope["path"],
@@ -187,48 +252,56 @@ class TraceMiddleware:
             "headers": headers_for_log(scope["headers"]),
         }
 
-        # Buffer a small JSON body to name its JSON-RPC method, then replay it.
-        content_type = dict(scope["headers"]).get(b"content-type", b"")
+        # Read the whole request body up front (bounded for logging, never for the
+        # app), log it, then replay it to the app unchanged.
         buffered: list[Message] = []
-        if scope["method"] == "POST" and b"json" in content_type:
-            chunks: list[bytes] = []
-            size = 0
-            while True:
-                message = await receive()
-                buffered.append(message)
-                if message["type"] != "http.request":
-                    break
-                chunks.append(message.get("body", b""))
-                size += len(chunks[-1])
-                if size > 64 * 1024 or not message.get("more_body", False):
-                    break
-            if size <= 64 * 1024:
-                entry["rpc"] = _rpc_summary(b"".join(chunks))
+        chunks: list[bytes] = []
+        while True:
+            message = await receive()
+            buffered.append(message)
+            if message["type"] != "http.request":
+                break
+            chunks.append(message.get("body", b""))
+            if not message.get("more_body", False):
+                break
+        if any(chunks):
+            entry["body"] = _body_text(chunks, _BODY_LIMIT)
+            entry["rpc"] = _rpc_summary(b"".join(chunks))
+        logger.debug(
+            "[%s] -> %s %s%s peer=%s headers=%s body=%s", rid, entry["method"], entry["path"],
+            f"?{entry['query']}" if entry["query"] else "", entry["peer"],
+            json.dumps(entry["headers"], default=str), entry.get("body"),
+        )
 
         async def replay() -> Message:
             if buffered:
                 return buffered.pop(0)
             return await receive()
 
-        body: list[bytes] = []
-        state: dict[str, Any] = {"status": None, "streaming": False}
+        response: list[bytes] = []
+        state: dict[str, Any] = {"streaming": False, "sent": 0}
 
         async def watch(message: Message) -> None:
             if message["type"] == "http.response.start":
-                state["status"] = message["status"]
                 entry["status"] = message["status"]
                 entry["ms"] = round((time.monotonic() - started) * 1000, 1)
-                response_headers = dict(message.get("headers", []))
-                state["streaming"] = b"event-stream" in response_headers.get(b"content-type", b"")
-                if message["status"] < 400 or state["streaming"]:
-                    _finish(entry)
-            elif message["type"] == "http.response.body" and state["status"] is not None:
-                if state["status"] >= 400 and not state["streaming"]:
-                    if sum(map(len, body)) < _BODY_LIMIT:
-                        body.append(message.get("body", b""))
-                    if not message.get("more_body", False):
-                        entry["error_body"] = b"".join(body)[:_BODY_LIMIT].decode("utf-8", "replace")
-                        _finish(entry)
+                response_headers = headers_for_log(message.get("headers", []))
+                state["streaming"] = "event-stream" in str(response_headers.get("content-type", ""))
+                logger.debug("[%s] <- %s %s in %sms headers=%s", rid, message["status"],
+                             entry["path"], entry["ms"], json.dumps(response_headers, default=str))
+            elif message["type"] == "http.response.body":
+                chunk = message.get("body", b"")
+                state["sent"] += len(chunk)
+                if state["streaming"]:
+                    if chunk:
+                        logger.debug("[%s] <- chunk %s", rid, _body_text([chunk], _CHUNK_LIMIT))
+                elif sum(map(len, response)) <= _BODY_LIMIT:
+                    response.append(chunk)
+                if not message.get("more_body", False):
+                    if not state["streaming"]:
+                        entry["response_body"] = _body_text(response, _BODY_LIMIT)
+                    entry["bytes"] = state["sent"]
+                    _finish(entry, started)
             await send(message)
 
         try:
@@ -236,23 +309,27 @@ class TraceMiddleware:
         except Exception:
             entry["status"] = entry.get("status") or 500
             entry["exception"] = True
-            logger.exception("unhandled error serving %s %s", scope["method"], scope["path"])
-            _finish(entry)
+            logger.exception("[%s] unhandled error serving %s %s", rid, scope["method"], scope["path"])
+            _finish(entry, started)
             raise
+        finally:
+            if "total_ms" not in entry:
+                entry["disconnected"] = True  # the client left before the response ended
+                _finish(entry, started)
 
 
-def _finish(entry: dict[str, Any]) -> None:
-    if entry.get("_done"):
+def _finish(entry: dict[str, Any], started: float) -> None:
+    if "total_ms" in entry:
         return
-    entry["_done"] = True
-    TRACES.append({k: v for k, v in entry.items() if k != "_done"})
-    level = logging.WARNING if (entry.get("status") or 0) >= 400 else logging.DEBUG
+    entry["total_ms"] = round((time.monotonic() - started) * 1000, 1)
+    TRACES.append(dict(entry))
+    level = logging.WARNING if (entry.get("status") or 0) >= 400 else logging.INFO
     rpc = f" rpc={entry['rpc']}" if entry.get("rpc") else ""
+    body = f" response={entry['response_body']!r}" if entry.get("response_body") else ""
     logger.log(
-        level, "%s %s -> %s in %sms%s peer=%s headers=%s%s",
-        entry["method"], entry["path"], entry.get("status"), entry.get("ms"), rpc,
-        entry.get("peer"), json.dumps(entry["headers"], default=str),
-        f" body={entry['error_body']!r}" if entry.get("error_body") else "",
+        level, "[%s] %s %s -> %s first byte %sms, done %sms, %s bytes%s%s",
+        entry["id"], entry["method"], entry["path"], entry.get("status"), entry.get("ms"),
+        entry["total_ms"], entry.get("bytes", 0), rpc, body,
     )
 
 

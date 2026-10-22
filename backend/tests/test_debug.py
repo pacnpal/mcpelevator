@@ -21,17 +21,28 @@ from app.runners.builtin import INTERNAL_SECRET
 
 @pytest.fixture(autouse=True)
 def _restore_logging():
-    """Debug mode reconfigures process-wide logging; put it back for later tests."""
-    names = ["", *debug._QUIET, "app", "mcpelevator", "fastmcp", "mcp", "uvicorn",
-             "uvicorn.access", "httpx"]
+    """Debug mode reconfigures every logger and the excepthooks process-wide; put them
+    back for later tests."""
+    import faulthandler
+    import sys
+    import threading
+
+    names = ["", *logging.root.manager.loggerDict]
     saved = {n: (logging.getLogger(n).level, list(logging.getLogger(n).handlers),
                  logging.getLogger(n).propagate) for n in names}
+    hooks = (sys.excepthook, threading.excepthook, faulthandler.is_enabled())
     yield
+    for name in logging.root.manager.loggerDict:
+        if name not in saved:
+            logging.getLogger(name).setLevel(logging.NOTSET)
     for n, (level, handlers, propagate) in saved.items():
         log = logging.getLogger(n)
         log.setLevel(level)
         log.handlers[:] = handlers
         log.propagate = propagate
+    sys.excepthook, threading.excepthook = hooks[0], hooks[1]
+    if not hooks[2]:
+        faulthandler.disable()
 
 
 def _jwt(claims: dict) -> str:
@@ -51,6 +62,14 @@ def test_fingerprints_never_log_a_usable_credential():
     assert debug.fingerprint("accept", "text/plain") == "text/plain"
 
 
+def test_scrub_hides_secrets_in_bodies_and_library_logs():
+    token = "mcpe_" + "y" * 40
+    out = debug.scrub(f'{{"token": "{token}", "env": {{"GITHUB_TOKEN": "ghp_1", "MODE": "x"}}}}')
+    assert token not in out and "ghp_1" not in out and '"MODE": "x"' in out
+    assert "sk-1" not in debug.scrub("arguments={'api_key': 'sk-1', 'q': 'cats'}")
+    assert "<jwt>" in debug.scrub(f"Bearer {_jwt({'sub': 'a'})}")
+
+
 def test_bundle_is_404_unless_debug(monkeypatch):
     monkeypatch.setattr(get_settings(), "debug", False)
     with TestClient(create_app()) as client:
@@ -67,8 +86,12 @@ def test_debug_traces_requests_and_serves_the_bundle(monkeypatch):
         assert r.status_code == 404
         trace = next(t for t in debug.TRACES if t["path"] == "/s/nope/mcp")
         assert trace["status"] == 404 and trace["rpc"] == ["tools/list"]
-        assert trace["error_body"] == "unknown server"
+        assert trace["response_body"] == "unknown server"
         assert token not in json.dumps(trace)
+
+        minted = client.post("/api/tokens", json={"name": "x", "scope": "all"}, headers=LOOPBACK)
+        trace = next(t for t in reversed(debug.TRACES) if t["path"] == "/api/tokens")
+        assert minted.json()["token"] not in trace["response_body"]
 
         bundle = client.get("/api/debug", headers=LOOPBACK).json()
         assert {"versions", "config", "servers", "groups", "traces", "logs"} <= set(bundle)

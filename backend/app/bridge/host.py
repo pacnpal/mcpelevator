@@ -1658,7 +1658,7 @@ def main() -> None:
     if debug.enabled():
         debug.configure_logging(keep=False)
         _UPSTREAM_LOG.setLevel(logging.DEBUG)
-        level = "debug"
+        level = "trace"  # uvicorn also logs every ASGI message at this level
 
     proxy = build_proxy(spec)
     if spec.get("rest_openapi"):

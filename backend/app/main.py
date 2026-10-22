@@ -131,6 +131,8 @@ async def lifespan(app: FastAPI):
     if debug.enabled():
         # Here, not at import: uvicorn configures its loggers before the lifespan runs.
         debug.configure_logging(keep=True)
+        # Never-awaited coroutines and callbacks that block the loop over 100ms.
+        asyncio.get_running_loop().set_debug(True)
         debug.log_startup()
     init_db()
     with Session(get_engine()) as session:
