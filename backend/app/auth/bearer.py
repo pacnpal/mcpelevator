@@ -16,20 +16,31 @@ class BearerProvider:
     name = "bearer"
 
     async def authenticate(self, request: Request, server: Server) -> None:
-        scheme, _, token = request.headers.get("authorization", "").partition(" ")
-        token = token.strip()
-        if scheme.lower() != "bearer" or not token:
-            raise HTTPException(
-                status_code=401,
-                detail="missing bearer token",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        if server.runner == BUILTIN_RUNNER:
-            from app.auth.control_plane import is_env_admin_token  # circular-import guard
+        from app.auth.principal import credential_principal  # circular-import guard
+        from app.groups import registry
 
-            if is_env_admin_token(token):
-                return  # the break-glass admin credential opens the control plane's server
+        group = server.id.removeprefix("group:") if server.id.startswith("group:") else None
         with Session(get_engine()) as session:
+            # The built-in mcpelevator server IS the control plane, which authorizes
+            # each call as its caller, so it also opens to the credentials the control
+            # plane accepts: the break-glass token, any control token, or a Cloudflare
+            # Access identity matching a user. A group bundling it opens to an ADMIN's
+            # such credential only: groups are an admin-owned surface, and a member's
+            # login must not reach the other members' tools.
+            if server.runner == BUILTIN_RUNNER or (
+                group is not None and registry.includes_builtin(session, group)
+            ):
+                caller = credential_principal(request, session, cloudflare=True)
+                if caller is not None and (group is None or caller.is_admin):
+                    return
+            scheme, _, token = request.headers.get("authorization", "").partition(" ")
+            token = token.strip()
+            if scheme.lower() != "bearer" or not token:
+                raise HTTPException(
+                    status_code=401,
+                    detail="missing bearer token",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
             record = repo.get_token_by_hash(session, hash_token(token))
             if record is None:
                 raise HTTPException(
@@ -44,10 +55,6 @@ class BearerProvider:
         # app.groups.hub.group_server). So a group-A token reaching group B — or any
         # server — is rejected exactly like a wrong-server token, and a per-server token
         # can't authorize a group bundle.
-        # A control (login) token also opens the built-in mcpelevator server: that
-        # server IS the control plane, which then authorizes each call as its owner.
-        if scope == "control" and server.runner == BUILTIN_RUNNER:
-            return
         if scope != "all" and scope != server.id:
             raise HTTPException(
                 status_code=403,

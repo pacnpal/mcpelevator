@@ -605,11 +605,12 @@
 	}
 
 	/** A group's member servers, resolved the way the backend resolves them: the wildcard
-	 *  is every registered server, an explicit list keeps its registry order. An id with no
+	 *  is every registered server except the built-in mcpelevator one (it joins only when
+	 *  named), an explicit list keeps its registry order. An id with no
 	 *  server row is dropped — a deleted server is pruned from the registry, so this only
 	 *  shows up in the window between the delete and the next groups fetch. */
 	function groupMembers(group: GroupInfo): ServerSummary[] {
-		if (group.members === '*') return servers;
+		if (group.members === '*') return servers.filter((s) => s.runner !== 'mcpelevator');
 		return group.members
 			.map((id) => servers.find((s) => s.id === id))
 			.filter((s): s is ServerSummary => s !== undefined);

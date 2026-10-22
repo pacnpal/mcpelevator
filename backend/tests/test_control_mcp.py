@@ -192,12 +192,14 @@ def test_builtin_row_guards(client):
     r = client.patch(f"/api/servers/{other['id']}", json={"runner": BUILTIN_RUNNER}, headers=LOOPBACK)
     assert r.status_code == 400
 
-    # Wildcard groups skip it and an explicit member list can't name it.
+    # Wildcard groups skip it; it joins a group only when named.
     with Session(get_engine()) as s:
         registry.write_group(s, "all", "*")
         assert b.id not in registry.resolve(s, "all")
-        with pytest.raises(ValueError):
-            registry.write_group(s, "ops", [b.id])
+        assert not registry.includes_builtin(s, "all")
+        registry.write_group(s, "ops", [b.id])
+        assert registry.resolve(s, "ops") == [b.id]
+        assert registry.includes_builtin(s, "ops")
 
 
 def test_playground_forwards_the_callers_credential_to_the_builtin_only(client, monkeypatch):
@@ -473,3 +475,130 @@ def test_prompts_use_bridge_names_only_through_the_bridge(client):
 
     assert "wait_for_server" in text()  # direct /api/mcp: the tools aren't renamed here
     assert "await_server" in text({INTERNAL_HEADER: INTERNAL_SECRET})
+
+
+def _member_control_token(client, admin_headers: dict, name: str = "Ada") -> tuple[dict, str]:
+    user = client.post("/api/users", json={"name": name}, headers={**LOOPBACK, **admin_headers}).json()
+    raw = new_token()
+    with Session(get_engine()) as s:
+        repo.create_token(
+            s,
+            Token(id=new_id(), name=name, token_hash=hash_token(raw), prefix=raw[:12],
+                  scope="control", user_id=user["id"]),
+        )
+    return user, raw
+
+
+def test_groups_naming_the_builtin_open_to_admin_control_credentials(client):
+    import asyncio
+
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.auth.bearer import BearerProvider
+    from app.groups.hub import group_server
+
+    admin = mint_token("control")
+    _, member = _member_control_token(client, {"authorization": f"Bearer {admin}"})
+    with Session(get_engine()) as s:
+        registry.write_group(s, "ops", [_builtin().id])
+        registry.write_group(s, "plain", [])
+
+    def auth(token: str, group: str) -> None:
+        req = Request({"type": "http", "headers": [(b"authorization", f"Bearer {token}".encode())]})
+        asyncio.run(BearerProvider().authenticate(req, group_server(group)))
+
+    auth(admin, "ops")
+    with pytest.raises(HTTPException):
+        auth(member, "ops")  # a member's login must not reach the other members' tools
+    with pytest.raises(HTTPException):
+        auth(admin, "plain")  # a control token opens only groups bundling the control plane
+    auth(mint_token("group:plain"), "plain")
+
+
+def test_hub_forwards_headers_to_the_builtin_member_only():
+    from app.groups.hub import GroupHub, _default_transport
+
+    captured = []
+
+    def factory(url: str):
+        captured.append(_default_transport(url))
+        return captured[-1]
+
+    hub = GroupHub(transport_factory=factory)
+    hub._make_proxy("mcpelevator", "http://127.0.0.1:1/mcp", forward=True)
+    hub._make_proxy("other", "http://127.0.0.1:2/mcp")
+    assert [t.forward_incoming_headers for t in captured] == [True, False]
+
+
+@pytest.fixture
+def cf(monkeypatch):
+    """Cloudflare Access configured for team.example, signing with a local key."""
+    import time
+    from types import SimpleNamespace
+
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from app.auth import cf_access
+    from app.config import get_settings
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(get_settings(), "cf_access_team_domain", "team.example")
+    monkeypatch.setattr(get_settings(), "cf_access_aud", "aud-1")
+    monkeypatch.setattr(
+        cf_access, "_keys",
+        lambda team: SimpleNamespace(get_signing_key_from_jwt=lambda t: SimpleNamespace(key=key.public_key())),
+    )
+
+    def assertion(email: str, aud: str = "aud-1") -> dict:
+        now = int(time.time())
+        claims = {"email": email, "aud": [aud], "iss": "https://team.example", "iat": now, "exp": now + 60}
+        return {cf_access.HEADER: jwt.encode(claims, key, algorithm="RS256")}
+
+    return assertion
+
+
+def test_cloudflare_identity_runs_calls_as_the_matching_user(client, cf):
+    import asyncio
+
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.auth.bearer import BearerProvider
+    from app.control_mcp import _authorize
+
+    admin = {"authorization": f"Bearer {mint_token('control')}"}
+    client.post("/api/users", json={"name": "ada@example.com"}, headers={**LOOPBACK, **admin})
+    with Session(get_engine()) as s:
+        runtime_settings.write(s, {"control_plane_auth": "always"})
+    internal = {INTERNAL_HEADER: INTERNAL_SECRET}
+
+    # Through the built-in bridge, the assertion names the caller, email case aside.
+    is_error, me = _call(client, "whoami", headers={**internal, **cf("Ada@Example.com")})
+    assert not is_error and me["user"]["name"] == "ada@example.com" and me["user"]["role"] == "member"
+    # Straight to /api/mcp, without the bridge, it isn't trusted.
+    status, body = _rpc(client, "tools/list", headers=cf("ada@example.com"))
+    assert status == 403 and "only through" in body["detail"]
+
+    def edge(headers: dict) -> None:
+        req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers.items()]})
+        with Session(get_engine()) as s:
+            _authorize(req, s, edge=True)
+
+    edge(cf("ada@example.com"))
+    asyncio.run(BearerProvider().authenticate(
+        Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]}),
+        _builtin(),
+    ))
+    for headers, reason in (
+        (cf("bob@example.com"), "no user has that name"),
+        (cf("ada@example.com", aud="other"), "didn't verify"),
+        ({"authorization": f"Bearer {mint_token()}"}, "isn't one"),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            edge(headers)
+        assert exc.value.status_code == 403 and reason in exc.value.detail
+    with pytest.raises(HTTPException) as exc:
+        edge({})
+    assert exc.value.status_code == 401

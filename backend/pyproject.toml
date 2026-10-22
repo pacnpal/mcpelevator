@@ -16,6 +16,8 @@ dependencies = [
     "pydantic-settings>=2.4",
     "httpx>=0.27",
     "python-multipart>=0.0.9",
+    # Cloudflare Access assertion checks (app.auth.cf_access); crypto for RS256.
+    "pyjwt[crypto]>=2.10",
 ]
 
 [project.optional-dependencies]

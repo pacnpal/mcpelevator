@@ -47,7 +47,7 @@ from starlette.types import ASGIApp
 # must get [] instead of a noisy -32603 (see app.bridge.host._forward_roots).
 from app.bridge.host import _forward_roots
 from app.db import get_engine, repo
-from app.db.models import Server
+from app.db.models import BUILTIN_RUNNER, Server
 from app.groups import registry
 from app.registry import settings as runtime_settings
 
@@ -193,6 +193,7 @@ class GroupHub:
                 servers = {
                     s.id: (s.mcp_http, s.auth_provider) for s in repo.list_servers(session)
                 }
+                builtin = {s.id for s in repo.list_servers(session) if s.runner == BUILTIN_RUNNER}
 
             running = supervisor.running_endpoints()
 
@@ -238,7 +239,7 @@ class GroupHub:
                 if current is not None and current.key == key:
                     continue  # topology unchanged — keep the live instance
                 try:
-                    await self._swap(name, entries, key, mounted)
+                    await self._swap(name, entries, key, mounted, builtin)
                 except Exception:
                     # Isolate per group: one group's build/start failure must not abort the
                     # whole pass and starve every group after it in iteration order (the
@@ -251,7 +252,7 @@ class GroupHub:
                     logger.exception("group %r sync error", name)
                     await self._teardown(name)
 
-    def _make_proxy(self, slug: str, url: str) -> FastMCP:
+    def _make_proxy(self, slug: str, url: str, forward: bool = False) -> FastMCP:
         transport = self._transport_factory(url)
         client = ProxyClient(transport, roots=_forward_roots)
         proxy = create_proxy(client, name=slug)
@@ -262,8 +263,11 @@ class GroupHub:
         # bundle — to every bridge, and a remote-runner bridge would forward it once
         # more to its upstream. Never propagate it; bridges are unauthenticated
         # loopback and the group's auth was already enforced at the dispatcher.
+        # The one exception is the built-in mcpelevator server (``forward``): its
+        # bridge only talks to this process's /api/mcp, which authorizes every call
+        # as the caller and so needs the caller's own credential.
         if hasattr(transport, "forward_incoming_headers"):
-            transport.forward_incoming_headers = False
+            transport.forward_incoming_headers = forward
         return proxy
 
     async def _swap(
@@ -272,10 +276,14 @@ class GroupHub:
         entries: list[tuple[str, str, str, int]],
         key: frozenset,
         members: dict[str, str] | None = None,
+        forward: set[str] | None = None,
     ) -> None:
         bundle = FastMCP(f"mcpelevator-{name}")
-        for _server_id, slug, host, port in sorted(entries):
-            bundle.mount(self._make_proxy(slug, f"http://{host}:{port}/mcp"), namespace=slug)
+        for server_id, slug, host, port in sorted(entries):
+            proxy = self._make_proxy(
+                slug, f"http://{host}:{port}/mcp", forward=server_id in (forward or ())
+            )
+            bundle.mount(proxy, namespace=slug)
         # stateless: a fresh upstream transport per request, so swapping instances never
         # strands a session. Host/Origin protection stays OFF here — enforce() in the
         # dispatcher is the single guard, identical to every other /s and /g route.

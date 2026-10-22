@@ -19,7 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.staticfiles import StaticFiles
 
-from app import __version__, control_mcp, usage
+from app import __version__, control_mcp, debug, usage
 from app.api import auth as auth_api
 from app.api import catalog as catalog_api
 from app.api import groups as groups_api
@@ -128,6 +128,10 @@ def _bootstrap_control_plane_auth() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if debug.enabled():
+        # Here, not at import: uvicorn configures its loggers before the lifespan runs.
+        debug.configure_logging(keep=True)
+        debug.log_startup()
     init_db()
     with Session(get_engine()) as session:
         service.normalize_auth_providers(session)  # canonicalize legacy auth_provider values
@@ -243,6 +247,8 @@ def create_app() -> FastAPI:
     # also declare require_admin themselves — defense in depth at include time).
     app.include_router(groups_api.router, prefix="/api", dependencies=gated)
     app.include_router(users_api.router, prefix="/api", dependencies=gated)
+    # Admin-only diagnostics bundle; 404 unless MCPE_DEBUG is on (app.debug).
+    app.include_router(debug.router, prefix="/api")
     # The control plane as an MCP server; its tools call the routers above in-process
     # with the caller's credentials, so it gates and authorizes exactly like /api.
     app.state.control_mcp = control_mcp.build(app)
@@ -254,6 +260,9 @@ def create_app() -> FastAPI:
     app.state.groups = hub
     app.mount("/g", GroupDispatch(hub))
     app.include_router(proxy_router)  # /s/{slug}/...
+
+    if debug.enabled():
+        app.add_middleware(debug.TraceMiddleware)  # outermost: sees every refusal too
 
     fe = settings.frontend_dir
     if not fe.is_absolute():

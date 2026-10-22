@@ -1093,3 +1093,18 @@ def test_group_restart_skips_a_member_disabled_while_the_batch_runs(clean_settin
         with Session(get_engine()) as session:
             repo.delete_server(session, a.id)
             repo.delete_server(session, b.id)
+
+
+def test_route_replaces_a_client_sent_original_host(clean_settings):
+    """The built-in member's bridge forwards the group request's headers to /api/mcp,
+    which builds URLs from x-mcpe-original-host. A client's copy must not get through."""
+
+    async def echo(scope, receive, send):
+        headers = [v.decode() for k, v in scope["headers"] if k == b"x-mcpe-original-host"]
+        await JSONResponse({"original": headers})(scope, receive, send)
+
+    _write_groups({"team": "*"})
+    with TestClient(app) as client:
+        _stub_group(client, "team", inner=echo)
+        r = client.post("/g/team/mcp", headers={**LOOPBACK, "x-mcpe-original-host": "evil.example"})
+        assert r.json() == {"original": ["127.0.0.1"]}

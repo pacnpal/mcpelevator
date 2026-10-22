@@ -111,24 +111,23 @@ def is_env_admin_token(token: str) -> bool:
 
 def control_auth(request: Request, session: Session) -> Literal["ok", "missing", "wrong_scope"]:
     """Classify the request's control-plane credential. Pure (no raising) so the
-    gate and ``/api/auth/status`` share one decision: ``ok`` = a control token (or
-    the break-glass env token); ``wrong_scope`` = a valid non-control token;
+    gate and ``/api/auth/status`` share one decision: ``ok`` = a control token, the
+    break-glass env token, or a trusted Cloudflare Access identity; ``wrong_scope`` =
+    a valid non-control token;
     ``missing`` = no token or no match."""
-    token = _bearer(request)
-    if not token:
-        return "missing"
-    if is_env_admin_token(token):
+    from app.auth.principal import credential_principal  # circular-import guard
+    from app.runners.builtin import is_internal
+
+    # The same decision principal.resolve makes, so the gate and identity agree:
+    # a user-bound credential whose user row is gone fails closed, and a Cloudflare
+    # Access identity counts only on requests the built-in bridge carried.
+    if credential_principal(request, session, cloudflare=is_internal(request)) is not None:
         return "ok"
-    row = repo.get_token_by_hash(session, hash_token(token))
-    if row is None:
-        return "missing"
-    if row.scope != "control":
+    token = _bearer(request)
+    row = repo.get_token_by_hash(session, hash_token(token)) if token else None
+    if row is not None and row.scope != "control":
         return "wrong_scope"
-    # A user-bound credential whose user row is gone fails closed, matching
-    # principal.resolve — the gate and identity resolution must agree.
-    if row.user_id is not None and repo.get_user(session, row.user_id) is None:
-        return "missing"
-    return "ok"
+    return "missing"
 
 
 def require_control_plane(request: Request, session: Session = Depends(get_session)) -> None:

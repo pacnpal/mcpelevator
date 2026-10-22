@@ -1651,13 +1651,30 @@ def main() -> None:
     _UPSTREAM_LOG.addHandler(handler)
     _UPSTREAM_LOG.setLevel(logging.INFO)
 
+    # MCPE_DEBUG reaches bridges through the inherited environment (see app.debug).
+    from app import debug
+
+    level = "info"
+    if debug.enabled():
+        debug.configure_logging(keep=False)
+        _UPSTREAM_LOG.setLevel(logging.DEBUG)
+        level = "debug"
+
     proxy = build_proxy(spec)
     if spec.get("rest_openapi"):
         # Compose MCP + REST into one app; run uvicorn directly (http_app carries
         # the session-manager lifespan, which uvicorn executes).
         import uvicorn
 
-        uvicorn.run(build_app(spec, proxy), host=host, port=port, log_level="info")
+        app = build_app(spec, proxy)
+        if debug.enabled():
+            app = debug.TraceMiddleware(app)
+        uvicorn.run(app, host=host, port=port, log_level=level)
+    elif debug.enabled():
+        import uvicorn
+
+        uvicorn.run(debug.TraceMiddleware(build_app(spec, proxy)), host=host, port=port,
+                    log_level=level)
     else:
         # run() handles uvicorn + the Streamable HTTP session-manager lifespan for us.
         proxy.run(transport="http", host=host, port=port, show_banner=False)

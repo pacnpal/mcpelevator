@@ -75,6 +75,12 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
 
     # auth chokepoint (raises 401/403 if denied)
     await enforce(request, server)
+    if server.runner == BUILTIN_RUNNER:
+        from app.control_mcp import authorize_edge  # circular-import guard
+
+        # Refuse a credential the control plane won't accept here, with a reason,
+        # rather than letting the bridge fail initialize with an opaque -32603.
+        authorize_edge(request)
 
     sup = request.app.state.supervisor
     # Only authenticated traffic counts as activity — an unauthorized probe must not

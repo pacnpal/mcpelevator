@@ -10,6 +10,8 @@ deterministic and upgrade-safe:
                                 closed: the credential is treated as invalid)
 - control token, no user_id  -> admin (tokens minted before multi-user, and
                                 boot/recovery mints, keep full power on upgrade)
+- Cloudflare Access identity -> the user named by its email, only on requests the
+                                built-in bridge carried (``app.auth.cf_access``)
 
 WHAT a principal may do lives in ``app.auth.policy`` — keep the two concerns
 separate so authorization rules never re-derive identity.
@@ -92,10 +94,7 @@ def resolve(request: Request, session: Session) -> Optional[Principal]:
 
 
 def _resolve_uncached(request: Request, session: Session) -> Optional[Principal]:
-    from app.auth.control_plane import (  # circular-import guard
-        enforcement_enabled,
-        is_env_admin_token,
-    )
+    from app.auth.control_plane import enforcement_enabled  # circular-import guard
 
     # Enforcement OFF decides FIRST: the local operator is trusted in full
     # regardless of any bearer header — exactly the pre-multi-user behavior, where
@@ -105,6 +104,22 @@ def _resolve_uncached(request: Request, session: Session) -> Optional[Principal]
     # surface, not a member view it can only escape by clearing the token.
     if not enforcement_enabled(session):
         return LOCAL_ADMIN
+
+    from app.runners.builtin import is_internal  # circular-import guard
+
+    # A Cloudflare Access identity counts only on requests the built-in bridge
+    # carried; see app.auth.cf_access for why it isn't trusted on all of /api.
+    return credential_principal(request, session, cloudflare=is_internal(request))
+
+
+def credential_principal(
+    request: Request, session: Session, *, cloudflare: bool
+) -> Optional[Principal]:
+    """The principal the request's credential names, regardless of enforcement: the
+    break-glass token, a control token, or (when ``cloudflare``) a Cloudflare Access
+    identity that matches a user. None when it names nobody."""
+    from app.auth import cf_access  # circular-import guard
+    from app.auth.control_plane import is_env_admin_token
 
     token = _bearer(request)
     if is_env_admin_token(token):
@@ -126,7 +141,14 @@ def _resolve_uncached(request: Request, session: Session) -> Optional[Principal]
                     local_runners=_effective_local_runners(user),
                     token_id=row.id,
                 )
-            # else: dangling credential — fail closed (enforcement is on here).
+            # else: dangling credential — fail closed.
+    if cloudflare:
+        user = cf_access.user(session, request)
+        if user is not None:
+            return Principal(
+                user_id=user.id, name=user.name, role=user.role,
+                local_runners=_effective_local_runners(user),
+            )
     return None
 
 

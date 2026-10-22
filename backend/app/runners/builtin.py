@@ -24,9 +24,18 @@ INTERNAL_HEADER = "x-mcpe-internal"
 # sets it for this server only and /api/mcp trusts it only next to INTERNAL_HEADER,
 # so the API's copyable URLs and OAuth callback name the caller's address.
 ORIGINAL_HOST_HEADER = "x-mcpe-original-host"
-# Proves a request came through this process's own bridge (which only the /s gate or
-# the supervisor's discovery probe can reach). Never persisted: bridges restart on boot.
+# Proves a request came through this process's own bridge (which only the /s gate, a
+# group bundle, or the supervisor's discovery probe can reach). Never persisted:
+# bridges restart on boot.
 INTERNAL_SECRET = secrets.token_urlsafe(32)
+
+
+def is_internal(request) -> bool:
+    """Did this request come through the built-in server's own bridge?"""
+    # Bytes: compare_digest raises on a non-ASCII str, which a client can send.
+    return secrets.compare_digest(
+        request.headers.get(INTERNAL_HEADER, "").encode(), INTERNAL_SECRET.encode()
+    )
 
 
 # Served by /api/mcp directly and handed to the bridge, which would otherwise
