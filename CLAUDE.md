@@ -104,7 +104,7 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   mapping a group name to its members — either `"*"` (every registered server, present and
   future, except the built-in control MCP server) or an ordered list of server ids. Each group is served at `/g/<name>/mcp`: a
   control-plane-hosted FastMCP mounting a proxy per running member, tools namespaced by slug,
-  rebuilt-and-swapped per group after each reconcile via the supervisor's `on_converged` hook
+  rebuilt-and-swapped per group after each reconcile via the supervisor's `on_converged` hook (the replaced instance drains its in-flight requests before closing, so a call that rebuilds its own group still returns)
   (the hub owns each sub-app's lifespan; Starlette doesn't run mounted lifespans). There is no
   special-case name — `all` is just a conventional entry with members `"*"`. The registry is
   validated at write time and again at startup (`registry.validate_at_startup` fails the boot

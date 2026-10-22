@@ -115,6 +115,34 @@ class _AppRunner:
                 logger.exception("group lifespan shutdown error")
 
 
+# How long a replaced group instance may keep serving the requests it already
+# accepted before it is closed anyway.
+_DRAIN_S = 300.0
+
+
+class _Counting:
+    """A group's ASGI app, counting requests in flight. A swap routes new requests
+    to the new instance at once and closes the old one only when this reaches zero,
+    so a call that changes its own group (the built-in server's put_group through
+    /g, say) isn't cut off by the rebuild it caused."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self.active = 0
+        self.idle = asyncio.Event()
+        self.idle.set()
+
+    async def __call__(self, scope, receive, send) -> None:
+        self.active += 1
+        self.idle.clear()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.active -= 1
+            if not self.active:
+                self.idle.set()
+
+
 class _Instance:
     """One group's live (app, runner, topology-key) triple."""
 
@@ -148,6 +176,7 @@ class GroupHub:
         # mirroring how tests patch app.bridge.host._build_transport
         self._transport_factory = transport_factory
         self._instances: dict[str, _Instance] = {}
+        self._retiring: set[_Instance] = set()  # replaced, finishing their requests
         self._lock = asyncio.Lock()
 
     def app_for(self, name: str) -> Optional[ASGIApp]:
@@ -288,22 +317,45 @@ class GroupHub:
         # strands a session. Host/Origin protection stays OFF here — enforce() in the
         # dispatcher is the single guard, identical to every other /s and /g route.
         app = bundle.http_app(path="/mcp", stateless_http=True, host_origin_protection=False)
-        # The old instance is torn down before the new one starts (the moment of
-        # emptiness just 503s at the dispatcher; swaps only happen on topology
-        # changes). Each lifespan runs inside its own _AppRunner task.
-        await self._teardown(name)
+        # The new instance starts first and takes new requests at once; the old one
+        # is retired (closed once its in-flight requests finish), so no request is
+        # cut off and there is no moment of emptiness. Each lifespan runs inside
+        # its own _AppRunner task.
         runner = _AppRunner(app)
         await runner.start()
-        self._instances[name] = _Instance(app, runner, key, members)
+        old = self._instances.get(name)
+        self._instances[name] = _Instance(_Counting(app), runner, key, members)
+        if old is not None:
+            self._retire(old)
 
     async def _teardown(self, name: str) -> None:
+        """Stop routing to ``name`` now; its instance closes once drained."""
         old = self._instances.pop(name, None)
         if old is not None:
-            await old.runner.close()
+            self._retire(old)
+
+    def _retire(self, instance: _Instance) -> None:
+        # Never awaited by the caller: the caller may be a request running ON this
+        # instance (a control-plane call that rebuilt its own group), so waiting
+        # for the drain here would deadlock.
+        self._retiring.add(instance)
+
+        async def drain() -> None:
+            try:
+                await asyncio.wait_for(instance.app.idle.wait(), _DRAIN_S)
+            except asyncio.TimeoutError:
+                logger.warning("group instance still busy after %ss; closing it", _DRAIN_S)
+            finally:
+                if instance in self._retiring:
+                    self._retiring.discard(instance)
+                    await instance.runner.close()
+
+        asyncio.get_running_loop().create_task(drain())
 
     async def _close_all_unlocked(self) -> None:
-        instances = list(self._instances.values())
+        instances = [*self._instances.values(), *self._retiring]
         self._instances.clear()
+        self._retiring.clear()
         for instance in instances:
             try:
                 await instance.runner.close()
@@ -315,9 +367,12 @@ class GroupHub:
 
     @asynccontextmanager
     async def auth_transition(self):
-        """Keep every group unavailable while an auth-affecting row is written."""
+        """Keep every group unavailable while an auth-affecting row is written. New
+        requests 503 at once; requests already accepted under the old auth finish
+        (one of them may be the very call making this change)."""
         async with self._lock:
-            await self._close_all_unlocked()
+            for name in list(self._instances):
+                await self._teardown(name)
             yield
 
     async def close(self) -> None:

@@ -1108,3 +1108,36 @@ def test_route_replaces_a_client_sent_original_host(clean_settings):
         _stub_group(client, "team", inner=echo)
         r = client.post("/g/team/mcp", headers={**LOOPBACK, "x-mcpe-original-host": "evil.example"})
         assert r.json() == {"original": ["127.0.0.1"]}
+
+
+async def test_replaced_instance_finishes_its_requests_before_closing():
+    """A swap must not cut off a request already running on the old instance: the
+    built-in server's put_group through /g rebuilds the very group carrying it."""
+    import asyncio
+
+    from app.groups.hub import _Counting, _Instance
+
+    release = asyncio.Event()
+    closed = []
+
+    async def slow_app(scope, receive, send):
+        await release.wait()
+
+    class Runner:
+        async def close(self):
+            closed.append(True)
+
+    hub = GroupHub()
+    counting = _Counting(slow_app)
+    old = _Instance(counting, Runner(), frozenset())
+    hub._instances["g"] = old
+    request = asyncio.create_task(counting({"type": "http"}, None, None))
+    await asyncio.sleep(0)
+    await hub._teardown("g")  # returns at once: the caller may be that request
+    await asyncio.sleep(0)
+    assert hub.app_for("g") is None and closed == []  # still serving its request
+    release.set()
+    await request
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert closed == [True]
