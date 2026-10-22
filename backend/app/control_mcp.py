@@ -624,15 +624,12 @@ def _refusal(request: Request, cloudflare: bool) -> HTTPException:
         if not cloudflare:
             why = ("a Cloudflare Access identity counts only through the built-in "
                    "server's /s URL, not /api/mcp directly")
-        elif not cf_access.configured():
-            why = ("a Cloudflare Access assertion arrived, but MCPE_CF_ACCESS_TEAM_DOMAIN "
-                   "and MCPE_CF_ACCESS_AUD aren't set")
-        elif (address := cf_access.email(request)) is None:
-            why = ("the Cloudflare Access assertion didn't verify (check "
-                   "MCPE_CF_ACCESS_TEAM_DOMAIN and MCPE_CF_ACCESS_AUD)")
         else:
-            why = (f"Cloudflare Access signed you in as {address}, but no single user has "
-                   "that name (none, or more than one)")
+            # Verifying again is fine: this is the failure path, and keys are cached.
+            address, why = cf_access.verify(request)
+            if address is not None:
+                why = (f"Cloudflare Access signed you in as {address}, but no single user "
+                       "has that name (none, or more than one)")
         return HTTPException(status_code=403, detail=why)
     if principal_mod._bearer(request):
         return HTTPException(

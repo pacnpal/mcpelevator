@@ -19,8 +19,9 @@ the built-in server use it directly.
 from __future__ import annotations
 
 import logging
+import time
 from functools import lru_cache
-from typing import Optional
+from typing import Any, Optional
 
 import jwt
 from sqlmodel import Session
@@ -42,10 +43,28 @@ def _team(domain: str) -> str:
 
 @lru_cache(maxsize=4)
 def _keys(team: str) -> jwt.PyJWKClient:
-    # ponytail: PyJWKClient fetches synchronously, so a key refresh (hourly, or on an
-    # unknown kid) blocks the caller for one short request; move to an async fetch if
-    # that ever shows up in latency.
+    # ponytail: PyJWKClient fetches synchronously, so a key refresh (hourly, or at most
+    # every _REFETCH_S on an unknown kid) blocks the caller for one short request; move
+    # to an async fetch if that ever shows up in latency.
     return jwt.PyJWKClient(f"{team}/cdn-cgi/access/certs", lifespan=3600, timeout=5)
+
+
+# An unknown kid refetches the keys (Cloudflare rotates them), but no more often than
+# this: otherwise every junk assertion would cost a blocking outbound request.
+_REFETCH_S = 300.0
+_last_refetch: dict[str, float] = {}
+
+
+def _signing_key(team: str, token: str) -> Any:
+    kid = jwt.get_unverified_header(token).get("kid")
+    client = _keys(team)
+    keys = {k.key_id: k.key for k in client.get_signing_keys()}
+    if kid not in keys and time.monotonic() - _last_refetch.get(team, -_REFETCH_S) >= _REFETCH_S:
+        _last_refetch[team] = time.monotonic()
+        keys = {k.key_id: k.key for k in client.get_signing_keys(refresh=True)}
+    if kid not in keys:
+        raise jwt.InvalidTokenError("signed with a key the team doesn't publish")
+    return keys[kid]
 
 
 def configured() -> bool:
@@ -53,25 +72,44 @@ def configured() -> bool:
     return bool(s.cf_access_team_domain.strip() and s.cf_access_aud.strip())
 
 
-def email(request: Request) -> Optional[str]:
-    """The verified email in the request's assertion, lowercased, or None."""
+def verify(request: Request) -> tuple[Optional[str], Optional[str]]:
+    """``(email, None)`` for a verified assertion, else ``(None, why)``. ``why`` names
+    what an operator can fix (expired, wrong AUD tag, wrong team domain) and stays
+    generic for anything else, so a forged token learns nothing from it."""
     token = request.headers.get(HEADER, "")
-    if not token or not configured():
-        return None
+    if not token:
+        return None, "no Cloudflare Access assertion"
+    if not configured():
+        return None, ("a Cloudflare Access assertion arrived, but MCPE_CF_ACCESS_TEAM_DOMAIN "
+                      "and MCPE_CF_ACCESS_AUD aren't set")
     s = get_settings()
     team = _team(s.cf_access_team_domain)
     audience = [a.strip() for a in s.cf_access_aud.split(",") if a.strip()]
     try:
-        key = _keys(team).get_signing_key_from_jwt(token).key
         claims = jwt.decode(
-            token, key, algorithms=["RS256"], audience=audience, issuer=team,
-            options={"require": ["exp", "iat"]},
+            token, _signing_key(team, token), algorithms=["RS256"], audience=audience,
+            issuer=team, options={"require": ["exp", "iat"]},
         )
+    except jwt.ExpiredSignatureError:
+        return None, "the Cloudflare Access assertion has expired; sign in again"
+    except jwt.InvalidAudienceError:
+        return None, ("the Cloudflare Access assertion is for a different Access application "
+                      "(check MCPE_CF_ACCESS_AUD)")
+    except jwt.InvalidIssuerError:
+        return None, ("the Cloudflare Access assertion is from a different team domain "
+                      "(check MCPE_CF_ACCESS_TEAM_DOMAIN)")
     except jwt.PyJWTError as exc:
         logger.info("Cloudflare Access assertion rejected: %s", exc)
-        return None
+        return None, "the Cloudflare Access assertion didn't verify"
     address = claims.get("email")
-    return address.strip().lower() if isinstance(address, str) and address.strip() else None
+    if not isinstance(address, str) or not address.strip():
+        return None, "the Cloudflare Access assertion carries no email"
+    return address.strip().lower(), None
+
+
+def email(request: Request) -> Optional[str]:
+    """The verified email in the request's assertion, lowercased, or None."""
+    return verify(request)[0]
 
 
 def user(session: Session, request: Request) -> Optional[User]:

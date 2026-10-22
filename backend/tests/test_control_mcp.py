@@ -546,15 +546,22 @@ def cf(monkeypatch):
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     monkeypatch.setattr(get_settings(), "cf_access_team_domain", "team.example")
     monkeypatch.setattr(get_settings(), "cf_access_aud", "aud-1")
-    monkeypatch.setattr(
-        cf_access, "_keys",
-        lambda team: SimpleNamespace(get_signing_key_from_jwt=lambda t: SimpleNamespace(key=key.public_key())),
-    )
+    fetches = []
 
-    def assertion(email: str, aud: str = "aud-1") -> dict:
+    def get_signing_keys(refresh: bool = False):
+        fetches.append(refresh)
+        return [SimpleNamespace(key_id="k1", key=key.public_key())]
+
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(get_signing_keys=get_signing_keys))
+    monkeypatch.setattr(cf_access, "_last_refetch", {})
+
+    def assertion(email: str, aud: str = "aud-1", kid: str = "k1", exp: int = 60,
+                  iss: str = "https://team.example") -> dict:
         now = int(time.time())
-        claims = {"email": email, "aud": [aud], "iss": "https://team.example", "iat": now, "exp": now + 60}
-        return {cf_access.HEADER: jwt.encode(claims, key, algorithm="RS256")}
+        claims = {"email": email, "aud": [aud], "iss": iss, "iat": now, "exp": now + exp}
+        return {cf_access.HEADER: jwt.encode(claims, key, algorithm="RS256", headers={"kid": kid})}
+
+    assertion.fetches = fetches
 
     return assertion
 
@@ -593,7 +600,10 @@ def test_cloudflare_identity_runs_calls_as_the_matching_user(client, cf):
     ))
     for headers, reason in (
         (cf("bob@example.com"), "no single user has that name"),
-        (cf("ada@example.com", aud="other"), "didn't verify"),
+        (cf("ada@example.com", aud="other"), "different Access application"),
+        (cf("ada@example.com", iss="https://other.example"), "different team domain"),
+        (cf("ada@example.com", exp=-120), "expired"),
+        (cf("ada@example.com", kid="nope"), "didn't verify"),
         ({"authorization": f"Bearer {mint_token()}"}, "isn't one"),
     ):
         with pytest.raises(HTTPException) as exc:
@@ -630,3 +640,17 @@ def test_bridge_forwarding_carries_the_cloudflare_assertion(monkeypatch):
                                                (b"cf-access-jwt-assertion", b"a.b.c")]})
     monkeypatch.setattr(deps, "get_http_request", lambda: req)
     assert {"authorization", "cf-access-jwt-assertion"} <= set(deps.get_http_headers(include={"authorization"}))
+
+
+def test_unknown_signing_key_refetches_at_most_once_per_window(cf):
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    def request(headers: dict) -> Request:
+        return Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers.items()]})
+
+    for _ in range(5):
+        assert cf_access.email(request(cf("ada@example.com", kid="junk"))) is None
+    assert cf.fetches.count(True) == 1  # junk kids can't force a fetch per request
+    assert cf_access.email(request(cf("ada@example.com"))) == "ada@example.com"

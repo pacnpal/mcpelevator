@@ -38,6 +38,7 @@ import threading
 import time
 from importlib import metadata
 from typing import Any
+from urllib.parse import parse_qsl
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session
@@ -176,6 +177,17 @@ def fingerprint(name: str, value: str) -> Any:
     return value
 
 
+def query_for_log(raw: bytes) -> dict[str, str] | None:
+    """Query parameters safe to log: an OAuth callback's ``code`` and ``state``, and
+    anything secret-named (``access_token``, ``api_key``), keep only their length."""
+    out = {}
+    for name, value in parse_qsl(raw.decode("latin-1"), keep_blank_values=True):
+        lower = name.lower()
+        secret = lower in ("code", "state") or any(word in lower for word in _SECRET_WORDS)
+        out[name] = f"<redacted, {len(value)} chars>" if secret else scrub(value)
+    return out or None
+
+
 def headers_for_log(raw: list[tuple[bytes, bytes]]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k, v in raw:
@@ -247,7 +259,7 @@ class TraceMiddleware:
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "method": scope["method"],
             "path": scope["path"],
-            "query": scope.get("query_string", b"").decode("latin-1") or None,
+            "query": query_for_log(scope.get("query_string", b"")),
             "peer": scope["client"][0] if scope.get("client") else None,
             "headers": headers_for_log(scope["headers"]),
         }
@@ -268,8 +280,8 @@ class TraceMiddleware:
             entry["body"] = _body_text(chunks, _BODY_LIMIT)
             entry["rpc"] = _rpc_summary(b"".join(chunks))
         logger.debug(
-            "[%s] -> %s %s%s peer=%s headers=%s body=%s", rid, entry["method"], entry["path"],
-            f"?{entry['query']}" if entry["query"] else "", entry["peer"],
+            "[%s] -> %s %s query=%s peer=%s headers=%s body=%s", rid, entry["method"],
+            entry["path"], entry["query"], entry["peer"],
             json.dumps(entry["headers"], default=str), entry.get("body"),
         )
 

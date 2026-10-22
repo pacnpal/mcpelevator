@@ -70,6 +70,32 @@ def test_scrub_hides_secrets_in_bodies_and_library_logs():
     assert "<jwt>" in debug.scrub(f"Bearer {_jwt({'sub': 'a'})}")
 
 
+def test_query_strings_are_scrubbed():
+    out = debug.query_for_log(b"code=abc123&state=xyz&api_key=k&page=2&q=mcpe_" + b"z" * 20)
+    assert out["code"] == "<redacted, 6 chars>" and out["state"] == "<redacted, 3 chars>"
+    assert out["api_key"] == "<redacted, 1 chars>" and out["page"] == "2"
+    assert "z" * 20 not in out["q"]
+    assert debug.query_for_log(b"") is None
+
+
+def test_bundle_needs_an_admin_when_auth_is_enforced(monkeypatch):
+    from sqlmodel import Session
+
+    from app.db import get_engine
+    from app.registry import settings as runtime_settings
+
+    monkeypatch.setattr(get_settings(), "debug", True)
+    with Session(get_engine()) as s:
+        previous = runtime_settings.control_plane_auth(s)
+        runtime_settings.write(s, {"control_plane_auth": "always"})
+    try:
+        with TestClient(create_app()) as client:
+            assert client.get("/api/debug", headers=LOOPBACK).status_code == 401
+    finally:
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"control_plane_auth": previous})
+
+
 def test_bundle_is_404_unless_debug(monkeypatch):
     monkeypatch.setattr(get_settings(), "debug", False)
     with TestClient(create_app()) as client:
