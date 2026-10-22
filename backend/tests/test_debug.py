@@ -88,6 +88,13 @@ def test_scrub_catches_query_secrets_in_any_line():
     assert "abc123" not in out and "xyz" not in out and "page=2" in out
 
 
+def test_retained_log_records_are_bounded():
+    ring = debug._Ring()
+    ring.setFormatter(logging.Formatter("%(message)s"))
+    ring.emit(logging.LogRecord("x", logging.DEBUG, __file__, 1, "y" * 100_000, None, None))
+    assert len(debug.RECORDS[-1]) < 9000
+
+
 def test_query_strings_are_scrubbed():
     out = debug.query_for_log(b"code=abc123&state=xyz&api_key=k&page=2&q=mcpe_" + b"z" * 20)
     assert out["code"] == "<redacted, 6 chars>" and out["state"] == "<redacted, 3 chars>"

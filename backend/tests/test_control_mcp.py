@@ -769,3 +769,44 @@ def test_debug_bridges_keep_uvicorn_off_its_own_handlers(monkeypatch):
     assert debug.uvicorn_logging() == {"log_config": None}
     monkeypatch.setattr(get_settings(), "debug", False)
     assert debug.uvicorn_logging() == {}
+
+
+def test_failed_cloudflare_sign_in_gets_its_reason_from_the_bearer_check(client, cf):
+    import asyncio
+
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.auth.bearer import BearerProvider
+    from app.groups.hub import group_server
+
+    admin = {**LOOPBACK, "authorization": f"Bearer {mint_token('control')}"}
+    client.post("/api/users", json={"name": "ada@example.com"}, headers=admin)
+    with Session(get_engine()) as s:
+        registry.write_group(s, "ops", [_builtin().id])
+
+    def auth(headers: dict, server) -> HTTPException:
+        req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers.items()]})
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(BearerProvider().authenticate(req, server))
+        return exc.value
+
+    edge_token = {"authorization": "Bearer cf-edge-token"}  # what Cloudflare forwards
+    err = auth({**edge_token, **cf("bob@example.com")}, _builtin())
+    assert err.status_code == 403 and "no single user" in err.detail
+    err = auth({**edge_token, **cf("ada@example.com")}, group_server("ops"))
+    assert err.status_code == 403 and "only an admin" in err.detail
+
+
+def test_switch_applies_to_cloudflare_users_with_auth_off(client, cf):
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.control_mcp import _authorize
+
+    user = client.post("/api/users", json={"name": "ada@example.com"}, headers=LOOPBACK).json()
+    client.patch(f"/api/users/{user['id']}", json={"control_mcp": False}, headers=LOOPBACK)
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+    with Session(get_engine()) as s, pytest.raises(HTTPException) as exc:
+        _authorize(req, s, edge=True)
+    assert exc.value.status_code == 403 and "disabled for this user" in exc.value.detail

@@ -12,11 +12,17 @@ from app.db.models import BUILTIN_RUNNER, Server
 from app.util import hash_token
 
 
+def _bearer_token(request: Request) -> str:
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    return token.strip() if scheme.lower() == "bearer" else ""
+
+
 class BearerProvider:
     name = "bearer"
 
     async def authenticate(self, request: Request, server: Server) -> None:
-        from app.auth.principal import credential_principal  # circular-import guard
+        from app.auth import cf_access  # circular-import guard
+        from app.auth.principal import credential_principal
         from app.groups import registry
 
         group = server.id.removeprefix("group:") if server.id.startswith("group:") else None
@@ -33,6 +39,20 @@ class BearerProvider:
                 caller = credential_principal(request, session, cloudflare=True)
                 if caller is not None and (group is None or caller.is_admin):
                     return
+                # A Cloudflare sign-in that didn't open the server (no single user, an
+                # assertion that didn't verify, a member at a group) is answered with
+                # its reason. Falling through would 401 the edge's own token, and a
+                # 401 sends an OAuth client back through a sign-in that can't fix it.
+                if request.headers.get(cf_access.HEADER) and not _bearer_token(request).startswith("mcpe_"):
+                    if caller is not None:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"Cloudflare Access signed you in as {caller.name}, but only "
+                            "an admin opens a group that includes the built-in server",
+                        )
+                    from app.control_mcp import _refusal
+
+                    raise _refusal(request, True)
             scheme, _, token = request.headers.get("authorization", "").partition(" ")
             token = token.strip()
             if scheme.lower() != "bearer" or not token:

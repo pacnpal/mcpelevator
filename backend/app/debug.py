@@ -93,10 +93,16 @@ class _ScrubFilter(logging.Filter):
         return True
 
 
+_RECORD_LIMIT = 8192  # per retained record: the ring caps the count, this the size
+
+
 class _Ring(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            RECORDS.append(self.format(record))
+            line = self.format(record)
+            if len(line) > _RECORD_LIMIT:
+                line = line[:_RECORD_LIMIT] + f"… ({len(line)} chars)"
+            RECORDS.append(line)
         except Exception:  # a log handler must never raise into the caller
             pass
 

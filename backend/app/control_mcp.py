@@ -671,11 +671,14 @@ def _authorize(request: Request, session: Session, *, edge: bool = False) -> Non
             raise _refusal(request, cloudflare)
         user_id = caller.user_id
     else:
-        # Every caller is the local admin, but a presented token still names its
-        # user, and that user's switch still applies.
+        # Every caller is the local admin, but a presented credential still names
+        # its user, and that user's switch still applies.
         bearer = principal_mod._bearer(request)
         row = repo.get_token_by_hash(session, hash_token(bearer)) if bearer else None
         user_id = row.user_id if row is not None else None
+        if user_id is None and (edge or internal):
+            signed_in = cf_access.user(session, request)  # so does a Cloudflare identity
+            user_id = signed_in.id if signed_in is not None else None
     if user_id is not None:
         user = repo.get_user(session, user_id)
         if user is None or not user.control_mcp:
