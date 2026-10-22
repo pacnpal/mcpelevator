@@ -2004,6 +2004,8 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     session.refresh(server)
     if server.runner == BUILTIN_RUNNER:
         _require_builtin_editable(server, changes)
+    elif changes.get("runner") == BUILTIN_RUNNER:
+        raise ValueError("the built-in mcpelevator runner can't be assigned to a server")
     # Pre-edit runner: converting a NON-docker server INTO a docker one newly grants the
     # root-equivalent runner, so it must be gated like create/enable. Merely editing a row that
     # was ALREADY docker is not gated (so a broken image/env can be fixed while the runner is

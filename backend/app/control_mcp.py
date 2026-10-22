@@ -301,12 +301,16 @@ def build(app: FastAPI) -> "_Gate":
         return await api("GET", "/api/users")
 
     @mcp.tool(annotations=_WRITE)
-    async def create_user(name: str, role: Role = "member", local_runners: bool = False) -> Any:
+    async def create_user(
+        name: str, role: Role = "member", local_runners: bool = False, control_mcp: bool = True
+    ) -> Any:
         """Create a user. ``local_runners`` lets a member use npx/uvx/command (code
-        execution on this host). Mint their login with create_user_credential."""
-        return await api(
-            "POST", "/api/users", json={"name": name, "role": role, "local_runners": local_runners}
-        )
+        execution on this host); ``control_mcp`` lets them use this MCP server. Mint
+        their login with create_user_credential."""
+        payload = {
+            "name": name, "role": role, "local_runners": local_runners, "control_mcp": control_mcp
+        }
+        return await api("POST", "/api/users", json=payload)
 
     @mcp.tool(annotations=_WRITE)
     async def update_user(
@@ -314,9 +318,13 @@ def build(app: FastAPI) -> "_Gate":
         name: Optional[str] = None,
         role: Optional[Role] = None,
         local_runners: Optional[bool] = None,
+        control_mcp: Optional[bool] = None,
     ) -> Any:
-        """Rename a user or change their role / local-runner permission."""
-        changes = {"name": name, "role": role, "local_runners": local_runners}
+        """Rename a user or change their role, local-runner permission, or access to this
+        MCP server."""
+        changes = {
+            "name": name, "role": role, "local_runners": local_runners, "control_mcp": control_mcp
+        }
         return await api(
             "PATCH", f"/api/users/{user_id}", json={k: v for k, v in changes.items() if v is not None}
         )

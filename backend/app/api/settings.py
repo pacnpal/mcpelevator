@@ -49,6 +49,12 @@ async def update_settings(
 ):
     changes = {k: v for k, v in payload.model_dump().items() if v is not None}
     control_mcp = changes.pop("control_mcp", None)
+    if control_mcp is not None and service.get_builtin(session) is None:
+        # Checked before any write so the rest of the patch isn't committed either.
+        raise HTTPException(
+            status_code=409,
+            detail="the built-in mcpelevator server isn't provisioned (MCPE_CONTROL_MCP=false)",
+        )
 
     def guard(s: Session) -> None:
         # Both checks run inside the settings write transaction (under the write

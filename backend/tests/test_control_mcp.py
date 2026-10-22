@@ -110,6 +110,15 @@ def test_global_switch_is_the_builtin_enabled_flag(client):
     assert client.get("/api/settings", headers=LOOPBACK).json()["control_mcp"] is True
 
 
+def test_global_switch_refused_when_not_provisioned(monkeypatch):
+    monkeypatch.setattr(Supervisor, "run_forever", _parked)
+    with TestClient(app) as c:
+        assert c.get("/api/settings", headers=LOOPBACK).json()["control_mcp"] is False
+        r = c.patch("/api/settings", json={"control_mcp": True, "idle_timeout_s": 7}, headers=LOOPBACK)
+        assert r.status_code == 409
+        assert c.get("/api/settings", headers=LOOPBACK).json()["idle_timeout_s"] != 7
+
+
 def test_enforced_gate_and_per_user_switch(client):
     admin = mint_token("control")
     with Session(get_engine()) as s:
@@ -138,8 +147,8 @@ def test_enforced_gate_and_per_user_switch(client):
     is_error, servers = _call(client, "list_servers", headers=ada)
     assert not is_error and servers == {"items": []}  # a member sees only their own servers
 
-    r = client.patch(f"/api/users/{user['id']}", json={"control_mcp": False}, headers={**LOOPBACK, **auth})
-    assert r.json()["control_mcp"] is False
+    is_error, out = _call(client, "update_user", {"user_id": user["id"], "control_mcp": False}, headers=auth)
+    assert not is_error and out["control_mcp"] is False
     assert _rpc(client, "tools/list", headers=ada)[0] == 403
     assert _rpc(client, "tools/list", headers=auth)[0] == 200
 
@@ -160,6 +169,10 @@ def test_builtin_row_guards(client):
     assert client.post(f"{url}/clone", headers=LOOPBACK).status_code == 400
     assert client.post("/api/servers", json={"name": "x", "runner": BUILTIN_RUNNER, "command": "x"},
                        headers=LOOPBACK).status_code == 400
+    other = client.post("/api/servers", json={"name": "y", "runner": "command", "command": "echo"},
+                        headers=LOOPBACK).json()
+    r = client.patch(f"/api/servers/{other['id']}", json={"runner": BUILTIN_RUNNER}, headers=LOOPBACK)
+    assert r.status_code == 400
 
     # Wildcard groups skip it; naming it explicitly includes it.
     with Session(get_engine()) as s:
