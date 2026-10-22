@@ -158,6 +158,7 @@ def test_builtin_row_guards(client):
     url = f"/api/servers/{b.id}"
     assert client.patch(url, json={"command": "evil"}, headers=LOOPBACK).status_code == 400
     assert client.patch(url, json={"auth_provider": "oauth"}, headers=LOOPBACK).status_code == 400
+    assert client.patch(url, json={"auth_provider": "inherit"}, headers=LOOPBACK).status_code == 400
     r = client.patch(
         url,
         json={"name": "Control", "runner": BUILTIN_RUNNER, "env": {}, "disabled_tools": ["delete_user"]},
@@ -174,12 +175,55 @@ def test_builtin_row_guards(client):
     r = client.patch(f"/api/servers/{other['id']}", json={"runner": BUILTIN_RUNNER}, headers=LOOPBACK)
     assert r.status_code == 400
 
-    # Wildcard groups skip it; naming it explicitly includes it.
+    # Wildcard groups skip it and an explicit member list can't name it.
     with Session(get_engine()) as s:
         registry.write_group(s, "all", "*")
-        registry.write_group(s, "ops", [b.id])
         assert b.id not in registry.resolve(s, "all")
-        assert registry.resolve(s, "ops") == [b.id]
+        with pytest.raises(ValueError):
+            registry.write_group(s, "ops", [b.id])
+
+
+def test_playground_forwards_the_callers_credential_to_the_builtin_only(client, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.api import servers as servers_api
+
+    seen = []
+
+    async def fake_call(url, name, arguments, timeout, headers=None):
+        seen.append(headers)
+        return SimpleNamespace(is_error=False, content=[], structured_content=None)
+
+    monkeypatch.setattr(servers_api, "_call_bridge_tool", fake_call)
+    b = _builtin()
+    unit = SimpleNamespace(state="running", port=1, host="127.0.0.1", tools=[{"name": "list_servers"}])
+    sup = client.app.state.supervisor
+    monkeypatch.setattr(sup, "unit", lambda sid: unit)
+    auth = {**LOOPBACK, "authorization": "Bearer abc"}
+    r = client.post(f"/api/servers/{b.id}/tools/list_servers/call", json={}, headers=auth)
+    assert r.status_code == 200, r.text
+    other = client.post("/api/servers", json={"name": "z", "runner": "command", "command": "echo"},
+                        headers=LOOPBACK).json()
+    unit.tools = [{"name": "list_servers"}]
+    client.post(f"/api/servers/{other['id']}/tools/list_servers/call", json={}, headers=auth)
+    assert seen == [{"authorization": "Bearer abc"}, None]
+
+
+def test_logs_recheck_visibility_after_the_await(client, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.api import servers as servers_api
+
+    b = _builtin()
+    logs = SimpleNamespace(snapshot=lambda: ["secret line"])
+    unit = SimpleNamespace(state="running", logs=logs, config_hash=b.config_hash, pid=1, port=1,
+                           host="127.0.0.1", last_error=None, startup_status=None, tools=[])
+    monkeypatch.setattr(client.app.state.supervisor, "unit", lambda sid: unit)
+    is_error, out = _call(client, "get_server_logs", {"server_id": b.id})
+    assert not is_error and out["lines"] == ["secret line"]
+    monkeypatch.setattr(servers_api, "_visible_now", lambda sid, p: False)  # transferred away
+    is_error, out = _call(client, "get_server_logs", {"server_id": b.id})
+    assert is_error and "secret" not in json.dumps(out)
 
 
 def test_bearer_accepts_control_tokens_for_the_builtin_only(client):

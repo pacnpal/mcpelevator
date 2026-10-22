@@ -116,16 +116,32 @@ async def update_settings(
     # dropping it to 0 resumes already-idle servers).
     if changes.keys() & {"docker_runner", "idle_timeout_s"}:
         request.app.state.supervisor.nudge()
-    builtin = service.get_builtin(session)
-    if control_mcp is not None and builtin is not None and builtin.enabled != control_mcp:
-        # Same desired-state write as POST /servers/{id}/enable|disable on that row.
-        await run_in_threadpool(service.set_enabled, session, builtin.id, control_mcp)
-        sup = request.app.state.supervisor
-        if control_mcp:
-            sup.request_activation(builtin.id)
-        else:
-            sup.cancel_activation_request(builtin.id)
-            sup.nudge()
+    if control_mcp is not None:
+
+        def _toggle():
+            # Same desired-state write as POST /servers/{id}/enable|disable on that row,
+            # re-authorized under the config write lock like every other admin write: a
+            # demotion or revocation can commit after the guard above ran.
+            with service.config_write_lock():
+                session.expire_all()
+                if not principal_mod.admin_now(session, principal):
+                    return None
+                builtin = service.get_builtin(session)
+                if builtin is None or builtin.enabled == control_mcp:
+                    return False
+                service.set_enabled(session, builtin.id, control_mcp)
+                return builtin.id
+
+        toggled = await run_in_threadpool(_toggle)
+        if toggled is None:
+            raise HTTPException(status_code=403, detail="admin role required")
+        if toggled:
+            sup = request.app.state.supervisor
+            if control_mcp:
+                sup.request_activation(toggled)
+            else:
+                sup.cancel_activation_request(toggled)
+                sup.nudge()
     result = _info(values, session)
     # A default-auth change must converge the group hub BEFORE this returns, not on the
     # next reconcile: every /g dispatcher enforces the NEW default auth on the very next

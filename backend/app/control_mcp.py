@@ -44,6 +44,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app import __version__
+from app.api import servers as servers_api
 from app.api.schemas import GroupMembers, Role, ServerCreate, ServerUpdate, SettingsUpdate
 from app.auth import principal as principal_mod
 from app.auth.control_plane import require_control_plane
@@ -233,7 +234,14 @@ def build(app: FastAPI) -> "_Gate":
         unit = app.state.supervisor.unit(server_id)
         if unit is None:
             return {"running": False, "lines": []}
-        return {"running": True, "state": unit.state, "lines": unit.logs.snapshot()[-tail:]}
+        lines = unit.logs.snapshot()[-tail:]
+        # Ownership can move during the await above. Re-check with no await in between,
+        # like the SSE route does before its first byte.
+        with Session(get_engine()) as session:
+            principal = principal_mod.resolve(get_http_request(), session)
+        if principal is None or not servers_api._visible_now(server_id, principal):
+            raise ToolError("404: server not found")
+        return {"running": True, "state": unit.state, "lines": lines}
 
     @mcp.tool(annotations=_READ)
     async def get_server_usage(server_id: str, days: Annotated[int, Field(ge=1)] = 7) -> Any:

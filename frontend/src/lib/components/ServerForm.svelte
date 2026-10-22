@@ -1365,7 +1365,7 @@
 		<div
 			class="grid grid-cols-2 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1 sm:grid-cols-4"
 		>
-			{#each isBuiltin ? AUTH_OPTIONS.filter((o) => o.value !== 'oauth') : AUTH_OPTIONS as opt (opt.value)}
+			{#each isBuiltin ? AUTH_OPTIONS.filter((o) => o.value === 'none' || o.value === 'bearer') : AUTH_OPTIONS as opt (opt.value)}
 				<label
 					class="flex cursor-pointer items-center justify-center rounded-md px-3 py-1.5 font-mono text-xs font-semibold transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
 					style={authProvider === opt.value

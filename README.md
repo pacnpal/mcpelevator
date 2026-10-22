@@ -498,7 +498,7 @@ never in the database, so authenticating never restarts the bridge on its own.
 
 Every install has one built-in server named **mcpelevator**, provisioned on boot (existing installs get it on upgrade). It serves the control plane itself as MCP tools at `/s/mcpelevator/mcp`, so an agent can do what the UI does: list, create, edit, enable, disable, restart and delete servers, import an `mcpServers` config, try a server's tools, read its logs and usage, manage groups, tokens, users and settings, and search the catalog. It has 37 tools.
 
-It's a server like the others. It shows on the dashboard, and you can hide or rename tools, rewrite descriptions, switch on REST/OpenAPI, set its auth and idle timeout, rename its slug, or add it to a group by id. Its launch line is fixed (there's nothing to launch), and it can't be deleted or cloned. A `"*"` group leaves it out, so adding it to a bundle is always a deliberate choice.
+It's a server like the others. It shows on the dashboard, and you can hide or rename tools, rewrite descriptions, switch on REST/OpenAPI, set its idle timeout, rename its slug, or set its auth to `none` or `bearer`. Its launch line is fixed (there's nothing to launch), and it can't be deleted or cloned. It never joins a group. A group token isn't a control credential, so its tools would all fail there once control-plane auth is on. `"*"` skips it and an explicit member list naming it is refused.
 
 Every tool call runs with **the caller's own permissions**. The bridge forwards your `Authorization` header to the in-process `/api/mcp`, and that endpoint runs each tool through the same `/api` route, so a member still sees only their own servers and admin-only tools still need an admin.
 
@@ -634,7 +634,7 @@ Two request grammars, both behind the same Host/Origin guard and per-request aut
 
 There is no `/s/all` or any other reserved slug beyond `summary` (which would shadow `/api/health/summary`) — single servers live only under `/s`, groups only under `/g`, so `all` is now an ordinary server slug if you want one.
 
-**The group registry** is the `groups` setting (SQLite, edited in Settings or via `PUT /api/groups/<name>` / `DELETE /api/groups/<name>`), a map from group name to its members. A member value is either `"*"` (every registered server, present and future, except the built-in mcpelevator server, which joins only by id) or an ordered list of server ids. Group names are URL-safe (lowercase letters, digits, single hyphens). Example registry:
+**The group registry** is the `groups` setting (SQLite, edited in Settings or via `PUT /api/groups/<name>` / `DELETE /api/groups/<name>`), a map from group name to its members. A member value is either `"*"` (every registered server, present and future, except the built-in mcpelevator server, which never joins a group) or an ordered list of server ids. Group names are URL-safe (lowercase letters, digits, single hyphens). Example registry:
 
 ```jsonc
 {

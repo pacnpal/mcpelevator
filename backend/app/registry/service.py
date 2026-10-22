@@ -1985,10 +1985,10 @@ def _require_builtin_editable(server: Server, changes: dict[str, Any]) -> None:
         if key in _MUTABLE_FIELDS and key not in _BUILTIN_EDITABLE:
             if (value or None) != (getattr(server, key) or None):
                 raise ValueError(f"{key} can't be changed on the built-in mcpelevator server")
-    if changes.get("auth_provider") == "oauth":
-        # /api/mcp authorizes each call by the caller's control-plane identity; an
-        # OAuth access token carries none.
-        raise ValueError("the built-in mcpelevator server supports inherit, none, or bearer auth")
+    if "auth_provider" in changes and changes["auth_provider"] not in ("none", "bearer"):
+        # /api/mcp authorizes each call by the caller's control-plane identity; an OAuth
+        # access token carries none. "inherit" is refused too: the default may be oauth.
+        raise ValueError("the built-in mcpelevator server supports none or bearer auth")
 
 
 @_serialized_write
