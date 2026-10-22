@@ -9,7 +9,7 @@ RUN npm run build   # -> /fe/build (adapter-static, SPA fallback)
 
 # uv + uvx binaries come from the official image — declared as a named stage so the
 # COPY --from below references an alias (Hadolint DL3022) rather than an external ref.
-FROM ghcr.io/astral-sh/uv:0.11.28 AS uv
+FROM ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa AS uv
 
 # Stage 2: runtime — Python control plane + Node/npx + uv/uvx so npx/uvx MCP
 # servers run with zero local setup (batteries-included).
