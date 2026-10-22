@@ -72,12 +72,17 @@ def test_scrub_hides_secrets_in_bodies_and_library_logs():
     assert token not in out and "ghp_1" not in out and '"MODE": "x"' in out
     assert "sk-1" not in debug.scrub("arguments={'api_key': 'sk-1', 'q': 'cats'}")
     assert "<jwt>" in debug.scrub(f"Bearer {_jwt({'sub': 'a'})}")
+    assert "it's" not in debug.scrub('{"password": "it\'s"}')
+    out = debug.scrub('{"token": "ab\\"cd", "next": "ok"}')
+    assert "ab" not in out and "cd" not in out and '"next": "ok"' in out
 
 
 def test_scrub_catches_query_secrets_in_any_line():
     line = 'GET /api/oauth/callback?code=abc123&state=xyz&page=2&api_key=k HTTP/1.1" 303'
     out = debug.scrub(line)
     assert "abc123" not in out and "xyz" not in out and "=k " not in out and "page=2" in out
+    form = debug.scrub("client_secret=abc123&grant_type=authorization_code&code=xyz")
+    assert "abc123" not in form and "xyz" not in form and "grant_type=authorization_code" in form
     asgi = "Started scope={'path': '/mcp', 'query_string': b'code=abc123&state=xyz&page=2'}"
     out = debug.scrub(asgi)
     assert "abc123" not in out and "xyz" not in out and "page=2" in out

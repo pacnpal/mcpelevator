@@ -61,11 +61,10 @@ _last_failure: dict[str, float] = {}
 
 def _fetch(team: str, *, refresh: bool) -> dict[str, Any]:
     client = _keys(team)
-    cached = client.jwk_set_cache.get() if client.jwk_set_cache is not None and not refresh else None
-    if cached is not None:
+    if not refresh and client.jwk_set_cache is not None and client.jwk_set_cache.get() is not None:
         # Still-fresh keys never wait on the backoff: a failed refetch for one junk
-        # kid must not lock out every valid sign-in.
-        return {k.key_id: k.key for k in cached.keys}
+        # kid must not lock out every valid sign-in. A cache hit makes no request.
+        return {k.key_id: k.key for k in client.get_signing_keys()}
     if time.monotonic() - _last_failure.get(team, -_FAILED_BACKOFF_S) < _FAILED_BACKOFF_S:
         raise jwt.PyJWKClientConnectionError("Cloudflare's signing keys were unreachable moments ago")
     try:

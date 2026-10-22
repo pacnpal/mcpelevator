@@ -231,16 +231,16 @@ _JWT = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 # A secret-looking field in JSON ("API_KEY": "...") or a Python repr ('token': '...').
 _SECRET_FIELD = re.compile(
     r"""(["'][^"']*(?:token|secret|password|key|authorization|assertion|cookie)[^"']*["']"""
-    r"""\s*:\s*)(["'])[^"']*\2""",
+    r"""\s*:\s*)(["'])(?:\\.|(?!\2)[^\\])*\2""",
     re.IGNORECASE,
 )
 
 # A secret query parameter inside any line: in a URL (uvicorn's access log prints the
 # full request target) or at the start of a quoted raw query string (uvicorn's ASGI
 # trace prints 'query_string': b'code=...'). An OAuth callback's code/state,
-# access_token=, api_key=.
+# access_token=, api_key=, or the first field of a form body.
 _SECRET_QUERY = re.compile(
-    r"([?&'\"](?:code|state|[^=&\s\"']*(?:token|secret|password|key|assertion)[^=&\s\"']*)=)"
+    r"((?:^|[?&'\"])(?:code|state|[^=&\s\"']*(?:token|secret|password|key|assertion)[^=&\s\"']*)=)"
     r"[^&\s\"']*",
     re.IGNORECASE,
 )

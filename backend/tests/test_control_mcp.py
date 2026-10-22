@@ -695,8 +695,7 @@ def test_backoff_never_blocks_fresh_cached_keys(monkeypatch, cf):
     from app.auth import cf_access
 
     real = cf_access._keys("https://team.example")
-    keys = real.get_signing_keys()
-    cache = SimpleNamespace(get=lambda: SimpleNamespace(keys=keys))
+    cache = SimpleNamespace(get=lambda: object())  # a fresh cached key set
     monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
         get_signing_keys=real.get_signing_keys, jwk_set_cache=cache))
     cf_access._last_failure["https://team.example"] = time.monotonic()  # a refetch just failed
