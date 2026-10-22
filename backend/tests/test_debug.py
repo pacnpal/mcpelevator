@@ -94,6 +94,47 @@ def test_handlers_installed_before_debug_mode_are_scrubbed():
     assert "q" * 30 not in stream.getvalue()
 
 
+def test_scrub_filter_covers_tracebacks_and_rpc_targets():
+    import io
+
+    stream = io.StringIO()
+    early = logging.getLogger("mcpelevator.test.exc")
+    early.addHandler(logging.StreamHandler(stream))
+    early.propagate = False
+    debug.configure_logging(keep=False)
+    secret = "mcpe_" + "w" * 30
+    try:
+        raise RuntimeError(f"bad token {secret}")
+    except RuntimeError:
+        early.exception("failed")
+    assert "w" * 30 not in stream.getvalue() and "RuntimeError" in stream.getvalue()
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "resources/read",
+                       "params": {"uri": f"x://{secret}"}}).encode()
+    assert "w" * 30 not in json.dumps(debug._rpc_summary(body))
+
+
+def test_trace_keeps_only_a_prefix_of_a_large_response():
+    import asyncio
+
+    big = b"y" * 2_000_000
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": big})
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        pass
+
+    scope = {"type": "http", "method": "GET", "path": "/api/big", "headers": [], "query_string": b""}
+    asyncio.run(debug.TraceMiddleware(app)(scope, receive, send))
+    trace = debug.TRACES[-1]
+    assert trace["bytes"] == 2_000_000 and len(trace["response_body"]) < 20000
+
+
 def test_trace_bounds_a_large_request_body():
     import asyncio
 

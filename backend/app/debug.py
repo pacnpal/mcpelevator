@@ -84,6 +84,12 @@ class _ScrubFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = scrub(record.getMessage())
         record.args = None
+        # Formatters reuse exc_text when it's set, so a scrubbed traceback here is the
+        # one every handler prints.
+        if record.exc_info and not record.exc_text:
+            record.exc_text = scrub(logging.Formatter().formatException(record.exc_info))
+        if record.stack_info:
+            record.stack_info = scrub(record.stack_info)
         return True
 
 
@@ -233,10 +239,18 @@ def scrub(text: str) -> str:
 
 
 def _body_text(chunks: list[bytes], limit: int) -> str:
-    raw = b"".join(chunks)
-    text = raw[:limit].decode("utf-8", "replace")
-    if len(raw) > limit:
-        text += f"… ({len(raw)} bytes)"
+    """The first ``limit`` bytes, scrubbed. Slices before joining, so a single huge
+    chunk is never copied whole."""
+    total = sum(map(len, chunks))
+    prefix, left = [], limit
+    for chunk in chunks:
+        if left <= 0:
+            break
+        prefix.append(chunk[:left])
+        left -= len(prefix[-1])
+    text = b"".join(prefix).decode("utf-8", "replace")
+    if total > limit:
+        text += f"… ({total} bytes)"
     return scrub(text)
 
 
@@ -253,7 +267,7 @@ def _rpc_summary(body: bytes) -> Any:
             continue
         params = item.get("params") if isinstance(item.get("params"), dict) else {}
         target = params.get("name") or params.get("uri")
-        out.append(f"{item['method']} {target}" if isinstance(target, str) else item["method"])
+        out.append(scrub(f"{item['method']} {target}") if isinstance(target, str) else item["method"])
     return out or None
 
 
@@ -296,7 +310,7 @@ class TraceMiddleware:
                 break
         if any(chunks):
             entry["body"] = _body_text(chunks, _BODY_LIMIT) + ("" if complete else " …(more)")
-            if complete:
+            if complete and sum(map(len, chunks)) <= 64 * 1024:
                 entry["rpc"] = _rpc_summary(b"".join(chunks))
         logger.debug(
             "[%s] -> %s %s query=%s peer=%s headers=%s body=%s", rid, entry["method"],
@@ -326,8 +340,8 @@ class TraceMiddleware:
                 if state["streaming"]:
                     if chunk:
                         logger.debug("[%s] <- chunk %s", rid, _body_text([chunk], _CHUNK_LIMIT))
-                elif sum(map(len, response)) <= _BODY_LIMIT:
-                    response.append(chunk)
+                elif (room := _BODY_LIMIT + 1 - sum(map(len, response))) > 0:
+                    response.append(chunk[:room])  # keep a prefix, never the whole result
                 if not message.get("more_body", False):
                     if not state["streaming"]:
                         entry["response_body"] = _body_text(response, _BODY_LIMIT)
