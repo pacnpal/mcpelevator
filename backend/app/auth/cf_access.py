@@ -75,11 +75,15 @@ def email(request: Request) -> Optional[str]:
 
 
 def user(session: Session, request: Request) -> Optional[User]:
-    """The user whose name is the request's verified Cloudflare Access email."""
+    """The user whose name is the request's verified Cloudflare Access email. User
+    names aren't unique, so two matches is no match: guessing could hand a member an
+    admin's identity."""
     address = email(request)
     if address is None:
         return None
-    match = next((u for u in repo.list_users(session) if u.name.strip().lower() == address), None)
-    if match is None:
-        logger.info("Cloudflare Access signed in %s, but no user has that name", address)
-    return match
+    matches = [u for u in repo.list_users(session) if u.name.strip().lower() == address]
+    if len(matches) != 1:
+        logger.info("Cloudflare Access signed in %s, but %d users have that name",
+                    address, len(matches))
+        return None
+    return matches[0]

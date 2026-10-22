@@ -302,7 +302,7 @@ user in **Settings → Users** whose name is the email you sign in to Access wit
 The server checks the `Cf-Access-Jwt-Assertion` header Cloudflare adds to every
 request it lets through and runs each call as that user. You can leave the server on
 `bearer`, since the check accepts that identity in place of a token. A 403 from
-`/s/mcpelevator/mcp` names what didn't line up: no user with that email, an
+`/s/mcpelevator/mcp` names what didn't line up: no single user with that email, an
 assertion that didn't verify (wrong team domain or AUD), or the env vars not being
 set. Clients other than claude.ai (MCPJam, for one) also need their callback URL on
 the application's **Allowed redirect URIs**, or Cloudflare refuses to register them

@@ -592,7 +592,7 @@ def test_cloudflare_identity_runs_calls_as_the_matching_user(client, cf):
         _builtin(),
     ))
     for headers, reason in (
-        (cf("bob@example.com"), "no user has that name"),
+        (cf("bob@example.com"), "no single user has that name"),
         (cf("ada@example.com", aud="other"), "didn't verify"),
         ({"authorization": f"Bearer {mint_token()}"}, "isn't one"),
     ):
@@ -602,3 +602,31 @@ def test_cloudflare_identity_runs_calls_as_the_matching_user(client, cf):
     with pytest.raises(HTTPException) as exc:
         edge({})
     assert exc.value.status_code == 401
+
+
+def test_cloudflare_identity_refuses_an_ambiguous_name(client, cf):
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    admin = {**LOOPBACK, "authorization": f"Bearer {mint_token('control')}"}
+    client.post("/api/users", json={"name": "ada@example.com"}, headers=admin)
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+    with Session(get_engine()) as s:
+        assert cf_access.user(s, req) is not None
+    client.post("/api/users", json={"name": "ADA@example.com ", "role": "admin"}, headers=admin)
+    with Session(get_engine()) as s:
+        assert cf_access.user(s, req) is None
+
+
+def test_bridge_forwarding_carries_the_cloudflare_assertion(monkeypatch):
+    """The built-in bridge and the group hub rely on FastMCP's forward_incoming_headers
+    passing every caller header on, not just Authorization. Pin that."""
+    from starlette.requests import Request
+
+    import fastmcp.server.dependencies as deps
+
+    req = Request({"type": "http", "headers": [(b"authorization", b"Bearer x"),
+                                               (b"cf-access-jwt-assertion", b"a.b.c")]})
+    monkeypatch.setattr(deps, "get_http_request", lambda: req)
+    assert {"authorization", "cf-access-jwt-assertion"} <= set(deps.get_http_headers(include={"authorization"}))

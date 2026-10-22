@@ -631,7 +631,8 @@ def _refusal(request: Request, cloudflare: bool) -> HTTPException:
             why = ("the Cloudflare Access assertion didn't verify (check "
                    "MCPE_CF_ACCESS_TEAM_DOMAIN and MCPE_CF_ACCESS_AUD)")
         else:
-            why = f"Cloudflare Access signed you in as {address}, but no user has that name"
+            why = (f"Cloudflare Access signed you in as {address}, but no single user has "
+                   "that name (none, or more than one)")
         return HTTPException(status_code=403, detail=why)
     if principal_mod._bearer(request):
         return HTTPException(
