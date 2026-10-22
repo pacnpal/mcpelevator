@@ -538,7 +538,10 @@ def build(app: FastAPI) -> "_Gate":
         return await api("GET", "/api/settings")
 
     def _localized(text: str) -> str:
-        # Prompts name tools; use the names this server's clients actually see.
+        # Prompts name tools; use the names this client actually sees. Only the bridge
+        # applies the tool policy, so a direct /api/mcp client keeps the original names.
+        if not _internal(get_http_request()):
+            return text
         with Session(get_engine()) as session:
             return localize(text, service.get_builtin(session))
 

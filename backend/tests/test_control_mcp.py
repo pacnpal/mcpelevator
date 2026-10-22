@@ -457,3 +457,19 @@ def test_non_ascii_internal_header_is_just_a_mismatch(client):
                  INTERNAL_HEADER: b"\xe9"},
     )
     assert r.status_code == 200  # auth off: the local operator, not a 500
+
+
+def test_prompts_use_bridge_names_only_through_the_bridge(client):
+    with Session(get_engine()) as s:
+        b = service.get_builtin(s)
+        b.tool_overrides = {"wait_for_server": {"name": "await_server"}}
+        s.add(b)
+        s.commit()
+    args = {"name": "install_server", "arguments": {"what": "x"}}
+
+    def text(headers=None):
+        _, msg = _rpc(client, "prompts/get", args, headers)
+        return msg["result"]["messages"][0]["content"]["text"]
+
+    assert "wait_for_server" in text()  # direct /api/mcp: the tools aren't renamed here
+    assert "await_server" in text({INTERNAL_HEADER: INTERNAL_SECRET})
