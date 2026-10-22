@@ -74,6 +74,12 @@ def test_scrub_hides_secrets_in_bodies_and_library_logs():
     assert "<jwt>" in debug.scrub(f"Bearer {_jwt({'sub': 'a'})}")
 
 
+def test_scrub_catches_query_secrets_in_any_line():
+    line = 'GET /api/oauth/callback?code=abc123&state=xyz&page=2&api_key=k HTTP/1.1" 303'
+    out = debug.scrub(line)
+    assert "abc123" not in out and "xyz" not in out and "=k " not in out and "page=2" in out
+
+
 def test_query_strings_are_scrubbed():
     out = debug.query_for_log(b"code=abc123&state=xyz&api_key=k&page=2&q=mcpe_" + b"z" * 20)
     assert out["code"] == "<redacted, 6 chars>" and out["state"] == "<redacted, 3 chars>"

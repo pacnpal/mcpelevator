@@ -228,6 +228,14 @@ _SECRET_FIELD = re.compile(
     re.IGNORECASE,
 )
 
+# A secret query parameter in a URL inside any line (uvicorn's access log prints the
+# full request target): an OAuth callback's code/state, ?access_token=, ?api_key=.
+_SECRET_QUERY = re.compile(
+    r"([?&](?:code|state|[^=&\s\"']*(?:token|secret|password|key|assertion)[^=&\s\"']*)=)"
+    r"[^&\s\"']*",
+    re.IGNORECASE,
+)
+
 
 def scrub(text: str) -> str:
     """A body safe to log: mcpe_ tokens cut to their 12-character prefix, JWTs and
@@ -235,6 +243,7 @@ def scrub(text: str) -> str:
     freshly minted token) replaced."""
     text = _MCPE_TOKEN.sub(lambda m: m.group(0)[:12] + "…", text)
     text = _JWT.sub("<jwt>", text)
+    text = _SECRET_QUERY.sub(r"\1<redacted>", text)
     return _SECRET_FIELD.sub(r"\1\2<redacted>\2", text)
 
 

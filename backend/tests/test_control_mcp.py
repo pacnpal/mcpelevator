@@ -552,7 +552,8 @@ def cf(monkeypatch):
         fetches.append(refresh)
         return [SimpleNamespace(key_id="k1", key=key.public_key())]
 
-    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(get_signing_keys=get_signing_keys))
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+        get_signing_keys=get_signing_keys, jwk_set_cache=None))
     monkeypatch.setattr(cf_access, "_last_refetch", {})
     monkeypatch.setattr(cf_access, "_last_failure", {})
 
@@ -671,7 +672,8 @@ def test_unreachable_signing_keys_back_off_instead_of_blocking_each_request(monk
         calls.append(refresh)
         raise jwt.PyJWKClientConnectionError("timed out")
 
-    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(get_signing_keys=down))
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+        get_signing_keys=down, jwk_set_cache=None))
     req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
     for _ in range(5):
         assert cf_access.email(req) is None
@@ -682,3 +684,52 @@ def test_sql_logging_never_shows_bound_values():
     from app.db import get_engine
 
     assert get_engine().hide_parameters is True
+
+
+def test_backoff_never_blocks_fresh_cached_keys(monkeypatch, cf):
+    import time
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    real = cf_access._keys("https://team.example")
+    keys = real.get_signing_keys()
+    cache = SimpleNamespace(get=lambda: SimpleNamespace(keys=keys))
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+        get_signing_keys=real.get_signing_keys, jwk_set_cache=cache))
+    cf_access._last_failure["https://team.example"] = time.monotonic()  # a refetch just failed
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+    assert cf_access.email(req) == "ada@example.com"
+
+
+def test_cloudflare_admin_passes_the_settings_lockout_guard(client, cf):
+    from starlette.requests import Request
+
+    from app.auth.control_plane import admin_credential_presented
+
+    admin = {**LOOPBACK, "authorization": f"Bearer {mint_token('control')}"}
+    client.post("/api/users", json={"name": "root@example.com", "role": "admin"}, headers=admin)
+    client.post("/api/users", json={"name": "ada@example.com"}, headers=admin)
+
+    def presented(email: str, internal: bool) -> bool:
+        headers = {**cf(email), **({INTERNAL_HEADER: INTERNAL_SECRET} if internal else {})}
+        req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers.items()]})
+        with Session(get_engine()) as s:
+            return admin_credential_presented(req, s)
+
+    assert presented("root@example.com", internal=True)
+    assert not presented("ada@example.com", internal=True)  # a member never counts
+    assert not presented("root@example.com", internal=False)  # nor an untrusted assertion
+
+
+def test_restart_group_refuses_its_own_bridge(client):
+    with Session(get_engine()) as s:
+        registry.write_group(s, "ops", [_builtin().id])
+        registry.write_group(s, "plain", [])
+    internal = {INTERNAL_HEADER: INTERNAL_SECRET}
+    is_error, out = _call(client, "restart_group", {"name": "ops"}, headers=internal)
+    assert is_error and "can't restart itself" in json.dumps(out)
+    is_error, _ = _call(client, "restart_group", {"name": "plain"}, headers=internal)
+    assert not is_error

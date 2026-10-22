@@ -17,7 +17,6 @@ from fastapi import Depends, HTTPException
 from sqlmodel import Session
 from starlette.requests import Request
 
-from app.auth.principal import ROLE_ADMIN
 from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Token
@@ -67,18 +66,14 @@ def admin_credential_presented(request: Request, session: Session) -> bool:
     login token is a valid control credential but must NOT satisfy this — enabling
     enforcement while holding only member logins would strand the box with no way
     to reach Settings or Users."""
-    token = _bearer(request)
-    if is_env_admin_token(token):
-        return True
-    if not token:
-        return False
-    row = repo.get_token_by_hash(session, hash_token(token))
-    if row is None or row.scope != "control":
-        return False
-    if row.user_id is None:
-        return True  # legacy/boot mint: resolves to admin
-    user = repo.get_user(session, row.user_id)
-    return user is not None and user.role == ROLE_ADMIN
+    from app.auth.principal import credential_principal  # circular-import guard
+    from app.runners.builtin import is_internal
+
+    # The env token, a user-less control token, an admin's login, or (through the
+    # built-in bridge) an admin's Cloudflare Access identity: the same resolution
+    # principal.resolve uses, so a credential it would call admin counts here too.
+    caller = credential_principal(request, session, cloudflare=is_internal(request))
+    return caller is not None and caller.is_admin
 
 
 def would_lock_out(request: Request, session: Session, changes: dict[str, Any]) -> bool:

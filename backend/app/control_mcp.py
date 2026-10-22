@@ -53,6 +53,7 @@ from app.auth import principal as principal_mod
 from app.auth import cf_access
 from app.auth.control_plane import enforcement_enabled
 from app.db import get_engine, repo
+from app.groups import registry
 from app.registry import service
 from app.util import hash_token
 from app.runners.builtin import (
@@ -340,6 +341,13 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.tool(annotations=_WRITE)
     async def restart_group(name: str) -> Any:
         """Restart every enabled member of a group; reports restarted/skipped/failed."""
+        if _internal(get_http_request()):
+            with Session(get_engine()) as session:
+                if registry.includes_builtin(session, name):
+                    raise ToolError(
+                        f"group {name!r} includes the built-in server, which can't restart "
+                        "itself through its own connection; use the dashboard or the /api route"
+                    )
         return await api("POST", f"/api/groups/{_seg(name)}/restart")
 
     # ---- Tokens -------------------------------------------------------------
