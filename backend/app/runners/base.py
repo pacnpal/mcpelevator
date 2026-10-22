@@ -66,6 +66,9 @@ class ProcessSpec:
     # upstream. Off for every real upstream, since it would disclose the caller's credential,
     # and on only for the built-in server, whose upstream is this control plane itself.
     forward_authorization: bool = False
+    # MCP server instructions for the bridge to answer initialize with (the built-in
+    # server's; a real upstream's never reach a proxy). Empty = none.
+    instructions: str = ""
 
 
 Builder = Callable[[Server], ProcessSpec]

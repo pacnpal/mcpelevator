@@ -257,3 +257,57 @@ def test_bearer_accepts_control_tokens_for_the_builtin_only(client):
     other = Server(id="other", slug="other", name="other", args=[], env={})
     with pytest.raises(HTTPException):
         asyncio.run(BearerProvider().authenticate(req, other))
+
+
+def test_whoami_and_wait_for_server(client):
+    is_error, me = _call(client, "whoami")
+    assert not is_error and me["user"]["role"] == "admin"
+    created = client.post("/api/servers", json={"name": "w", "runner": "command", "command": "echo"},
+                          headers=LOOPBACK).json()
+    is_error, out = _call(client, "wait_for_server", {"server_id": created["id"], "timeout_s": 2})
+    assert not is_error and out["state"] == "stopped" and out["timed_out"] is False
+
+
+def test_install_from_catalog(client, monkeypatch):
+    from app.catalog import base, registry as catalog_registry
+
+    for src in catalog_registry.SOURCES.values():
+        if getattr(src, "_cache", None) is not None:
+            src._cache._store.clear()
+    detail = {
+        "server": {
+            "name": "io.example/memory", "title": "Memory", "version": "1.0.0",
+            "packages": [{"registryType": "npm", "identifier": "@me/memory", "version": "1.0.0",
+                          "transport": {"type": "stdio"}}],
+        },
+        "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+    }
+
+    async def fake_get_json(http, url, params):
+        return detail
+
+    monkeypatch.setattr(base, "get_json", fake_get_json)
+    is_error, out = _call(
+        client, "install_from_catalog", {"id": "io.example/memory", "enabled": False}
+    )
+    assert not is_error, out
+    srv = out["server"]
+    assert (srv["runner"], srv["name"], srv["enabled"]) == ("npx", "Memory", False)
+    with Session(get_engine()) as s:
+        assert repo.get_server(s, srv["id"]).source == "catalog:io.example/memory@1.0.0"
+
+
+def test_resources_and_prompts(client):
+    status, msg = _rpc(client, "resources/list")
+    assert status == 200
+    assert {"mcpelevator://servers", "mcpelevator://settings", "mcpelevator://groups"} <= {
+        r["uri"] for r in msg["result"]["resources"]
+    }
+    status, msg = _rpc(client, "resources/read", {"uri": "mcpelevator://servers"})
+    assert "mcpelevator" in msg["result"]["contents"][0]["text"]
+    status, msg = _rpc(client, "resources/templates/list")
+    assert "mcpelevator://servers/{server_id}/logs" in {
+        t["uriTemplate"] for t in msg["result"]["resourceTemplates"]
+    }
+    status, msg = _rpc(client, "prompts/list")
+    assert {"install_server", "diagnose_server"} <= {p["name"] for p in msg["result"]["prompts"]}

@@ -29,7 +29,10 @@ every tool call still needs the caller's own credential. It runs stateless.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import secrets
+import time
 from typing import Annotated, Any, Optional
 
 import httpx
@@ -50,7 +53,8 @@ from app.auth import principal as principal_mod
 from app.auth.control_plane import require_control_plane
 from app.db import get_engine, repo
 from app.registry import service
-from app.runners.builtin import INTERNAL_HEADER, INTERNAL_SECRET, PATH
+from app.runners.builtin import INSTRUCTIONS, INTERNAL_HEADER, INTERNAL_SECRET, PATH
+from app.runners.remote import canonical_transport
 
 # Request headers that describe the MCP transport, not the caller. Everything
 # else (authorization, host, origin, forwarding headers) is passed through so the
@@ -69,23 +73,6 @@ _READ = {"readOnlyHint": True, "openWorldHint": False}
 _WRITE = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False}
 _DESTRUCTIVE = {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False}
 
-INSTRUCTIONS = """\
-Manage this mcpelevator instance: the MCP servers it hosts (each served at
-/s/<slug>/mcp), groups bundling them (/g/<name>/mcp), access tokens, users,
-runtime settings, usage counters, and the public MCP catalog.
-
-Typical flows:
-- Install from the catalog: search_catalog -> get_catalog_server (its launch spec)
-  -> create_server with that spec -> enable_server -> get_server until state is
-  "running" (get_server_logs explains a "failed" state).
-- Bulk add: import_servers with a standard {"mcpServers": {...}} config; imported
-  servers start disabled, review then enable_server.
-- Try a tool: call_server_tool on a running server (not counted as usage).
-- Reach a server from a client: mint a token with create_token (scope "all", a
-  server id, or "group:<name>"); the plaintext is returned once.
-Server ids (not slugs) identify servers in every tool. Lifecycle tools write
-desired state; the supervisor converges, so state may lag a moment.
-"""
 
 
 def build(app: FastAPI) -> "_Gate":
@@ -93,7 +80,9 @@ def build(app: FastAPI) -> "_Gate":
     a lifespan the host app must run (see ``main.lifespan``)."""
     mcp = FastMCP("mcpelevator", instructions=INSTRUCTIONS, version=__version__)
 
-    async def api(method: str, path: str, *, json: Any = None, params: dict | None = None) -> Any:
+    async def api(
+        method: str, path: str, *, json: Any = None, params: dict | None = None, raw: bool = False
+    ) -> Any:
         outer = get_http_request()
         headers = {k: v for k, v in outer.headers.items() if k not in _TRANSPORT_HEADERS}
         peer = (outer.client.host, outer.client.port) if outer.client else ("127.0.0.1", 0)
@@ -107,6 +96,8 @@ def build(app: FastAPI) -> "_Gate":
             except ValueError:
                 detail = r.text
             raise ToolError(f"{r.status_code}: {detail}")
+        if raw:
+            return r.content
         if not r.content:
             return {"ok": True}
         data = r.json()
@@ -115,6 +106,12 @@ def build(app: FastAPI) -> "_Gate":
         return {"items": data} if isinstance(data, list) else data
 
     # ---- Instance -----------------------------------------------------------
+
+    @mcp.tool(annotations=_READ)
+    async def whoami() -> Any:
+        """Who this connection acts as: user id, name, role, local-runner permission, and
+        whether control-plane auth is enforced."""
+        return await api("GET", "/api/auth/status")
 
     @mcp.tool(annotations=_READ)
     async def health_summary() -> Any:
@@ -249,6 +246,31 @@ def build(app: FastAPI) -> "_Gate":
         if principal is None or not servers_api._visible_now(server_id, principal):
             raise ToolError("404: server not found")
         return {"running": True, "state": unit.state, "lines": lines}
+
+    @mcp.tool(annotations=_READ)
+    async def wait_for_server(
+        server_id: str, timeout_s: Annotated[float, Field(ge=1, le=300)] = 60
+    ) -> Any:
+        """Wait until a server leaves starting/stopping (after create, enable, restart or
+        an edit), then return its detail. ``timed_out`` is true if it was still settling."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            detail = await api("GET", f"/api/servers/{server_id}")
+            settling = detail.get("state") in ("starting", "stopping")
+            if not settling or time.monotonic() >= deadline:
+                return {**detail, "timed_out": settling}
+            await asyncio.sleep(1)
+
+    @mcp.tool(annotations=_READ)
+    async def export_server_mcpb(server_id: str) -> Any:
+        """A local server's launch spec as a .mcpb bundle (Claude Desktop extension),
+        base64-encoded. Remote servers can't be exported."""
+        data = await api("GET", f"/api/servers/{server_id}/mcpb", raw=True)
+        detail = await api("GET", f"/api/servers/{server_id}")
+        return {
+            "filename": f"{detail['slug']}.mcpb",
+            "content_base64": base64.b64encode(data).decode(),
+        }
 
     @mcp.tool(annotations=_READ)
     async def get_server_usage(server_id: str, days: Annotated[int, Field(ge=1)] = 7) -> Any:
@@ -389,6 +411,113 @@ def build(app: FastAPI) -> "_Gate":
     async def list_catalog_versions(id: str, source: Optional[str] = None) -> Any:
         """The published versions of a catalog entry."""
         return await api("GET", "/api/catalog/server/versions", params={"id": id, "source": source})
+
+    @mcp.tool(annotations={**_WRITE, "openWorldHint": True})
+    async def install_from_catalog(
+        id: str,
+        source: Optional[str] = None,
+        version: str = "latest",
+        name: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+        enabled: Optional[bool] = None,
+    ) -> Any:
+        """Install a catalog entry in one step, the way the UI's Install button does: the
+        first installable package, else a proxyable remote endpoint. ``env`` fills in
+        required values (env vars, or upstream headers for a remote). It starts only when
+        nothing is left to fill in, unless ``enabled`` says otherwise. Returns the server
+        plus any ``warnings`` (values still needed) and ``notes``."""
+        detail = await api(
+            "GET", "/api/catalog/server", params={"id": id, "source": source, "version": version}
+        )
+        meta = detail["server"]
+        draft = next((d for d in detail["drafts"] if d["installable"]), None)
+        remote = next(
+            (r for r in detail["remotes"] if r.get("url") and canonical_transport(r["type"])),
+            None,
+        )
+        if draft is not None:
+            spec = {
+                "runner": draft["runner"] or "npx",
+                "command": draft["command"],
+                "args": draft["args"],
+                "env": {**draft["env"], **(env or {})},
+            }
+            warnings = draft["warnings"]
+        elif remote is not None:
+            spec = {
+                "runner": "remote",
+                "command": remote["url"],
+                "args": [canonical_transport(remote["type"])],
+                "env": {**remote["headers"], **(env or {})},
+            }
+            warnings = remote["warnings"]
+        else:
+            reasons = [d["reason"] for d in detail["drafts"] if d.get("reason")]
+            raise ToolError(
+                "no installable package or remote endpoint; use create_server by hand. "
+                + " ".join(reasons + detail.get("notes", []))
+            )
+        tag = f"@{meta['version']}" if meta.get("version") else ""
+        created = await api(
+            "POST",
+            "/api/servers",
+            json={
+                **spec,
+                "name": name or meta.get("title") or meta["name"],
+                "source": f"catalog:{meta['name']}{tag}",
+                "enabled": not warnings if enabled is None else enabled,
+            },
+        )
+        return {"server": created, "warnings": warnings, "notes": detail.get("notes", [])}
+
+    # ---- Resources and prompts ---------------------------------------------
+
+    @mcp.resource("mcpelevator://servers", mime_type="application/json")
+    async def servers_resource() -> Any:
+        """Every server visible to the caller."""
+        return await api("GET", "/api/servers")
+
+    @mcp.resource("mcpelevator://servers/{server_id}", mime_type="application/json")
+    async def server_resource(server_id: str) -> Any:
+        """One server's full detail."""
+        return await api("GET", f"/api/servers/{server_id}")
+
+    @mcp.resource("mcpelevator://servers/{server_id}/logs", mime_type="text/plain")
+    async def server_logs_resource(server_id: str) -> str:
+        """A server's current activation log."""
+        return "\n".join((await get_server_logs(server_id, 2000))["lines"])
+
+    @mcp.resource("mcpelevator://groups", mime_type="application/json")
+    async def groups_resource() -> Any:
+        """Every group and its members (admin only)."""
+        return await api("GET", "/api/groups")
+
+    @mcp.resource("mcpelevator://settings", mime_type="application/json")
+    async def settings_resource() -> Any:
+        """The runtime settings."""
+        return await api("GET", "/api/settings")
+
+    @mcp.prompt
+    def install_server(what: str) -> str:
+        """Find and install an MCP server from the public catalog."""
+        return (
+            f"Install an MCP server for: {what}. Use search_catalog to find candidates and "
+            "pick the best match (say why). Call install_from_catalog with its id. If it "
+            "returns warnings, ask me for those values, then update_server with them and "
+            "enable_server. Finish with wait_for_server and report its state, endpoint URL, "
+            "and tools. If it failed, read get_server_logs and explain."
+        )
+
+    @mcp.prompt
+    def diagnose_server(server_id: str) -> str:
+        """Work out why a server isn't running and fix what can be fixed."""
+        return (
+            f"Diagnose server {server_id}. Read get_server for its state, startup status and "
+            "last error, and get_server_logs for the log. Explain the root cause in plain "
+            "words. If it's a config problem (a missing env var, a wrong package or URL), "
+            "propose the exact update_server change and apply it once I agree, then "
+            "restart_server and wait_for_server to confirm."
+        )
 
     # host_origin_protection off: the /api allowlist middleware already ran.
     inner = mcp.http_app(path=PATH, stateless_http=True, host_origin_protection=False)

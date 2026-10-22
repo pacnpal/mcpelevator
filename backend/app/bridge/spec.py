@@ -53,6 +53,8 @@ def bridge_payload(spec, name: str, *, mcp_http: bool, rest_openapi: bool) -> di
         payload["serialize_client_requests"] = True
     if spec.forward_authorization:
         payload["forward_authorization"] = True
+    if spec.instructions:
+        payload["instructions"] = spec.instructions
     return payload
 
 

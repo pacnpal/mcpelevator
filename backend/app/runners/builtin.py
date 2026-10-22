@@ -24,6 +24,34 @@ INTERNAL_HEADER = "x-mcpe-internal"
 INTERNAL_SECRET = secrets.token_urlsafe(32)
 
 
+# Served by /api/mcp directly and handed to the bridge, which would otherwise
+# answer initialize with no instructions of its own.
+INSTRUCTIONS = """\
+Manage this mcpelevator instance: the MCP servers it hosts (each served at
+/s/<slug>/mcp), groups bundling them (/g/<name>/mcp), access tokens, users,
+runtime settings, usage counters, and the public MCP catalog. whoami says who
+this connection acts as; every call runs with that caller's permissions.
+
+Typical flows:
+- Install from the catalog: search_catalog, then install_from_catalog with the
+  entry's id (pass env for required values), then wait_for_server. A "failed"
+  state is explained by get_server_logs. For full control, get_catalog_server
+  returns the launch spec to edit and pass to create_server.
+- Bulk add: import_servers with a standard {"mcpServers": {...}} config. Imported
+  servers start disabled. Review them, then enable_server and wait_for_server.
+- Hide or relabel a server's tools: update_server with disabled_tools or
+  tool_overrides.
+- Try a tool: call_server_tool on a running server (not counted as usage).
+- Reach a server from a client: mint a token with create_token (scope "all", a
+  server id, or "group:<name>"). The plaintext is returned once.
+Server ids (not slugs) identify servers in every tool. Lifecycle tools write
+desired state and the supervisor converges, so use wait_for_server after them.
+Read-only views are also resources (mcpelevator://servers, .../servers/{id},
+.../servers/{id}/logs, mcpelevator://groups, mcpelevator://settings), and the
+install_server and diagnose_server prompts walk through the common jobs.
+"""
+
+
 def internal_url() -> str:
     settings = get_settings()
     host = settings.host
@@ -46,4 +74,5 @@ def build(server: Server) -> ProcessSpec:
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),
         forward_authorization=True,
+        instructions=INSTRUCTIONS,
     )
