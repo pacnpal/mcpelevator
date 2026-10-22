@@ -157,6 +157,13 @@ def build(app: FastAPI) -> "_Gate":
     async def update_settings(changes: SettingsUpdate) -> Any:
         """Change runtime settings (admin only). Only the fields given change. A change
         that would turn on control-plane auth without an admin credential is refused."""
+        if changes.control_mcp is False and _internal(get_http_request()):
+            # Turning control_mcp off disables the built-in server, i.e. the bridge
+            # carrying this call (see _refuse_self).
+            raise ToolError(
+                "the built-in server can't turn itself off through its own connection; "
+                "use Settings or PATCH /api/settings"
+            )
         return await api("PATCH", "/api/settings", json=changes.model_dump(exclude_unset=True))
 
     @mcp.tool(annotations=_READ)

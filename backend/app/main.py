@@ -135,7 +135,14 @@ async def lifespan(app: FastAPI):
         service.normalize_reserved_slugs(session)  # rename rows a reserved slug would shadow
         service.backfill_config_hashes(session)  # rehash upgraded rows -> no spurious restarts
         if get_settings().control_mcp:
-            service.ensure_builtin(session)  # every install gets the control-plane MCP server
+            created = service.ensure_builtin(session)  # every install gets one
+            if created is not None:
+                # Its slug is "mcpelevator" unless a server already took it; say where it is.
+                print(
+                    f"[mcpelevator] built-in control-plane MCP server ready at "
+                    f"{get_settings().base_url}/s/{created.slug}/mcp",
+                    flush=True,
+                )
         # The group registry is the single source of truth for /g/<name>. Validate it
         # against the server table before serving: an unknown member id means an
         # inconsistent (hand-edited) config, and we refuse to boot rather than serve it.

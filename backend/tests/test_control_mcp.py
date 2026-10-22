@@ -441,6 +441,9 @@ def test_builtin_refuses_to_reconfigure_itself_through_its_bridge(client):
     assert is_error and "itself" in json.dumps(out)
     is_error, out = _call(client, "disable_server", {"server_id": b.id}, headers=internal)
     assert is_error and "itself" in json.dumps(out)
+    is_error, out = _call(client, "update_settings", {"changes": {"control_mcp": False}},
+                          headers=internal)
+    assert is_error and "itself" in json.dumps(out) and _builtin().enabled
     is_error, out = _call(client, "update_server",
                           {"server_id": b.id, "changes": {"name": "Ctl"}}, headers=internal)
     assert not is_error and out["name"] == "Ctl"
