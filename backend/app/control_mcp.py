@@ -34,6 +34,7 @@ import base64
 import secrets
 import time
 from typing import Annotated, Any, Optional
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -53,7 +54,7 @@ from app.auth import principal as principal_mod
 from app.auth.control_plane import require_control_plane
 from app.db import get_engine, repo
 from app.registry import service
-from app.runners.builtin import INSTRUCTIONS, INTERNAL_HEADER, INTERNAL_SECRET, PATH
+from app.runners.builtin import INSTRUCTIONS, INTERNAL_HEADER, INTERNAL_SECRET, PATH, localize
 from app.runners.remote import canonical_transport
 
 # Request headers that describe the MCP transport, not the caller. Everything
@@ -68,6 +69,12 @@ _TRANSPORT_HEADERS = {
     "last-event-id",
     "transfer-encoding",
 }
+
+def _seg(value: str) -> str:
+    """A tool argument as ONE path segment. Dots too: httpx would resolve a literal
+    ``..`` and send ``delete_server("../tokens/x")`` to a different route."""
+    return quote(str(value), safe="").replace(".", "%2E")
+
 
 _READ = {"readOnlyHint": True, "openWorldHint": False}
 _WRITE = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False}
@@ -121,7 +128,7 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.tool(annotations=_READ)
     async def server_health(slug: str) -> Any:
         """Health of one server by slug (its live state and readiness)."""
-        return await api("GET", f"/api/health/{slug}")
+        return await api("GET", f"/api/health/{_seg(slug)}")
 
     @mcp.tool(annotations=_READ)
     async def get_settings() -> Any:
@@ -153,7 +160,7 @@ def build(app: FastAPI) -> "_Gate":
     async def get_server(server_id: str) -> Any:
         """One server's full detail: launch spec, live state, startup status, OAuth
         status, tools, and its /s/<slug> URLs."""
-        return await api("GET", f"/api/servers/{server_id}")
+        return await api("GET", f"/api/servers/{_seg(server_id)}")
 
     @mcp.tool(annotations=_WRITE)
     async def create_server(spec: ServerCreate) -> Any:
@@ -167,18 +174,18 @@ def build(app: FastAPI) -> "_Gate":
         """Edit a server; only the fields given change (an explicit null resets the
         nullable ones to inherit). A launch-spec change restarts its bridge."""
         return await api(
-            "PATCH", f"/api/servers/{server_id}", json=changes.model_dump(exclude_unset=True)
+            "PATCH", f"/api/servers/{_seg(server_id)}", json=changes.model_dump(exclude_unset=True)
         )
 
     @mcp.tool(annotations=_DESTRUCTIVE)
     async def delete_server(server_id: str) -> Any:
         """Stop and permanently delete a server, its tokens, and its group memberships."""
-        return await api("DELETE", f"/api/servers/{server_id}")
+        return await api("DELETE", f"/api/servers/{_seg(server_id)}")
 
     @mcp.tool(annotations=_WRITE)
     async def clone_server(server_id: str, name: Optional[str] = None) -> Any:
         """Copy a server's configuration into a new, disabled server."""
-        return await api("POST", f"/api/servers/{server_id}/clone", json={"name": name})
+        return await api("POST", f"/api/servers/{_seg(server_id)}/clone", json={"name": name})
 
     @mcp.tool(annotations=_WRITE)
     async def import_servers(config: dict) -> Any:
@@ -189,17 +196,17 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.tool(annotations=_WRITE)
     async def enable_server(server_id: str) -> Any:
         """Set a server desired-running; the supervisor starts it."""
-        return await api("POST", f"/api/servers/{server_id}/enable")
+        return await api("POST", f"/api/servers/{_seg(server_id)}/enable")
 
     @mcp.tool(annotations=_WRITE)
     async def disable_server(server_id: str) -> Any:
         """Set a server desired-stopped; the supervisor stops it."""
-        return await api("POST", f"/api/servers/{server_id}/disable")
+        return await api("POST", f"/api/servers/{_seg(server_id)}/disable")
 
     @mcp.tool(annotations=_WRITE)
     async def retry_server(server_id: str) -> Any:
         """Start a fresh activation of a failed server."""
-        return await api("POST", f"/api/servers/{server_id}/retry")
+        return await api("POST", f"/api/servers/{_seg(server_id)}/retry")
 
     @mcp.tool(annotations=_WRITE)
     async def restart_server(server_id: str) -> Any:
@@ -211,9 +218,11 @@ def build(app: FastAPI) -> "_Gate":
                 # Restarting stops the bridge carrying this very call, which then
                 # can't deliver the result. Use the dashboard or POST /api/.../restart.
                 raise ToolError("the built-in server can't restart itself from here")
-        return await api("POST", f"/api/servers/{server_id}/restart")
+        return await api("POST", f"/api/servers/{_seg(server_id)}/restart")
 
-    @mcp.tool(annotations={**_WRITE, "openWorldHint": True})
+    # No destructiveHint: whether a call destroys anything depends on the tool chosen,
+    # and an absent hint means "may be destructive" to the client.
+    @mcp.tool(annotations={"readOnlyHint": False, "openWorldHint": True})
     async def call_server_tool(
         server_id: str,
         tool_name: str,
@@ -224,7 +233,7 @@ def build(app: FastAPI) -> "_Gate":
         usage). A tool's own failure comes back as ``is_error`` in the result."""
         return await api(
             "POST",
-            f"/api/servers/{server_id}/tools/{tool_name}/call",
+            f"/api/servers/{_seg(server_id)}/tools/{_seg(tool_name)}/call",
             json={"arguments": arguments or {}, "timeout_s": timeout_s},
         )
 
@@ -234,7 +243,7 @@ def build(app: FastAPI) -> "_Gate":
     ) -> Any:
         """The last ``tail`` lines of a server's current activation log (setup script,
         bridge, and upstream stderr). It's the first place to look when it failed."""
-        await api("GET", f"/api/servers/{server_id}")  # visibility: 404s like the route
+        await api("GET", f"/api/servers/{_seg(server_id)}")  # visibility: 404s like the route
         unit = app.state.supervisor.unit(server_id)
         if unit is None:
             return {"running": False, "lines": []}
@@ -255,7 +264,7 @@ def build(app: FastAPI) -> "_Gate":
         an edit), then return its detail. ``timed_out`` is true if it was still settling."""
         deadline = time.monotonic() + timeout_s
         while True:
-            detail = await api("GET", f"/api/servers/{server_id}")
+            detail = await api("GET", f"/api/servers/{_seg(server_id)}")
             settling = detail.get("state") in ("starting", "stopping")
             if not settling or time.monotonic() >= deadline:
                 return {**detail, "timed_out": settling}
@@ -265,8 +274,8 @@ def build(app: FastAPI) -> "_Gate":
     async def export_server_mcpb(server_id: str) -> Any:
         """A local server's launch spec as a .mcpb bundle (Claude Desktop extension),
         base64-encoded. Remote servers can't be exported."""
-        data = await api("GET", f"/api/servers/{server_id}/mcpb", raw=True)
-        detail = await api("GET", f"/api/servers/{server_id}")
+        data = await api("GET", f"/api/servers/{_seg(server_id)}/mcpb", raw=True)
+        detail = await api("GET", f"/api/servers/{_seg(server_id)}")
         return {
             "filename": f"{detail['slug']}.mcpb",
             "content_base64": base64.b64encode(data).decode(),
@@ -276,18 +285,18 @@ def build(app: FastAPI) -> "_Gate":
     async def get_server_usage(server_id: str, days: Annotated[int, Field(ge=1)] = 7) -> Any:
         """One server's tool-call counts over the trailing ``days``: totals, per tool,
         and a series."""
-        return await api("GET", f"/api/servers/{server_id}/usage", params={"days": days})
+        return await api("GET", f"/api/servers/{_seg(server_id)}/usage", params={"days": days})
 
     @mcp.tool(annotations=_WRITE)
     async def start_server_oauth(server_id: str) -> Any:
         """Begin the upstream OAuth sign-in for a remote server with ``oauth`` on.
         Returns the authorization URL a human must open in a browser to finish it."""
-        return await api("POST", f"/api/servers/{server_id}/oauth/authorize")
+        return await api("POST", f"/api/servers/{_seg(server_id)}/oauth/authorize")
 
     @mcp.tool(annotations=_DESTRUCTIVE)
     async def disconnect_server_oauth(server_id: str) -> Any:
         """Forget a server's stored upstream OAuth tokens."""
-        return await api("POST", f"/api/servers/{server_id}/oauth/disconnect")
+        return await api("POST", f"/api/servers/{_seg(server_id)}/oauth/disconnect")
 
     # ---- Groups (admin) -----------------------------------------------------
 
@@ -300,17 +309,17 @@ def build(app: FastAPI) -> "_Gate":
     async def put_group(name: str, members: GroupMembers) -> Any:
         """Create or replace a group: ``members`` is "*" (every server, present and
         future) or an ordered list of server ids. Tools surface as <slug>_<tool>."""
-        return await api("PUT", f"/api/groups/{name}", json={"members": members})
+        return await api("PUT", f"/api/groups/{_seg(name)}", json={"members": members})
 
     @mcp.tool(annotations=_DESTRUCTIVE)
     async def delete_group(name: str) -> Any:
         """Delete a group and revoke the tokens scoped to it."""
-        return await api("DELETE", f"/api/groups/{name}")
+        return await api("DELETE", f"/api/groups/{_seg(name)}")
 
     @mcp.tool(annotations=_WRITE)
     async def restart_group(name: str) -> Any:
         """Restart every enabled member of a group; reports restarted/skipped/failed."""
-        return await api("POST", f"/api/groups/{name}/restart")
+        return await api("POST", f"/api/groups/{_seg(name)}/restart")
 
     # ---- Tokens -------------------------------------------------------------
 
@@ -328,7 +337,7 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.tool(annotations=_DESTRUCTIVE)
     async def delete_token(token_id: str) -> Any:
         """Revoke a token."""
-        return await api("DELETE", f"/api/tokens/{token_id}")
+        return await api("DELETE", f"/api/tokens/{_seg(token_id)}")
 
     # ---- Users (admin) ------------------------------------------------------
 
@@ -363,18 +372,18 @@ def build(app: FastAPI) -> "_Gate":
             "name": name, "role": role, "local_runners": local_runners, "control_mcp": control_mcp
         }
         return await api(
-            "PATCH", f"/api/users/{user_id}", json={k: v for k, v in changes.items() if v is not None}
+            "PATCH", f"/api/users/{_seg(user_id)}", json={k: v for k, v in changes.items() if v is not None}
         )
 
     @mcp.tool(annotations=_DESTRUCTIVE)
     async def delete_user(user_id: str) -> Any:
         """Delete a user and their tokens (refused while they still own servers)."""
-        return await api("DELETE", f"/api/users/{user_id}")
+        return await api("DELETE", f"/api/users/{_seg(user_id)}")
 
     @mcp.tool(annotations=_WRITE)
     async def create_user_credential(user_id: str) -> Any:
         """Mint a control-plane login token for a user; the plaintext is returned once."""
-        return await api("POST", f"/api/users/{user_id}/credentials")
+        return await api("POST", f"/api/users/{_seg(user_id)}/credentials")
 
     # ---- Catalog ------------------------------------------------------------
 
@@ -457,6 +466,10 @@ def build(app: FastAPI) -> "_Gate":
                 "no installable package or remote endpoint; use create_server by hand. "
                 + " ".join(reasons + detail.get("notes", []))
             )
+        # Catalog warnings name the value they need ("Environment variable KEY is
+        # required"), so drop the ones the caller just filled in.
+        supplied = {k for k, v in (env or {}).items() if v}
+        warnings = [w for w in warnings if not supplied & set(w.replace(",", " ").split())]
         tag = f"@{meta['version']}" if meta.get("version") else ""
         created = await api(
             "POST",
@@ -480,7 +493,7 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.resource("mcpelevator://servers/{server_id}", mime_type="application/json")
     async def server_resource(server_id: str) -> Any:
         """One server's full detail."""
-        return await api("GET", f"/api/servers/{server_id}")
+        return await api("GET", f"/api/servers/{_seg(server_id)}")
 
     @mcp.resource("mcpelevator://servers/{server_id}/logs", mime_type="text/plain")
     async def server_logs_resource(server_id: str) -> str:
@@ -497,10 +510,15 @@ def build(app: FastAPI) -> "_Gate":
         """The runtime settings."""
         return await api("GET", "/api/settings")
 
+    def _localized(text: str) -> str:
+        # Prompts name tools; use the names this server's clients actually see.
+        with Session(get_engine()) as session:
+            return localize(text, service.get_builtin(session))
+
     @mcp.prompt
     def install_server(what: str) -> str:
         """Find and install an MCP server from the public catalog."""
-        return (
+        return _localized(
             f"Install an MCP server for: {what}. Use search_catalog to find candidates and "
             "pick the best match (say why). Call install_from_catalog with its id. If it "
             "returns warnings, ask me for those values, then update_server with them and "
@@ -511,7 +529,7 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.prompt
     def diagnose_server(server_id: str) -> str:
         """Work out why a server isn't running and fix what can be fixed."""
-        return (
+        return _localized(
             f"Diagnose server {server_id}. Read get_server for its state, startup status and "
             "last error, and get_server_logs for the log. Explain the root cause in plain "
             "words. If it's a config problem (a missing env var, a wrong package or URL), "

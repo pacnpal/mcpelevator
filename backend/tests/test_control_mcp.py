@@ -110,6 +110,20 @@ def test_global_switch_is_the_builtin_enabled_flag(client):
     assert client.get("/api/settings", headers=LOOPBACK).json()["control_mcp"] is True
 
 
+def test_mixed_settings_patch_with_toggle_is_atomic(client, monkeypatch):
+    from app.auth import principal as principal_mod
+
+    monkeypatch.setattr(principal_mod, "admin_now", lambda s, p: False)
+    admin = mint_token("control")
+    with Session(get_engine()) as s:
+        runtime_settings.write(s, {"control_plane_auth": "always"})
+    auth = {**LOOPBACK, "authorization": f"Bearer {admin}"}
+    r = client.patch("/api/settings", json={"control_mcp": False, "idle_timeout_s": 9}, headers=auth)
+    assert r.status_code == 403
+    assert _builtin().enabled is True
+    assert client.get("/api/settings", headers=auth).json()["idle_timeout_s"] != 9
+
+
 def test_global_switch_refused_when_not_provisioned(monkeypatch):
     monkeypatch.setattr(Supervisor, "run_forever", _parked)
     with TestClient(app) as c:
@@ -311,3 +325,51 @@ def test_resources_and_prompts(client):
     }
     status, msg = _rpc(client, "prompts/list")
     assert {"install_server", "diagnose_server"} <= {p["name"] for p in msg["result"]["prompts"]}
+
+
+def test_path_arguments_cannot_escape_their_route(client):
+    token = client.post("/api/tokens", json={"name": "keep"}, headers=LOOPBACK).json()
+    for bad in (f"../tokens/{token['id']}", ".."):
+        is_error, _ = _call(client, "delete_server", {"server_id": bad})
+        assert is_error
+    assert any(t["id"] == token["id"] for t in client.get("/api/tokens", headers=LOOPBACK).json())
+
+
+def test_guidance_uses_the_operators_tool_names(client):
+    from app.runners.builtin import INSTRUCTIONS, localize
+
+    b = _builtin()
+    b.tool_overrides = {"wait_for_server": {"name": "await_server"}}
+    b.disabled_tools = ["delete_user"]
+    text = localize(INSTRUCTIONS, b)
+    assert "await_server" in text and "wait_for_server" not in text
+    assert "Hidden on this server, so not callable: delete_user." in text
+
+
+def test_install_from_catalog_drops_warnings_the_caller_filled(client, monkeypatch):
+    from app.catalog import base, registry as catalog_registry
+
+    for src in catalog_registry.SOURCES.values():
+        if getattr(src, "_cache", None) is not None:
+            src._cache._store.clear()
+    detail = {
+        "server": {
+            "name": "io.example/keyed", "title": "Keyed", "version": "1.0.0",
+            "packages": [{"registryType": "npm", "identifier": "@me/keyed", "version": "1.0.0",
+                          "transport": {"type": "stdio"},
+                          "environmentVariables": [{"name": "API_KEY", "isRequired": True,
+                                                    "isSecret": True}]}],
+        },
+        "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+    }
+
+    async def fake_get_json(http, url, params):
+        return detail
+
+    monkeypatch.setattr(base, "get_json", fake_get_json)
+    is_error, out = _call(client, "install_from_catalog", {"id": "io.example/keyed"})
+    assert not is_error and out["warnings"] and out["server"]["enabled"] is False
+    is_error, out = _call(
+        client, "install_from_catalog", {"id": "io.example/keyed", "env": {"API_KEY": "k"}}
+    )
+    assert not is_error and out["warnings"] == [] and out["server"]["enabled"] is True

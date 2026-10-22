@@ -11,6 +11,7 @@ authorizes every tool call as that caller.
 
 from __future__ import annotations
 
+import re
 import secrets
 
 from app.config import get_settings
@@ -52,6 +53,20 @@ install_server and diagnose_server prompts walk through the common jobs.
 """
 
 
+def localize(text: str, server: Server | None) -> str:
+    """``text`` as this server's clients see its tools: renamed tools under their new
+    names, and hidden ones listed, so guidance never names a tool that isn't there."""
+    if server is None:
+        return text
+    for upstream, override in (server.tool_overrides or {}).items():
+        if override.get("name"):
+            text = re.sub(rf"\b{re.escape(upstream)}\b", override["name"], text)
+    hidden = sorted(server.disabled_tools or [])
+    if hidden:
+        text += f"\nHidden on this server, so not callable: {', '.join(hidden)}."
+    return text
+
+
 def internal_url() -> str:
     settings = get_settings()
     host = settings.host
@@ -74,5 +89,5 @@ def build(server: Server) -> ProcessSpec:
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),
         forward_authorization=True,
-        instructions=INSTRUCTIONS,
+        instructions=localize(INSTRUCTIONS, server),
     )
