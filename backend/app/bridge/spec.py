@@ -51,6 +51,8 @@ def bridge_payload(spec, name: str, *, mcp_http: bool, rest_openapi: bool) -> di
     # key as off (`spec.get("serialize_client_requests")` in `_build_transport`).
     if spec.serialize_client_requests:
         payload["serialize_client_requests"] = True
+    if spec.forward_authorization:
+        payload["forward_authorization"] = True
     return payload
 
 

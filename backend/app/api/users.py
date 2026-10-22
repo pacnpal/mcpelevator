@@ -53,6 +53,7 @@ def _info(
         name=user.name,
         role=user.role,
         local_runners=bool(user.local_runners),
+        control_mcp=bool(user.control_mcp),
         servers_count=servers_count,
         tokens_count=tokens_count,
         created_at=user.created_at,
@@ -121,7 +122,13 @@ async def create_user(
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="name must not be empty")
-    user = User(id=new_id(), name=name, role=payload.role, local_runners=payload.local_runners)
+    user = User(
+        id=new_id(),
+        name=name,
+        role=payload.role,
+        local_runners=payload.local_runners,
+        control_mcp=payload.control_mcp,
+    )
 
     def _create():
         with service.config_write_lock():
@@ -181,6 +188,8 @@ async def update_user(
                 user.role = payload.role
             if payload.local_runners is not None:
                 user.local_runners = payload.local_runners
+            if payload.control_mcp is not None:
+                user.control_mcp = payload.control_mcp
             return repo.save_user(session, user)
 
     # Threadpool: the lock is a threading lock shared with imports deriving scrypt

@@ -505,11 +505,11 @@ export function createUser(
 	return jsonRequest<UserInfo>('/users', 'POST', { name, role, local_runners });
 }
 
-/** Patch a user's name, role, or local-runner permission. A 409 surfaces the
+/** Patch a user's name, role, local-runner permission, or control-MCP access. A 409 surfaces the
  * last-admin guard (no other admin login would remain). */
 export function updateUser(
 	id: string,
-	patch: Partial<Pick<UserInfo, 'name' | 'role' | 'local_runners'>>
+	patch: Partial<Pick<UserInfo, 'name' | 'role' | 'local_runners' | 'control_mcp'>>
 ): Promise<UserInfo> {
 	return jsonRequest<UserInfo>(`/users/${encodeURIComponent(id)}`, 'PATCH', patch);
 }

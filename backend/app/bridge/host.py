@@ -1492,8 +1492,10 @@ def build_proxy(spec: dict) -> FastMCP:
     # The outer proxy already authenticated the caller. Forwarding its headers from
     # this bridge to a remote MCP server would disclose bearer/OAuth credentials to
     # that upstream. Static headers and upstream OAuth live on the transport itself.
+    # The one exception is the built-in server, whose upstream is the control plane
+    # itself and must authorize each call as the caller (app.runners.builtin).
     if hasattr(transport, "forward_incoming_headers"):
-        transport.forward_incoming_headers = False
+        transport.forward_incoming_headers = bool(spec.get("forward_authorization"))
     return proxy
 
 

@@ -8,7 +8,7 @@ from sqlmodel import Session
 from starlette.requests import Request
 
 from app.db import get_engine, repo
-from app.db.models import Server
+from app.db.models import BUILTIN_RUNNER, Server
 from app.util import hash_token
 
 
@@ -39,6 +39,10 @@ class BearerProvider:
         # app.groups.hub.group_server). So a group-A token reaching group B — or any
         # server — is rejected exactly like a wrong-server token, and a per-server token
         # can't authorize a group bundle.
+        # A control (login) token also opens the built-in mcpelevator server: that
+        # server IS the control plane, which then authorizes each call as its owner.
+        if scope == "control" and server.runner == BUILTIN_RUNNER:
+            return
         if scope != "all" and scope != server.id:
             raise HTTPException(
                 status_code=403,

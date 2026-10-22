@@ -8,7 +8,8 @@
 		uvx: 'uvx',
 		command: 'cmd',
 		docker: 'docker',
-		remote: 'remote'
+		remote: 'remote',
+		mcpelevator: 'built-in'
 	};
 </script>
 

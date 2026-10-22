@@ -494,6 +494,19 @@ never in the database, so authenticating never restarts the bridge on its own.
 > leaked grant at the provider (or via **Disconnect**) rather than relying on on-disk
 > secrecy. Full rationale: [docs/security.md](docs/security.md) § *Credentials at rest*.
 
+## Manage mcpelevator from an agent (the built-in MCP server)
+
+Every install has one built-in server named **mcpelevator**, provisioned on boot (existing installs get it on upgrade). It serves the control plane itself as MCP tools at `/s/mcpelevator/mcp`, so an agent can do what the UI does: list, create, edit, enable, disable, restart and delete servers, import an `mcpServers` config, try a server's tools, read its logs and usage, manage groups, tokens, users and settings, and search the catalog. It has 37 tools.
+
+It's a server like the others. It shows on the dashboard, and you can hide or rename tools, rewrite descriptions, switch on REST/OpenAPI, set its auth and idle timeout, rename its slug, or add it to a group by id. Its launch line is fixed (there's nothing to launch), and it can't be deleted or cloned. A `"*"` group leaves it out, so adding it to a bundle is always a deliberate choice.
+
+Every tool call runs with **the caller's own permissions**. The bridge forwards your `Authorization` header to the in-process `/api/mcp`, and that endpoint runs each tool through the same `/api` route, so a member still sees only their own servers and admin-only tools still need an admin.
+
+- **Connecting:** the built-in server starts behind `bearer`. With control-plane auth on, use a **login (control) token**. The bearer check accepts control tokens for this one server, and a data-plane token can't drive the control plane. With control-plane auth off, any token that passes the server's auth works, since `/api` is open to the same loopback audience anyway.
+- **Turning it off:** Settings → *mcpelevator MCP server* (or `PATCH /api/settings {"control_mcp": false}`) is the global switch. It's the built-in server's own enabled flag, so disabling it on the dashboard does the same thing. Per user, Settings → Users → *Revoke control MCP* (`control_mcp` on `PATCH /api/users/<id>`).
+- **Not provisioning it:** set `MCPE_CONTROL_MCP=false` and boot won't create it. A server that already exists is left alone.
+- **Direct endpoint:** `/api/mcp` serves the same tools without the bridge, gated like `/api`.
+
 ## Install from a registry (catalog)
 
 Don't know the package name? **Browse** finds servers for you. The catalog searches public
@@ -535,6 +548,7 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_MINT_ADMIN_TOKEN` | `false` | Force-mint a fresh admin token on boot and print it (recovery for a lost token); unset after grabbing it |
 | `MCPE_ALLOW_PRIVATE_LAN` | `false` | First-boot seed for the LAN-access setting (headless bootstrap); see **Security** |
 | `MCPE_DOCKER_RUNNER` | `false` | First-boot seed for the (root-equivalent) docker-runner setting; needs the Docker socket mounted or a dind sidecar |
+| `MCPE_CONTROL_MCP` | `true` | Provision the built-in mcpelevator MCP server on boot when it's missing; `false` skips that (an existing one stays, turn it off in Settings) |
 | `MCPE_APT_PACKAGES` | _(none)_ | Global, space-separated extra Debian packages installed before mcpelevator starts (Docker image only), not per-server `setup_script`. A failed install warns and boot continues; packages must be reinstalled after container replacement |
 | `MCPE_DATA_DIR` | `./data` | SQLite + caches |
 | `MCPE_FRONTEND_DIR` | `../frontend/build` | Built SPA to serve |
@@ -615,11 +629,12 @@ Two request grammars, both behind the same Host/Origin guard and per-request aut
 | --- | --- |
 | `/s/<slug>/mcp` | **One server.** `<slug>` is the server's routing key (operator-renameable). |
 | `/s/<slug>/rest/…` | **The same server as plain REST** (opt-in per server): `POST /rest/<tool>`, `GET /rest/openapi.json`, `GET /rest`. Same Host/Origin guard and per-server auth as `/mcp`. |
+| `/api/mcp` | **The control plane as MCP**, the upstream of the built-in `mcpelevator` server. Gated like `/api`. |
 | `/g/<name>/mcp` | **A group.** `<name>` is a registry entry; the URL serves the union of the group's running members' tools, each namespaced by the member's slug (`<slug>_<tool>`). |
 
 There is no `/s/all` or any other reserved slug beyond `summary` (which would shadow `/api/health/summary`) — single servers live only under `/s`, groups only under `/g`, so `all` is now an ordinary server slug if you want one.
 
-**The group registry** is the `groups` setting (SQLite, edited in Settings or via `PUT /api/groups/<name>` / `DELETE /api/groups/<name>`), a map from group name to its members. A member value is either `"*"` (every registered server, present and future) or an ordered list of server ids. Group names are URL-safe (lowercase letters, digits, single hyphens). Example registry:
+**The group registry** is the `groups` setting (SQLite, edited in Settings or via `PUT /api/groups/<name>` / `DELETE /api/groups/<name>`), a map from group name to its members. A member value is either `"*"` (every registered server, present and future, except the built-in mcpelevator server, which joins only by id) or an ordered list of server ids. Group names are URL-safe (lowercase letters, digits, single hyphens). Example registry:
 
 ```jsonc
 {

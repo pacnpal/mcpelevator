@@ -45,7 +45,7 @@ from app.auth.principal import Principal, current_principal
 from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
 from app.db import get_engine, get_session, repo
-from app.db.models import Server
+from app.db.models import BUILTIN_RUNNER, Server
 from app.groups import registry as group_registry
 from app.registry import service
 from app.registry import settings as runtime_settings
@@ -623,7 +623,11 @@ async def delete_server(
     session: Session = Depends(get_session),
     principal: Principal = Depends(current_principal),
 ):
-    _visible(principal, session, server_id)
+    if _visible(principal, session, server_id).runner == BUILTIN_RUNNER:
+        raise HTTPException(
+            status_code=409,
+            detail="the built-in mcpelevator server can't be deleted, disable it instead",
+        )
     sup = request.app.state.supervisor
     sup.cancel_activation_request(server_id)
     await sup.stop(server_id)  # tear down the process before removing desired state

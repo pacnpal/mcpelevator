@@ -627,6 +627,8 @@
 	// too (shared $lib/uvxPin logic) so the card never shows an unpinned command
 	// that would reproduce the failure the pin fixes.
 	const commandLine = $derived.by(() => {
+		// The built-in server has no stored launch line: its upstream is this instance.
+		if (server?.runner === 'mcpelevator') return 'built-in: this instance’s control plane (/api/mcp)';
 		if (server?.runner === 'docker') {
 			return [
 				'docker run -i --rm --init […]',
@@ -890,36 +892,38 @@
 					/>
 				{/if}
 
-				<button
-					type="button"
-					onclick={doClone}
-					disabled={cloning || busy || restarting || deleting || applyingTools}
-					aria-busy={cloning}
-					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3.5 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
-				>
-					{#if cloning}
-						<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-							<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
-							<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-						</svg>
-						Cloning
-					{:else}
-						<svg
-							class="size-4"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
-						>
-							<rect x="9" y="9" width="11" height="11" rx="2" />
-							<path d="M5 15V5a2 2 0 0 1 2-2h10" />
-						</svg>
-						Clone
-					{/if}
-				</button>
+				{#if server.runner !== 'mcpelevator'}
+					<button
+						type="button"
+						onclick={doClone}
+						disabled={cloning || busy || restarting || deleting || applyingTools}
+						aria-busy={cloning}
+						class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3.5 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
+					>
+						{#if cloning}
+							<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+								<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
+								<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+							</svg>
+							Cloning
+						{:else}
+							<svg
+								class="size-4"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								aria-hidden="true"
+							>
+								<rect x="9" y="9" width="11" height="11" rx="2" />
+								<path d="M5 15V5a2 2 0 0 1 2-2h10" />
+							</svg>
+							Clone
+						{/if}
+					</button>
+				{/if}
 
 				<a
 					href={`/server/${server.id}/edit`}
@@ -1554,66 +1558,68 @@
 			/>
 		{/if}
 
-		<!-- Danger zone -->
-		<div
-			class="flex flex-col gap-3 rounded-[var(--radius-card)] border px-5 py-4"
-			style="border-color: color-mix(in oklab, var(--color-state-failed) 25%, var(--color-line));"
-		>
-			{#if !confirmDelete}
-				<div class="flex flex-wrap items-center justify-between gap-3">
-					<div>
-						<p class="text-sm font-medium text-[var(--color-ink)]">Delete server</p>
-						<p class="text-xs text-[var(--color-ink-dim)]">
-							Stops the server and removes it permanently.
+		{#if server.runner !== 'mcpelevator'}
+			<!-- Danger zone -->
+			<div
+				class="flex flex-col gap-3 rounded-[var(--radius-card)] border px-5 py-4"
+				style="border-color: color-mix(in oklab, var(--color-state-failed) 25%, var(--color-line));"
+			>
+				{#if !confirmDelete}
+					<div class="flex flex-wrap items-center justify-between gap-3">
+						<div>
+							<p class="text-sm font-medium text-[var(--color-ink)]">Delete server</p>
+							<p class="text-xs text-[var(--color-ink-dim)]">
+								Stops the server and removes it permanently.
+							</p>
+						</div>
+						<button
+							type="button"
+							onclick={() => (confirmDelete = true)}
+							disabled={deleteBlocked}
+							class="shrink-0 rounded-lg border px-3.5 py-2 text-sm font-medium transition active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50"
+							style="border-color: color-mix(in oklab, var(--color-state-failed) 40%, transparent); color: var(--color-state-failed);"
+						>
+							Delete
+						</button>
+					</div>
+				{:else}
+					<div class="flex flex-col gap-3">
+						<p class="text-sm text-[var(--color-ink)]">
+							Delete <span class="font-semibold">{server.name}</span>? This stops and
+							removes it.
 						</p>
+						<div class="flex items-center gap-2">
+							<button
+								type="button"
+								onclick={doDelete}
+								disabled={deleting || deleteBlocked}
+								aria-busy={deleting}
+								class="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+								style="background-color: var(--color-state-failed);"
+							>
+								{#if deleting}
+									<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+										<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
+										<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+									</svg>
+									Deleting
+								{:else}
+									Yes, delete
+								{/if}
+							</button>
+							<button
+								type="button"
+								onclick={() => (confirmDelete = false)}
+								disabled={deleting}
+								class="rounded-lg border border-[var(--color-line)] px-4 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
+							>
+								Cancel
+							</button>
+						</div>
 					</div>
-					<button
-						type="button"
-						onclick={() => (confirmDelete = true)}
-						disabled={deleteBlocked}
-						class="shrink-0 rounded-lg border px-3.5 py-2 text-sm font-medium transition active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50"
-						style="border-color: color-mix(in oklab, var(--color-state-failed) 40%, transparent); color: var(--color-state-failed);"
-					>
-						Delete
-					</button>
-				</div>
-			{:else}
-				<div class="flex flex-col gap-3">
-					<p class="text-sm text-[var(--color-ink)]">
-						Delete <span class="font-semibold">{server.name}</span>? This stops and
-						removes it.
-					</p>
-					<div class="flex items-center gap-2">
-						<button
-							type="button"
-							onclick={doDelete}
-							disabled={deleting || deleteBlocked}
-							aria-busy={deleting}
-							class="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
-							style="background-color: var(--color-state-failed);"
-						>
-							{#if deleting}
-								<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-									<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
-									<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-								</svg>
-								Deleting
-							{:else}
-								Yes, delete
-							{/if}
-						</button>
-						<button
-							type="button"
-							onclick={() => (confirmDelete = false)}
-							disabled={deleting}
-							class="rounded-lg border border-[var(--color-line)] px-4 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
-						>
-							Cancel
-						</button>
-					</div>
-				</div>
-			{/if}
-		</div>
+				{/if}
+			</div>
+		{/if}
 
 		<!-- Staged tool changes. The bar floats above the page rather than sitting under the
 		     tool list: the list runs long, and toggling a tool at the top must not mean

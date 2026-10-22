@@ -19,7 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.staticfiles import StaticFiles
 
-from app import __version__, usage
+from app import __version__, control_mcp, usage
 from app.api import auth as auth_api
 from app.api import catalog as catalog_api
 from app.api import groups as groups_api
@@ -134,6 +134,8 @@ async def lifespan(app: FastAPI):
         service.normalize_docker_servers(session)  # canonicalize legacy docker rows before enable
         service.normalize_reserved_slugs(session)  # rename rows a reserved slug would shadow
         service.backfill_config_hashes(session)  # rehash upgraded rows -> no spurious restarts
+        if get_settings().control_mcp:
+            service.ensure_builtin(session)  # every install gets the control-plane MCP server
         # The group registry is the single source of truth for /g/<name>. Validate it
         # against the server table before serving: an unknown member id means an
         # inconsistent (hand-edited) config, and we refuse to boot rather than serve it.
@@ -153,7 +155,10 @@ async def lifespan(app: FastAPI):
     # what ever writes them (and applies their retention).
     usage_flusher = asyncio.create_task(usage.run_forever())
     try:
-        yield
+        # Starlette doesn't run a route's ASGI lifespan: run /api/mcp's session manager here.
+        control = app.state.control_mcp.inner
+        async with control.router.lifespan_context(control):
+            yield
     finally:
         await supervisor.shutdown()
         reconciler.cancel()
@@ -231,6 +236,10 @@ def create_app() -> FastAPI:
     # also declare require_admin themselves — defense in depth at include time).
     app.include_router(groups_api.router, prefix="/api", dependencies=gated)
     app.include_router(users_api.router, prefix="/api", dependencies=gated)
+    # The control plane as an MCP server; its tools call the routers above in-process
+    # with the caller's credentials, so it gates and authorizes exactly like /api.
+    app.state.control_mcp = control_mcp.build(app)
+    app.add_route(control_mcp.PATH, app.state.control_mcp, methods=["GET", "POST", "DELETE"])
     # Group endpoints (/g/<name>/mcp) BEFORE the proxy catch-all and the SPA mount:
     # registration order wins. The hub is constructed here (state for the dispatcher)
     # but only starts serving groups once the lifespan wires it to the supervisor.
