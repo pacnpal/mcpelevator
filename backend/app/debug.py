@@ -299,9 +299,9 @@ def _redact_colon(m: re.Match) -> str:
     return f"{m[1]}<redacted>"
 
 
-# An Authorization header's whole value, whatever its scheme (Token ghp_..., ApiKey
-# sk_...): the credential follows a space the field rules stop at.
-_AUTH_HEADER = re.compile(r"((?<![\w-])(?:proxy-)?authorization\s*:\s*)[^\r\n,;\"'<>]+", re.IGNORECASE)
+# An Authorization header's whole value, to the end of its line, whatever its scheme:
+# Token ghp_..., ApiKey sk_..., or Digest's quoted, comma-separated parameters.
+_AUTH_HEADER = re.compile(r"((?<![\w-])(?:proxy-)?authorization\s*:[ \t]*)[^\r\n]+", re.IGNORECASE)
 
 # Any other credential after an auth scheme (Authorization: Bearer ghp_..., an
 # upstream's error echoing its header). mcpe_ tokens keep their prefix, see above.

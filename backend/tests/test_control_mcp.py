@@ -735,8 +735,8 @@ def test_a_cached_key_set_with_no_keys_is_refetched(monkeypatch):
 
     def keys(refresh: bool = False):
         calls.append(refresh)
-        if not refresh:
-            raise jwt.PyJWKClientError("The JWKS endpoint did not contain any signing keys")
+        if not refresh:  # what PyJWT raises for {"keys": []}, a sibling of PyJWKClientError
+            raise jwt.PyJWKSetError("The JWK Set did not contain any keys")
         return [SimpleNamespace(key_id="k1", key="pem")]
 
     cache = SimpleNamespace(get=lambda: object())
@@ -745,6 +745,22 @@ def test_a_cached_key_set_with_no_keys_is_refetched(monkeypatch):
         get_signing_keys=keys, jwk_set_cache=cache))
     assert cf_access._fetch("https://team.example", refresh=False) == {"k1": "pem"}
     assert calls == [False, True]
+
+
+def test_an_assertion_with_a_non_string_kid_is_refused(cf):
+    import base64
+    import json
+
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    def part(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+    forged = f"{part({'alg': 'RS256', 'kid': []})}.{part({'email': 'ada@example.com'})}.c2ln"
+    req = Request({"type": "http", "headers": [(b"cf-access-jwt-assertion", forged.encode())]})
+    assert cf_access.verify(req) == (None, "the Cloudflare Access assertion didn't verify")
 
 
 def test_sql_logging_never_shows_bound_values():

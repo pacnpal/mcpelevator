@@ -66,7 +66,7 @@ def _fetch(team: str, *, refresh: bool) -> dict[str, Any]:
         # kid must not lock out every valid sign-in. A cache hit makes no request.
         try:
             return {k.key_id: k.key for k in client.get_signing_keys()}
-        except jwt.PyJWKClientError:
+        except (jwt.PyJWKClientError, jwt.PyJWKSetError):
             # A cached set with no usable keys ({"keys": []}) would fail every
             # sign-in until it expires: refetch it instead, under the backoff.
             refresh = True
@@ -74,7 +74,7 @@ def _fetch(team: str, *, refresh: bool) -> dict[str, Any]:
         raise jwt.PyJWKClientConnectionError("Cloudflare's signing keys were unreachable moments ago")
     try:
         return {k.key_id: k.key for k in client.get_signing_keys(refresh=refresh)}
-    except (jwt.PyJWKClientError, ValueError) as exc:
+    except (jwt.PyJWKClientError, jwt.PyJWKSetError, ValueError) as exc:
         # Unreachable, or answered with something that isn't a key set (bad JSON,
         # no keys): either way back off, and refuse the sign-in rather than fail it.
         _last_failure[team] = time.monotonic()
@@ -85,6 +85,8 @@ def _fetch(team: str, *, refresh: bool) -> dict[str, Any]:
 
 def _signing_key(team: str, token: str) -> Any:
     kid = jwt.get_unverified_header(token).get("kid")
+    if not isinstance(kid, str):  # a list or object would fail the lookup below
+        raise jwt.InvalidTokenError("the assertion names no key")
     keys = _fetch(team, refresh=False)
     if kid not in keys and time.monotonic() - _last_refetch.get(team, -_REFETCH_S) >= _REFETCH_S:
         keys = _fetch(team, refresh=True)
