@@ -266,7 +266,9 @@ _AUTH_SCHEME = re.compile(
 )
 
 # The user:password part of a URL (postgres://alice:s3cr3t@db/app), encoded or not.
-_URL_USERINFO = re.compile(r"""\b([a-z][a-z0-9+.-]*://)[^\s/@"'<>]+@""", re.IGNORECASE)
+# It stays inside the authority (never past / ? or #), runs to its last @ so a raw
+# @ in a password is covered, and caps the scheme so long dotted text stays linear.
+_URL_USERINFO = re.compile(r"""\b([a-z][a-z0-9+.-]{0,31}://)[^\s/?#"'<>]+@""", re.IGNORECASE)
 # The end of one server-sent event: a blank line, LF or CRLF.
 _EVENT_END = re.compile(rb"\r?\n\r?\n")
 
@@ -276,7 +278,7 @@ _EVENT_END = re.compile(rb"\r?\n\r?\n")
 # access_token=, api_key=, or the first field of a form body. Scanned the same
 # linear way as _SECRET_FIELD.
 _SECRET_QUERY = re.compile(
-    r"((?:^|[?&'\"])(?:code|state|(?=[^=&\s\"']*?(?:token|secret|password|key|assertion))[^=&\s\"']*+)=)"
+    r"((?:^|[?&'\"])(?:code|state|(?=[^=&?\s\"']*?(?:token|secret|password|key|assertion))[^=&?\s\"']*+)=)"
     r"[^&\s\"']*",
     re.IGNORECASE,
 )

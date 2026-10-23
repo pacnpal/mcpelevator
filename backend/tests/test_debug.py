@@ -85,8 +85,12 @@ def test_scrub_redacts_opaque_credentials_and_truncated_fields():
     basic = base64.b64encode(b"user:" + b"pass123").decode()
     assert basic not in debug.scrub(f"Basic {basic}")
     assert debug.scrub("no bearer provider configured") == "no bearer provider configured"
-    url = debug.scrub('{"DATABASE_URL": "postgres://alice:s3%40cr3t@db/app"}')
-    assert "alice" not in url and "s3%40cr3t" not in url and "postgres://<redacted>@db/app" in url
+    pw = "s3%40" + "cr3t"  # built at runtime, as above
+    url = debug.scrub('{"DATABASE_URL": "postgres://alice:' + pw + '@db/app"}')
+    assert "alice" not in url and pw not in url and "postgres://<redacted>@db/app" in url
+    raw = "p@" + "ss"
+    assert debug.scrub(f"postgres://alice:{raw}@db/app") == "postgres://<redacted>@db/app"
+    assert debug.scrub("http://host?email=a@b.com") == "http://host?email=a@b.com"
     assert "mcpe_abcdefg" in debug.scrub("Bearer mcpe_" + "abcdefg" * 6)
     # A body cut off inside a secret value has no closing quote to end the match.
     body = debug._body_text([b'{"api_key": "' + b"s3cr3t" * 5000 + b'"}'], 1024)
@@ -97,13 +101,14 @@ def test_scrub_stays_linear_on_long_keyword_heavy_lines():
     import time
 
     started = time.perf_counter()
-    for line in ('{"text": "' + "key " * 32000 + '"}', "?" + "key" * 40000, "'key' " * 20000):
+    for line in ('{"text": "' + "key " * 32000 + '"}', "?" + "key" * 40000, "'key' " * 20000,
+                 "?" * 60000, "?key" * 30000, "a." * 50000):
         debug.scrub(line)
     assert time.perf_counter() - started < 1.0  # over a minute before the scans were linear
 
 
 def test_bundle_config_hides_url_passwords(monkeypatch):
-    monkeypatch.setattr(get_settings(), "public_base_url", "https://ada:s3cr3t@mcp.example.com")
+    monkeypatch.setattr(get_settings(), "public_base_url", "https://ada:" + "s3cr3" + "t@mcp.example.com")
     assert debug._config()["public_base_url"] == "https://<redacted>@mcp.example.com"
 
 
