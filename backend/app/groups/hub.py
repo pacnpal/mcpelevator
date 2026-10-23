@@ -47,7 +47,7 @@ from starlette.types import ASGIApp
 # must get [] instead of a noisy -32603 (see app.bridge.host._forward_roots).
 from app.bridge.host import _forward_roots
 from app.db import get_engine, repo
-from app.db.models import Server
+from app.db.models import BUILTIN_RUNNER, Server
 from app.groups import registry
 from app.registry import settings as runtime_settings
 
@@ -115,6 +115,40 @@ class _AppRunner:
                 logger.exception("group lifespan shutdown error")
 
 
+# How long a replaced group instance may keep serving the requests it already
+# accepted before it is closed anyway.
+_DRAIN_S = 300.0
+
+
+class _Counting:
+    """A group's ASGI app, counting requests in flight. A swap routes new requests
+    to the new instance at once and closes the old one only when this reaches zero,
+    so a call that changes its own group (the built-in server's put_group through
+    /g, say) isn't cut off by the rebuild it caused."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self.active = 0
+        self.idle = asyncio.Event()
+        self.idle.set()
+
+    def hold(self) -> None:
+        self.active += 1
+        self.idle.clear()
+
+    def release(self) -> None:
+        self.active -= 1
+        if not self.active:
+            self.idle.set()
+
+    async def __call__(self, scope, receive, send) -> None:
+        self.hold()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.release()
+
+
 class _Instance:
     """One group's live (app, runner, topology-key) triple."""
 
@@ -148,6 +182,7 @@ class GroupHub:
         # mirroring how tests patch app.bridge.host._build_transport
         self._transport_factory = transport_factory
         self._instances: dict[str, _Instance] = {}
+        self._retiring: set[_Instance] = set()  # replaced, finishing their requests
         self._lock = asyncio.Lock()
 
     def app_for(self, name: str) -> Optional[ASGIApp]:
@@ -193,6 +228,7 @@ class GroupHub:
                 servers = {
                     s.id: (s.mcp_http, s.auth_provider) for s in repo.list_servers(session)
                 }
+                builtin = {s.id for s in repo.list_servers(session) if s.runner == BUILTIN_RUNNER}
 
             running = supervisor.running_endpoints()
 
@@ -221,6 +257,11 @@ class GroupHub:
                     # member is safe behind any group provider.
                     if effective != "none" and effective != default:
                         continue
+                    # The built-in server reads the caller's control credential, which
+                    # an OAuth group never carries (its token is the provider's JWT),
+                    # so there it would only list tools that refuse every call.
+                    if server_id in builtin and default == "oauth":
+                        continue
                     # The entry carries the server ID, so the topology key below
                     # does too. Ports are runtime, not identity, and the allocator
                     # hands back the LOWEST free one — so deleting a member and
@@ -238,7 +279,7 @@ class GroupHub:
                 if current is not None and current.key == key:
                     continue  # topology unchanged — keep the live instance
                 try:
-                    await self._swap(name, entries, key, mounted)
+                    await self._swap(name, entries, key, mounted, builtin)
                 except Exception:
                     # Isolate per group: one group's build/start failure must not abort the
                     # whole pass and starve every group after it in iteration order (the
@@ -251,7 +292,7 @@ class GroupHub:
                     logger.exception("group %r sync error", name)
                     await self._teardown(name)
 
-    def _make_proxy(self, slug: str, url: str) -> FastMCP:
+    def _make_proxy(self, slug: str, url: str, forward: bool = False) -> FastMCP:
         transport = self._transport_factory(url)
         client = ProxyClient(transport, roots=_forward_roots)
         proxy = create_proxy(client, name=slug)
@@ -262,8 +303,11 @@ class GroupHub:
         # bundle — to every bridge, and a remote-runner bridge would forward it once
         # more to its upstream. Never propagate it; bridges are unauthenticated
         # loopback and the group's auth was already enforced at the dispatcher.
+        # The one exception is the built-in mcpelevator server (``forward``): its
+        # bridge only talks to this process's /api/mcp, which authorizes every call
+        # as the caller and so needs the caller's own credential.
         if hasattr(transport, "forward_incoming_headers"):
-            transport.forward_incoming_headers = False
+            transport.forward_incoming_headers = forward
         return proxy
 
     async def _swap(
@@ -272,30 +316,57 @@ class GroupHub:
         entries: list[tuple[str, str, str, int]],
         key: frozenset,
         members: dict[str, str] | None = None,
+        forward: set[str] | None = None,
     ) -> None:
         bundle = FastMCP(f"mcpelevator-{name}")
-        for _server_id, slug, host, port in sorted(entries):
-            bundle.mount(self._make_proxy(slug, f"http://{host}:{port}/mcp"), namespace=slug)
+        for server_id, slug, host, port in sorted(entries):
+            proxy = self._make_proxy(
+                slug, f"http://{host}:{port}/mcp", forward=server_id in (forward or ())
+            )
+            bundle.mount(proxy, namespace=slug)
         # stateless: a fresh upstream transport per request, so swapping instances never
         # strands a session. Host/Origin protection stays OFF here — enforce() in the
         # dispatcher is the single guard, identical to every other /s and /g route.
         app = bundle.http_app(path="/mcp", stateless_http=True, host_origin_protection=False)
-        # The old instance is torn down before the new one starts (the moment of
-        # emptiness just 503s at the dispatcher; swaps only happen on topology
-        # changes). Each lifespan runs inside its own _AppRunner task.
-        await self._teardown(name)
+        # The new instance starts first and takes new requests at once; the old one
+        # is retired (closed once its in-flight requests finish), so no request is
+        # cut off and there is no moment of emptiness. Each lifespan runs inside
+        # its own _AppRunner task.
         runner = _AppRunner(app)
         await runner.start()
-        self._instances[name] = _Instance(app, runner, key, members)
+        old = self._instances.get(name)
+        self._instances[name] = _Instance(_Counting(app), runner, key, members)
+        if old is not None:
+            self._retire(old)
 
     async def _teardown(self, name: str) -> None:
+        """Stop routing to ``name`` now; its instance closes once drained."""
         old = self._instances.pop(name, None)
         if old is not None:
-            await old.runner.close()
+            self._retire(old)
+
+    def _retire(self, instance: _Instance) -> None:
+        # Never awaited by the caller: the caller may be a request running ON this
+        # instance (a control-plane call that rebuilt its own group), so waiting
+        # for the drain here would deadlock.
+        self._retiring.add(instance)
+
+        async def drain() -> None:
+            try:
+                await asyncio.wait_for(instance.app.idle.wait(), _DRAIN_S)
+            except asyncio.TimeoutError:
+                logger.warning("group instance still busy after %ss; closing it", _DRAIN_S)
+            finally:
+                if instance in self._retiring:
+                    self._retiring.discard(instance)
+                    await instance.runner.close()
+
+        asyncio.get_running_loop().create_task(drain())
 
     async def _close_all_unlocked(self) -> None:
-        instances = list(self._instances.values())
+        instances = [*self._instances.values(), *self._retiring]
         self._instances.clear()
+        self._retiring.clear()
         for instance in instances:
             try:
                 await instance.runner.close()
@@ -307,9 +378,12 @@ class GroupHub:
 
     @asynccontextmanager
     async def auth_transition(self):
-        """Keep every group unavailable while an auth-affecting row is written."""
+        """Keep every group unavailable while an auth-affecting row is written. New
+        requests 503 at once; requests already accepted under the old auth finish
+        (one of them may be the very call making this change)."""
         async with self._lock:
-            await self._close_all_unlocked()
+            for name in list(self._instances):
+                await self._teardown(name)
             yield
 
     async def close(self) -> None:

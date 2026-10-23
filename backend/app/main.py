@@ -19,7 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.staticfiles import StaticFiles
 
-from app import __version__, control_mcp, usage
+from app import __version__, control_mcp, debug, usage
 from app.api import auth as auth_api
 from app.api import catalog as catalog_api
 from app.api import groups as groups_api
@@ -29,6 +29,7 @@ from app.api import settings as settings_api
 from app.api import tokens as tokens_api
 from app.api import usage as usage_api
 from app.api import users as users_api
+from app.auth import cf_access
 from app.auth.control_plane import (
     ensure_control_token,
     enforcement_enabled,
@@ -128,7 +129,14 @@ def _bootstrap_control_plane_auth() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if debug.enabled():
+        # Here, not at import: uvicorn configures its loggers before the lifespan runs.
+        debug.configure_logging(keep=True)
+        # Never-awaited coroutines and callbacks that block the loop over 100ms.
+        asyncio.get_running_loop().set_debug(True)
+        debug.log_startup()
     init_db()
+    cf_access.prewarm()
     with Session(get_engine()) as session:
         service.normalize_auth_providers(session)  # canonicalize legacy auth_provider values
         service.normalize_docker_servers(session)  # canonicalize legacy docker rows before enable
@@ -243,6 +251,8 @@ def create_app() -> FastAPI:
     # also declare require_admin themselves — defense in depth at include time).
     app.include_router(groups_api.router, prefix="/api", dependencies=gated)
     app.include_router(users_api.router, prefix="/api", dependencies=gated)
+    # Admin-only diagnostics bundle; 404 unless MCPE_DEBUG is on (app.debug).
+    app.include_router(debug.router, prefix="/api")
     # The control plane as an MCP server; its tools call the routers above in-process
     # with the caller's credentials, so it gates and authorizes exactly like /api.
     app.state.control_mcp = control_mcp.build(app)
@@ -254,6 +264,9 @@ def create_app() -> FastAPI:
     app.state.groups = hub
     app.mount("/g", GroupDispatch(hub))
     app.include_router(proxy_router)  # /s/{slug}/...
+
+    if debug.enabled():
+        app.add_middleware(debug.TraceMiddleware)  # outermost: sees every refusal too
 
     fe = settings.frontend_dir
     if not fe.is_absolute():

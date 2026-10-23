@@ -367,6 +367,31 @@ async def test_hub_excludes_members_with_incompatible_auth(clean_settings):
             repo.delete_server(session, oauth.id)
 
 
+async def test_hub_leaves_the_builtin_out_of_oauth_groups(clean_settings):
+    """The built-in server reads a control credential, which an OAuth group's token
+    never is, so an OAuth group would only list control tools that refuse every call."""
+    with Session(get_engine()) as session:
+        service.ensure_builtin(session)
+        row = service.get_builtin(session)
+        builtin = SimpleNamespace(id=row.id, slug=row.slug)
+        open_srv = _mk_server(session, "Open One")
+    hub = _hub_for({f"up-{builtin.slug}": _make_upstream("b", "whoami"),
+                    "up-open-one": _make_upstream("o", "free")})
+    try:
+        for default, tools in (("oauth", ["open-one_free"]),
+                               ("none", [f"{builtin.slug}_whoami", "open-one_free"])):
+            _write_groups({"g": [builtin.id, open_srv.id]}, default_auth_provider=default)
+            with Session(get_engine()) as session:
+                service.update_server(session, builtin.id, {"auth_provider": "none"})
+            await hub.sync(_endpoints(builtin, open_srv))
+            assert await _list_tool_names(hub.app_for("g")) == tools
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, open_srv.id)
+            repo.delete_server(session, builtin.id)  # an enabled row would skew later tests
+
+
 async def test_hub_unchanged_topology_is_a_noop_swap(clean_settings):
     with Session(get_engine()) as session:
         a = _mk_server(session, "Stable")
@@ -1093,3 +1118,75 @@ def test_group_restart_skips_a_member_disabled_while_the_batch_runs(clean_settin
         with Session(get_engine()) as session:
             repo.delete_server(session, a.id)
             repo.delete_server(session, b.id)
+
+
+def test_route_replaces_a_client_sent_original_host(clean_settings):
+    """The built-in member's bridge forwards the group request's headers to /api/mcp,
+    which builds URLs from x-mcpe-original-host. A client's copy must not get through."""
+
+    async def echo(scope, receive, send):
+        headers = [v.decode() for k, v in scope["headers"] if k == b"x-mcpe-original-host"]
+        await JSONResponse({"original": headers})(scope, receive, send)
+
+    _write_groups({"team": "*"})
+    with TestClient(app) as client:
+        _stub_group(client, "team", inner=echo)
+        r = client.post("/g/team/mcp", headers={**LOOPBACK, "x-mcpe-original-host": "evil.example"})
+        assert r.json() == {"original": ["127.0.0.1"]}
+
+
+def test_route_holds_its_instance_while_the_body_is_read(clean_settings, monkeypatch):
+    """A swap while usage buffers the body retires the instance picked first. The
+    route holds it from selection, so it isn't closed before the request reaches it,
+    and the request is served by the instance whose members it was counted against."""
+    from app.groups import route
+    from app.groups.hub import _Counting
+
+    async def old_app(scope, receive, send):
+        await JSONResponse({"app": "old"})(scope, receive, send)
+
+    old = _Counting(old_app)
+    held = []
+    _write_groups({"team": "*"})
+    with TestClient(app) as client:
+        _stub_group(client, "team", inner=old)
+
+        async def swap_while_reading(request, receive, mounted):
+            held.append(old.active)  # a retire would wait on old.idle here
+            return receive
+
+        monkeypatch.setattr(route, "_record_group_usage", swap_while_reading)
+        r = client.post("/g/team/mcp", headers=LOOPBACK, json={})
+        assert r.json() == {"app": "old"} and held == [1]
+        assert old.active == 0 and old.idle.is_set()
+
+
+async def test_replaced_instance_finishes_its_requests_before_closing():
+    """A swap must not cut off a request already running on the old instance: the
+    built-in server's put_group through /g rebuilds the very group carrying it."""
+    import asyncio
+
+    from app.groups.hub import _Counting, _Instance
+
+    release = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def slow_app(scope, receive, send):
+        await release.wait()
+
+    class Runner:
+        async def close(self):
+            closed.set()
+
+    hub = GroupHub()
+    counting = _Counting(slow_app)
+    old = _Instance(counting, Runner(), frozenset())
+    hub._instances["g"] = old
+    request = asyncio.create_task(counting({"type": "http"}, None, None))
+    await asyncio.sleep(0)
+    await hub._teardown("g")  # returns at once: the caller may be that request
+    await asyncio.sleep(0)
+    assert hub.app_for("g") is None and not closed.is_set()  # still serving its request
+    release.set()
+    await request
+    await asyncio.wait_for(closed.wait(), 2)

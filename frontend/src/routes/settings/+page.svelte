@@ -564,8 +564,9 @@
 	// ---- Groups (the /g/<name> registry) ----------------------------------------
 	// A group is a named bundle served at /g/<name>/mcp — the union of its running
 	// members' tools, namespaced by slug. Membership is "*" (every registered server,
-	// present and future) or an explicit list of server ids. There is no special-case
-	// name; add a group named "all" with members "*" for a bundle of everything.
+	// present and future, except the built-in mcpelevator one) or an explicit list of
+	// server ids. There is no special-case name; add a group named "all" with members
+	// "*" for a bundle of every server.
 	let newGroupName = $state('');
 	let newGroupMode = $state<'all' | 'selected'>('all');
 	let newGroupSelection = $state<string[]>([]);
@@ -576,10 +577,10 @@
 	// alphanumerics + single hyphens) — reject anything that couldn't be routed.
 	const groupNameValid = $derived(/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(newGroupName.trim()));
 
-	/** Human label for a group's membership: "all servers" for the wildcard, else a
-	 * count. */
+	/** Human label for a group's membership: "all servers" for the wildcard (which
+	 * leaves out the built-in one), else a count. */
 	function membersLabel(members: GroupMembers): string {
-		if (members === '*') return 'all servers';
+		if (members === '*') return 'all servers except mcpelevator';
 		return members.length === 1 ? '1 server' : `${members.length} servers`;
 	}
 
@@ -605,11 +606,12 @@
 	}
 
 	/** A group's member servers, resolved the way the backend resolves them: the wildcard
-	 *  is every registered server, an explicit list keeps its registry order. An id with no
+	 *  is every registered server except the built-in mcpelevator one (it joins only when
+	 *  named), an explicit list keeps its registry order. An id with no
 	 *  server row is dropped — a deleted server is pruned from the registry, so this only
 	 *  shows up in the window between the delete and the next groups fetch. */
 	function groupMembers(group: GroupInfo): ServerSummary[] {
-		if (group.members === '*') return servers;
+		if (group.members === '*') return servers.filter((s) => s.runner !== 'mcpelevator');
 		return group.members
 			.map((id) => servers.find((s) => s.id === id))
 			.filter((s): s is ServerSummary => s !== undefined);
@@ -1801,11 +1803,12 @@
 					bundling its running members' tools, each prefixed by the member's slug (e.g.
 					<code class="font-mono">github_create_issue</code>). Members are
 					<code class="font-mono">all servers</code> (every registered server, including
-					future ones) or a picked list. A group uses the default auth provider above. A
+					future ones, except the built-in <code class="font-mono">mcpelevator</code> server,
+					which joins a group only when picked) or a picked list. A group uses the default auth provider above. A
 					protected member is included only when it uses that same provider; bearer and OAuth
 					credentials cannot stand in for one another. Name a group
 					<code class="font-mono">all</code> with <code class="font-mono">all servers</code>
-					for a bundle of everything.
+					for a bundle of every server.
 				</p>
 
 				<!-- Existing groups -->
@@ -2025,7 +2028,7 @@
 
 					<div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Group members">
 						{#each [
-							{ value: 'all', label: 'All servers', hint: 'every registered server, including future ones' },
+							{ value: 'all', label: 'All servers', hint: 'every registered server, including future ones, except the built-in mcpelevator server' },
 							{ value: 'selected', label: 'Selected servers', hint: 'only the servers you pick below' }
 						] as const as choice (choice.value)}
 							<label

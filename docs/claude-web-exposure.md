@@ -293,6 +293,21 @@ The forwarded request won't carry an mcpe bearer token, so pick one:
   never put the injection on an ungated public hostname, or a direct hit gets the
   token injected and bypasses OAuth.
 
+**The built-in `mcpelevator` server is the exception.** Its tools run as a
+mcpelevator user, so passing the Access gate isn't enough: the control plane has to
+know who you are. Neither option above tells it. Set `MCPE_CF_ACCESS_TEAM_DOMAIN` to
+your team domain (`myteam.cloudflareaccess.com`) and `MCPE_CF_ACCESS_AUD` to this
+Access application's AUD tag (shown on the application's overview), then create a
+user in **Settings → Users** whose name is the email you sign in to Access with.
+The server checks the `Cf-Access-Jwt-Assertion` header Cloudflare adds to every
+request it lets through and runs each call as that user. You can leave the server on
+`bearer`, since the check accepts that identity in place of a token. A 403 from
+`/s/mcpelevator/mcp` names what didn't line up: no single user with that email, an
+assertion that didn't verify (wrong team domain or AUD), or the env vars not being
+set. Clients other than claude.ai (MCPJam, for one) also need their callback URL on
+the application's **Allowed redirect URIs**, or Cloudflare refuses to register them
+with `redirect_uri is not allowed by the account configuration`.
+
 ### Step 5 — Add the connector in Claude
 
 In claude.ai → **Settings** → **Connectors** → **Add custom connector**, paste:

@@ -146,6 +146,8 @@ def test_enforced_gate_and_per_user_switch(client):
     assert _rpc(client, "tools/list", headers=internal)[0] == 200
     is_error, out = _call(client, "list_servers", headers=internal)
     assert is_error and "401" in json.dumps(out)
+    # An anonymous client reaching the bridge through a group is not that probe.
+    assert _rpc(client, "tools/list", headers={**internal, "x-mcpe-group": "g"})[0] == 401
 
     auth = {"authorization": f"Bearer {admin}"}
     user = client.post("/api/users", json={"name": "Ada"}, headers={**LOOPBACK, **auth}).json()
@@ -192,12 +194,14 @@ def test_builtin_row_guards(client):
     r = client.patch(f"/api/servers/{other['id']}", json={"runner": BUILTIN_RUNNER}, headers=LOOPBACK)
     assert r.status_code == 400
 
-    # Wildcard groups skip it and an explicit member list can't name it.
+    # Wildcard groups skip it; it joins a group only when named.
     with Session(get_engine()) as s:
         registry.write_group(s, "all", "*")
         assert b.id not in registry.resolve(s, "all")
-        with pytest.raises(ValueError):
-            registry.write_group(s, "ops", [b.id])
+        assert not registry.includes_builtin(s, "all")
+        registry.write_group(s, "ops", [b.id])
+        assert registry.resolve(s, "ops") == [b.id]
+        assert registry.includes_builtin(s, "ops")
 
 
 def test_playground_forwards_the_callers_credential_to_the_builtin_only(client, monkeypatch):
@@ -224,6 +228,11 @@ def test_playground_forwards_the_callers_credential_to_the_builtin_only(client, 
     unit.tools = [{"name": "list_servers"}]
     client.post(f"/api/servers/{other['id']}/tools/list_servers/call", json={}, headers=auth)
     assert seen == [{"authorization": "Bearer abc", "x-mcpe-original-host": "127.0.0.1"}, None]
+    # An OAuth-only Cloudflare client has no Authorization; its assertion goes instead.
+    seen.clear()
+    cf = {**LOOPBACK, "cf-access-jwt-assertion": "a.b.c"}
+    client.post(f"/api/servers/{b.id}/tools/list_servers/call", json={}, headers=cf)
+    assert seen == [{"cf-access-jwt-assertion": "a.b.c", "x-mcpe-original-host": "127.0.0.1"}]
 
 
 def test_logs_recheck_visibility_after_the_await(client, monkeypatch):
@@ -412,6 +421,26 @@ def test_break_glass_token_opens_the_builtin(client, monkeypatch):
         asyncio.run(BearerProvider().authenticate(req, other))
 
 
+def test_the_s_proxy_sets_the_builtin_markers_itself(client):
+    """x-mcpe-original-host and x-mcpe-group are the proxy's and the group route's to
+    set. A client's copy on /s must not reach the built-in bridge."""
+    import httpx
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    async def echo(request):
+        return JSONResponse({k: v for k, v in request.headers.items() if k.startswith("x-mcpe-")})
+
+    upstream = Starlette(routes=[Route("/{path:path}", echo, methods=["POST"])])
+    client.app.state.http = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream))
+    client.app.state.supervisor.endpoint = lambda slug: ("bridge", 9000)
+    forged = {"x-mcpe-group": "g", "x-mcpe-original-host": "evil.example",
+              "authorization": f"Bearer {mint_token('control')}"}
+    r = client.post(f"/s/{_builtin().slug}/mcp", json={}, headers={**LOOPBACK, **forged})
+    assert r.json() == {"x-mcpe-original-host": "127.0.0.1"}
+
+
 def test_urls_name_the_host_the_caller_used(client):
     carried = {"x-mcpe-original-host": "localhost:9999"}
     _, out = _call(client, "list_servers", headers=carried)  # no internal secret: ignored
@@ -465,6 +494,7 @@ def test_prompts_use_bridge_names_only_through_the_bridge(client):
         b.tool_overrides = {"wait_for_server": {"name": "await_server"}}
         s.add(b)
         s.commit()
+        slug = b.slug
     args = {"name": "install_server", "arguments": {"what": "x"}}
 
     def text(headers=None):
@@ -473,3 +503,480 @@ def test_prompts_use_bridge_names_only_through_the_bridge(client):
 
     assert "wait_for_server" in text()  # direct /api/mcp: the tools aren't renamed here
     assert "await_server" in text({INTERNAL_HEADER: INTERNAL_SECRET})
+    # Through a group bundle every tool carries the slug, renamed ones included.
+    grouped = text({INTERNAL_HEADER: INTERNAL_SECRET, "x-mcpe-group": "g"})
+    assert f"{slug}_await_server" in grouped and f"{slug}_search_catalog" in grouped
+    assert " search_catalog" not in grouped
+
+
+def _member_control_token(client, admin_headers: dict, name: str = "Ada") -> tuple[dict, str]:
+    user = client.post("/api/users", json={"name": name}, headers={**LOOPBACK, **admin_headers}).json()
+    raw = new_token()
+    with Session(get_engine()) as s:
+        repo.create_token(
+            s,
+            Token(id=new_id(), name=name, token_hash=hash_token(raw), prefix=raw[:12],
+                  scope="control", user_id=user["id"]),
+        )
+    return user, raw
+
+
+def test_groups_naming_the_builtin_open_to_admin_control_credentials(client):
+    import asyncio
+
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.auth.bearer import BearerProvider
+    from app.groups.hub import group_server
+
+    admin = mint_token("control")
+    _, member = _member_control_token(client, {"authorization": f"Bearer {admin}"})
+    with Session(get_engine()) as s:
+        registry.write_group(s, "ops", [_builtin().id])
+        registry.write_group(s, "plain", [])
+
+    def auth(token: str, group: str) -> None:
+        req = Request({"type": "http", "headers": [(b"authorization", f"Bearer {token}".encode())]})
+        asyncio.run(BearerProvider().authenticate(req, group_server(group)))
+
+    auth(admin, "ops")
+    with pytest.raises(HTTPException):
+        auth(member, "ops")  # a member's login must not reach the other members' tools
+    with pytest.raises(HTTPException):
+        auth(admin, "plain")  # a control token opens only groups bundling the control plane
+    auth(mint_token("group:plain"), "plain")
+
+
+def test_hub_forwards_headers_to_the_builtin_member_only():
+    from app.groups.hub import GroupHub, _default_transport
+
+    captured = []
+
+    def factory(url: str):
+        captured.append(_default_transport(url))
+        return captured[-1]
+
+    hub = GroupHub(transport_factory=factory)
+    hub._make_proxy("mcpelevator", "http://127.0.0.1:1/mcp", forward=True)
+    hub._make_proxy("other", "http://127.0.0.1:2/mcp")
+    assert [t.forward_incoming_headers for t in captured] == [True, False]
+
+
+@pytest.fixture
+def cf(monkeypatch):
+    """Cloudflare Access configured for team.example, signing with a local key."""
+    import time
+    from types import SimpleNamespace
+
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from app.auth import cf_access
+    from app.config import get_settings
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(get_settings(), "cf_access_team_domain", "team.example")
+    monkeypatch.setattr(get_settings(), "cf_access_aud", "aud-1")
+    fetches = []
+
+    def get_signing_keys(refresh: bool = False):
+        fetches.append(refresh)
+        return [SimpleNamespace(key_id="k1", key=key.public_key())]
+
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+        get_signing_keys=get_signing_keys, jwk_set_cache=None))
+    monkeypatch.setattr(cf_access, "_last_refetch", {})
+    monkeypatch.setattr(cf_access, "_last_failure", {})
+    # As the startup load leaves it: requests on the event loop answer from these.
+    monkeypatch.setattr(cf_access, "_good", {"https://team.example": ({"k1": key.public_key()}, time.monotonic())})
+
+    def assertion(email: str, aud: str = "aud-1", kid: str = "k1", exp: int = 60,
+                  iss: str = "https://team.example") -> dict:
+        now = int(time.time())
+        claims = {"email": email, "aud": [aud], "iss": iss, "iat": now, "exp": now + exp}
+        return {cf_access.HEADER: jwt.encode(claims, key, algorithm="RS256", headers={"kid": kid})}
+
+    assertion.fetches = fetches
+
+    return assertion
+
+
+def test_cloudflare_identity_runs_calls_as_the_matching_user(client, cf):
+    import asyncio
+
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.auth.bearer import BearerProvider
+    from app.control_mcp import _authorize
+
+    admin = {"authorization": f"Bearer {mint_token('control')}"}
+    client.post("/api/users", json={"name": "ada@example.com"}, headers={**LOOPBACK, **admin})
+    with Session(get_engine()) as s:
+        runtime_settings.write(s, {"control_plane_auth": "always"})
+    internal = {INTERNAL_HEADER: INTERNAL_SECRET}
+
+    # Through the built-in bridge, the assertion names the caller, email case aside.
+    is_error, me = _call(client, "whoami", headers={**internal, **cf("Ada@Example.com")})
+    assert not is_error and me["user"]["name"] == "ada@example.com" and me["user"]["role"] == "member"
+    # Straight to /api/mcp, without the bridge, it isn't trusted.
+    status, body = _rpc(client, "tools/list", headers=cf("ada@example.com"))
+    assert status == 403 and "only through" in body["detail"]
+
+    def edge(headers: dict) -> None:
+        req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers.items()]})
+        with Session(get_engine()) as s:
+            _authorize(req, s, edge=True)
+
+    edge(cf("ada@example.com"))
+    asyncio.run(BearerProvider().authenticate(
+        Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]}),
+        _builtin(),
+    ))
+    for headers, reason in (
+        (cf("bob@example.com"), "no single user has that name"),
+        (cf("ada@example.com", aud="other"), "different Access application"),
+        (cf("ada@example.com", iss="https://other.example"), "different team domain"),
+        (cf("ada@example.com", exp=-120), "expired"),
+        (cf("ada@example.com", kid="nope"), "didn't verify"),
+        ({"authorization": f"Bearer {mint_token()}"}, "isn't one"),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            edge(headers)
+        assert exc.value.status_code == 403 and reason in exc.value.detail
+    with pytest.raises(HTTPException) as exc:
+        edge({})
+    assert exc.value.status_code == 401
+
+
+def test_cloudflare_identity_refuses_an_ambiguous_name(client, cf):
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    admin = {**LOOPBACK, "authorization": f"Bearer {mint_token('control')}"}
+    client.post("/api/users", json={"name": "ada@example.com"}, headers=admin)
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+    with Session(get_engine()) as s:
+        assert cf_access.user(s, req) is not None
+    client.post("/api/users", json={"name": "ADA@example.com ", "role": "admin"}, headers=admin)
+    with Session(get_engine()) as s:
+        assert cf_access.user(s, req) is None
+
+
+def test_bridge_forwarding_carries_the_cloudflare_assertion(monkeypatch):
+    """The built-in bridge and the group hub rely on FastMCP's forward_incoming_headers
+    passing every caller header on, not just Authorization. Pin that."""
+    from starlette.requests import Request
+
+    import fastmcp.server.dependencies as deps
+
+    req = Request({"type": "http", "headers": [(b"authorization", b"Bearer x"),
+                                               (b"cf-access-jwt-assertion", b"a.b.c")]})
+    monkeypatch.setattr(deps, "get_http_request", lambda: req)
+    assert {"authorization", "cf-access-jwt-assertion"} <= set(deps.get_http_headers(include={"authorization"}))
+
+
+def test_unknown_signing_key_refetches_at_most_once_per_window(cf):
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    def request(headers: dict) -> Request:
+        return Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers.items()]})
+
+    for _ in range(5):
+        assert cf_access.email(request(cf("ada@example.com", kid="junk"))) is None
+    assert cf.fetches.count(True) == 1  # junk kids can't force a fetch per request
+    assert cf_access.email(request(cf("ada@example.com"))) == "ada@example.com"
+
+
+def test_unreachable_signing_keys_back_off_instead_of_blocking_each_request(monkeypatch, cf):
+    from types import SimpleNamespace
+
+    import jwt
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    calls = []
+
+    def down(refresh: bool = False):
+        calls.append(refresh)
+        raise jwt.PyJWKClientConnectionError("timed out")
+
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+        get_signing_keys=down, jwk_set_cache=None))
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+    for _ in range(5):
+        assert cf_access.email(req) is None
+    assert len(calls) == 1  # one blocking attempt, then the backoff answers
+
+    # A 200 that isn't a key set (bad JSON) is refused and backed off the same way.
+    import json
+
+    calls.clear()
+    cf_access._last_failure.clear()
+
+    def garbled(refresh: bool = False):
+        calls.append(refresh)
+        raise json.JSONDecodeError("Expecting value", "<html>", 0)
+
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+        get_signing_keys=garbled, jwk_set_cache=None))
+    for _ in range(5):
+        assert cf_access.verify(req) == (
+            None, "Cloudflare Access's signing keys aren't available yet; try again shortly")
+    assert len(calls) == 1
+
+
+def test_a_cached_key_set_with_no_keys_is_refetched(monkeypatch):
+    """{"keys": []} gets cached like any answer; serving it would fail every sign-in
+    until it expired, so a cache hit that fails refetches (under the backoff)."""
+    import jwt
+    from types import SimpleNamespace
+
+    from app.auth import cf_access
+
+    calls = []
+
+    def keys(refresh: bool = False):
+        calls.append(refresh)
+        if not refresh:  # what PyJWT raises for {"keys": []}, a sibling of PyJWKClientError
+            raise jwt.PyJWKSetError("The JWK Set did not contain any keys")
+        return [SimpleNamespace(key_id="k1", key="pem")]
+
+    cache = SimpleNamespace(get=lambda: object())
+    monkeypatch.setattr(cf_access, "_last_failure", {})
+    monkeypatch.setattr(cf_access, "_last_refetch", {})
+    monkeypatch.setattr(cf_access, "_good", {})
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+        get_signing_keys=keys, jwk_set_cache=cache))
+    assert cf_access._fetch("https://team.example", refresh=False) == {"k1": "pem"}
+    assert calls == [False, True]
+
+
+def test_an_assertion_with_a_non_string_kid_is_refused(cf):
+    import base64
+    import json
+
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    def part(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+    forged = f"{part({'alg': 'RS256', 'kid': []})}.{part({'email': 'ada@example.com'})}.c2ln"
+    req = Request({"type": "http", "headers": [(b"cf-access-jwt-assertion", forged.encode())]})
+    assert cf_access.verify(req) == (None, "the Cloudflare Access assertion didn't verify")
+
+
+def test_sql_logging_never_shows_bound_values():
+    from app.db import get_engine
+
+    assert get_engine().hide_parameters is True
+
+
+def test_backoff_never_blocks_fresh_cached_keys(monkeypatch, cf):
+    import time
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    real = cf_access._keys("https://team.example")
+    cache = SimpleNamespace(get=lambda: object())  # a fresh cached key set
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+        get_signing_keys=real.get_signing_keys, jwk_set_cache=cache))
+    cf_access._last_failure["https://team.example"] = time.monotonic()  # a refetch just failed
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+    assert cf_access.email(req) == "ada@example.com"
+
+
+def test_cloudflare_admin_passes_the_settings_lockout_guard(client, cf):
+    from starlette.requests import Request
+
+    from app.auth.control_plane import admin_credential_presented
+
+    admin = {**LOOPBACK, "authorization": f"Bearer {mint_token('control')}"}
+    client.post("/api/users", json={"name": "root@example.com", "role": "admin"}, headers=admin)
+    client.post("/api/users", json={"name": "ada@example.com"}, headers=admin)
+
+    def presented(email: str, internal: bool) -> bool:
+        headers = {**cf(email), **({INTERNAL_HEADER: INTERNAL_SECRET} if internal else {})}
+        req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers.items()]})
+        with Session(get_engine()) as s:
+            return admin_credential_presented(req, s)
+
+    assert presented("root@example.com", internal=True)
+    assert not presented("ada@example.com", internal=True)  # a member never counts
+    assert not presented("root@example.com", internal=False)  # nor an untrusted assertion
+
+
+def test_restart_group_refuses_its_own_bridge(client):
+    with Session(get_engine()) as s:
+        registry.write_group(s, "ops", [_builtin().id])
+        registry.write_group(s, "plain", [])
+    internal = {INTERNAL_HEADER: INTERNAL_SECRET}
+    is_error, out = _call(client, "restart_group", {"name": "ops"}, headers=internal)
+    assert is_error and "can't restart itself" in json.dumps(out)
+    is_error, _ = _call(client, "restart_group", {"name": "plain"}, headers=internal)
+    assert not is_error
+
+
+def test_failed_refetch_doesnt_hold_the_refetch_window(monkeypatch, cf):
+    from types import SimpleNamespace
+
+    import jwt
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    real = cf_access._keys("https://team.example")
+    state = {"down": True}
+
+    def get_signing_keys(refresh: bool = False):
+        if refresh and state["down"]:
+            raise jwt.PyJWKClientConnectionError("timed out")
+        keys = real.get_signing_keys()
+        return [*keys, SimpleNamespace(key_id="rotated", key=keys[0].key)] if refresh else keys
+
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+        get_signing_keys=get_signing_keys, jwk_set_cache=None))
+    req = Request({"type": "http", "headers": [
+        (k.encode(), v.encode()) for k, v in cf("ada@example.com", kid="rotated").items()]})
+    assert cf_access.email(req) is None  # the refetch fails during the outage
+    state["down"] = False
+    cf_access._last_failure.clear()  # the 30s failure backoff has passed
+    assert cf_access.email(req) == "ada@example.com"  # no five-minute wait
+
+
+def test_debug_bridges_keep_uvicorn_off_its_own_handlers(monkeypatch):
+    from app import debug
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "debug", True)
+    assert debug.uvicorn_logging() == {"log_config": None}
+    monkeypatch.setattr(get_settings(), "debug", False)
+    assert debug.uvicorn_logging() == {}
+
+
+def test_failed_cloudflare_sign_in_gets_its_reason_from_the_bearer_check(client, cf):
+    import asyncio
+
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.auth.bearer import BearerProvider
+    from app.groups.hub import group_server
+
+    admin = {**LOOPBACK, "authorization": f"Bearer {mint_token('control')}"}
+    client.post("/api/users", json={"name": "ada@example.com"}, headers=admin)
+    with Session(get_engine()) as s:
+        registry.write_group(s, "ops", [_builtin().id])
+
+    def auth(headers: dict, server) -> HTTPException:
+        req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers.items()]})
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(BearerProvider().authenticate(req, server))
+        return exc.value
+
+    edge_token = {"authorization": "Bearer cf-edge-token"}  # what Cloudflare forwards
+    err = auth({**edge_token, **cf("bob@example.com")}, _builtin())
+    assert err.status_code == 403 and "no single user" in err.detail
+    err = auth({**edge_token, **cf("ada@example.com")}, group_server("ops"))
+    assert err.status_code == 403 and "only an admin" in err.detail
+
+
+def test_switch_applies_to_cloudflare_users_with_auth_off(client, cf, monkeypatch):
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.control_mcp import _authorize
+
+    user = client.post("/api/users", json={"name": "ada@example.com"}, headers=LOOPBACK).json()
+    client.patch(f"/api/users/{user['id']}", json={"control_mcp": False}, headers=LOOPBACK)
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+    with Session(get_engine()) as s, pytest.raises(HTTPException) as exc:
+        _authorize(req, s, edge=True)
+    assert exc.value.status_code == 403 and "disabled for this user" in exc.value.detail
+
+    # An admin token sent alongside outranks the Cloudflare identity, as with enforcement on.
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "admin_token", "break-glass")
+    both = [*req.scope["headers"], (b"authorization", b"Bearer break-glass")]
+    with Session(get_engine()) as s:
+        _authorize(Request({"type": "http", "headers": both}), s, edge=True)
+
+
+def test_key_refresh_on_the_event_loop_never_waits_on_the_fetch(monkeypatch, cf):
+    import asyncio
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+    assert cf_access.email(req) == "ada@example.com"  # off the loop: fetched in place
+    real, gate, calls = cf_access._keys("https://team.example"), threading.Event(), []
+
+    def slow(refresh: bool = False):
+        calls.append(refresh)
+        gate.wait(5)
+        return real.get_signing_keys(refresh)
+
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(get_signing_keys=slow, jwk_set_cache=None))
+
+    async def on_loop():
+        return [cf_access.email(req) for _ in range(3)]
+
+    started = time.monotonic()
+    assert asyncio.run(on_loop()) == ["ada@example.com"] * 3  # the last keys answer
+    assert time.monotonic() - started < 1  # nobody waited on the stalled fetch
+    gate.set()
+    for _ in range(200):
+        if not cf_access._refreshing:
+            break
+        time.sleep(0.01)
+    assert calls == [False]  # one refresh in a thread, not one per request
+
+
+def test_a_cold_start_on_the_event_loop_refuses_instead_of_waiting(monkeypatch, cf):
+    import asyncio
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    real, gate = cf_access._keys("https://team.example"), threading.Event()
+
+    def slow(refresh: bool = False):
+        gate.wait(5)
+        return real.get_signing_keys(refresh)
+
+    monkeypatch.setattr(cf_access, "_good", {})  # the startup load hasn't landed
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(get_signing_keys=slow, jwk_set_cache=None))
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+
+    async def on_loop():
+        return cf_access.verify(req)
+
+    started = time.monotonic()
+    assert asyncio.run(on_loop())[1] == "Cloudflare Access's signing keys aren't available yet; try again shortly"
+    assert time.monotonic() - started < 1
+    gate.set()
+    for _ in range(200):
+        if not cf_access._refreshing:
+            break
+        time.sleep(0.01)
+    assert asyncio.run(on_loop()) == ("ada@example.com", None)  # loaded in the background

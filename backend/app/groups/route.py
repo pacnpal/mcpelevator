@@ -39,7 +39,8 @@ from app import usage
 from app.auth.middleware import enforce
 from app.db import get_engine
 from app.groups import registry
-from app.groups.hub import GroupHub, group_server
+from app.groups.hub import GroupHub, _Counting, group_server
+from app.runners.builtin import GROUP_HEADER, ORIGINAL_HOST_HEADER
 from app.usage import attribution
 
 
@@ -191,6 +192,16 @@ class GroupDispatch:
         # app_root_path remains on the scope for external URL generation.
         sub_scope = dict(scope)
         sub_scope["root_path"] = routing_root_path + "/" + name
+        # The built-in member's bridge forwards this request's headers to /api/mcp,
+        # which names the caller's address in URLs from this header (as the /s proxy
+        # sets it). Replace any client-sent copy with the Host enforce() validated.
+        # GROUP_HEADER tells it the request came through a bundle, so its prompts
+        # name tools with the slug prefix the bundle gives them.
+        ours = (ORIGINAL_HOST_HEADER.encode(), GROUP_HEADER.encode())
+        sub_scope["headers"] = [(k, v) for k, v in scope["headers"] if k not in ours] + [
+            (ORIGINAL_HOST_HEADER.encode(), request.headers.get("host", "").encode("latin-1")),
+            (GROUP_HEADER.encode(), name.encode()),
+        ]
 
         # Idle bookkeeping: an authenticated group request counts as in-flight
         # traffic for every member for the WHOLE delegation — a long-lived
@@ -217,6 +228,13 @@ class GroupDispatch:
         for member_id in mounted.values():
             if supervisor is not None:
                 supervisor.request_started(member_id)
+        # Hold the instance from its selection, not from when delegation starts:
+        # usage may await the body first, and a swap in that window must not close
+        # it. Nothing above awaits since app_for, so `mounted` is this instance's
+        # own members and attribution and idle leases match the app that serves.
+        held = isinstance(inner, _Counting)
+        if held:
+            inner.hold()
         try:
             # Count the tool calls this request carries (see _record_group_usage),
             # which may consume + replay the body. Only the bundle's own endpoint
@@ -230,6 +248,8 @@ class GroupDispatch:
                 receive = await _record_group_usage(request, receive, mounted)
             await inner(sub_scope, receive, send)
         finally:
+            if held:
+                inner.release()
             for member_id in mounted.values():
                 if supervisor is not None:
                     supervisor.request_finished(member_id)

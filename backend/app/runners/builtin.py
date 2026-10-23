@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import secrets
+from collections.abc import Iterable
 
 from app.config import get_settings
 from app.db.models import BUILTIN_RUNNER, Server
@@ -24,9 +25,21 @@ INTERNAL_HEADER = "x-mcpe-internal"
 # sets it for this server only and /api/mcp trusts it only next to INTERNAL_HEADER,
 # so the API's copyable URLs and OAuth callback name the caller's address.
 ORIGINAL_HOST_HEADER = "x-mcpe-original-host"
-# Proves a request came through this process's own bridge (which only the /s gate or
-# the supervisor's discovery probe can reach). Never persisted: bridges restart on boot.
+# Set by the group route on every request it hands a bundle: inside a group this
+# server's tools carry its slug as a prefix, so prompts must name them that way.
+GROUP_HEADER = "x-mcpe-group"
+# Proves a request came through this process's own bridge (which only the /s gate, a
+# group bundle, or the supervisor's discovery probe can reach). Never persisted:
+# bridges restart on boot.
 INTERNAL_SECRET = secrets.token_urlsafe(32)
+
+
+def is_internal(request) -> bool:
+    """Did this request come through the built-in server's own bridge?"""
+    # Bytes: compare_digest raises on a non-ASCII str, which a client can send.
+    return secrets.compare_digest(
+        request.headers.get(INTERNAL_HEADER, "").encode(), INTERNAL_SECRET.encode()
+    )
 
 
 # Served by /api/mcp directly and handed to the bridge, which would otherwise
@@ -57,14 +70,19 @@ install_server and diagnose_server prompts walk through the common jobs.
 """
 
 
-def localize(text: str, server: Server | None) -> str:
+def localize(text: str, server: Server | None, prefix: str = "", tools: Iterable[str] = ()) -> str:
     """``text`` as this server's clients see its tools: renamed tools under their new
-    names, and hidden ones listed, so guidance never names a tool that isn't there."""
+    names, and hidden ones listed, so guidance never names a tool that isn't there.
+    ``prefix`` (a group's ``<slug>_``) goes on each of ``tools`` and every rename."""
     if server is None:
         return text
-    for upstream, override in (server.tool_overrides or {}).items():
-        if override.get("name"):
-            text = re.sub(rf"\b{re.escape(upstream)}\b", override["name"], text)
+    renamed = {u: o["name"] for u, o in (server.tool_overrides or {}).items() if o.get("name")}
+    names = {u: prefix + n for u, n in renamed.items()}
+    if prefix:
+        names.update({t: prefix + renamed.get(t, t) for t in tools})
+    if names:  # one pass, so a rename is never renamed or prefixed twice
+        pattern = r"\b(" + "|".join(map(re.escape, sorted(names, key=len, reverse=True))) + r")\b"
+        text = re.sub(pattern, lambda m: names[m.group(1)], text)
     hidden = sorted(server.disabled_tools or [])
     if hidden:
         text += f"\nHidden on this server, so not callable: {', '.join(hidden)}."

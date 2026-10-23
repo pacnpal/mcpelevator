@@ -100,6 +100,17 @@ class Settings(BaseSettings):
     # /s/mcpelevator/mcp) on boot when it's missing. MCPE_CONTROL_MCP=false skips that;
     # an existing one is left as is. Turn it off in Settings instead.
     control_mcp: bool = True
+    # Cloudflare Access in front of this instance: the team domain
+    # (e.g. "myteam.cloudflareaccess.com") and the Access application's AUD tag
+    # (comma-separated for several apps). With both set, the built-in mcpelevator server
+    # accepts the edge's signed Cf-Access-Jwt-Assertion and runs calls as the user whose
+    # name is the signed-in email (see app.auth.cf_access).
+    cf_access_team_domain: str = ""
+    cf_access_aud: str = ""
+    # Debug mode: DEBUG logging everywhere (bridges too), a one-line trace of every
+    # request with credentials fingerprinted, and an admin-only diagnostics bundle at
+    # GET /api/debug. Off by default; see app.debug.
+    debug: bool = False
 
     # --- data / persistence ---
     data_dir: Path = Path("./data")

@@ -82,14 +82,29 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   (`MCPE_CONTROL_MCP=false` skips that). It runs through an ordinary remote bridge that forwards the
   caller's Authorization (`ProcessSpec.forward_authorization`, on for this runner only) plus a
   per-process internal header. Only MCP exposure, tool policy, name, slug, auth (`none`/`bearer`) and
-  idle are editable (REST stays off: its in-process proxy call can't forward the caller's token). It can't be deleted, cloned or reassigned (it stays admin-owned, since its `enabled` is a global setting), it never joins a group (`"*"` skips it, an explicit
-  member list naming it is refused), and the bearer provider accepts control tokens for it. The global switch is the row's `enabled` (surfaced as the `control_mcp`
-  setting) and the per-user switch is `User.control_mcp`. `/api/mcp` checks both on every request.
+  idle are editable (REST stays off: its in-process proxy call can't forward the caller's token). It can't be deleted, cloned or reassigned (it stays admin-owned, since its `enabled` is a global setting).
+  It joins a group only when named (`"*"` skips it); the hub forwards the caller's headers to that
+  member alone, and such a group also opens to an ADMIN's control credential. The bearer provider
+  accepts any control credential for the server itself (`principal.credential_principal`), and the
+  `/s` proxy runs `control_mcp.authorize_edge` so an unusable credential gets a 401/403 with a reason
+  instead of a failed `initialize`. Behind Cloudflare Access (`auth/cf_access.py`, opt-in via
+  `MCPE_CF_ACCESS_TEAM_DOMAIN` + `MCPE_CF_ACCESS_AUD`) the signed `Cf-Access-Jwt-Assertion` maps
+  its email to the user of that name; `principal.resolve` trusts it only on requests carrying the
+  bridge's internal header (`runners.builtin.is_internal`), never on the rest of `/api` (CSRF). The
+  global switch is the row's `enabled` (surfaced as the `control_mcp` setting) and the per-user
+  switch is `User.control_mcp`. `/api/mcp` checks both on every request.
+- **Debug mode** (`debug.py`, `MCPE_DEBUG=true`): deliberately maximal. TRACE logging for every
+  logger in the control plane and every bridge (they inherit the env; bridges also run uvicorn at
+  `trace`), every SQL statement (values hidden by `hide_parameters`), `TraceMiddleware` logging each request's arrival and headers, its body as the app reads it,
+  response start, every streamed event and a summary, excepthooks + faulthandler + asyncio debug,
+  and the admin-only `GET /api/debug` bundle. Every line passes through `debug.scrub` (and headers
+  through `debug.fingerprint`): never log a usable credential. Off, none of it is installed and the
+  route 404s. New failure paths should log through a module `logger` so debug mode picks them up.
 - **Group registry** (`groups/`): the `groups` runtime setting is the single source of truth
   mapping a group name to its members — either `"*"` (every registered server, present and
   future, except the built-in control MCP server) or an ordered list of server ids. Each group is served at `/g/<name>/mcp`: a
   control-plane-hosted FastMCP mounting a proxy per running member, tools namespaced by slug,
-  rebuilt-and-swapped per group after each reconcile via the supervisor's `on_converged` hook
+  rebuilt-and-swapped per group after each reconcile via the supervisor's `on_converged` hook (the replaced instance drains its in-flight requests before closing, so a call that rebuilds its own group still returns)
   (the hub owns each sub-app's lifespan; Starlette doesn't run mounted lifespans). There is no
   special-case name — `all` is just a conventional entry with members `"*"`. The registry is
   validated at write time and again at startup (`registry.validate_at_startup` fails the boot

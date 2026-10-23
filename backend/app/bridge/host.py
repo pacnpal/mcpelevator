@@ -1644,12 +1644,23 @@ def main() -> None:
     host = os.environ.get("MCPE_BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ["MCPE_BRIDGE_PORT"])
 
-    # The upstream's log notifications land here when no client may have them (see
-    # _StdioRouting); stderr is captured with the server's own output.
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(levelname)s upstream: %(message)s"))
-    _UPSTREAM_LOG.addHandler(handler)
-    _UPSTREAM_LOG.setLevel(logging.INFO)
+    # MCPE_DEBUG reaches bridges through the inherited environment (see app.debug).
+    from app import debug
+
+    level = "info"
+    if debug.enabled():
+        # The root's scrubbed handler writes upstream logs too; a handler of their
+        # own here would print each line twice.
+        debug.configure_logging(keep=False)
+        _UPSTREAM_LOG.setLevel(logging.DEBUG)
+        level = "trace"  # uvicorn also logs every ASGI message at this level
+    else:
+        # The upstream's log notifications land here when no client may have them (see
+        # _StdioRouting); stderr is captured with the server's own output.
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s upstream: %(message)s"))
+        _UPSTREAM_LOG.addHandler(handler)
+        _UPSTREAM_LOG.setLevel(logging.INFO)
 
     proxy = build_proxy(spec)
     if spec.get("rest_openapi"):
@@ -1657,7 +1668,15 @@ def main() -> None:
         # the session-manager lifespan, which uvicorn executes).
         import uvicorn
 
-        uvicorn.run(build_app(spec, proxy), host=host, port=port, log_level="info")
+        app = build_app(spec, proxy)
+        if debug.enabled():
+            app = debug.TraceMiddleware(app)
+        uvicorn.run(app, host=host, port=port, log_level=level, **debug.uvicorn_logging())
+    elif debug.enabled():
+        import uvicorn
+
+        uvicorn.run(debug.TraceMiddleware(build_app(spec, proxy)), host=host, port=port,
+                    log_level=level, **debug.uvicorn_logging())
     else:
         # run() handles uvicorn + the Streamable HTTP session-manager lifespan for us.
         proxy.run(transport="http", host=host, port=port, show_banner=False)

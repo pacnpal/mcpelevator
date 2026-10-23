@@ -4,7 +4,7 @@ A group is a named, ordered set of registered servers. The registry is the
 ``groups`` runtime setting (SQLite kv, like every other runtime-mutable knob):
 a mapping from group name to either the wildcard ``"*"`` (every registered
 server, present and future, except the built-in mcpelevator control server, which
-never joins a group) or an explicit list of server ids. There is no
+joins only by being named) or an explicit list of server ids. There is no
 special-case group name — ``all`` is just a conventional entry whose member
 value is ``"*"``, resolved through the same code path as any other group.
 
@@ -71,16 +71,10 @@ def validate_members(session: Session, group: str, members: Members) -> None:
     (a ``ValueError``) naming the offending group and server id."""
     if members == WILDCARD:
         return
-    servers = repo.list_servers(session)
-    known = {s.id for s in servers}
-    builtin = {s.id for s in servers if s.runner == BUILTIN_RUNNER}
+    known = {s.id for s in repo.list_servers(session)}
     for server_id in members:
         if server_id not in known:
             raise UnknownMemberError(group, server_id)
-        if server_id in builtin:
-            # A group credential is never a control credential, so every one of its
-            # tools would 401 once control-plane auth is on.
-            raise ValueError(f"group {group!r}: the built-in mcpelevator server can't join a group")
 
 
 def validate_at_startup(session: Session) -> None:
@@ -151,6 +145,18 @@ def resolve(session: Session, name: str) -> list[str] | None:
         return None
     members = registry[name]
     if members == WILDCARD:
-        # The built-in control-plane server never joins a group (see validate_members).
+        # The built-in control-plane server joins only when named: "*" bundles are
+        # handed to agents for general tooling, and must not grow admin tools on upgrade.
         return [s.id for s in repo.list_servers(session) if s.runner != BUILTIN_RUNNER]
     return list(members)
+
+
+def includes_builtin(session: Session, name: str) -> bool:
+    """Does group ``name`` name the built-in control-plane server? Such a group also
+    opens to an admin's control credential (see app.auth.bearer), since that's the
+    only credential the server's tools accept once control-plane auth is on."""
+    members = read(session).get(name)
+    if not members or members == WILDCARD:
+        return False
+    builtin = service.get_builtin(session)
+    return builtin is not None and builtin.id in members

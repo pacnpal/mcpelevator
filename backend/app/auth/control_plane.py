@@ -17,7 +17,6 @@ from fastapi import Depends, HTTPException
 from sqlmodel import Session
 from starlette.requests import Request
 
-from app.auth.principal import ROLE_ADMIN
 from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Token
@@ -67,18 +66,14 @@ def admin_credential_presented(request: Request, session: Session) -> bool:
     login token is a valid control credential but must NOT satisfy this — enabling
     enforcement while holding only member logins would strand the box with no way
     to reach Settings or Users."""
-    token = _bearer(request)
-    if is_env_admin_token(token):
-        return True
-    if not token:
-        return False
-    row = repo.get_token_by_hash(session, hash_token(token))
-    if row is None or row.scope != "control":
-        return False
-    if row.user_id is None:
-        return True  # legacy/boot mint: resolves to admin
-    user = repo.get_user(session, row.user_id)
-    return user is not None and user.role == ROLE_ADMIN
+    from app.auth.principal import credential_principal  # circular-import guard
+    from app.runners.builtin import is_internal
+
+    # The env token, a user-less control token, an admin's login, or (through the
+    # built-in bridge) an admin's Cloudflare Access identity: the same resolution
+    # principal.resolve uses, so a credential it would call admin counts here too.
+    caller = credential_principal(request, session, cloudflare=is_internal(request))
+    return caller is not None and caller.is_admin
 
 
 def would_lock_out(request: Request, session: Session, changes: dict[str, Any]) -> bool:
@@ -111,24 +106,23 @@ def is_env_admin_token(token: str) -> bool:
 
 def control_auth(request: Request, session: Session) -> Literal["ok", "missing", "wrong_scope"]:
     """Classify the request's control-plane credential. Pure (no raising) so the
-    gate and ``/api/auth/status`` share one decision: ``ok`` = a control token (or
-    the break-glass env token); ``wrong_scope`` = a valid non-control token;
+    gate and ``/api/auth/status`` share one decision: ``ok`` = a control token, the
+    break-glass env token, or a trusted Cloudflare Access identity; ``wrong_scope`` =
+    a valid non-control token;
     ``missing`` = no token or no match."""
-    token = _bearer(request)
-    if not token:
-        return "missing"
-    if is_env_admin_token(token):
+    from app.auth.principal import credential_principal  # circular-import guard
+    from app.runners.builtin import is_internal
+
+    # The same decision principal.resolve makes, so the gate and identity agree:
+    # a user-bound credential whose user row is gone fails closed, and a Cloudflare
+    # Access identity counts only on requests the built-in bridge carried.
+    if credential_principal(request, session, cloudflare=is_internal(request)) is not None:
         return "ok"
-    row = repo.get_token_by_hash(session, hash_token(token))
-    if row is None:
-        return "missing"
-    if row.scope != "control":
+    token = _bearer(request)
+    row = repo.get_token_by_hash(session, hash_token(token)) if token else None
+    if row is not None and row.scope != "control":
         return "wrong_scope"
-    # A user-bound credential whose user row is gone fails closed, matching
-    # principal.resolve — the gate and identity resolution must agree.
-    if row.user_id is not None and repo.get_user(session, row.user_id) is None:
-        return "missing"
-    return "ok"
+    return "missing"
 
 
 def require_control_plane(request: Request, session: Session = Depends(get_session)) -> None:

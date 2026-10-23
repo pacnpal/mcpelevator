@@ -20,7 +20,7 @@ The one exception is ``get_server_logs``: the API's log route is a never-ending
 SSE stream, so the tool checks visibility through ``GET /api/servers/{id}`` and
 then reads the unit's bounded backlog directly.
 
-The endpoint itself is gated like the sensitive routers (``require_control_plane``)
+The endpoint itself is gated (``_authorize``: the same credentials as the sensitive routers)
 before the MCP app sees the request, so an unauthenticated client can't even list
 tools once enforcement is on. The exception is the built-in bridge (internal header,
 no Authorization), which is how the supervisor's discovery probe lists the tools;
@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import secrets
 import time
 from typing import Annotated, Any, Optional
 from urllib.parse import quote
@@ -51,18 +50,20 @@ from app import __version__
 from app.api import servers as servers_api
 from app.api.schemas import GroupMembers, Role, ServerCreate, ServerUpdate, SettingsUpdate
 from app.auth import principal as principal_mod
-from app.auth.control_plane import require_control_plane
+from app.auth import cf_access
+from app.auth.control_plane import enforcement_enabled, is_env_admin_token
 from app.db import get_engine, repo
+from app.groups import registry
 from app.registry import service
 from app.util import hash_token
 from app.runners.builtin import (
+    GROUP_HEADER,
     INSTRUCTIONS,
-    INTERNAL_HEADER,
-    INTERNAL_SECRET,
     ORIGINAL_HOST_HEADER,
     PATH,
     localize,
 )
+from app.runners.builtin import is_internal as _internal
 from app.runners.remote import canonical_transport
 
 # Request headers that describe the MCP transport, not the caller. Everything
@@ -341,6 +342,13 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.tool(annotations=_WRITE)
     async def restart_group(name: str) -> Any:
         """Restart every enabled member of a group; reports restarted/skipped/failed."""
+        if _internal(get_http_request()):
+            with Session(get_engine()) as session:
+                if registry.includes_builtin(session, name):
+                    raise ToolError(
+                        f"group {name!r} includes the built-in server, which can't restart "
+                        "itself through its own connection; use the dashboard or the /api route"
+                    )
         return await api("POST", f"/api/groups/{_seg(name)}/restart")
 
     # ---- Tokens -------------------------------------------------------------
@@ -537,18 +545,24 @@ def build(app: FastAPI) -> "_Gate":
         """The runtime settings."""
         return await api("GET", "/api/settings")
 
-    def _localized(text: str) -> str:
+    async def _localized(text: str) -> str:
         # Prompts name tools; use the names this client actually sees. Only the bridge
         # applies the tool policy, so a direct /api/mcp client keeps the original names.
-        if not _internal(get_http_request()):
+        # Through a group bundle every tool also carries this server's slug.
+        request = get_http_request()
+        if not _internal(request):
             return text
         with Session(get_engine()) as session:
-            return localize(text, service.get_builtin(session))
+            builtin = service.get_builtin(session)
+        if builtin is None or not request.headers.get(GROUP_HEADER):
+            return localize(text, builtin)
+        tools = [tool.name for tool in await mcp.list_tools()]
+        return localize(text, builtin, prefix=f"{builtin.slug}_", tools=tools)
 
     @mcp.prompt
-    def install_server(what: str) -> str:
+    async def install_server(what: str) -> str:
         """Find and install an MCP server from the public catalog."""
-        return _localized(
+        return await _localized(
             f"Install an MCP server for: {what}. Use search_catalog to find candidates and "
             "pick the best match (say why). Call install_from_catalog with its id. If it "
             "returns warnings, ask me for those values, then update_server with them and "
@@ -557,9 +571,9 @@ def build(app: FastAPI) -> "_Gate":
         )
 
     @mcp.prompt
-    def diagnose_server(server_id: str) -> str:
+    async def diagnose_server(server_id: str) -> str:
         """Work out why a server isn't running and fix what can be fixed."""
-        return _localized(
+        return await _localized(
             f"Diagnose server {server_id}. Read get_server for its state, startup status and "
             "last error, and get_server_logs for the log. Explain the root cause in plain "
             "words. If it's a config problem (a missing env var, a wrong package or URL), "
@@ -574,7 +588,7 @@ def build(app: FastAPI) -> "_Gate":
 
 
 class _Gate:
-    """``require_control_plane`` in front of the MCP app. A class, not a function:
+    """``_authorize`` in front of the MCP app. A class, not a function:
     Starlette's ``Route`` treats a plain function endpoint as request -> response."""
 
     def __init__(self, inner: ASGIApp) -> None:
@@ -615,33 +629,77 @@ def _refuse_self(server_id: str, what: str) -> None:
         )
 
 
-def _internal(request: Request) -> bool:
-    """Did this request come through the built-in server's own bridge?"""
-    # Bytes: compare_digest raises on a non-ASCII str, which a client can send.
-    return secrets.compare_digest(
-        request.headers.get(INTERNAL_HEADER, "").encode(), INTERNAL_SECRET.encode()
+
+
+def _refusal(request: Request, cloudflare: bool) -> HTTPException:
+    """Why the request's credential can't drive the control plane, in words an
+    operator can act on. 401 only when nothing was presented: a 401 sends OAuth
+    clients back through sign-in, which can't fix a credential that names no user."""
+    if request.headers.get(cf_access.HEADER):
+        if not cloudflare:
+            why = ("a Cloudflare Access identity counts only through the built-in "
+                   "server's /s URL, not /api/mcp directly")
+        else:
+            # Verifying again is fine: this is the failure path, and keys are cached.
+            address, why = cf_access.verify(request)
+            if address is not None:
+                why = (f"Cloudflare Access signed you in as {address}, but no single user "
+                       "has that name (none, or more than one)")
+        return HTTPException(status_code=403, detail=why)
+    if principal_mod._bearer(request):
+        return HTTPException(
+            status_code=403,
+            detail="this server needs a control (login) token or MCPE_ADMIN_TOKEN; "
+            "the token sent isn't one",
+        )
+    return HTTPException(
+        status_code=401,
+        detail="control-plane auth required",
+        headers={"WWW-Authenticate": "Bearer"},
     )
 
 
-def _authorize(request: Request, session: Session) -> None:
+def _authorize(request: Request, session: Session, *, edge: bool = False) -> None:
+    """The built-in server's gate. ``edge`` is the /s check in front of its bridge:
+    the request hasn't been through the bridge yet, so a Cloudflare Access identity
+    is taken directly, and an unusable credential is refused here with a reason
+    instead of surfacing as a failed ``initialize``."""
     builtin = service.get_builtin(session)
     if builtin is None or not builtin.enabled:
         raise HTTPException(status_code=404, detail="the mcpelevator MCP server is turned off")
-    if _internal(request) and not request.headers.get("authorization"):
-        return  # the built-in bridge listing tools; calls still authenticate per route
-    require_control_plane(request, session)
-    principal = principal_mod.resolve(request, session)
-    user_id = principal.user_id if principal is not None else None
-    # With enforcement off every caller resolves to the local admin, but a presented
-    # token still names its user, and that user's switch still applies.
-    bearer = principal_mod._bearer(request)
-    row = repo.get_token_by_hash(session, hash_token(bearer)) if bearer else None
-    if row is not None and row.user_id is not None:
-        user_id = row.user_id
+    internal = _internal(request)
+    credential = request.headers.get("authorization") or request.headers.get(cf_access.HEADER)
+    if not edge and internal and not credential and not request.headers.get(GROUP_HEADER):
+        # The supervisor's discovery probe listing tools; calls still authenticate
+        # per route. A group request is a client's, so it never counts as one.
+        return
+    if enforcement_enabled(session):
+        cloudflare = edge or internal
+        caller = principal_mod.credential_principal(request, session, cloudflare=cloudflare)
+        if caller is None:
+            raise _refusal(request, cloudflare)
+        user_id = caller.user_id
+    else:
+        # Every caller is the local admin, but a presented credential still names
+        # its user, and that user's switch still applies.
+        bearer = principal_mod._bearer(request)
+        row = repo.get_token_by_hash(session, hash_token(bearer)) if bearer else None
+        user_id = row.user_id if row is not None else None
+        # A Cloudflare identity names the caller only when no control credential
+        # does: an admin or userless token outranks it, as with enforcement on.
+        if row is None and not is_env_admin_token(bearer) and (edge or internal):
+            signed_in = cf_access.user(session, request)
+            user_id = signed_in.id if signed_in is not None else None
     if user_id is not None:
         user = repo.get_user(session, user_id)
         if user is None or not user.control_mcp:
             raise HTTPException(
                 status_code=403, detail="the mcpelevator MCP server is disabled for this user"
             )
+
+
+def authorize_edge(request: Request) -> None:
+    """The /s gate for the built-in server (see ``_authorize``)."""
+    with Session(get_engine()) as session:
+        _authorize(request, session, edge=True)
 

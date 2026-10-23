@@ -406,7 +406,7 @@ curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/jso
 
 Pasting an `mcpServers` config with remote entries now imports them as `remote` servers instead of skipping: a `url` (or Gemini CLI's `httpUrl`) becomes the upstream, and a `type` / `transport` field selects the transport (defaulting to `streamable-http`).
 
-**One URL for a bundle of servers (groups).** Declare a **group** in Settings (or `PUT /api/groups/<name>`) and `http://…/g/<name>/mcp` serves the tools of that group's running members as a single MCP bundle — each tool prefixed by the member's slug (e.g. `memory_create_entities`), so one client entry covers the whole set. A group's members are **all servers** (`"*"` — every registered server, present and future) or a **picked list** of server ids. There's no special name: create a group called `all` with members `"*"` for a bundle of everything. Groups follow the default auth provider; see **Security** for the exclusion rule that keeps bearer-protected servers out of an unauthenticated bundle, and **Route reference** below for the full grammar and the registry config format.
+**One URL for a bundle of servers (groups).** Declare a **group** in Settings (or `PUT /api/groups/<name>`) and `http://…/g/<name>/mcp` serves the tools of that group's running members as a single MCP bundle — each tool prefixed by the member's slug (e.g. `memory_create_entities`), so one client entry covers the whole set. A group's members are **all servers** (`"*"` — every registered server, present and future, except the built-in mcpelevator server, which joins only when named) or a **picked list** of server ids. There's no special name: create a group called `all` with members `"*"` for a bundle of everything. Groups follow the default auth provider; see **Security** for the exclusion rule that keeps bearer-protected servers out of an unauthenticated bundle, and **Route reference** below for the full grammar and the registry config format.
 
 ### Upstream authentication: token headers vs OAuth
 
@@ -498,11 +498,18 @@ never in the database, so authenticating never restarts the bridge on its own.
 
 Every install has one built-in server named **mcpelevator**, provisioned on boot (existing installs get it on upgrade). It serves the control plane itself over MCP at `/s/mcpelevator/mcp`, so an agent can do what the UI does. If a server of yours already had that slug, the built-in one gets `mcpelevator-2` instead. Boot prints the URL it actually lands on, and the dashboard shows it. It has 41 tools: list, create, edit, enable, disable, restart and delete servers, import an `mcpServers` config, install a catalog entry in one call, wait for a server to settle, try a server's tools, read its logs and usage, export a `.mcpb` bundle, manage groups, tokens, users and settings, and ask `whoami`. The read-only views are also MCP resources (`mcpelevator://servers`, `mcpelevator://servers/{id}`, `mcpelevator://servers/{id}/logs`, `mcpelevator://groups`, `mcpelevator://settings`). The `install_server` and `diagnose_server` prompts walk an agent through the two most common jobs, and the server sends instructions on connect that explain the flows.
 
-It's a server like the others. It shows on the dashboard, and you can hide or rename tools, rewrite descriptions, set its idle timeout, rename its slug, or set its auth to `none` or `bearer`. Its launch line is fixed (there's nothing to launch), and it can't be deleted, cloned, or handed to another owner. REST/OpenAPI stays off, because a REST call can't carry your token through to the control plane. It never joins a group. A group token isn't a control credential, so its tools would all fail there once control-plane auth is on. `"*"` skips it and an explicit member list naming it is refused.
+It's a server like the others. It shows on the dashboard, and you can hide or rename tools, rewrite descriptions, set its idle timeout, rename its slug, or set its auth to `none` or `bearer`. Its launch line is fixed (there's nothing to launch), and it can't be deleted, cloned, or handed to another owner. REST/OpenAPI stays off, because a REST call can't carry your token through to the control plane. It joins a group only when you name it in the group's member list: `"*"` skips it, so a wildcard bundle you hand to agents never picks up admin tools on upgrade.
 
 Every tool call runs with **the caller's own permissions**. The bridge forwards your `Authorization` header to the in-process `/api/mcp`, and that endpoint runs each tool through the same `/api` route, so a member still sees only their own servers and admin-only tools still need an admin.
 
-- **Connecting:** the built-in server starts behind `bearer`. With control-plane auth on, use a **login (control) token**. The bearer check accepts control tokens for this one server, and a data-plane token can't drive the control plane. With control-plane auth off, any token that passes the server's auth works, since `/api` is open to the same loopback audience anyway.
+- **Connecting:** the built-in server starts behind `bearer`, so clients send `Authorization: Bearer <token>`. With control-plane auth on, the token has to be a **login (control) token** or `MCPE_ADMIN_TOKEN`. A data-plane token gets through the `/s` check but can't drive the control plane, so it's refused at `/s` with a 403 that says so. With control-plane auth off, any token that passes the server's auth works, since `/api` is open to the same loopback audience anyway. The copy menu on the server's page has ready-made client configs; in a generic `mcpServers` file it looks like this:
+
+  ```json
+  {"mcpServers": {"mcpelevator": {"type": "http", "url": "https://mcp.example.com/s/mcpelevator/mcp",
+    "headers": {"Authorization": "Bearer mcpe_..."}}}}
+  ```
+- **Behind Cloudflare Access (OAuth clients like claude.ai):** claude.ai connectors and MCPJam only speak OAuth, so they never hold an mcpelevator token. If Cloudflare Access fronts the instance and runs that OAuth sign-in, set `MCPE_CF_ACCESS_TEAM_DOMAIN` (e.g. `myteam.cloudflareaccess.com`) and `MCPE_CF_ACCESS_AUD` (the Access application's AUD tag). The built-in server then checks the signed `Cf-Access-Jwt-Assertion` header Cloudflare adds to each request and runs calls as the user whose **name is the signed-in email** (case doesn't matter). Create that user in Settings → Users once. An email that matches no user, or more than one, gets a 403 naming it. Members get their own scoped view and admins get everything, exactly like a login token. Cloudflare's registration step needs the client's callback on the Access application's **Allowed redirect URIs** list, or sign-in fails with `redirect_uri is not allowed`. The identity counts only on the built-in server's `/s` URL and groups that include it, never on the rest of `/api`, where it would make the UI's routes forgeable from another site.
+- **In a group:** name the built-in server in a group's member list and its tools join that bundle, namespaced like any member. The group's URL then also opens to an **admin's** control token, `MCPE_ADMIN_TOKEN` or Cloudflare Access identity (a member's login would reach the other members' tools, so it doesn't count there), and the bundle passes that credential to the built-in member only. A `group:<name>` token still opens the group, but the control tools refuse it once control-plane auth is on. The group's auth has to match the built-in server's, as for any member: with the default provider at `none`, set the built-in server to `none` too (the control plane still checks every call). An OAuth group leaves it out, since the token an OAuth client sends isn't a control credential.
 - **Turning it off:** Settings → *mcpelevator MCP server* (or `PATCH /api/settings {"control_mcp": false}`) is the global switch. It's the built-in server's own enabled flag, so disabling it on the dashboard does the same thing. Per user, Settings → Users → *Revoke control MCP* (`control_mcp` on `PATCH /api/users/<id>`).
 - **Not provisioning it:** set `MCPE_CONTROL_MCP=false` and boot won't create it. A server that already exists is left alone.
 - **Direct endpoint:** `/api/mcp` serves the same tools without the bridge, gated like `/api`.
@@ -549,6 +556,9 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_ALLOW_PRIVATE_LAN` | `false` | First-boot seed for the LAN-access setting (headless bootstrap); see **Security** |
 | `MCPE_DOCKER_RUNNER` | `false` | First-boot seed for the (root-equivalent) docker-runner setting; needs the Docker socket mounted or a dind sidecar |
 | `MCPE_CONTROL_MCP` | `true` | Provision the built-in mcpelevator MCP server on boot when it's missing; `false` skips that (an existing one stays, turn it off in Settings) |
+| `MCPE_CF_ACCESS_TEAM_DOMAIN` | _(none)_ | Cloudflare Access team domain (`myteam.cloudflareaccess.com`). With `MCPE_CF_ACCESS_AUD`, the built-in server accepts Cloudflare Access sign-ins; see **Manage mcpelevator from an agent** |
+| `MCPE_CF_ACCESS_AUD` | _(none)_ | The Access application's AUD tag (comma-separated for several applications) |
+| `MCPE_DEBUG` | `false` | Debug mode: TRACE-level logs everywhere (bridges too), a full trace of every request with secrets scrubbed, crash reporting, and `GET /api/debug`; see **Debug mode** |
 | `MCPE_APT_PACKAGES` | _(none)_ | Global, space-separated extra Debian packages installed before mcpelevator starts (Docker image only), not per-server `setup_script`. A failed install warns and boot continues; packages must be reinstalled after container replacement |
 | `MCPE_DATA_DIR` | `./data` | SQLite + caches |
 | `MCPE_FRONTEND_DIR` | `../frontend/build` | Built SPA to serve |
@@ -558,6 +568,42 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_RESTART_BUDGET` | `5` | Startup attempts before `failed`; retry waits are 2/4/8/16 seconds and cap at 16 |
 | `MCPE_RESTART_STABLE_S` | `60` | Uninterrupted running time before the retry budget is restored |
 | `MCPE_VERSION` | _(image: release tag)_ | Version the instance reports (`/api/health`, UI badge). Set by the published image from the release tag; you don't normally set it. Unset → derived from the adjacent `pyproject.toml` (source tree), else installed package metadata |
+
+## Debug mode
+
+Set `MCPE_DEBUG=true` on the container and restart when something fails and the normal logs don't say why. It's deliberately as verbose as it can be, so one run captures whatever the failure turns out to need:
+
+- **Everything logs at TRACE.** Every logger in the process is opened up, mcpelevator's own and every library's. That covers FastMCP, the MCP SDK (every JSON-RPC message in and out), httpx and httpcore (every outbound connection), uvicorn (every connection), SSE framing, and SQLAlchemy (every SQL statement; bound values are hidden, since a secret like a client secret travels there with no name a scrubber could recognize). Each line carries a timestamp, the logger name and the thread. Each server's bridge inherits the setting and also logs every ASGI message, so the log on a server's page shows its whole conversation with the upstream and the full traceback of any failure.
+- **Every request is traced.** For `/api`, `/s`, `/g` and the OAuth discovery routes you get:
+  - a line when the request arrives: method, path, query, peer, every header
+  - a line with the body once the app reads it (a request refused at the Host check or auth, before its body is read, has none)
+  - a line when the response starts: status, headers, time to first byte
+  - a line per server-sent event, so an MCP error inside an SSE stream shows up as text
+  - a summary line with the JSON-RPC method and tool name, the status, the total time and the response body
+
+  Lines from one request share a short id, so you can follow it through a busy log.
+- **Failures can't go quiet.** Uncaught exceptions in any thread are logged with tracebacks. So are unhandled errors while serving a request. `faulthandler` dumps a traceback on a hard crash. Asyncio debug mode reports coroutines that were never awaited and callbacks that block the event loop for over 100ms.
+- **A diagnostics bundle.** `GET /api/debug` (admin only) returns one JSON document:
+  - the version and library versions
+  - the effective config, with secrets shown as `<set>`
+  - the runtime settings, and whether control-plane auth is enforced
+  - the users
+  - every server's state, last error, env var names (never values) and last 60 log lines
+  - every group's members, and what it's actually serving
+  - the last 500 request traces and the last 5000 log records
+
+  Save it and attach it to an issue: `curl -H "Authorization: Bearer $TOKEN" https://mcp.example.com/api/debug > debug.json`.
+
+Credentials and secrets are scrubbed from all of it, library output included:
+
+- An `mcpe_` token shows only its first 12 characters, the same prefix the token list shows.
+- A JWT in a header shows its claims (issuer, audience, subject, email, expiry, and whether it's expired) and never its signature. Anywhere else, a JWT becomes `<jwt>`.
+- Cookies show only a count. The bridge's internal header shows only whether it was valid.
+- Any JSON or Python field whose name looks secret (`*_TOKEN`, `API_KEY`, `password`, a freshly minted token) has its value replaced, a number or bytes value included. So does a secret-named field written as a header or config line (`X-API-Key: ...`).
+- A credential after `Bearer` or `Basic`, and the `user:password@` part of a URL, are replaced.
+- Every string in the `/api/debug` bundle goes through the same scrubber before it's returned.
+
+Ordinary values aren't scrubbed. Tool arguments and results, prompts and file contents all show up, so treat a debug log like the data your servers handle. Turn it off once you're done. When it's off, none of this runs and `/api/debug` returns 404.
 
 ## Security
 
@@ -630,11 +676,12 @@ Two request grammars, both behind the same Host/Origin guard and per-request aut
 | `/s/<slug>/mcp` | **One server.** `<slug>` is the server's routing key (operator-renameable). |
 | `/s/<slug>/rest/…` | **The same server as plain REST** (opt-in per server): `POST /rest/<tool>`, `GET /rest/openapi.json`, `GET /rest`. Same Host/Origin guard and per-server auth as `/mcp`. |
 | `/api/mcp` | **The control plane as MCP**, the upstream of the built-in `mcpelevator` server. Gated like `/api`. |
+| `/api/debug` | **Diagnostics bundle** (admin only) when `MCPE_DEBUG=true`; 404 otherwise. See **Debug mode**. |
 | `/g/<name>/mcp` | **A group.** `<name>` is a registry entry; the URL serves the union of the group's running members' tools, each namespaced by the member's slug (`<slug>_<tool>`). |
 
 There is no `/s/all` or any other reserved slug beyond `summary` (which would shadow `/api/health/summary`) — single servers live only under `/s`, groups only under `/g`, so `all` is now an ordinary server slug if you want one.
 
-**The group registry** is the `groups` setting (SQLite, edited in Settings or via `PUT /api/groups/<name>` / `DELETE /api/groups/<name>`), a map from group name to its members. A member value is either `"*"` (every registered server, present and future, except the built-in mcpelevator server, which never joins a group) or an ordered list of server ids. Group names are URL-safe (lowercase letters, digits, single hyphens). Example registry:
+**The group registry** is the `groups` setting (SQLite, edited in Settings or via `PUT /api/groups/<name>` / `DELETE /api/groups/<name>`), a map from group name to its members. A member value is either `"*"` (every registered server, present and future, except the built-in mcpelevator server, which joins only when named) or an ordered list of server ids. Group names are URL-safe (lowercase letters, digits, single hyphens). Example registry:
 
 ```jsonc
 {

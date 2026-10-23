@@ -32,6 +32,10 @@ def get_engine():
             # wedged the entire control plane: every /api request, login included,
             # stalled in the Host allowlist middleware and 500'd on QueuePool timeout.
             poolclass=NullPool,
+            # Bound values carry secrets (a server's oauth_client_secret) as bare
+            # positional values no scrubber can recognize, so SQL logging (debug mode)
+            # and error messages show statements only.
+            hide_parameters=True,
         )
     return _engine
 
