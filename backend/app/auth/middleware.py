@@ -291,13 +291,18 @@ def request_allowlist(session: Session) -> list[str]:
 
 def enforce_host(request: Request, session: Session) -> None:
     """Apply the Host/Origin guard without requiring a data-plane credential."""
+    from app.runners.builtin import is_internal  # circular-import guard
+
     allowed = request_allowlist(session)
     allow_private = private_lan_allowed(request, session)
     ok, reason = host_allowed(
         request.headers.get("host", ""),
         request.headers.get("origin"),
         allowed,
-        client_is_loopback=is_loopback_client(request),
+        # The built-in bridge calls /api/mcp on loopback, but it forwards the caller's
+        # headers, and uvicorn takes the caller's X-Forwarded-For from a loopback peer
+        # as the client address. Its per-process secret proves where it came from.
+        client_is_loopback=is_loopback_client(request) or is_internal(request),
         allow_private=allow_private,
     )
     if not ok:

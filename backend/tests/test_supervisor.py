@@ -642,3 +642,38 @@ async def test_disabled_row_is_not_marked_stopped_while_its_teardown_keeps_faili
         sup.units.clear()
         with Session(get_engine()) as session:
             repo.delete_server(session, server_id)
+
+
+def test_an_unchanged_runtime_write_skips_the_commit():
+    """The reconcile loop rewrites every running server's row each pass. Writing an
+    aware timestamp that equals the stored naive one must not reach the database."""
+    from sqlalchemy import event
+
+    from app.db.models import utcnow
+
+    with Session(get_engine()) as session:
+        server = service.create_server(session, name="Steady", runner="npx", command="npx", enabled=False)
+        sid = server.id
+    fields = dict(state="running", pid=1, port=2, last_error=None, tools=[], restart_count=0,
+                  last_health=utcnow())
+    writes = []
+
+    def count(conn, cursor, statement, *args):
+        if statement.split()[0] in ("INSERT", "UPDATE"):
+            writes.append(statement)
+
+    try:
+        with Session(get_engine()) as session:
+            repo.upsert_runtime(session, sid, **fields)
+        event.listen(get_engine(), "before_cursor_execute", count)
+        with Session(get_engine()) as session:
+            repo.upsert_runtime(session, sid, **fields)  # same values: no write
+        assert writes == []
+        with Session(get_engine()) as session:
+            repo.upsert_runtime(session, sid, **{**fields, "pid": 3})  # a real change still lands
+            assert repo.get_runtime(session, sid).pid == 3
+        assert len(writes) == 1
+    finally:
+        event.remove(get_engine(), "before_cursor_execute", count)
+        with Session(get_engine()) as session:
+            repo.delete_server(session, sid)
