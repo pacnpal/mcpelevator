@@ -378,13 +378,24 @@ _EVENT_END = re.compile(rb"\r?\n\r?\n")
 
 # A secret query parameter inside any line: in a URL (uvicorn's access log prints the
 # full request target) or at the start of a quoted raw query string (uvicorn's ASGI
-# trace prints 'query_string': b'code=...'). An OAuth callback's code/state,
+# trace prints 'query_string': b'code=...'), or after a space in prose ("received
+# code=..."). An OAuth callback's code/state,
 # access_token=, api_key=, a presigned URL's X-Amz-Signature= / X-Amz-Credential= or
 # Azure sig=, or the first field of a form body. Scanned the same
 # linear way as _SECRET_FIELD.
 _SECRET_QUERY = re.compile(
-    r"((?:^|[?&'\"])(?:code|state|sig|(?=[^=&?\s\"']*?(?:token|secret|password|key|assertion|signature|credential))[^=&?\s\"']*+)=)"
+    r"((?:(?:^|[?&'\"])(?:code|state|sig|(?=[^=&?\s\"']*?(?:token|secret|password|key|assertion|signature|credential))[^=&?\s\"']*+)"
+    r"|(?<=\s)(?:code|state|sig))=)"
     r"(?![\[{])[^&\s\"']*",  # a list or object is _redact_containers' job
+    re.IGNORECASE,
+)
+
+
+# A header as a (name, value) tuple, the way httpcore's traces print response headers
+# and uvicorn's ASGI trace prints a request's: (b'set-cookie', b'session=...').
+_SECRET_PAIR = re.compile(
+    r"""(\(\s*b?(["'])(?=[^"']*?(?:token|secret|password|key|authorization|assertion|cookie))[^"']*+\2\s*,\s*)"""
+    r"""(b?)(["'])(?:\\.|(?!\4)[^\\])*(?:\4|\Z)""",
     re.IGNORECASE,
 )
 
@@ -397,6 +408,7 @@ def scrub(text: str) -> str:
     text = _JWT.sub("<jwt>", text)
     text = _SECRET_QUERY.sub(r"\1<redacted>", text)
     text = _AUTH_HEADER.sub(r"\1<redacted>", text)
+    text = _SECRET_PAIR.sub(r"\1\3\4<redacted>\4", text)
     text = _AUTH_SCHEME.sub(r"\1\2<redacted>", text)
     text = _URL_USERINFO.sub(r"\1<redacted>@", text)
     text = _SECRET_COLON.sub(_redact_colon, text)

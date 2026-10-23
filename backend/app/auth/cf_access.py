@@ -132,17 +132,18 @@ def _fetch(team: str, *, refresh: bool) -> dict[str, Any]:
             # sign-in until it expires: refetch it instead, under the backoff.
             refresh = True
     backing_off = time.monotonic() - _last_failure.get(team, -_FAILED_BACKOFF_S) < _FAILED_BACKOFF_S
-    last = _good.get(team)
-    if _on_loop() and last is not None and time.monotonic() - last[1] < _STALE_S:
-        # A fetch here would stall every request on the loop: answer from the last
-        # keys and refresh in a thread. A kid they lack is refused until it lands.
+    if _on_loop():
+        # A fetch here would stall every request on the loop: refresh in a thread and
+        # answer from the last keys. A kid they lack, or no keys yet (the startup
+        # load still running), is refused until the refresh lands.
         if not backing_off:
             _refresh_soon(team, refresh=refresh)
-        return last[0]
+        last = _good.get(team)
+        if last is not None and time.monotonic() - last[1] < _STALE_S:
+            return last[0]
+        raise jwt.PyJWKClientConnectionError("Cloudflare's signing keys are still loading")
     if backing_off:
         raise jwt.PyJWKClientConnectionError("Cloudflare's signing keys were unreachable moments ago")
-    # ponytail: with no keys yet (the startup prewarm still running or failed), the
-    # first fetch blocks its caller, once per failure backoff at most.
     return _download(team, refresh=refresh)
 
 
@@ -189,6 +190,9 @@ def verify(request: Request) -> tuple[Optional[str], Optional[str]]:
     except jwt.InvalidIssuerError:
         return None, ("the Cloudflare Access assertion is from a different team domain "
                       "(check MCPE_CF_ACCESS_TEAM_DOMAIN)")
+    except jwt.PyJWKClientConnectionError as exc:
+        logger.info("Cloudflare Access keys unavailable: %s", exc)
+        return None, "Cloudflare Access's signing keys aren't available yet; try again shortly"
     except jwt.PyJWTError as exc:
         logger.info("Cloudflare Access assertion rejected: %s", exc)
         return None, "the Cloudflare Access assertion didn't verify"

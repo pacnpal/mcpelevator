@@ -588,7 +588,8 @@ def cf(monkeypatch):
         get_signing_keys=get_signing_keys, jwk_set_cache=None))
     monkeypatch.setattr(cf_access, "_last_refetch", {})
     monkeypatch.setattr(cf_access, "_last_failure", {})
-    monkeypatch.setattr(cf_access, "_good", {})
+    # As the startup load leaves it: requests on the event loop answer from these.
+    monkeypatch.setattr(cf_access, "_good", {"https://team.example": ({"k1": key.public_key()}, time.monotonic())})
 
     def assertion(email: str, aud: str = "aud-1", kid: str = "k1", exp: int = 60,
                   iss: str = "https://team.example") -> dict:
@@ -725,7 +726,8 @@ def test_unreachable_signing_keys_back_off_instead_of_blocking_each_request(monk
     monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
         get_signing_keys=garbled, jwk_set_cache=None))
     for _ in range(5):
-        assert cf_access.verify(req) == (None, "the Cloudflare Access assertion didn't verify")
+        assert cf_access.verify(req) == (
+            None, "Cloudflare Access's signing keys aren't available yet; try again shortly")
     assert len(calls) == 1
 
 
@@ -944,3 +946,37 @@ def test_key_refresh_on_the_event_loop_never_waits_on_the_fetch(monkeypatch, cf)
             break
         time.sleep(0.01)
     assert calls == [False]  # one refresh in a thread, not one per request
+
+
+def test_a_cold_start_on_the_event_loop_refuses_instead_of_waiting(monkeypatch, cf):
+    import asyncio
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    real, gate = cf_access._keys("https://team.example"), threading.Event()
+
+    def slow(refresh: bool = False):
+        gate.wait(5)
+        return real.get_signing_keys(refresh)
+
+    monkeypatch.setattr(cf_access, "_good", {})  # the startup load hasn't landed
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(get_signing_keys=slow, jwk_set_cache=None))
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+
+    async def on_loop():
+        return cf_access.verify(req)
+
+    started = time.monotonic()
+    assert asyncio.run(on_loop())[1] == "Cloudflare Access's signing keys aren't available yet; try again shortly"
+    assert time.monotonic() - started < 1
+    gate.set()
+    for _ in range(200):
+        if not cf_access._refreshing:
+            break
+        time.sleep(0.01)
+    assert asyncio.run(on_loop()) == ("ada@example.com", None)  # loaded in the background

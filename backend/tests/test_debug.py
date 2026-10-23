@@ -539,3 +539,15 @@ def test_scrub_redacts_containers_under_unquoted_secret_names():
         out = debug.scrub(line)
         assert live not in out and '"<redacted>"' in out, out
     assert debug.scrub('api_keys: ["x"] user: ada').endswith("user: ada")
+
+
+def test_scrub_redacts_tuple_headers_and_prose_oauth_codes():
+    secret = "opaque-" + "secret9"
+    trace = (f"receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'OK', "
+             f"[(b'set-cookie', b'session={secret}'), (b'content-type', b'text/html')])")
+    out = debug.scrub(trace)
+    assert secret not in out and "(b'content-type', b'text/html')" in out
+    assert secret not in debug.scrub(f"'headers': [(b'cookie', b'sid={secret}'), (b'host', b'x')]")
+    assert debug.scrub(f"received code={secret} and state={secret}") == (
+        "received code=<redacted> and state=<redacted>")
+    assert debug.scrub("exit status_code=200") == "exit status_code=200"
