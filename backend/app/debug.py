@@ -83,8 +83,13 @@ class _ScrubFilter(logging.Filter):
     write the unscrubbed line before the record reaches the root."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = scrub(record.getMessage())
-        record.args = None
+        if record.name == "uvicorn.access" and isinstance(record.args, tuple):
+            # Its AccessFormatter unpacks the (client, method, path, version, status)
+            # args itself, so scrub each one in place instead of flattening them.
+            record.args = tuple(scrub(a) if isinstance(a, str) else a for a in record.args)
+        else:
+            record.msg = scrub(record.getMessage())
+            record.args = None
         # Formatters reuse exc_text when it's set, so a scrubbed traceback here is the
         # one every handler prints.
         if record.exc_info and not record.exc_text:
@@ -276,12 +281,14 @@ def _redact_field(m: re.Match) -> str:
 # ("missing key: retrying") are left alone.
 _SECRET_COLON = re.compile(
     r"""((?<![\w-])(?=[\w-]*?(?:token|secret|password|key|authorization|assertion|cookie))[\w-]*+"""
-    r"""\s*:\s*)[^\s,;&"'<>]+""",
+    r"""\s*:\s*)(?:(["'])(?:\\.|(?!\2)[^\\])*(?:\2|\Z)|[^\s,;&"'<>]+)""",
     re.IGNORECASE,
 )
 
 
 def _redact_colon(m: re.Match) -> str:
+    if m[2]:  # a quoted value (client_secret: "..."), whatever it holds
+        return f"{m[1]}{m[2]}<redacted>{m[2]}"
     name, value = _name(m[1]), m[0][len(m[1]):]
     if name.lower() in ("key", "token") and value.isalpha() and value.islower():
         return m[0]
@@ -331,10 +338,11 @@ def scrub(text: str) -> str:
     return _SECRET_FIELD.sub(_redact_field, text)
 
 
-def _body_text(chunks: list[bytes], limit: int) -> str:
+def _body_text(chunks: list[bytes], limit: int, total: int | None = None) -> str:
     """The first ``limit`` bytes, scrubbed. Slices before joining, so a single huge
-    chunk is never copied whole."""
-    total = sum(map(len, chunks))
+    chunk is never copied whole. ``total`` is the real size when ``chunks`` holds
+    only a prefix."""
+    total = sum(map(len, chunks)) if total is None else total
     prefix, left = [], limit
     for chunk in chunks:
         if left <= 0:
@@ -397,17 +405,20 @@ class TraceMiddleware:
 
         async def traced_receive() -> Message:
             message = await receive()
-            if message["type"] != "http.request" or body["logged"]:
+            if message["type"] != "http.request":
                 return message
             data = message.get("body", b"")
-            body["bytes"] += len(data)
+            body["bytes"] += len(data)  # counted past the cut, so the size stays true
+            entry["request_bytes"] = body["bytes"]
+            if body["logged"]:
+                return message
             if (room := _BODY_LIMIT + 1 - sum(map(len, chunks))) > 0:
                 chunks.append(data[:room])
             done = not message.get("more_body", False)
             if done or body["bytes"] > _BODY_LIMIT:
                 body["logged"] = True
                 if any(chunks):
-                    entry["body"] = _body_text(chunks, _BODY_LIMIT) + ("" if done else " …(more)")
+                    entry["body"] = _body_text(chunks, _BODY_LIMIT, body["bytes"]) + ("" if done else " …(more)")
                     if done and body["bytes"] <= _BODY_LIMIT:
                         entry["rpc"] = _rpc_summary(b"".join(chunks))
                 logger.debug("[%s] -> body %s", rid, entry.get("body"))
@@ -458,9 +469,9 @@ class TraceMiddleware:
                     response.append(chunk[:room])  # keep a prefix, never the whole result
                 if not message.get("more_body", False):
                     if not state["streaming"]:
-                        entry["response_body"] = _body_text(response, _BODY_LIMIT)
+                        entry["response_body"] = _body_text(response, _BODY_LIMIT, state["sent"])
                     entry["bytes"] = state["sent"]
-                    _finish(entry, started)
+                    state["ended"] = True
             await send(message)
 
         try:
@@ -472,9 +483,11 @@ class TraceMiddleware:
             _finish(entry, started)
             raise
         finally:
-            if "total_ms" not in entry:
+            # Recorded only once the app is done: an error after the last body message
+            # (a failed background task, a send to a client that left) still shows.
+            if not state.get("ended"):
                 entry["disconnected"] = True  # the client left before the response ended
-                _finish(entry, started)
+            _finish(entry, started)
 
 
 def _finish(entry: dict[str, Any], started: float) -> None:

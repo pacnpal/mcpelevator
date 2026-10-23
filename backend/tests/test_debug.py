@@ -139,6 +139,9 @@ def test_scrub_redacts_secret_fields_in_header_and_config_syntax():
     assert pw not in debug.scrub(f"client_secret: {pw}")
     assert "12345" not in debug.scrub('{"password": 12345}')
     assert debug.scrub("max_tokens: 4096, keys: 3") == "max_tokens: 4096, keys: 3"
+    quoted = "opaque-" + "Value9"
+    assert debug.scrub(f'client_secret: "{quoted}"') == 'client_secret: "<redacted>"'
+    assert quoted not in debug.scrub(f"X-API-Key: '{quoted}'")
     assert '"api_key": "<redacted>"' in debug.scrub('{"api_key": "x1y2z3w4"}')  # quoted rule unchanged
 
 
@@ -344,6 +347,35 @@ def test_trace_bounds_a_large_request_body():
     assert seen == [1_000_000]  # the app still gets the whole body
     trace = debug.TRACES[-1]
     assert trace["body"].endswith("…(more)") and len(trace["body"]) < 20000
+    assert trace["request_bytes"] == 1_000_000  # counted past the cut
+
+
+def test_trace_records_an_error_after_the_last_body_message():
+    import asyncio
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+        raise RuntimeError("background task failed")
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        pass
+
+    scope = {"type": "http", "method": "GET", "path": "/api/x", "headers": [], "query_string": b""}
+    with pytest.raises(RuntimeError):
+        asyncio.run(debug.TraceMiddleware(app)(scope, receive, send))
+    assert debug.TRACES[-1]["exception"] is True and "disconnected" not in debug.TRACES[-1]
+
+
+def test_scrub_filter_keeps_uvicorn_access_args():
+    record = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d',
+                               ("1.2.3.4:5", "GET", "/api/oauth/callback?code=abc123&page=2", "1.1", 200), None)
+    debug._ScrubFilter().filter(record)
+    assert isinstance(record.args, tuple) and record.args[4] == 200
+    assert "abc123" not in record.args[2] and "page=2" in record.args[2]
 
 
 def test_bundle_needs_an_admin_when_auth_is_enforced(monkeypatch):
