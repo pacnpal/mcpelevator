@@ -107,6 +107,21 @@ def test_bundle_config_hides_url_passwords(monkeypatch):
     assert debug._config()["public_base_url"] == "https://<redacted>@mcp.example.com"
 
 
+def test_scrub_redacts_secret_fields_whatever_their_value():
+    out = debug.scrub("""{"api_key": 123456789, "count": 3} {'token': b'opaque-cred'} {"total_tokens": 42}""")
+    assert "123456789" not in out and "opaque-cred" not in out and '"count": 3' in out
+    assert '"api_key": "<redacted>"' in out and "'token': b'<redacted>'" in out
+    assert '"total_tokens": 42' in out  # a short count isn't a credential
+    assert debug.scrub('{"token": null, "keys": {"a": 1}}') == '{"token": null, "keys": {"a": 1}}'
+
+
+def test_bundle_scrubs_every_string_it_returns():
+    token = "mcpe_" + "q" * 40
+    out = debug._scrubbed({"traces": [{"path": f"/s/x/{token}", "headers": {"authorization": "Bearer mcpe_qqqqqqq… (45 chars)"}}]})
+    assert token not in str(out)
+    assert out["traces"][0]["headers"]["authorization"] == "Bearer mcpe_qqqqqqq… (45 chars)"
+
+
 def test_scrub_catches_query_secrets_in_any_line():
     line = 'GET /api/oauth/callback?code=abc123&state=xyz&page=2&api_key=k HTTP/1.1" 303'
     out = debug.scrub(line)

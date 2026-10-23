@@ -599,8 +599,9 @@ Credentials and secrets are scrubbed from all of it, library output included:
 - An `mcpe_` token shows only its first 12 characters, the same prefix the token list shows.
 - A JWT in a header shows its claims (issuer, audience, subject, email, expiry, and whether it's expired) and never its signature. Anywhere else, a JWT becomes `<jwt>`.
 - Cookies show only a count. The bridge's internal header shows only whether it was valid.
-- Any JSON or Python field whose name looks secret (`*_TOKEN`, `API_KEY`, `password`, a freshly minted token) has its value replaced.
+- Any JSON or Python field whose name looks secret (`*_TOKEN`, `API_KEY`, `password`, a freshly minted token) has its value replaced, a number or bytes value included.
 - A credential after `Bearer` or `Basic`, and the `user:password@` part of a URL, are replaced.
+- Every string in the `/api/debug` bundle goes through the same scrubber before it's returned.
 
 Ordinary values aren't scrubbed. Tool arguments and results, prompts and file contents all show up, so treat a debug log like the data your servers handle. Turn it off once you're done. When it's off, none of this runs and `/api/debug` returns 404.
 

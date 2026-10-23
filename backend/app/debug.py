@@ -242,9 +242,22 @@ _JWT = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 # of quotes and keywords stays linear instead of rescanning every name.
 _SECRET_FIELD = re.compile(
     r"""(["'](?=[^"']*?(?:token|secret|password|key|authorization|assertion|cookie))[^"']*+["']"""
-    r"""\s*:\s*)(["'])(?:\\.|\\\Z|(?!\2)[^\\])*(?:\2|\Z)""",
+    r"""\s*:\s*)"""
+    # A quoted value (bytes too), or a bare one of 6+ characters like a numeric key,
+    # so a short count ("total_tokens": 42) stays readable. Never a nested object or
+    # list, and null/true/false stay as they are.
+    r"""(?:(b?)(["'])(?:\\.|\\\Z|(?!\3)[^\\])*(?:\3|\Z)"""
+    r"""|(?![{\[]|(?:null|true|false|none)\b)[^\s,}\]]{6,})""",
     re.IGNORECASE,
 )
+
+
+def _redact_field(m: re.Match) -> str:
+    if m[3]:
+        return f"{m[1]}{m[2]}{m[3]}<redacted>{m[3]}"
+    return f'{m[1]}"<redacted>"'
+
+
 # Any other credential after an auth scheme (Authorization: Bearer ghp_..., an
 # upstream's error echoing its header). mcpe_ tokens keep their prefix, see above.
 # A value of lowercase letters alone is a word, so prose ("bearer provider") stays.
@@ -278,7 +291,7 @@ def scrub(text: str) -> str:
     text = _SECRET_QUERY.sub(r"\1<redacted>", text)
     text = _AUTH_SCHEME.sub(r"\1\2<redacted>", text)
     text = _URL_USERINFO.sub(r"\1<redacted>@", text)
-    return _SECRET_FIELD.sub(r"\1\2<redacted>\2", text)
+    return _SECRET_FIELD.sub(_redact_field, text)
 
 
 def _body_text(chunks: list[bytes], limit: int) -> str:
@@ -515,7 +528,7 @@ async def bundle(request: Request) -> dict[str, Any]:
             "last_error": scrub(unit.last_error) if unit is not None and unit.last_error else None,
             "log_tail": [scrub(line) for line in unit.logs.snapshot()[-60:]] if unit is not None else [],
         })
-    return {
+    return _scrubbed({
         "versions": _versions(),
         "config": _config(),
         "control_plane_auth_enforced": enforced,
@@ -526,4 +539,17 @@ async def bundle(request: Request) -> dict[str, Any]:
                    for name, members in groups.items()},
         "traces": list(TRACES),
         "logs": list(RECORDS),
-    }
+    })
+
+
+def _scrubbed(value: Any) -> Any:
+    """``value`` with scrub() applied to every string in it. The bundle is meant to
+    be shared, so nothing in it is trusted to have been scrubbed already (a trace's
+    path is stored as it arrived)."""
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, dict):
+        return {k: _scrubbed(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_scrubbed(v) for v in value]
+    return value
