@@ -250,15 +250,54 @@ _JWT = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 _SECRET_FIELD = re.compile(
     r"""(["'](?=[^"']*?(?:token|secret|password|key|authorization|assertion|cookie))[^"']*+["']"""
     r"""\s*:\s*)"""
-    # A quoted value (bytes too), a flat list or object ("api_keys": ["sk_..."]), or a
-    # bare one like a numeric key; null/true/false stay as they are. A container
-    # nested inside another can't be matched by a regex and is left to its own
-    # field names.
+    # A quoted value (bytes too) or a bare one like a numeric key; null/true/false
+    # stay as they are. A list or object value is _redact_containers' job.
     r"""(?:(b?)(["'])(?:\\.|\\\Z|(?!\3)[^\\])*(?:\3|\Z)"""
-    r"""|\[[^\[\]{}]*\]|\{[^\[\]{}]*\}"""
     r"""|(?![{\[]|(?:null|true|false|none)\b)[^\s,}\]]+)""",
     re.IGNORECASE,
 )
+
+
+# A secret-named field whose value is a list or object ("api_keys": [{"value": ...}]).
+# A regex can't match nested brackets, so _redact_containers scans for the close.
+_SECRET_CONTAINER = re.compile(
+    r"""["'](?=[^"']*?(?:token|secret|password|key|authorization|assertion|cookie))[^"']*+["']\s*:\s*(?=[\[{])""",
+    re.IGNORECASE,
+)
+
+
+def _container_end(text: str, start: int) -> int:
+    """The index just past the bracket closing the container at ``start``, skipping
+    brackets inside quoted strings; the end of the text when it never closes (cut off
+    by a size limit), so a truncated container is still redacted."""
+    depth, quote, i = 0, None, start
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c in "[{":
+            depth += 1
+        elif c in "]}":
+            depth -= 1
+            if not depth:
+                return i + 1
+        i += 1
+    return len(text)
+
+
+def _redact_containers(text: str) -> str:
+    out, pos = [], 0
+    for m in _SECRET_CONTAINER.finditer(text):
+        if m.start() < pos:  # inside a container already redacted
+            continue
+        out += [text[pos:m.end()], '"<redacted>"']
+        pos = _container_end(text, m.end())
+    return "".join(out) + text[pos:]
 
 
 # A name that counts or sizes something ("total_tokens", "token_count", "keys")
@@ -348,7 +387,7 @@ def scrub(text: str) -> str:
     text = _AUTH_SCHEME.sub(r"\1\2<redacted>", text)
     text = _URL_USERINFO.sub(r"\1<redacted>@", text)
     text = _SECRET_COLON.sub(_redact_colon, text)
-    return _SECRET_FIELD.sub(_redact_field, text)
+    return _SECRET_FIELD.sub(_redact_field, _redact_containers(text))
 
 
 def _body_text(chunks: list[bytes], limit: int, total: int | None = None) -> str:

@@ -110,7 +110,8 @@ def test_scrub_stays_linear_on_long_keyword_heavy_lines():
 
     started = time.perf_counter()
     for line in ('{"text": "' + "key " * 32000 + '"}', "?" + "key" * 40000, "'key' " * 20000,
-                 "?" * 60000, "?key" * 30000, "a." * 50000, "a-" * 50000 + "key:", "key " * 30000 + ":"):
+                 "?" * 60000, "?key" * 30000, "a." * 50000, "a-" * 50000 + "key:", "key " * 30000 + ":",
+                 '{"key": [' * 20000, '"key": {} ' * 20000):
         debug.scrub(line)
     assert time.perf_counter() - started < 1.0  # over a minute before the scans were linear
 
@@ -126,8 +127,11 @@ def test_scrub_redacts_secret_fields_whatever_their_value():
     assert '"api_key": "<redacted>"' in out and "'token': b'<redacted>'" in out
     assert '"total_tokens": 42' in out  # a short count isn't a credential
     assert debug.scrub('{"token": null}') == '{"token": null}'
-    # Nesting deeper than one level can't be matched; a JWKS key list is public anyway.
-    assert debug.scrub('{"keys": [{"kid": "a"}]}') == '{"keys": [{"kid": "a"}]}'
+    # Nested containers are redacted to their matching close, brackets in strings aside.
+    live = "sk_live" + "_99Nested"
+    nested = '{"api_keys": [{"value": "' + live + '", "note": "a]b"}], "n": 1}'
+    assert debug.scrub(nested) == '{"api_keys": "<redacted>", "n": 1}'
+    assert live not in debug.scrub('{"token": {"a": [{"b": "' + live)  # cut off mid-value
 
 
 def test_bundle_scrubs_every_string_it_returns():
