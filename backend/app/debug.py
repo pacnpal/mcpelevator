@@ -237,8 +237,10 @@ _JWT = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 # A secret-looking field in JSON ("API_KEY": "...") or a Python repr ('token': '...').
 # A value cut off by a size limit has no closing quote, so the end of the text
 # closes it too: a truncated body must not keep the secret it was cut through.
+# The name is scanned possessively after a keyword lookahead, so a long line full
+# of quotes and keywords stays linear instead of rescanning every name.
 _SECRET_FIELD = re.compile(
-    r"""(["'][^"']*(?:token|secret|password|key|authorization|assertion|cookie)[^"']*["']"""
+    r"""(["'](?=[^"']*?(?:token|secret|password|key|authorization|assertion|cookie))[^"']*+["']"""
     r"""\s*:\s*)(["'])(?:\\.|\\\Z|(?!\2)[^\\])*(?:\2|\Z)""",
     re.IGNORECASE,
 )
@@ -257,9 +259,10 @@ _EVENT_END = re.compile(rb"\r?\n\r?\n")
 # A secret query parameter inside any line: in a URL (uvicorn's access log prints the
 # full request target) or at the start of a quoted raw query string (uvicorn's ASGI
 # trace prints 'query_string': b'code=...'). An OAuth callback's code/state,
-# access_token=, api_key=, or the first field of a form body.
+# access_token=, api_key=, or the first field of a form body. Scanned the same
+# linear way as _SECRET_FIELD.
 _SECRET_QUERY = re.compile(
-    r"((?:^|[?&'\"])(?:code|state|[^=&\s\"']*(?:token|secret|password|key|assertion)[^=&\s\"']*)=)"
+    r"((?:^|[?&'\"])(?:code|state|(?=[^=&\s\"']*?(?:token|secret|password|key|assertion))[^=&\s\"']*+)=)"
     r"[^&\s\"']*",
     re.IGNORECASE,
 )

@@ -53,9 +53,8 @@ class BearerProvider:
                     from app.control_mcp import _refusal
 
                     raise _refusal(request, True)
-            scheme, _, token = request.headers.get("authorization", "").partition(" ")
-            token = token.strip()
-            if scheme.lower() != "bearer" or not token:
+            token = _bearer_token(request)
+            if not token:
                 raise HTTPException(
                     status_code=401,
                     detail="missing bearer token",

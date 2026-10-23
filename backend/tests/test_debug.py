@@ -93,6 +93,15 @@ def test_scrub_redacts_opaque_credentials_and_truncated_fields():
     assert "s3cr3t" not in body and body.endswith(" bytes)")
 
 
+def test_scrub_stays_linear_on_long_keyword_heavy_lines():
+    import time
+
+    started = time.perf_counter()
+    for line in ('{"text": "' + "key " * 32000 + '"}', "?" + "key" * 40000, "'key' " * 20000):
+        debug.scrub(line)
+    assert time.perf_counter() - started < 1.0  # over a minute before the scans were linear
+
+
 def test_scrub_catches_query_secrets_in_any_line():
     line = 'GET /api/oauth/callback?code=abc123&state=xyz&page=2&api_key=k HTTP/1.1" 303'
     out = debug.scrub(line)
