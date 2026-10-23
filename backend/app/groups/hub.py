@@ -132,15 +132,21 @@ class _Counting:
         self.idle = asyncio.Event()
         self.idle.set()
 
-    async def __call__(self, scope, receive, send) -> None:
+    def hold(self) -> None:
         self.active += 1
         self.idle.clear()
+
+    def release(self) -> None:
+        self.active -= 1
+        if not self.active:
+            self.idle.set()
+
+    async def __call__(self, scope, receive, send) -> None:
+        self.hold()
         try:
             await self.app(scope, receive, send)
         finally:
-            self.active -= 1
-            if not self.active:
-                self.idle.set()
+            self.release()
 
 
 class _Instance:

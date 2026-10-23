@@ -1110,30 +1110,30 @@ def test_route_replaces_a_client_sent_original_host(clean_settings):
         assert r.json() == {"original": ["127.0.0.1"]}
 
 
-def test_route_serves_the_instance_current_after_the_body_is_read(clean_settings, monkeypatch):
-    """A swap while usage buffers the body retires the instance picked first, with
-    nothing counted on it yet, so it may close. The request goes to the new one."""
+def test_route_holds_its_instance_while_the_body_is_read(clean_settings, monkeypatch):
+    """A swap while usage buffers the body retires the instance picked first. The
+    route holds it from selection, so it isn't closed before the request reaches it,
+    and the request is served by the instance whose members it was counted against."""
     from app.groups import route
+    from app.groups.hub import _Counting
 
-    async def old(scope, receive, send):
+    async def old_app(scope, receive, send):
         await JSONResponse({"app": "old"})(scope, receive, send)
 
-    async def new(scope, receive, send):
-        await JSONResponse({"app": "new"})(scope, receive, send)
-
+    old = _Counting(old_app)
+    held = []
     _write_groups({"team": "*"})
     with TestClient(app) as client:
-        current = {"app": old}
-        _stub_group(client, "team", inner=None)
-        client.app.state.groups.app_for = lambda n: current["app"] if n == "team" else None
+        _stub_group(client, "team", inner=old)
 
         async def swap_while_reading(request, receive, mounted):
-            current["app"] = new
+            held.append(old.active)  # a retire would wait on old.idle here
             return receive
 
         monkeypatch.setattr(route, "_record_group_usage", swap_while_reading)
         r = client.post("/g/team/mcp", headers=LOOPBACK, json={})
-        assert r.json() == {"app": "new"}
+        assert r.json() == {"app": "old"} and held == [1]
+        assert old.active == 0 and old.idle.is_set()
 
 
 async def test_replaced_instance_finishes_its_requests_before_closing():

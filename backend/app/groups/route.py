@@ -39,7 +39,7 @@ from app import usage
 from app.auth.middleware import enforce
 from app.db import get_engine
 from app.groups import registry
-from app.groups.hub import GroupHub, group_server
+from app.groups.hub import GroupHub, _Counting, group_server
 from app.runners.builtin import ORIGINAL_HOST_HEADER
 from app.usage import attribution
 
@@ -224,6 +224,13 @@ class GroupDispatch:
         for member_id in mounted.values():
             if supervisor is not None:
                 supervisor.request_started(member_id)
+        # Hold the instance from its selection, not from when delegation starts:
+        # usage may await the body first, and a swap in that window must not close
+        # it. Nothing above awaits since app_for, so `mounted` is this instance's
+        # own members and attribution and idle leases match the app that serves.
+        held = isinstance(inner, _Counting)
+        if held:
+            inner.hold()
         try:
             # Count the tool calls this request carries (see _record_group_usage),
             # which may consume + replay the body. Only the bundle's own endpoint
@@ -235,12 +242,10 @@ class GroupDispatch:
             # the client then followed it with, so one tool call landed twice.
             if subpath == "mcp":
                 receive = await _record_group_usage(request, receive, mounted)
-            # Re-read after that await: a swap while the body was buffering retires
-            # the instance picked above, and with nothing counted on it yet it may
-            # already be closed. No await between here and _Counting's count.
-            inner = self._hub.app_for(name) or inner
             await inner(sub_scope, receive, send)
         finally:
+            if held:
+                inner.release()
             for member_id in mounted.values():
                 if supervisor is not None:
                     supervisor.request_finished(member_id)
