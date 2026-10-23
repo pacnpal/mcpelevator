@@ -32,7 +32,7 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: "0.13.3"
-          python-version: "3.14"
+          python-version: "3.15"
           enable-cache: true
       - name: Sync dependencies (with dev extras)
         # --locked asserts uv.lock is in sync with pyproject.toml (fails on a
