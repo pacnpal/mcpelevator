@@ -133,6 +133,12 @@ def test_scrub_redacts_secret_fields_in_header_and_config_syntax():
     assert live not in out and "opaque-Value9" not in out and "user: ada" in out
     assert "X-API-Key: <redacted>" in out
     assert debug.scrub("missing key: retrying") == "missing key: retrying"
+    # The name decides: a short or all-letter value in a credential field is redacted,
+    # a count stays.
+    pw = "summer" + "flower"
+    assert pw not in debug.scrub(f"client_secret: {pw}")
+    assert "12345" not in debug.scrub('{"password": 12345}')
+    assert debug.scrub("max_tokens: 4096, keys: 3") == "max_tokens: 4096, keys: 3"
     assert '"api_key": "<redacted>"' in debug.scrub('{"api_key": "x1y2z3w4"}')  # quoted rule unchanged
 
 

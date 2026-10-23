@@ -703,6 +703,30 @@ def test_unreachable_signing_keys_back_off_instead_of_blocking_each_request(monk
     assert len(calls) == 1
 
 
+def test_a_cached_key_set_with_no_keys_is_refetched(monkeypatch):
+    """{"keys": []} gets cached like any answer; serving it would fail every sign-in
+    until it expired, so a cache hit that fails refetches (under the backoff)."""
+    import jwt
+    from types import SimpleNamespace
+
+    from app.auth import cf_access
+
+    calls = []
+
+    def keys(refresh: bool = False):
+        calls.append(refresh)
+        if not refresh:
+            raise jwt.PyJWKClientError("The JWKS endpoint did not contain any signing keys")
+        return [SimpleNamespace(key_id="k1", key="pem")]
+
+    cache = SimpleNamespace(get=lambda: object())
+    monkeypatch.setattr(cf_access, "_last_failure", {})
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+        get_signing_keys=keys, jwk_set_cache=cache))
+    assert cf_access._fetch("https://team.example", refresh=False) == {"k1": "pem"}
+    assert calls == [False, True]
+
+
 def test_sql_logging_never_shows_bound_values():
     from app.db import get_engine
 

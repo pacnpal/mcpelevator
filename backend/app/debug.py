@@ -243,30 +243,53 @@ _JWT = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 _SECRET_FIELD = re.compile(
     r"""(["'](?=[^"']*?(?:token|secret|password|key|authorization|assertion|cookie))[^"']*+["']"""
     r"""\s*:\s*)"""
-    # A quoted value (bytes too), or a bare one of 6+ characters like a numeric key,
-    # so a short count ("total_tokens": 42) stays readable. Never a nested object or
-    # list, and null/true/false stay as they are.
+    # A quoted value (bytes too) or a bare one like a numeric key. Never a nested
+    # object or list, and null/true/false stay as they are.
     r"""(?:(b?)(["'])(?:\\.|\\\Z|(?!\3)[^\\])*(?:\3|\Z)"""
-    r"""|(?![{\[]|(?:null|true|false|none)\b)[^\s,}\]]{6,})""",
+    r"""|(?![{\[]|(?:null|true|false|none)\b)[^\s,}\]]+)""",
     re.IGNORECASE,
 )
+
+
+# A name that counts or sizes something ("total_tokens", "token_count", "keys")
+# holds a number, not a credential.
+_COUNT_NAME = re.compile(r"(?:tokens|keys|count|_max|max_|limit|length|size)$|^(?:max|num|n)_", re.IGNORECASE)
+
+
+def _name(prefix: str) -> str:
+    return prefix.rstrip(" \t:=").strip("\"'")
 
 
 def _redact_field(m: re.Match) -> str:
     if m[3]:
         return f"{m[1]}{m[2]}{m[3]}<redacted>{m[3]}"
+    value = m[0][len(m[1]):]
+    if value.isdigit() and _COUNT_NAME.search(_name(m[1])):
+        return m[0]
     return f'{m[1]}"<redacted>"'
 
 
 # A secret-named field in plain header or config syntax (X-API-Key: sk_live_...,
 # client_secret: ...). A name starts only after a non-name character and the keyword
-# is found by lookahead, so the scan stays linear; a value of lowercase letters alone
-# is a word, so prose ("missing key: retrying") stays readable.
+# is found by lookahead, so the scan stays linear. The name decides, not the value's
+# look; only the bare prose words "key" and "token" before a lowercase word
+# ("missing key: retrying") are left alone.
 _SECRET_COLON = re.compile(
     r"""((?<![\w-])(?=[\w-]*?(?:token|secret|password|key|authorization|assertion|cookie))[\w-]*+"""
-    r"""\s*:\s*)(?![a-z]+(?![^\s,;&"'<>]))[^\s,;&"'<>]{6,}""",
+    r"""\s*:\s*)[^\s,;&"'<>]+""",
     re.IGNORECASE,
 )
+
+
+def _redact_colon(m: re.Match) -> str:
+    name, value = _name(m[1]), m[0][len(m[1]):]
+    if name.lower() in ("key", "token") and value.isalpha() and value.islower():
+        return m[0]
+    if value.lower() in ("bearer", "basic"):  # its credential is _AUTH_SCHEME's
+        return m[0]
+    if value.isdigit() and _COUNT_NAME.search(name):
+        return m[0]
+    return f"{m[1]}<redacted>"
 
 
 # Any other credential after an auth scheme (Authorization: Bearer ghp_..., an
@@ -304,7 +327,7 @@ def scrub(text: str) -> str:
     text = _SECRET_QUERY.sub(r"\1<redacted>", text)
     text = _AUTH_SCHEME.sub(r"\1\2<redacted>", text)
     text = _URL_USERINFO.sub(r"\1<redacted>@", text)
-    text = _SECRET_COLON.sub(r"\1<redacted>", text)
+    text = _SECRET_COLON.sub(_redact_colon, text)
     return _SECRET_FIELD.sub(_redact_field, text)
 
 
