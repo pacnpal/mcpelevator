@@ -248,9 +248,12 @@ _JWT = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 _SECRET_FIELD = re.compile(
     r"""(["'](?=[^"']*?(?:token|secret|password|key|authorization|assertion|cookie))[^"']*+["']"""
     r"""\s*:\s*)"""
-    # A quoted value (bytes too) or a bare one like a numeric key. Never a nested
-    # object or list, and null/true/false stay as they are.
+    # A quoted value (bytes too), a flat list or object ("api_keys": ["sk_..."]), or a
+    # bare one like a numeric key; null/true/false stay as they are. A container
+    # nested inside another can't be matched by a regex and is left to its own
+    # field names.
     r"""(?:(b?)(["'])(?:\\.|\\\Z|(?!\3)[^\\])*(?:\3|\Z)"""
+    r"""|\[[^\[\]{}]*\]|\{[^\[\]{}]*\}"""
     r"""|(?![{\[]|(?:null|true|false|none)\b)[^\s,}\]]+)""",
     re.IGNORECASE,
 )

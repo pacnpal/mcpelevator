@@ -122,7 +122,9 @@ def test_scrub_redacts_secret_fields_whatever_their_value():
     assert "123456789" not in out and "opaque-cred" not in out and '"count": 3' in out
     assert '"api_key": "<redacted>"' in out and "'token': b'<redacted>'" in out
     assert '"total_tokens": 42' in out  # a short count isn't a credential
-    assert debug.scrub('{"token": null, "keys": {"a": 1}}') == '{"token": null, "keys": {"a": 1}}'
+    assert debug.scrub('{"token": null}') == '{"token": null}'
+    # Nesting deeper than one level can't be matched; a JWKS key list is public anyway.
+    assert debug.scrub('{"keys": [{"kid": "a"}]}') == '{"keys": [{"kid": "a"}]}'
 
 
 def test_bundle_scrubs_every_string_it_returns():
@@ -144,6 +146,9 @@ def test_scrub_redacts_secret_fields_in_header_and_config_syntax():
     assert pw not in debug.scrub(f"client_secret: {pw}")
     assert "12345" not in debug.scrub('{"password": 12345}')
     assert debug.scrub("max_tokens: 4096, keys: 3") == "max_tokens: 4096, keys: 3"
+    live = "sk_live" + "_51Habc"
+    out = debug.scrub('{"api_keys": ["' + live + '", "x"], "cookies": {"sid": "' + live + '"}, "n": 1}')
+    assert live not in out and '"api_keys": "<redacted>"' in out and '"n": 1' in out
     quoted = "opaque-" + "Value9"
     assert debug.scrub(f'client_secret: "{quoted}"') == 'client_secret: "<redacted>"'
     assert quoted not in debug.scrub(f"X-API-Key: '{quoted}'")
