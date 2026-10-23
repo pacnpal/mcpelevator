@@ -1,4 +1,4 @@
-import { mount, unmount } from 'svelte';
+import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { UsageBand, UsagePoint } from '$lib/types';
@@ -16,6 +16,7 @@ function render(series: UsagePoint[], bands: UsageBand[], bucketSeconds = 3600) 
 	host = document.createElement('div');
 	document.body.appendChild(host);
 	component = mount(UsageSparklines, { target: host, props: { series, bands, bucketSeconds } });
+	flushSync(); // LayerChart 2.4+ builds its marks in an effect after measuring the container
 	return host;
 }
 

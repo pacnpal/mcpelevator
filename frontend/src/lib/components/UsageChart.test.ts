@@ -1,4 +1,4 @@
-import { mount, unmount } from 'svelte';
+import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { UsagePoint } from '$lib/types';
@@ -19,6 +19,7 @@ function render(series: UsagePoint[], props: Record<string, unknown> = {}) {
 		target: host,
 		props: { series, bucketSeconds: 3600, ...props }
 	});
+	flushSync(); // LayerChart 2.4+ builds its marks in an effect after measuring the container
 	return host;
 }
 
