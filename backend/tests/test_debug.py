@@ -210,6 +210,40 @@ def test_trace_logs_a_stream_by_whole_events(caplog):
     assert "rest not logged" in events[1] and len(events[1]) < 6000 and "data: tail" in events[2]
 
 
+def test_trace_reads_one_huge_stream_message_in_windows(caplog, monkeypatch):
+    """One ASGI message holding a huge event and then a secret one: the big event is
+    cut to a prefix, and the next event is still found and scrubbed."""
+    import asyncio
+
+    seen, pattern = [], debug._EVENT_END
+
+    class Spy:  # records how much is split at once
+        def split(self, data):
+            seen.append(len(data))
+            return pattern.split(data)
+
+    monkeypatch.setattr(debug, "_EVENT_END", Spy())
+    body = b"data: " + b"z" * 200_000 + b'\n\ndata: {"token": "s3cr3tQQQQ"}\n\n'
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"text/event-stream")]})
+        await send({"type": "http.response.body", "body": body})
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        pass
+
+    scope = {"type": "http", "method": "GET", "path": "/s/x/mcp", "headers": [], "query_string": b""}
+    with caplog.at_level(logging.DEBUG, logger="app.debug"):
+        asyncio.run(debug.TraceMiddleware(app)(scope, receive, send))
+    events = [r.getMessage() for r in caplog.records if "<- event" in r.getMessage()]
+    assert max(seen) <= 2 * debug._BODY_LIMIT + 3  # never the whole message at once
+    assert "rest not logged" in events[0] and '"token": "<redacted>"' in events[1]
+
+
 def test_trace_bounds_a_large_request_body():
     import asyncio
 

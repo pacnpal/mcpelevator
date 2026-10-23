@@ -367,6 +367,31 @@ async def test_hub_excludes_members_with_incompatible_auth(clean_settings):
             repo.delete_server(session, oauth.id)
 
 
+async def test_hub_leaves_the_builtin_out_of_oauth_groups(clean_settings):
+    """The built-in server reads a control credential, which an OAuth group's token
+    never is, so an OAuth group would only list control tools that refuse every call."""
+    with Session(get_engine()) as session:
+        service.ensure_builtin(session)
+        row = service.get_builtin(session)
+        builtin = SimpleNamespace(id=row.id, slug=row.slug)
+        open_srv = _mk_server(session, "Open One")
+    hub = _hub_for({f"up-{builtin.slug}": _make_upstream("b", "whoami"),
+                    "up-open-one": _make_upstream("o", "free")})
+    try:
+        for default, tools in (("oauth", ["open-one_free"]),
+                               ("none", [f"{builtin.slug}_whoami", "open-one_free"])):
+            _write_groups({"g": [builtin.id, open_srv.id]}, default_auth_provider=default)
+            with Session(get_engine()) as session:
+                service.update_server(session, builtin.id, {"auth_provider": "none"})
+            await hub.sync(_endpoints(builtin, open_srv))
+            assert await _list_tool_names(hub.app_for("g")) == tools
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, open_srv.id)
+            repo.delete_server(session, builtin.id)  # an enabled row would skew later tests
+
+
 async def test_hub_unchanged_topology_is_a_noop_swap(clean_settings):
     with Session(get_engine()) as session:
         a = _mk_server(session, "Stable")
@@ -1144,14 +1169,14 @@ async def test_replaced_instance_finishes_its_requests_before_closing():
     from app.groups.hub import _Counting, _Instance
 
     release = asyncio.Event()
-    closed = []
+    closed = asyncio.Event()
 
     async def slow_app(scope, receive, send):
         await release.wait()
 
     class Runner:
         async def close(self):
-            closed.append(True)
+            closed.set()
 
     hub = GroupHub()
     counting = _Counting(slow_app)
@@ -1161,9 +1186,7 @@ async def test_replaced_instance_finishes_its_requests_before_closing():
     await asyncio.sleep(0)
     await hub._teardown("g")  # returns at once: the caller may be that request
     await asyncio.sleep(0)
-    assert hub.app_for("g") is None and closed == []  # still serving its request
+    assert hub.app_for("g") is None and not closed.is_set()  # still serving its request
     release.set()
     await request
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert closed == [True]
+    await asyncio.wait_for(closed.wait(), 2)

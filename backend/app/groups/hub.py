@@ -257,6 +257,11 @@ class GroupHub:
                     # member is safe behind any group provider.
                     if effective != "none" and effective != default:
                         continue
+                    # The built-in server reads the caller's control credential, which
+                    # an OAuth group never carries (its token is the provider's JWT),
+                    # so there it would only list tools that refuse every call.
+                    if server_id in builtin and default == "oauth":
+                        continue
                     # The entry carries the server ID, so the topology key below
                     # does too. Ports are runtime, not identity, and the allocator
                     # hands back the LOWEST free one — so deleting a member and

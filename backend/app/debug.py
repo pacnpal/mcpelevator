@@ -367,6 +367,12 @@ class TraceMiddleware:
         state: dict[str, Any] = {"streaming": False, "sent": 0, "pending": b"", "skipping": False}
 
         def log_events(chunk: bytes, end: bool) -> None:
+            # A huge message is read in _BODY_LIMIT windows, so no more than that
+            # is ever copied at once; a window edge is just another chunk edge.
+            for at in range(0, len(chunk), _BODY_LIMIT) or [0]:
+                log_window(chunk[at:at + _BODY_LIMIT], end and at + _BODY_LIMIT >= len(chunk))
+
+        def log_window(chunk: bytes, end: bool) -> None:
             # A stream is logged one whole event at a time, never a raw chunk:
             # chunk boundaries are arbitrary, and a secret field split across two
             # would slip past scrub() in both halves.
