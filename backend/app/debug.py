@@ -319,13 +319,15 @@ def _redact_field(m: re.Match) -> str:
 
 
 # A secret-named field in plain header or config syntax (X-API-Key: sk_live_...,
-# client_secret: ...). A name starts only after a non-name character and the keyword
-# is found by lookahead, so the scan stays linear. The name decides, not the value's
-# look; only the bare prose words "key" and "token" before a lowercase word
-# ("missing key: retrying") are left alone.
+# client_secret: ..., API_KEY=... after other text). An "=" counts only unspaced, as
+# in an env assignment, so code (token = request.headers...) reads as written. A
+# name starts only after a non-name character and the keyword is found by
+# lookahead, so the scan stays linear. The name decides, not the value's look; only
+# the bare prose words "key" and "token" before a lowercase word ("missing key:
+# retrying") are left alone.
 _SECRET_COLON = re.compile(
     r"""((?<![\w-])(?=[\w-]*?(?:token|secret|password|key|authorization|assertion|cookie))[\w-]*+"""
-    r"""\s*:\s*)(?:(["'])(?:\\.|(?!\2)[^\\])*(?:\2|\Z)|[^\s,;&"'<>]+)""",
+    r"""(?:\s*:\s*|=))(?:(["'])(?:\\.|(?!\2)[^\\])*(?:\2|\Z)|[^\s,;&"'<>]+)""",
     re.IGNORECASE,
 )
 

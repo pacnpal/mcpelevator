@@ -469,3 +469,31 @@ def test_debug_traces_requests_and_serves_the_bundle(monkeypatch):
         bundle = client.get("/api/debug", headers=LOOPBACK).json()
         assert {"versions", "config", "servers", "groups", "traces", "logs"} <= set(bundle)
         assert bundle["config"]["debug"] is True
+
+
+def test_scrub_redacts_env_assignments_after_other_text():
+    secret = "opaque-" + "Value9"
+    out = debug.scrub(f"loading API_KEY={secret} from .env")
+    assert secret not in out and "loading API_KEY=<redacted> from .env" == out
+    assert debug.scrub("sampling max_tokens=4096") == "sampling max_tokens=4096"
+    # A spaced "=" is code in a traceback line, left as written.
+    line = 'token = request.headers.get("authorization")'
+    assert debug.scrub(line) == line
+
+
+def test_bridge_debug_mode_writes_upstream_logs_once(monkeypatch):
+    import uvicorn
+
+    from app.bridge import host
+
+    monkeypatch.setenv("MCPE_BRIDGE_SPEC", "{}")
+    monkeypatch.setenv("MCPE_BRIDGE_PORT", "1")
+    monkeypatch.setattr(debug, "enabled", lambda: True)
+    monkeypatch.setattr(debug, "configure_logging", lambda **_: None)
+    monkeypatch.setattr(host, "build_proxy", lambda spec: None)
+    monkeypatch.setattr(host, "build_app", lambda spec, proxy: None)
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    before = list(host._UPSTREAM_LOG.handlers)
+    host.main()
+    # Only the root's scrubbed handler writes them; no second copy of each line.
+    assert host._UPSTREAM_LOG.handlers == before
