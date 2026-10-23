@@ -129,8 +129,22 @@ def list_runtimes(session: Session) -> list[ServerRuntime]:
     return list(session.exec(select(ServerRuntime)).all())
 
 
+def _naive_utc(value: Any) -> Any:
+    """SQLite hands datetimes back naive (they're stored as UTC), so an aware one
+    never compares equal to its own stored copy without this."""
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
 def upsert_runtime(session: Session, server_id: str, **fields: Any) -> ServerRuntime:
     runtime = session.get(ServerRuntime, server_id)
+    # The supervisor writes every running server's row on every reconcile pass. Skip
+    # the ones that didn't change: each write is a commit (an fsync) on the event loop.
+    if runtime is not None and all(
+        _naive_utc(getattr(runtime, key)) == _naive_utc(value) for key, value in fields.items()
+    ):
+        return runtime
     if runtime is None:
         runtime = ServerRuntime(server_id=server_id, tools=fields.pop("tools", []))
     for key, value in fields.items():

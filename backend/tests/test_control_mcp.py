@@ -980,3 +980,25 @@ def test_a_cold_start_on_the_event_loop_refuses_instead_of_waiting(monkeypatch, 
             break
         time.sleep(0.01)
     assert asyncio.run(on_loop()) == ("ada@example.com", None)  # loaded in the background
+
+
+def test_bridge_calls_pass_the_host_check_behind_a_forwarding_proxy():
+    """The bridge forwards the caller's X-Forwarded-For, so uvicorn reports the
+    caller's public address as the peer of its loopback call to /api/mcp. The
+    internal secret, not that address, decides whether Host: 127.0.0.1 passes."""
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.auth.middleware import enforce_host
+
+    def request(internal: bool) -> Request:
+        headers = [(b"host", b"127.0.0.1:8080")]
+        if internal:
+            headers.append((INTERNAL_HEADER.encode(), INTERNAL_SECRET.encode()))
+        return Request({"type": "http", "headers": headers, "client": ("160.79.106.169", 0)})
+
+    with Session(get_engine()) as s:
+        enforce_host(request(internal=True), s)  # the bridge's own call passes
+        with pytest.raises(HTTPException) as exc:
+            enforce_host(request(internal=False), s)  # a real remote peer still doesn't
+    assert exc.value.status_code == 403
