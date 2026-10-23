@@ -249,6 +249,34 @@ def test_trace_reads_one_huge_stream_message_in_windows(caplog, monkeypatch):
     assert "rest not logged" in events[0] and '"token": "<redacted>"' in events[1]
 
 
+def test_trace_records_the_body_the_app_reads_and_never_reads_ahead():
+    import asyncio
+
+    reads = []
+    message = {"type": "http.request", "body": b'{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}'}
+
+    async def refusing(scope, receive, send):  # like the Host guard: answers unread
+        await send({"type": "http.response.start", "status": 403, "headers": []})
+        await send({"type": "http.response.body", "body": b"no"})
+
+    async def reading(scope, receive, send):
+        await receive()
+        await refusing(scope, receive, send)
+
+    async def receive():
+        reads.append(1)
+        return message
+
+    async def send(_):
+        pass
+
+    scope = {"type": "http", "method": "POST", "path": "/s/x/mcp", "headers": [], "query_string": b""}
+    asyncio.run(debug.TraceMiddleware(refusing)(scope, receive, send))
+    assert reads == [] and "body" not in debug.TRACES[-1]
+    asyncio.run(debug.TraceMiddleware(reading)(scope, receive, send))
+    assert debug.TRACES[-1]["rpc"] == ["tools/list"]
+
+
 def test_trace_bounds_a_large_request_body():
     import asyncio
 
@@ -316,13 +344,15 @@ def test_debug_traces_requests_and_serves_the_bundle(monkeypatch):
                         headers={**LOOPBACK, "authorization": f"Bearer {token}"})
         assert r.status_code == 404
         trace = next(t for t in debug.TRACES if t["path"] == "/s/nope/mcp")
-        assert trace["status"] == 404 and trace["rpc"] == ["tools/list"]
+        # Refused before its body was read, so the body is never waited on or logged.
+        assert trace["status"] == 404 and "body" not in trace
         assert trace["response_body"] == "unknown server"
         assert token not in json.dumps(trace)
 
         minted = client.post("/api/tokens", json={"name": "x", "scope": "all"}, headers=LOOPBACK)
         trace = next(t for t in reversed(debug.TRACES) if t["path"] == "/api/tokens")
         assert minted.json()["token"] not in trace["response_body"]
+        assert '"scope":"all"' in trace["body"]  # read by the route, so traced
 
         bundle = client.get("/api/debug", headers=LOOPBACK).json()
         assert {"versions", "config", "servers", "groups", "traces", "logs"} <= set(bundle)

@@ -575,7 +575,8 @@ Set `MCPE_DEBUG=true` on the container and restart when something fails and the 
 
 - **Everything logs at TRACE.** Every logger in the process is opened up, mcpelevator's own and every library's. That covers FastMCP, the MCP SDK (every JSON-RPC message in and out), httpx and httpcore (every outbound connection), uvicorn (every connection), SSE framing, and SQLAlchemy (every SQL statement; bound values are hidden, since a secret like a client secret travels there with no name a scrubber could recognize). Each line carries a timestamp, the logger name and the thread. Each server's bridge inherits the setting and also logs every ASGI message, so the log on a server's page shows its whole conversation with the upstream and the full traceback of any failure.
 - **Every request is traced.** For `/api`, `/s`, `/g` and the OAuth discovery routes you get:
-  - a line when the request arrives: method, path, query, peer, every header, the body
+  - a line when the request arrives: method, path, query, peer, every header
+  - a line with the body once the app reads it (a request refused at the Host check or auth, before its body is read, has none)
   - a line when the response starts: status, headers, time to first byte
   - a line per server-sent event, so an MCP error inside an SSE stream shows up as text
   - a summary line with the JSON-RPC method and tool name, the status, the total time and the response body

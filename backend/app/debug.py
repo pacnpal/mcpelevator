@@ -7,7 +7,8 @@ It is as verbose as it can be on purpose. When it's on:
   SSE framing, and every SQL statement (bound values hidden). Bridges inherit the
   variable, so each server's own log (the one the UI shows) gets the same detail.
 - Every HTTP request is traced: a line when it arrives (method, path, query, peer,
-  headers, body), a line when the response starts (status, headers), a line per
+  headers), a line with its body once the app has read it, a line when the response
+  starts (status, headers), a line per
   streamed event (so an MCP error inside an SSE stream shows up), and a summary with
   the JSON-RPC method, tool name, status and timing. Credentials are reduced to
   something you can match but not reuse, and secret-looking values in bodies are
@@ -333,35 +334,34 @@ class TraceMiddleware:
             "headers": headers_for_log(scope["headers"]),
         }
 
-        # Read the start of the body (up to _BODY_LIMIT, so a huge upload can't fill
-        # memory), log it, then replay what was read and hand the rest of the stream
-        # to the app untouched.
-        buffered: list[Message] = []
-        chunks: list[bytes] = []
-        complete = False
-        while sum(map(len, chunks)) <= _BODY_LIMIT:
-            message = await receive()
-            buffered.append(message)
-            if message["type"] != "http.request":
-                break
-            chunks.append(message.get("body", b""))
-            if not message.get("more_body", False):
-                complete = True
-                break
-        if any(chunks):
-            entry["body"] = _body_text(chunks, _BODY_LIMIT) + ("" if complete else " …(more)")
-            if complete and sum(map(len, chunks)) <= 64 * 1024:
-                entry["rpc"] = _rpc_summary(b"".join(chunks))
         logger.debug(
-            "[%s] -> %s %s query=%s peer=%s headers=%s body=%s", rid, entry["method"],
-            entry["path"], entry["query"], entry["peer"],
-            json.dumps(entry["headers"], default=str), entry.get("body"),
+            "[%s] -> %s %s query=%s peer=%s headers=%s", rid, entry["method"], entry["path"],
+            entry["query"], entry["peer"], json.dumps(entry["headers"], default=str),
         )
 
-        async def replay() -> Message:
-            if buffered:
-                return buffered.pop(0)
-            return await receive()
+        # The body is traced as the app reads it, never read ahead: reading first would
+        # wait on a slow client before the Host/Origin and auth checks have run. Only
+        # the first _BODY_LIMIT bytes are kept, so a huge upload can't fill memory.
+        chunks: list[bytes] = []
+        body = {"bytes": 0, "logged": False}
+
+        async def traced_receive() -> Message:
+            message = await receive()
+            if message["type"] != "http.request" or body["logged"]:
+                return message
+            data = message.get("body", b"")
+            body["bytes"] += len(data)
+            if (room := _BODY_LIMIT + 1 - sum(map(len, chunks))) > 0:
+                chunks.append(data[:room])
+            done = not message.get("more_body", False)
+            if done or body["bytes"] > _BODY_LIMIT:
+                body["logged"] = True
+                if any(chunks):
+                    entry["body"] = _body_text(chunks, _BODY_LIMIT) + ("" if done else " …(more)")
+                    if done and body["bytes"] <= _BODY_LIMIT:
+                        entry["rpc"] = _rpc_summary(b"".join(chunks))
+                logger.debug("[%s] -> body %s", rid, entry.get("body"))
+            return message
 
         response: list[bytes] = []
         state: dict[str, Any] = {"streaming": False, "sent": 0, "pending": b"", "skipping": False}
@@ -414,7 +414,7 @@ class TraceMiddleware:
             await send(message)
 
         try:
-            await self.app(scope, replay, watch)
+            await self.app(scope, traced_receive, watch)
         except Exception:
             entry["status"] = entry.get("status") or 500
             entry["exception"] = True
