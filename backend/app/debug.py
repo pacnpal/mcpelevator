@@ -59,6 +59,10 @@ _FORMAT = "%(asctime)s %(levelname)s %(name)s [%(threadName)s]: %(message)s"
 # fetched row, which is the data itself, secrets included, rather than what happened to it.
 _LEVELS = {"sqlalchemy.engine": logging.INFO, "sqlalchemy.pool": logging.DEBUG}
 _SECRET_WORDS = ("token", "secret", "password", "key", "assertion", "cookie", "authorization")
+# A presigned URL's credential parameters (X-Amz-Signature, X-Amz-Credential, Azure's
+# sig) are secret only in a query; a header such as Access-Control-Allow-Credentials
+# isn't.
+_QUERY_SECRET_WORDS = (*_SECRET_WORDS, "signature", "credential")
 _BODY_LIMIT = 16384
 _CHUNK_LIMIT = 4096
 # The API, server and group endpoints, and OAuth discovery; not the SPA's assets.
@@ -225,7 +229,7 @@ def query_for_log(raw: bytes) -> dict[str, str] | None:
     out = {}
     for name, value in parse_qsl(raw.decode("latin-1"), keep_blank_values=True):
         lower = name.lower()
-        secret = lower in ("code", "state") or any(word in lower for word in _SECRET_WORDS)
+        secret = lower in ("code", "state", "sig") or any(word in lower for word in _QUERY_SECRET_WORDS)
         out[name] = f"<redacted, {len(value)} chars>" if secret else scrub(value)
     return out or None
 
@@ -369,10 +373,11 @@ _EVENT_END = re.compile(rb"\r?\n\r?\n")
 # A secret query parameter inside any line: in a URL (uvicorn's access log prints the
 # full request target) or at the start of a quoted raw query string (uvicorn's ASGI
 # trace prints 'query_string': b'code=...'). An OAuth callback's code/state,
-# access_token=, api_key=, or the first field of a form body. Scanned the same
+# access_token=, api_key=, a presigned URL's X-Amz-Signature= / X-Amz-Credential= or
+# Azure sig=, or the first field of a form body. Scanned the same
 # linear way as _SECRET_FIELD.
 _SECRET_QUERY = re.compile(
-    r"((?:^|[?&'\"])(?:code|state|(?=[^=&?\s\"']*?(?:token|secret|password|key|assertion))[^=&?\s\"']*+)=)"
+    r"((?:^|[?&'\"])(?:code|state|sig|(?=[^=&?\s\"']*?(?:token|secret|password|key|assertion|signature|credential))[^=&?\s\"']*+)=)"
     r"[^&\s\"']*",
     re.IGNORECASE,
 )

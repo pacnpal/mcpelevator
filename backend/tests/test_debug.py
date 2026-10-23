@@ -497,3 +497,15 @@ def test_bridge_debug_mode_writes_upstream_logs_once(monkeypatch):
     host.main()
     # Only the root's scrubbed handler writes them; no second copy of each line.
     assert host._UPSTREAM_LOG.handlers == before
+
+
+def test_scrub_redacts_presigned_url_signatures():
+    sig, cred = "f00d" * 16, "AKIA" + "EXAMPLE7Q/20261023/us-east-1/s3/aws4_request"
+    url = (f"GET https://b.s3.amazonaws.com/o?X-Amz-Credential={cred}&X-Amz-Signature={sig}"
+           f"&X-Amz-Expires=300 and https://a.blob.core.windows.net/c/b?sv=2024&sig={sig}")
+    out = debug.scrub(url)
+    assert sig not in out and cred not in out and "X-Amz-Expires=300" in out and "sv=2024" in out
+    logged = debug.query_for_log(f"X-Amz-Signature={sig}&sig={sig}&page=2".encode())
+    assert sig not in str(logged) and logged["page"] == "2"
+    # Only a query: a CORS header keeps its value.
+    assert debug.fingerprint("access-control-allow-credentials", "true") == "true"
