@@ -80,8 +80,11 @@ def test_scrub_hides_secrets_in_bodies_and_library_logs():
 def test_scrub_redacts_opaque_credentials_and_truncated_fields():
     # Built at runtime so a secret scanner doesn't flag the fixture.
     opaque = "ghp" + "_" + "abc123XYZ789"
-    out = debug.scrub(f"upstream said: Authorization: Bearer {opaque} rejected")
+    out = debug.scrub(f"upstream said: Bearer {opaque} rejected")
     assert opaque not in out and "Bearer <redacted> rejected" in out
+    for scheme in ("Bearer", "Token", "ApiKey"):  # any scheme in an Authorization header
+        out = debug.scrub(f"Authorization: {scheme} {opaque}, retrying")
+        assert opaque not in out and out == "Authorization: <redacted>, retrying"
     basic = base64.b64encode(b"user:" + b"pass123").decode()
     assert basic not in debug.scrub(f"Basic {basic}")
     assert debug.scrub("no bearer provider configured") == "no bearer provider configured"

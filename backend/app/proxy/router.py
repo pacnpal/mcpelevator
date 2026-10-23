@@ -30,7 +30,7 @@ from app.auth.middleware import enforce
 from app.config import get_settings
 from app.db import get_engine, repo
 from app.db.models import BUILTIN_RUNNER
-from app.runners.builtin import ORIGINAL_HOST_HEADER
+from app.runners.builtin import GROUP_HEADER, ORIGINAL_HOST_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,9 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
         body = await request.body()
         fwd_headers = {
             k: v for k, v in request.headers.items()
-            if k.lower() not in _HOP and k.lower() != ORIGINAL_HOST_HEADER
+            # Both are ours to set: a client's copy would forge its address or pose
+            # as a group request (and get group-prefixed prompt tool names).
+            if k.lower() not in _HOP and k.lower() not in (ORIGINAL_HOST_HEADER, GROUP_HEADER)
         }
         if server.runner == BUILTIN_RUNNER:
             fwd_headers[ORIGINAL_HOST_HEADER] = request.headers.get("host", "")

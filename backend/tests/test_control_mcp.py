@@ -416,6 +416,26 @@ def test_break_glass_token_opens_the_builtin(client, monkeypatch):
         asyncio.run(BearerProvider().authenticate(req, other))
 
 
+def test_the_s_proxy_sets_the_builtin_markers_itself(client):
+    """x-mcpe-original-host and x-mcpe-group are the proxy's and the group route's to
+    set. A client's copy on /s must not reach the built-in bridge."""
+    import httpx
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    async def echo(request):
+        return JSONResponse({k: v for k, v in request.headers.items() if k.startswith("x-mcpe-")})
+
+    upstream = Starlette(routes=[Route("/{path:path}", echo, methods=["POST"])])
+    client.app.state.http = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream))
+    client.app.state.supervisor.endpoint = lambda slug: ("bridge", 9000)
+    forged = {"x-mcpe-group": "g", "x-mcpe-original-host": "evil.example",
+              "authorization": f"Bearer {mint_token('control')}"}
+    r = client.post(f"/s/{_builtin().slug}/mcp", json={}, headers={**LOOPBACK, **forged})
+    assert r.json() == {"x-mcpe-original-host": "127.0.0.1"}
+
+
 def test_urls_name_the_host_the_caller_used(client):
     carried = {"x-mcpe-original-host": "localhost:9999"}
     _, out = _call(client, "list_servers", headers=carried)  # no internal secret: ignored

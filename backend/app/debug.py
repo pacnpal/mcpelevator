@@ -299,6 +299,10 @@ def _redact_colon(m: re.Match) -> str:
     return f"{m[1]}<redacted>"
 
 
+# An Authorization header's whole value, whatever its scheme (Token ghp_..., ApiKey
+# sk_...): the credential follows a space the field rules stop at.
+_AUTH_HEADER = re.compile(r"((?<![\w-])(?:proxy-)?authorization\s*:\s*)[^\r\n,;\"'<>]+", re.IGNORECASE)
+
 # Any other credential after an auth scheme (Authorization: Bearer ghp_..., an
 # upstream's error echoing its header). mcpe_ tokens keep their prefix, see above.
 # A value of lowercase letters alone is a word, so prose ("bearer provider") stays.
@@ -332,6 +336,7 @@ def scrub(text: str) -> str:
     text = _MCPE_TOKEN.sub(lambda m: m.group(0)[:12] + "…", text)
     text = _JWT.sub("<jwt>", text)
     text = _SECRET_QUERY.sub(r"\1<redacted>", text)
+    text = _AUTH_HEADER.sub(r"\1<redacted>", text)
     text = _AUTH_SCHEME.sub(r"\1\2<redacted>", text)
     text = _URL_USERINFO.sub(r"\1<redacted>@", text)
     text = _SECRET_COLON.sub(_redact_colon, text)
