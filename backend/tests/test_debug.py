@@ -87,6 +87,9 @@ def test_scrub_redacts_opaque_credentials_and_truncated_fields():
         assert opaque not in out and out == "Authorization: <redacted>\nretrying"
     digest = 'Authorization: Digest username="ada", response="' + opaque + '"'
     assert debug.scrub(digest) == "Authorization: <redacted>"
+    assert debug.scrub(f"Cookie: marker=first; session={opaque}") == "Cookie: <redacted>"
+    assert debug.scrub(f"Set-Cookie: session={opaque}; HttpOnly") == "Set-Cookie: <redacted>"
+    assert debug.fingerprint("authorization", opaque) == f"<redacted, {len(opaque)} chars>"
     basic = base64.b64encode(b"user:" + b"pass123").decode()
     assert basic not in debug.scrub(f"Basic {basic}")
     assert debug.scrub("no bearer provider configured") == "no bearer provider configured"

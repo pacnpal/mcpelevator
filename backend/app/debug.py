@@ -202,6 +202,8 @@ def fingerprint(name: str, value: str) -> Any:
     if lower in ("authorization", "proxy-authorization"):
         scheme, _, token = value.partition(" ")
         token = token.strip()
+        if not token:  # no scheme, so the whole value is the credential
+            return f"<redacted, {len(value)} chars>"
         if token.startswith("mcpe_"):
             return f"{scheme} {token[:12]}… ({len(token)} chars)"
         claims = _jwt_claims(token)
@@ -302,9 +304,12 @@ def _redact_colon(m: re.Match) -> str:
     return f"{m[1]}<redacted>"
 
 
-# An Authorization header's whole value, to the end of its line, whatever its scheme:
-# Token ghp_..., ApiKey sk_..., or Digest's quoted, comma-separated parameters.
-_AUTH_HEADER = re.compile(r"((?<![\w-])(?:proxy-)?authorization\s*:[ \t]*)[^\r\n]+", re.IGNORECASE)
+# A credential header's whole value, to the end of its line: Authorization whatever
+# its scheme (Token ghp_..., Digest's comma-separated parameters) and Cookie /
+# Set-Cookie, whose later pairs follow a ";" the field rules stop at.
+_AUTH_HEADER = re.compile(
+    r"((?<![\w-])(?:(?:proxy-)?authorization|cookie|set-cookie)\s*:[ \t]*)[^\r\n]+", re.IGNORECASE
+)
 
 # Any other credential after an auth scheme (Authorization: Bearer ghp_..., an
 # upstream's error echoing its header). mcpe_ tokens keep their prefix, see above.
