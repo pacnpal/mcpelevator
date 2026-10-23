@@ -530,3 +530,12 @@ def test_uvicorn_cli_loggers_reach_the_ring(monkeypatch):
     access.info('127.0.0.1:1 - "GET /api/health-probe HTTP/1.1" 200')
     assert access.propagate and not access.handlers
     assert any("/api/health-probe" in line for line in debug.RECORDS)
+
+
+def test_scrub_redacts_containers_under_unquoted_secret_names():
+    live = "sk_live" + "_51Habc123"
+    for line in (f'api_keys: ["{live}"]', f"cookies: {{sid: '{live}', n: [1]}} done",
+                 f'API_TOKENS=["{live}", "x"]'):
+        out = debug.scrub(line)
+        assert live not in out and '"<redacted>"' in out, out
+    assert debug.scrub('api_keys: ["x"] user: ada').endswith("user: ada")

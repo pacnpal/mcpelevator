@@ -18,7 +18,9 @@ the built-in server use it directly.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 import time
 from functools import lru_cache
 from typing import Any, Optional
@@ -43,9 +45,9 @@ def _team(domain: str) -> str:
 
 @lru_cache(maxsize=4)
 def _keys(team: str) -> jwt.PyJWKClient:
-    # ponytail: PyJWKClient fetches synchronously, so a key refresh (hourly, or at most
-    # every _REFETCH_S on an unknown kid) blocks the caller for one short request; move
-    # to an async fetch if that ever shows up in latency.
+    # PyJWKClient fetches synchronously. On the event loop that would stall every
+    # request, so a refresh there runs in a thread (_refresh_soon) while the last
+    # good keys keep answering; see _fetch.
     return jwt.PyJWKClient(f"{team}/cdn-cgi/access/certs", lifespan=3600, timeout=5)
 
 
@@ -57,6 +59,65 @@ _last_refetch: dict[str, float] = {}
 # instead of letting every queued assertion block on another doomed fetch.
 _FAILED_BACKOFF_S = 30.0
 _last_failure: dict[str, float] = {}
+# The last keys each team answered with, and when. They keep sign-ins working on the
+# event loop while a refresh runs, but no longer than this: a key Cloudflare stopped
+# publishing a day ago is no longer trusted just because its endpoint is down.
+_STALE_S = 86400.0
+_good: dict[str, tuple[dict[str, Any], float]] = {}
+_refreshing: set[str] = set()
+_refreshing_lock = threading.Lock()
+
+
+def _on_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _download(team: str, *, refresh: bool) -> dict[str, Any]:
+    try:
+        keys = {k.key_id: k.key for k in _keys(team).get_signing_keys(refresh=refresh)}
+    except (jwt.PyJWKClientError, jwt.PyJWKSetError, ValueError) as exc:
+        # Unreachable, or answered with something that isn't a key set (bad JSON,
+        # no keys): either way back off, and refuse the sign-in rather than fail it.
+        _last_failure[team] = time.monotonic()
+        if isinstance(exc, jwt.PyJWKClientConnectionError):
+            raise
+        raise jwt.PyJWKClientConnectionError(f"Cloudflare's signing keys couldn't be read: {exc}") from exc
+    _good[team] = (keys, time.monotonic())
+    if refresh:
+        # Only a refetch that worked starts the unknown-kid window: one that failed is
+        # covered by the shorter failure backoff, so a key rotated during an outage is
+        # picked up as soon as Cloudflare answers again.
+        _last_refetch[team] = time.monotonic()
+    return keys
+
+
+def _refresh_soon(team: str, *, refresh: bool) -> None:
+    """Fetch the team's keys in a thread, once at a time."""
+    with _refreshing_lock:
+        if team in _refreshing:
+            return
+        _refreshing.add(team)
+
+    def run() -> None:
+        try:
+            _download(team, refresh=refresh)
+        except jwt.PyJWKClientConnectionError as exc:
+            logger.info("Cloudflare Access key refresh failed: %s", exc)
+        finally:
+            with _refreshing_lock:
+                _refreshing.discard(team)
+
+    threading.Thread(target=run, name="cf-access-keys", daemon=True).start()
+
+
+def prewarm() -> None:
+    """Load the keys in the background at startup, so the first sign-in has them."""
+    if configured():
+        _refresh_soon(_team(get_settings().cf_access_team_domain), refresh=False)
 
 
 def _fetch(team: str, *, refresh: bool) -> dict[str, Any]:
@@ -70,17 +131,19 @@ def _fetch(team: str, *, refresh: bool) -> dict[str, Any]:
             # A cached set with no usable keys ({"keys": []}) would fail every
             # sign-in until it expires: refetch it instead, under the backoff.
             refresh = True
-    if time.monotonic() - _last_failure.get(team, -_FAILED_BACKOFF_S) < _FAILED_BACKOFF_S:
+    backing_off = time.monotonic() - _last_failure.get(team, -_FAILED_BACKOFF_S) < _FAILED_BACKOFF_S
+    last = _good.get(team)
+    if _on_loop() and last is not None and time.monotonic() - last[1] < _STALE_S:
+        # A fetch here would stall every request on the loop: answer from the last
+        # keys and refresh in a thread. A kid they lack is refused until it lands.
+        if not backing_off:
+            _refresh_soon(team, refresh=refresh)
+        return last[0]
+    if backing_off:
         raise jwt.PyJWKClientConnectionError("Cloudflare's signing keys were unreachable moments ago")
-    try:
-        return {k.key_id: k.key for k in client.get_signing_keys(refresh=refresh)}
-    except (jwt.PyJWKClientError, jwt.PyJWKSetError, ValueError) as exc:
-        # Unreachable, or answered with something that isn't a key set (bad JSON,
-        # no keys): either way back off, and refuse the sign-in rather than fail it.
-        _last_failure[team] = time.monotonic()
-        if isinstance(exc, jwt.PyJWKClientConnectionError):
-            raise
-        raise jwt.PyJWKClientConnectionError(f"Cloudflare's signing keys couldn't be read: {exc}") from exc
+    # ponytail: with no keys yet (the startup prewarm still running or failed), the
+    # first fetch blocks its caller, once per failure backoff at most.
+    return _download(team, refresh=refresh)
 
 
 def _signing_key(team: str, token: str) -> Any:
@@ -90,10 +153,6 @@ def _signing_key(team: str, token: str) -> Any:
     keys = _fetch(team, refresh=False)
     if kid not in keys and time.monotonic() - _last_refetch.get(team, -_REFETCH_S) >= _REFETCH_S:
         keys = _fetch(team, refresh=True)
-        # Only a refetch that worked starts the window: one that failed is covered by
-        # the shorter failure backoff, so a key rotated during an outage is picked up
-        # as soon as Cloudflare answers again.
-        _last_refetch[team] = time.monotonic()
     if kid not in keys:
         raise jwt.InvalidTokenError("signed with a key the team doesn't publish")
     return keys[kid]

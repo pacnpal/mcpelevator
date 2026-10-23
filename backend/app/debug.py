@@ -265,10 +265,13 @@ _SECRET_FIELD = re.compile(
 )
 
 
-# A secret-named field whose value is a list or object ("api_keys": [{"value": ...}]).
-# A regex can't match nested brackets, so _redact_containers scans for the close.
+# A secret-named field whose value is a list or object ("api_keys": [{"value": ...}],
+# or unquoted as in YAML or config: api_keys: ["..."]). A regex can't match nested
+# brackets, so _redact_containers scans for the close.
 _SECRET_CONTAINER = re.compile(
-    r"""["'](?=[^"']*?(?:token|secret|password|key|authorization|assertion|cookie))[^"']*+["']\s*:\s*(?=[\[{])""",
+    r"""(?:["'](?=[^"']*?(?:token|secret|password|key|authorization|assertion|cookie))[^"']*+["']\s*:\s*"""
+    r"""|(?<![\w-])(?=[\w-]*?(?:token|secret|password|key|authorization|assertion|cookie))[\w-]*+(?:\s*:\s*|=))"""
+    r"""(?=[\[{])""",
     re.IGNORECASE,
 )
 
@@ -331,10 +334,10 @@ def _redact_field(m: re.Match) -> str:
 # name starts only after a non-name character and the keyword is found by
 # lookahead, so the scan stays linear. The name decides, not the value's look; only
 # the bare prose words "key" and "token" before a lowercase word ("missing key:
-# retrying") are left alone.
+# retrying") are left alone. A list or object value is _redact_containers' job.
 _SECRET_COLON = re.compile(
     r"""((?<![\w-])(?=[\w-]*?(?:token|secret|password|key|authorization|assertion|cookie))[\w-]*+"""
-    r"""(?:\s*:\s*|=))(?:(["'])(?:\\.|(?!\2)[^\\])*(?:\2|\Z)|[^\s,;&"'<>]+)""",
+    r"""(?:\s*:\s*|=))(?:(["'])(?:\\.|(?!\2)[^\\])*(?:\2|\Z)|(?![\[{])[^\s,;&"'<>]+)""",
     re.IGNORECASE,
 )
 
@@ -381,7 +384,7 @@ _EVENT_END = re.compile(rb"\r?\n\r?\n")
 # linear way as _SECRET_FIELD.
 _SECRET_QUERY = re.compile(
     r"((?:^|[?&'\"])(?:code|state|sig|(?=[^=&?\s\"']*?(?:token|secret|password|key|assertion|signature|credential))[^=&?\s\"']*+)=)"
-    r"[^&\s\"']*",
+    r"(?![\[{])[^&\s\"']*",  # a list or object is _redact_containers' job
     re.IGNORECASE,
 )
 

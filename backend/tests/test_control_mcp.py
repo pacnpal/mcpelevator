@@ -588,6 +588,7 @@ def cf(monkeypatch):
         get_signing_keys=get_signing_keys, jwk_set_cache=None))
     monkeypatch.setattr(cf_access, "_last_refetch", {})
     monkeypatch.setattr(cf_access, "_last_failure", {})
+    monkeypatch.setattr(cf_access, "_good", {})
 
     def assertion(email: str, aud: str = "aud-1", kid: str = "k1", exp: int = 60,
                   iss: str = "https://team.example") -> dict:
@@ -746,6 +747,8 @@ def test_a_cached_key_set_with_no_keys_is_refetched(monkeypatch):
 
     cache = SimpleNamespace(get=lambda: object())
     monkeypatch.setattr(cf_access, "_last_failure", {})
+    monkeypatch.setattr(cf_access, "_last_refetch", {})
+    monkeypatch.setattr(cf_access, "_good", {})
     monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
         get_signing_keys=keys, jwk_set_cache=cache))
     assert cf_access._fetch("https://team.example", refresh=False) == {"k1": "pem"}
@@ -906,3 +909,38 @@ def test_switch_applies_to_cloudflare_users_with_auth_off(client, cf, monkeypatc
     both = [*req.scope["headers"], (b"authorization", b"Bearer break-glass")]
     with Session(get_engine()) as s:
         _authorize(Request({"type": "http", "headers": both}), s, edge=True)
+
+
+def test_key_refresh_on_the_event_loop_never_waits_on_the_fetch(monkeypatch, cf):
+    import asyncio
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+    assert cf_access.email(req) == "ada@example.com"  # off the loop: fetched in place
+    real, gate, calls = cf_access._keys("https://team.example"), threading.Event(), []
+
+    def slow(refresh: bool = False):
+        calls.append(refresh)
+        gate.wait(5)
+        return real.get_signing_keys(refresh)
+
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(get_signing_keys=slow, jwk_set_cache=None))
+
+    async def on_loop():
+        return [cf_access.email(req) for _ in range(3)]
+
+    started = time.monotonic()
+    assert asyncio.run(on_loop()) == ["ada@example.com"] * 3  # the last keys answer
+    assert time.monotonic() - started < 1  # nobody waited on the stalled fetch
+    gate.set()
+    for _ in range(200):
+        if not cf_access._refreshing:
+            break
+        time.sleep(0.01)
+    assert calls == [False]  # one refresh in a thread, not one per request

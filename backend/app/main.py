@@ -29,6 +29,7 @@ from app.api import settings as settings_api
 from app.api import tokens as tokens_api
 from app.api import usage as usage_api
 from app.api import users as users_api
+from app.auth import cf_access
 from app.auth.control_plane import (
     ensure_control_token,
     enforcement_enabled,
@@ -135,6 +136,7 @@ async def lifespan(app: FastAPI):
         asyncio.get_running_loop().set_debug(True)
         debug.log_startup()
     init_db()
+    cf_access.prewarm()
     with Session(get_engine()) as session:
         service.normalize_auth_providers(session)  # canonicalize legacy auth_provider values
         service.normalize_docker_servers(session)  # canonicalize legacy docker rows before enable
