@@ -77,6 +77,20 @@ def test_scrub_hides_secrets_in_bodies_and_library_logs():
     assert "ab" not in out and "cd" not in out and '"next": "ok"' in out
 
 
+def test_scrub_redacts_opaque_credentials_and_truncated_fields():
+    # Built at runtime so a secret scanner doesn't flag the fixture.
+    opaque = "ghp" + "_" + "abc123XYZ789"
+    out = debug.scrub(f"upstream said: Authorization: Bearer {opaque} rejected")
+    assert opaque not in out and "Bearer <redacted> rejected" in out
+    basic = base64.b64encode(b"user:" + b"pass123").decode()
+    assert basic not in debug.scrub(f"Basic {basic}")
+    assert debug.scrub("no bearer provider configured") == "no bearer provider configured"
+    assert "mcpe_abcdefg" in debug.scrub("Bearer mcpe_" + "abcdefg" * 6)
+    # A body cut off inside a secret value has no closing quote to end the match.
+    body = debug._body_text([b'{"api_key": "' + b"s3cr3t" * 5000 + b'"}'], 1024)
+    assert "s3cr3t" not in body and body.endswith(" bytes)")
+
+
 def test_scrub_catches_query_secrets_in_any_line():
     line = 'GET /api/oauth/callback?code=abc123&state=xyz&page=2&api_key=k HTTP/1.1" 303'
     out = debug.scrub(line)

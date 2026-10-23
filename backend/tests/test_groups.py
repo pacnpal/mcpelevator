@@ -1110,6 +1110,32 @@ def test_route_replaces_a_client_sent_original_host(clean_settings):
         assert r.json() == {"original": ["127.0.0.1"]}
 
 
+def test_route_serves_the_instance_current_after_the_body_is_read(clean_settings, monkeypatch):
+    """A swap while usage buffers the body retires the instance picked first, with
+    nothing counted on it yet, so it may close. The request goes to the new one."""
+    from app.groups import route
+
+    async def old(scope, receive, send):
+        await JSONResponse({"app": "old"})(scope, receive, send)
+
+    async def new(scope, receive, send):
+        await JSONResponse({"app": "new"})(scope, receive, send)
+
+    _write_groups({"team": "*"})
+    with TestClient(app) as client:
+        current = {"app": old}
+        _stub_group(client, "team", inner=None)
+        client.app.state.groups.app_for = lambda n: current["app"] if n == "team" else None
+
+        async def swap_while_reading(request, receive, mounted):
+            current["app"] = new
+            return receive
+
+        monkeypatch.setattr(route, "_record_group_usage", swap_while_reading)
+        r = client.post("/g/team/mcp", headers=LOOPBACK, json={})
+        assert r.json() == {"app": "new"}
+
+
 async def test_replaced_instance_finishes_its_requests_before_closing():
     """A swap must not cut off a request already running on the old instance: the
     built-in server's put_group through /g rebuilds the very group carrying it."""

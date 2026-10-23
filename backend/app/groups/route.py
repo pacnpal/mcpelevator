@@ -235,6 +235,10 @@ class GroupDispatch:
             # the client then followed it with, so one tool call landed twice.
             if subpath == "mcp":
                 receive = await _record_group_usage(request, receive, mounted)
+            # Re-read after that await: a swap while the body was buffering retires
+            # the instance picked above, and with nothing counted on it yet it may
+            # already be closed. No await between here and _Counting's count.
+            inner = self._hub.app_for(name) or inner
             await inner(sub_scope, receive, send)
         finally:
             for member_id in mounted.values():

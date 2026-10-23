@@ -235,10 +235,18 @@ def headers_for_log(raw: list[tuple[bytes, bytes]]) -> dict[str, Any]:
 _MCPE_TOKEN = re.compile(r"mcpe_[A-Za-z0-9_-]{8,}")
 _JWT = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 # A secret-looking field in JSON ("API_KEY": "...") or a Python repr ('token': '...').
+# A value cut off by a size limit has no closing quote, so the end of the text
+# closes it too: a truncated body must not keep the secret it was cut through.
 _SECRET_FIELD = re.compile(
     r"""(["'][^"']*(?:token|secret|password|key|authorization|assertion|cookie)[^"']*["']"""
-    r"""\s*:\s*)(["'])(?:\\.|(?!\2)[^\\])*\2""",
+    r"""\s*:\s*)(["'])(?:\\.|\\\Z|(?!\2)[^\\])*(?:\2|\Z)""",
     re.IGNORECASE,
+)
+# Any other credential after an auth scheme (Authorization: Bearer ghp_..., an
+# upstream's error echoing its header). mcpe_ tokens keep their prefix, see above.
+# A value of lowercase letters alone is a word, so prose ("bearer provider") stays.
+_AUTH_SCHEME = re.compile(
+    r"\b((?i:bearer|basic))(\s+)(?!mcpe_)(?![a-z]+(?![A-Za-z0-9._~+/=-]))[A-Za-z0-9._~+/=-]{8,}"
 )
 
 # A secret query parameter inside any line: in a URL (uvicorn's access log prints the
@@ -259,6 +267,7 @@ def scrub(text: str) -> str:
     text = _MCPE_TOKEN.sub(lambda m: m.group(0)[:12] + "…", text)
     text = _JWT.sub("<jwt>", text)
     text = _SECRET_QUERY.sub(r"\1<redacted>", text)
+    text = _AUTH_SCHEME.sub(r"\1\2<redacted>", text)
     return _SECRET_FIELD.sub(r"\1\2<redacted>\2", text)
 
 
@@ -272,10 +281,8 @@ def _body_text(chunks: list[bytes], limit: int) -> str:
             break
         prefix.append(chunk[:left])
         left -= len(prefix[-1])
-    text = b"".join(prefix).decode("utf-8", "replace")
-    if total > limit:
-        text += f"… ({total} bytes)"
-    return scrub(text)
+    text = scrub(b"".join(prefix).decode("utf-8", "replace"))
+    return text + f"… ({total} bytes)" if total > limit else text
 
 
 def _rpc_summary(body: bytes) -> Any:
