@@ -350,6 +350,34 @@ def test_trace_bounds_a_large_request_body():
     assert trace["request_bytes"] == 1_000_000  # counted past the cut
 
 
+def test_trace_of_a_body_dripped_a_byte_at_a_time_stays_fast():
+    import asyncio
+    import time
+
+    n = 40_000
+    sent = iter(range(n))
+
+    async def app(scope, receive, send):
+        while (await receive()).get("more_body"):
+            pass
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        for i in range(n):
+            await send({"type": "http.response.body", "body": b"y", "more_body": i < n - 1})
+
+    async def receive():
+        i = next(sent)
+        return {"type": "http.request", "body": b"x", "more_body": i < n - 1}
+
+    async def send(message):
+        pass
+
+    scope = {"type": "http", "method": "POST", "path": "/api/x", "headers": [], "query_string": b""}
+    started = time.perf_counter()
+    asyncio.run(debug.TraceMiddleware(app)(scope, receive, send))
+    assert time.perf_counter() - started < 2.0  # quadratic in the chunk count before
+    assert debug.TRACES[-1]["request_bytes"] == n and debug.TRACES[-1]["bytes"] == n
+
+
 def test_trace_records_an_error_after_the_last_body_message():
     import asyncio
 

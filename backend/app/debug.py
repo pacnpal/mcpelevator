@@ -401,7 +401,7 @@ class TraceMiddleware:
         # wait on a slow client before the Host/Origin and auth checks have run. Only
         # the first _BODY_LIMIT bytes are kept, so a huge upload can't fill memory.
         chunks: list[bytes] = []
-        body = {"bytes": 0, "logged": False}
+        body = {"bytes": 0, "kept": 0, "logged": False}  # counters, never a re-sum per chunk
 
         async def traced_receive() -> Message:
             message = await receive()
@@ -412,8 +412,9 @@ class TraceMiddleware:
             entry["request_bytes"] = body["bytes"]
             if body["logged"]:
                 return message
-            if (room := _BODY_LIMIT + 1 - sum(map(len, chunks))) > 0:
+            if (room := _BODY_LIMIT + 1 - body["kept"]) > 0:
                 chunks.append(data[:room])
+                body["kept"] += len(chunks[-1])
             done = not message.get("more_body", False)
             if done or body["bytes"] > _BODY_LIMIT:
                 body["logged"] = True
@@ -425,7 +426,7 @@ class TraceMiddleware:
             return message
 
         response: list[bytes] = []
-        state: dict[str, Any] = {"streaming": False, "sent": 0, "pending": b"", "skipping": False}
+        state: dict[str, Any] = {"streaming": False, "sent": 0, "kept": 0, "pending": b"", "skipping": False}
 
         def log_events(chunk: bytes, end: bool) -> None:
             # A huge message is read in _BODY_LIMIT windows, so no more than that
@@ -465,8 +466,9 @@ class TraceMiddleware:
                 state["sent"] += len(chunk)
                 if state["streaming"]:
                     log_events(chunk, end=not message.get("more_body", False))
-                elif (room := _BODY_LIMIT + 1 - sum(map(len, response))) > 0:
+                elif (room := _BODY_LIMIT + 1 - state["kept"]) > 0:
                     response.append(chunk[:room])  # keep a prefix, never the whole result
+                    state["kept"] += len(response[-1])
                 if not message.get("more_body", False):
                     if not state["streaming"]:
                         entry["response_body"] = _body_text(response, _BODY_LIMIT, state["sent"])
