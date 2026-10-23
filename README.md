@@ -577,7 +577,7 @@ Set `MCPE_DEBUG=true` on the container and restart when something fails and the 
 - **Every request is traced.** For `/api`, `/s`, `/g` and the OAuth discovery routes you get:
   - a line when the request arrives: method, path, query, peer, every header, the body
   - a line when the response starts: status, headers, time to first byte
-  - a line per streamed chunk, so an MCP error inside an SSE stream shows up as text
+  - a line per server-sent event, so an MCP error inside an SSE stream shows up as text
   - a summary line with the JSON-RPC method and tool name, the status, the total time and the response body
 
   Lines from one request share a short id, so you can follow it through a busy log.
@@ -599,6 +599,7 @@ Credentials and secrets are scrubbed from all of it, library output included:
 - A JWT in a header shows its claims (issuer, audience, subject, email, expiry, and whether it's expired) and never its signature. Anywhere else, a JWT becomes `<jwt>`.
 - Cookies show only a count. The bridge's internal header shows only whether it was valid.
 - Any JSON or Python field whose name looks secret (`*_TOKEN`, `API_KEY`, `password`, a freshly minted token) has its value replaced.
+- A credential after `Bearer` or `Basic`, and the `user:password@` part of a URL, are replaced.
 
 Ordinary values aren't scrubbed. Tool arguments and results, prompts and file contents all show up, so treat a debug log like the data your servers handle. Turn it off once you're done. When it's off, none of this runs and `/api/debug` returns 404.
 

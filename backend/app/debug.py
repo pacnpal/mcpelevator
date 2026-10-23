@@ -8,7 +8,7 @@ It is as verbose as it can be on purpose. When it's on:
   variable, so each server's own log (the one the UI shows) gets the same detail.
 - Every HTTP request is traced: a line when it arrives (method, path, query, peer,
   headers, body), a line when the response starts (status, headers), a line per
-  streamed chunk (so an MCP error inside an SSE stream shows up), and a summary with
+  streamed event (so an MCP error inside an SSE stream shows up), and a summary with
   the JSON-RPC method, tool name, status and timing. Credentials are reduced to
   something you can match but not reuse, and secret-looking values in bodies are
   scrubbed.
@@ -249,6 +249,11 @@ _AUTH_SCHEME = re.compile(
     r"\b((?i:bearer|basic))(\s+)(?!mcpe_)(?![a-z]+(?![A-Za-z0-9._~+/=-]))[A-Za-z0-9._~+/=-]{8,}"
 )
 
+# The user:password part of a URL (postgres://alice:s3cr3t@db/app), encoded or not.
+_URL_USERINFO = re.compile(r"""\b([a-z][a-z0-9+.-]*://)[^\s/@"'<>]+@""", re.IGNORECASE)
+# The end of one server-sent event: a blank line, LF or CRLF.
+_EVENT_END = re.compile(rb"\r?\n\r?\n")
+
 # A secret query parameter inside any line: in a URL (uvicorn's access log prints the
 # full request target) or at the start of a quoted raw query string (uvicorn's ASGI
 # trace prints 'query_string': b'code=...'). An OAuth callback's code/state,
@@ -268,6 +273,7 @@ def scrub(text: str) -> str:
     text = _JWT.sub("<jwt>", text)
     text = _SECRET_QUERY.sub(r"\1<redacted>", text)
     text = _AUTH_SCHEME.sub(r"\1\2<redacted>", text)
+    text = _URL_USERINFO.sub(r"\1<redacted>@", text)
     return _SECRET_FIELD.sub(r"\1\2<redacted>\2", text)
 
 
@@ -355,7 +361,26 @@ class TraceMiddleware:
             return await receive()
 
         response: list[bytes] = []
-        state: dict[str, Any] = {"streaming": False, "sent": 0}
+        state: dict[str, Any] = {"streaming": False, "sent": 0, "pending": b"", "skipping": False}
+
+        def log_events(chunk: bytes, end: bool) -> None:
+            # A stream is logged one whole event at a time, never a raw chunk:
+            # chunk boundaries are arbitrary, and a secret field split across two
+            # would slip past scrub() in both halves.
+            *done, state["pending"] = _EVENT_END.split(state["pending"] + chunk)
+            if end and state["pending"]:
+                done, state["pending"] = done + [state["pending"]], b""
+            for i, event in enumerate(done):
+                if i == 0 and state["skipping"]:
+                    state["skipping"] = False  # the tail of an event too long to hold
+                elif event:
+                    logger.debug("[%s] <- event %s", rid, _body_text([event], _CHUNK_LIMIT))
+            if len(state["pending"]) > _BODY_LIMIT:
+                if not state["skipping"]:
+                    logger.debug("[%s] <- event %s …(rest not logged)", rid,
+                                 _body_text([state["pending"]], _CHUNK_LIMIT))
+                # Keep only enough to spot an event end split across chunks.
+                state["pending"], state["skipping"] = state["pending"][-3:], True
 
         async def watch(message: Message) -> None:
             if message["type"] == "http.response.start":
@@ -369,8 +394,7 @@ class TraceMiddleware:
                 chunk = message.get("body", b"")
                 state["sent"] += len(chunk)
                 if state["streaming"]:
-                    if chunk:
-                        logger.debug("[%s] <- chunk %s", rid, _body_text([chunk], _CHUNK_LIMIT))
+                    log_events(chunk, end=not message.get("more_body", False))
                 elif (room := _BODY_LIMIT + 1 - sum(map(len, response))) > 0:
                     response.append(chunk[:room])  # keep a prefix, never the whole result
                 if not message.get("more_body", False):

@@ -798,7 +798,7 @@ def test_failed_cloudflare_sign_in_gets_its_reason_from_the_bearer_check(client,
     assert err.status_code == 403 and "only an admin" in err.detail
 
 
-def test_switch_applies_to_cloudflare_users_with_auth_off(client, cf):
+def test_switch_applies_to_cloudflare_users_with_auth_off(client, cf, monkeypatch):
     from fastapi import HTTPException
     from starlette.requests import Request
 
@@ -810,3 +810,11 @@ def test_switch_applies_to_cloudflare_users_with_auth_off(client, cf):
     with Session(get_engine()) as s, pytest.raises(HTTPException) as exc:
         _authorize(req, s, edge=True)
     assert exc.value.status_code == 403 and "disabled for this user" in exc.value.detail
+
+    # An admin token sent alongside outranks the Cloudflare identity, as with enforcement on.
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "admin_token", "break-glass")
+    both = [*req.scope["headers"], (b"authorization", b"Bearer break-glass")]
+    with Session(get_engine()) as s:
+        _authorize(Request({"type": "http", "headers": both}), s, edge=True)

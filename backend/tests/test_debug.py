@@ -85,6 +85,8 @@ def test_scrub_redacts_opaque_credentials_and_truncated_fields():
     basic = base64.b64encode(b"user:" + b"pass123").decode()
     assert basic not in debug.scrub(f"Basic {basic}")
     assert debug.scrub("no bearer provider configured") == "no bearer provider configured"
+    url = debug.scrub('{"DATABASE_URL": "postgres://alice:s3%40cr3t@db/app"}')
+    assert "alice" not in url and "s3%40cr3t" not in url and "postgres://<redacted>@db/app" in url
     assert "mcpe_abcdefg" in debug.scrub("Bearer mcpe_" + "abcdefg" * 6)
     # A body cut off inside a secret value has no closing quote to end the match.
     body = debug._body_text([b'{"api_key": "' + b"s3cr3t" * 5000 + b'"}'], 1024)
@@ -168,6 +170,35 @@ def test_trace_keeps_only_a_prefix_of_a_large_response():
     asyncio.run(debug.TraceMiddleware(app)(scope, receive, send))
     trace = debug.TRACES[-1]
     assert trace["bytes"] == 2_000_000 and len(trace["response_body"]) < 20000
+
+
+def test_trace_logs_a_stream_by_whole_events(caplog):
+    """A secret split across two stream chunks is scrubbed, and an event too long to
+    hold is logged as a prefix without holding the rest."""
+    import asyncio
+
+    secret = "s3cr3t" + "Q" * 10
+    chunks = [b'data: {"api_', ('key": "%s"}\r\n' % secret).encode(), b"\r\n",
+              b"data: " + b"z" * 40_000, b"\r\n\r\ndata: tail\r\n\r\n"]
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"text/event-stream")]})
+        for i, chunk in enumerate(chunks):
+            await send({"type": "http.response.body", "body": chunk, "more_body": i < len(chunks) - 1})
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        pass
+
+    scope = {"type": "http", "method": "GET", "path": "/s/x/mcp", "headers": [], "query_string": b""}
+    with caplog.at_level(logging.DEBUG, logger="app.debug"):
+        asyncio.run(debug.TraceMiddleware(app)(scope, receive, send))
+    events = [r.getMessage() for r in caplog.records if "<- event" in r.getMessage()]
+    assert len(events) == 3 and secret not in "".join(events) and '"api_key": "<redacted>"' in events[0]
+    assert "rest not logged" in events[1] and len(events[1]) < 6000 and "data: tail" in events[2]
 
 
 def test_trace_bounds_a_large_request_body():

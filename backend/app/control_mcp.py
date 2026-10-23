@@ -51,7 +51,7 @@ from app.api import servers as servers_api
 from app.api.schemas import GroupMembers, Role, ServerCreate, ServerUpdate, SettingsUpdate
 from app.auth import principal as principal_mod
 from app.auth import cf_access
-from app.auth.control_plane import enforcement_enabled
+from app.auth.control_plane import enforcement_enabled, is_env_admin_token
 from app.db import get_engine, repo
 from app.groups import registry
 from app.registry import service
@@ -676,8 +676,10 @@ def _authorize(request: Request, session: Session, *, edge: bool = False) -> Non
         bearer = principal_mod._bearer(request)
         row = repo.get_token_by_hash(session, hash_token(bearer)) if bearer else None
         user_id = row.user_id if row is not None else None
-        if user_id is None and (edge or internal):
-            signed_in = cf_access.user(session, request)  # so does a Cloudflare identity
+        # A Cloudflare identity names the caller only when no control credential
+        # does: an admin or userless token outranks it, as with enforcement on.
+        if row is None and not is_env_admin_token(bearer) and (edge or internal):
+            signed_in = cf_access.user(session, request)
             user_id = signed_in.id if signed_in is not None else None
     if user_id is not None:
         user = repo.get_user(session, user_id)
