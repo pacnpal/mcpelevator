@@ -669,8 +669,10 @@ def _authorize(request: Request, session: Session, *, edge: bool = False) -> Non
         raise HTTPException(status_code=404, detail="the mcpelevator MCP server is turned off")
     internal = _internal(request)
     credential = request.headers.get("authorization") or request.headers.get(cf_access.HEADER)
-    if not edge and internal and not credential:
-        return  # the built-in bridge listing tools; calls still authenticate per route
+    if not edge and internal and not credential and not request.headers.get(GROUP_HEADER):
+        # The supervisor's discovery probe listing tools; calls still authenticate
+        # per route. A group request is a client's, so it never counts as one.
+        return
     if enforcement_enabled(session):
         cloudflare = edge or internal
         caller = principal_mod.credential_principal(request, session, cloudflare=cloudflare)

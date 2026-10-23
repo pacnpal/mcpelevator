@@ -146,6 +146,8 @@ def test_enforced_gate_and_per_user_switch(client):
     assert _rpc(client, "tools/list", headers=internal)[0] == 200
     is_error, out = _call(client, "list_servers", headers=internal)
     assert is_error and "401" in json.dumps(out)
+    # An anonymous client reaching the bridge through a group is not that probe.
+    assert _rpc(client, "tools/list", headers={**internal, "x-mcpe-group": "g"})[0] == 401
 
     auth = {"authorization": f"Bearer {admin}"}
     user = client.post("/api/users", json={"name": "Ada"}, headers={**LOOPBACK, **auth}).json()
