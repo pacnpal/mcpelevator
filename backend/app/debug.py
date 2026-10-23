@@ -258,6 +258,17 @@ def _redact_field(m: re.Match) -> str:
     return f'{m[1]}"<redacted>"'
 
 
+# A secret-named field in plain header or config syntax (X-API-Key: sk_live_...,
+# client_secret: ...). A name starts only after a non-name character and the keyword
+# is found by lookahead, so the scan stays linear; a value of lowercase letters alone
+# is a word, so prose ("missing key: retrying") stays readable.
+_SECRET_COLON = re.compile(
+    r"""((?<![\w-])(?=[\w-]*?(?:token|secret|password|key|authorization|assertion|cookie))[\w-]*+"""
+    r"""\s*:\s*)(?![a-z]+(?![^\s,;&"'<>]))[^\s,;&"'<>]{6,}""",
+    re.IGNORECASE,
+)
+
+
 # Any other credential after an auth scheme (Authorization: Bearer ghp_..., an
 # upstream's error echoing its header). mcpe_ tokens keep their prefix, see above.
 # A value of lowercase letters alone is a word, so prose ("bearer provider") stays.
@@ -293,6 +304,7 @@ def scrub(text: str) -> str:
     text = _SECRET_QUERY.sub(r"\1<redacted>", text)
     text = _AUTH_SCHEME.sub(r"\1\2<redacted>", text)
     text = _URL_USERINFO.sub(r"\1<redacted>@", text)
+    text = _SECRET_COLON.sub(r"\1<redacted>", text)
     return _SECRET_FIELD.sub(_redact_field, text)
 
 

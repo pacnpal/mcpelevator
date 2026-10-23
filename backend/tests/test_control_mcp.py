@@ -686,6 +686,22 @@ def test_unreachable_signing_keys_back_off_instead_of_blocking_each_request(monk
         assert cf_access.email(req) is None
     assert len(calls) == 1  # one blocking attempt, then the backoff answers
 
+    # A 200 that isn't a key set (bad JSON) is refused and backed off the same way.
+    import json
+
+    calls.clear()
+    cf_access._last_failure.clear()
+
+    def garbled(refresh: bool = False):
+        calls.append(refresh)
+        raise json.JSONDecodeError("Expecting value", "<html>", 0)
+
+    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+        get_signing_keys=garbled, jwk_set_cache=None))
+    for _ in range(5):
+        assert cf_access.verify(req) == (None, "the Cloudflare Access assertion didn't verify")
+    assert len(calls) == 1
+
 
 def test_sql_logging_never_shows_bound_values():
     from app.db import get_engine

@@ -69,9 +69,13 @@ def _fetch(team: str, *, refresh: bool) -> dict[str, Any]:
         raise jwt.PyJWKClientConnectionError("Cloudflare's signing keys were unreachable moments ago")
     try:
         return {k.key_id: k.key for k in client.get_signing_keys(refresh=refresh)}
-    except jwt.PyJWKClientConnectionError:
+    except (jwt.PyJWKClientError, ValueError) as exc:
+        # Unreachable, or answered with something that isn't a key set (bad JSON,
+        # no keys): either way back off, and refuse the sign-in rather than fail it.
         _last_failure[team] = time.monotonic()
-        raise
+        if isinstance(exc, jwt.PyJWKClientConnectionError):
+            raise
+        raise jwt.PyJWKClientConnectionError(f"Cloudflare's signing keys couldn't be read: {exc}") from exc
 
 
 def _signing_key(team: str, token: str) -> Any:

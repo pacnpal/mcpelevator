@@ -102,7 +102,7 @@ def test_scrub_stays_linear_on_long_keyword_heavy_lines():
 
     started = time.perf_counter()
     for line in ('{"text": "' + "key " * 32000 + '"}', "?" + "key" * 40000, "'key' " * 20000,
-                 "?" * 60000, "?key" * 30000, "a." * 50000):
+                 "?" * 60000, "?key" * 30000, "a." * 50000, "a-" * 50000 + "key:", "key " * 30000 + ":"):
         debug.scrub(line)
     assert time.perf_counter() - started < 1.0  # over a minute before the scans were linear
 
@@ -125,6 +125,15 @@ def test_bundle_scrubs_every_string_it_returns():
     out = debug._scrubbed({"traces": [{"path": f"/s/x/{token}", "headers": {"authorization": "Bearer mcpe_qqqqqqq… (45 chars)"}}]})
     assert token not in str(out)
     assert out["traces"][0]["headers"]["authorization"] == "Bearer mcpe_qqqqqqq… (45 chars)"
+
+
+def test_scrub_redacts_secret_fields_in_header_and_config_syntax():
+    live = "sk_live" + "_51Habc123"
+    out = debug.scrub(f"X-API-Key: {live}\nclient_secret: opaque-Value9 user: ada")
+    assert live not in out and "opaque-Value9" not in out and "user: ada" in out
+    assert "X-API-Key: <redacted>" in out
+    assert debug.scrub("missing key: retrying") == "missing key: retrying"
+    assert '"api_key": "<redacted>"' in debug.scrub('{"api_key": "x1y2z3w4"}')  # quoted rule unchanged
 
 
 def test_scrub_catches_query_secrets_in_any_line():
