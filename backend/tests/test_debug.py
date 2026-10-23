@@ -102,6 +102,11 @@ def test_scrub_stays_linear_on_long_keyword_heavy_lines():
     assert time.perf_counter() - started < 1.0  # over a minute before the scans were linear
 
 
+def test_bundle_config_hides_url_passwords(monkeypatch):
+    monkeypatch.setattr(get_settings(), "public_base_url", "https://ada:s3cr3t@mcp.example.com")
+    assert debug._config()["public_base_url"] == "https://<redacted>@mcp.example.com"
+
+
 def test_scrub_catches_query_secrets_in_any_line():
     line = 'GET /api/oauth/callback?code=abc123&state=xyz&page=2&api_key=k HTTP/1.1" 303'
     out = debug.scrub(line)

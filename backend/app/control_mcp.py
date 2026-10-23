@@ -57,6 +57,7 @@ from app.groups import registry
 from app.registry import service
 from app.util import hash_token
 from app.runners.builtin import (
+    GROUP_HEADER,
     INSTRUCTIONS,
     ORIGINAL_HOST_HEADER,
     PATH,
@@ -544,18 +545,24 @@ def build(app: FastAPI) -> "_Gate":
         """The runtime settings."""
         return await api("GET", "/api/settings")
 
-    def _localized(text: str) -> str:
+    async def _localized(text: str) -> str:
         # Prompts name tools; use the names this client actually sees. Only the bridge
         # applies the tool policy, so a direct /api/mcp client keeps the original names.
-        if not _internal(get_http_request()):
+        # Through a group bundle every tool also carries this server's slug.
+        request = get_http_request()
+        if not _internal(request):
             return text
         with Session(get_engine()) as session:
-            return localize(text, service.get_builtin(session))
+            builtin = service.get_builtin(session)
+        if builtin is None or not request.headers.get(GROUP_HEADER):
+            return localize(text, builtin)
+        tools = [tool.name for tool in await mcp.list_tools()]
+        return localize(text, builtin, prefix=f"{builtin.slug}_", tools=tools)
 
     @mcp.prompt
-    def install_server(what: str) -> str:
+    async def install_server(what: str) -> str:
         """Find and install an MCP server from the public catalog."""
-        return _localized(
+        return await _localized(
             f"Install an MCP server for: {what}. Use search_catalog to find candidates and "
             "pick the best match (say why). Call install_from_catalog with its id. If it "
             "returns warnings, ask me for those values, then update_server with them and "
@@ -564,9 +571,9 @@ def build(app: FastAPI) -> "_Gate":
         )
 
     @mcp.prompt
-    def diagnose_server(server_id: str) -> str:
+    async def diagnose_server(server_id: str) -> str:
         """Work out why a server isn't running and fix what can be fixed."""
-        return _localized(
+        return await _localized(
             f"Diagnose server {server_id}. Read get_server for its state, startup status and "
             "last error, and get_server_logs for the log. Explain the root cause in plain "
             "words. If it's a config problem (a missing env var, a wrong package or URL), "

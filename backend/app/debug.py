@@ -451,7 +451,8 @@ def _config() -> dict[str, Any]:
         if any(word in name for word in _SECRET_WORDS) and isinstance(value, str) and value:
             out[name] = "<set>"
         else:
-            out[name] = str(value) if not isinstance(value, (bool, int, float, type(None))) else value
+            # scrub() catches what a name can't, like a password in a URL.
+            out[name] = scrub(str(value)) if not isinstance(value, (bool, int, float, type(None))) else value
     return out
 
 

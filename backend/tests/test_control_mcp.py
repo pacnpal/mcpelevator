@@ -467,6 +467,7 @@ def test_prompts_use_bridge_names_only_through_the_bridge(client):
         b.tool_overrides = {"wait_for_server": {"name": "await_server"}}
         s.add(b)
         s.commit()
+        slug = b.slug
     args = {"name": "install_server", "arguments": {"what": "x"}}
 
     def text(headers=None):
@@ -475,6 +476,10 @@ def test_prompts_use_bridge_names_only_through_the_bridge(client):
 
     assert "wait_for_server" in text()  # direct /api/mcp: the tools aren't renamed here
     assert "await_server" in text({INTERNAL_HEADER: INTERNAL_SECRET})
+    # Through a group bundle every tool carries the slug, renamed ones included.
+    grouped = text({INTERNAL_HEADER: INTERNAL_SECRET, "x-mcpe-group": "g"})
+    assert f"{slug}_await_server" in grouped and f"{slug}_search_catalog" in grouped
+    assert " search_catalog" not in grouped
 
 
 def _member_control_token(client, admin_headers: dict, name: str = "Ada") -> tuple[dict, str]:

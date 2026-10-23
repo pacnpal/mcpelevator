@@ -40,7 +40,7 @@ from app.auth.middleware import enforce
 from app.db import get_engine
 from app.groups import registry
 from app.groups.hub import GroupHub, _Counting, group_server
-from app.runners.builtin import ORIGINAL_HOST_HEADER
+from app.runners.builtin import GROUP_HEADER, ORIGINAL_HOST_HEADER
 from app.usage import attribution
 
 
@@ -195,9 +195,13 @@ class GroupDispatch:
         # The built-in member's bridge forwards this request's headers to /api/mcp,
         # which names the caller's address in URLs from this header (as the /s proxy
         # sets it). Replace any client-sent copy with the Host enforce() validated.
-        sub_scope["headers"] = [
-            (k, v) for k, v in scope["headers"] if k != ORIGINAL_HOST_HEADER.encode()
-        ] + [(ORIGINAL_HOST_HEADER.encode(), request.headers.get("host", "").encode("latin-1"))]
+        # GROUP_HEADER tells it the request came through a bundle, so its prompts
+        # name tools with the slug prefix the bundle gives them.
+        ours = (ORIGINAL_HOST_HEADER.encode(), GROUP_HEADER.encode())
+        sub_scope["headers"] = [(k, v) for k, v in scope["headers"] if k not in ours] + [
+            (ORIGINAL_HOST_HEADER.encode(), request.headers.get("host", "").encode("latin-1")),
+            (GROUP_HEADER.encode(), name.encode()),
+        ]
 
         # Idle bookkeeping: an authenticated group request counts as in-flight
         # traffic for every member for the WHOLE delegation — a long-lived
