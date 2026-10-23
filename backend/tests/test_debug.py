@@ -509,3 +509,24 @@ def test_scrub_redacts_presigned_url_signatures():
     assert sig not in str(logged) and logged["page"] == "2"
     # Only a query: a CORS header keeps its value.
     assert debug.fingerprint("access-control-allow-credentials", "true") == "true"
+
+
+def test_uvicorn_cli_loggers_reach_the_ring(monkeypatch):
+    import faulthandler
+    import sys
+    import threading
+
+    root = logging.getLogger()
+    access = logging.getLogger("uvicorn.access")
+    # As uvicorn's CLI leaves them: own handler, not propagating.
+    monkeypatch.setattr(root, "handlers", [h for h in root.handlers if not getattr(h, "_mcpe_debug", False)])
+    monkeypatch.setattr(access, "handlers", [logging.StreamHandler()])
+    monkeypatch.setattr(access, "propagate", False)
+    monkeypatch.setattr(root, "level", root.level)
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)
+    monkeypatch.setattr(threading, "excepthook", threading.excepthook)
+    monkeypatch.setattr(faulthandler, "enable", lambda: None)
+    debug.configure_logging(keep=True)
+    access.info('127.0.0.1:1 - "GET /api/health-probe HTTP/1.1" 200')
+    assert access.propagate and not access.handlers
+    assert any("/api/health-probe" in line for line in debug.RECORDS)

@@ -148,8 +148,11 @@ def configure_logging(*, keep: bool) -> None:
     for name in list(logging.root.manager.loggerDict):
         log = logging.getLogger(name)
         log.setLevel(logging.NOTSET)
-        if name == "fastmcp" or name.startswith("fastmcp."):
-            log.handlers.clear()  # fastmcp's own rich handler: route through ours instead
+        # fastmcp's rich handler and uvicorn's own (its CLI config stops them
+        # propagating, which would keep startup, access and protocol errors out of
+        # the ring): route both through ours instead.
+        if name.split(".")[0] in ("fastmcp", "uvicorn"):
+            log.handlers.clear()
             log.propagate = True
     for log in [root, *(logging.getLogger(n) for n in logging.root.manager.loggerDict)]:
         for handler in log.handlers:

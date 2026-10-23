@@ -228,6 +228,11 @@ def test_playground_forwards_the_callers_credential_to_the_builtin_only(client, 
     unit.tools = [{"name": "list_servers"}]
     client.post(f"/api/servers/{other['id']}/tools/list_servers/call", json={}, headers=auth)
     assert seen == [{"authorization": "Bearer abc", "x-mcpe-original-host": "127.0.0.1"}, None]
+    # An OAuth-only Cloudflare client has no Authorization; its assertion goes instead.
+    seen.clear()
+    cf = {**LOOPBACK, "cf-access-jwt-assertion": "a.b.c"}
+    client.post(f"/api/servers/{b.id}/tools/list_servers/call", json={}, headers=cf)
+    assert seen == [{"cf-access-jwt-assertion": "a.b.c", "x-mcpe-original-host": "127.0.0.1"}]
 
 
 def test_logs_recheck_visibility_after_the_await(client, monkeypatch):

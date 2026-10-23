@@ -40,7 +40,7 @@ from app.api.schemas import (
 )
 from app import mcpb, usage
 from app.api.util import base_url, oauth_public_base, resync_groups
-from app.auth import oauth_flow, policy
+from app.auth import cf_access, oauth_flow, policy
 from app.auth import principal as principal_mod
 from app.auth.principal import Principal, current_principal
 from app.auth.oauth_store import ServerTokenStorage
@@ -1014,13 +1014,12 @@ async def call_server_tool(
     if unit is None or unit.state != "running" or unit.port is None:
         raise HTTPException(status_code=409, detail="server is not running")
     # The built-in server's tools authorize as the caller (app.runners.builtin), so
-    # its bridge needs the caller's credential. No other bridge ever gets it.
+    # its bridge needs the caller's credential: a bearer token, or the Cloudflare
+    # Access assertion an OAuth-only client signs in with. No other bridge gets either.
     extra = {}
-    if server.runner == BUILTIN_RUNNER and request.headers.get("authorization"):
-        extra["headers"] = {
-            "authorization": request.headers["authorization"],
-            ORIGINAL_HOST_HEADER: request.headers.get("host", ""),
-        }
+    creds = {k: request.headers[k] for k in ("authorization", cf_access.HEADER) if k in request.headers}
+    if server.runner == BUILTIN_RUNNER and creds:
+        extra["headers"] = {**creds, ORIGINAL_HOST_HEADER: request.headers.get("host", "")}
     if not any(t.get("name") == tool_name for t in unit.tools or []):
         raise HTTPException(status_code=404, detail=f"tool {tool_name!r} not found")
     timeout = min(max(float(payload.timeout_s), 1.0), 300.0)
