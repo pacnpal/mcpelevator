@@ -158,7 +158,13 @@ async def lifespan(app: FastAPI):
     _bootstrap_private_lan()  # seed LAN access from env before deciding auth enforcement
     _bootstrap_docker_runner()  # seed docker-runner enable from env (headless)
     _bootstrap_control_plane_auth()
-    app.state.http = httpx.AsyncClient(timeout=None)  # no timeout: long-lived SSE streams
+    # No timeout: long-lived SSE streams. No connection cap either: the /s proxy holds a
+    # pooled connection for every open client stream, so httpx's default cap of 100 was
+    # reached by ordinary use, and then every proxied request hung waiting for a slot
+    # and every catalog fetch died of PoolTimeout.
+    app.state.http = httpx.AsyncClient(
+        timeout=None, limits=httpx.Limits(max_connections=None, max_keepalive_connections=20)
+    )
     supervisor = Supervisor()
     await supervisor.boot_reset()  # observed runtime from a prior process is stale
     app.state.supervisor = supervisor

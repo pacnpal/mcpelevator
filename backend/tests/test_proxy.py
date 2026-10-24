@@ -315,3 +315,37 @@ def _reset_settings():
     yield
     with Session(get_engine()) as session:
         runtime_settings.write(session, {"bind_mode": "local", "allowed_hosts": []})
+
+
+@pytest.mark.parametrize("fail_at", [None, "http.response.start", "http.response.body"])
+async def test_relay_response_closes_upstream_however_it_ends(fail_at):
+    # A client gone before the response starts means Starlette never iterates the
+    # body, so cleanup in the body generator would never run and the pooled upstream
+    # connection (and the in-flight count) leaked. It must run exactly once regardless.
+    from starlette.requests import ClientDisconnect
+
+    from app.proxy.router import _RelayResponse
+
+    closed = []
+
+    async def body():
+        yield b"chunk"
+
+    async def on_close():
+        closed.append(True)
+
+    async def send(message):
+        if message["type"] == fail_at:
+            raise OSError("client gone")
+
+    async def receive():
+        return {"type": "http.request"}
+
+    resp = _RelayResponse(body(), on_close)
+    scope = {"type": "http", "asgi": {"spec_version": "2.4"}}
+    if fail_at:
+        with pytest.raises(ClientDisconnect):
+            await resp(scope, receive, send)
+    else:
+        await resp(scope, receive, send)
+    assert closed == [True]
