@@ -239,8 +239,13 @@ class Source(Protocol):
         """
         ...
 
+    def enabled(self) -> bool:
+        """Whether this source is offered at all (e.g. False until its API key is set).
+        A disabled source is absent from the source list, the API and the mirror."""
+        ...
+
     def mirror_interval(self) -> float | None:
-        """Seconds between mirror syncs, or None to not mirror this source (yet)."""
+        """Seconds between mirror syncs, or None to not mirror this source."""
         ...
 
     def mirror_pages(

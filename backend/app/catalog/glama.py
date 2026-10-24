@@ -5,8 +5,8 @@ A *discovery-only* directory: entries are flat metadata (name, description, repo
 We scaffold the name + required env-var keys and link to the repo; the operator supplies
 the runner/package/command in the review form.
 
-Glama's directory API needs an API key (``MCPE_GLAMA_API_KEY``), and its data license
-requires a visible Glama credit on any page showing it and a link from every listing to
+Glama's directory API needs an API key (``MCPE_GLAMA_API_KEY``); without one the source
+is disabled and never shown. Its data license requires a visible Glama credit on any page showing it and a link from every listing to
 its Glama page. The SPA does both off ``attribution_url`` and each item's ``web_url``.
 """
 
@@ -25,14 +25,7 @@ BASE_URL = "https://glama.ai/api/mcp"
 
 
 def _auth() -> dict[str, str]:
-    """The API key header, or a clear error before we spend a request on a 401."""
-    key = get_settings().glama_api_key
-    if not key:
-        raise base.CatalogUpstreamError(
-            "Glama requires an API key. Create one at https://glama.ai/settings/api-keys "
-            "and set MCPE_GLAMA_API_KEY."
-        )
-    return {"Authorization": f"Bearer {key}"}
+    return {"Authorization": f"Bearer {get_settings().glama_api_key}"}
 
 
 def _repo_url(server: dict[str, Any]) -> str | None:
@@ -176,8 +169,11 @@ class GlamaSource:
         """
         self._cache = base.TTLCache()
 
+    def enabled(self) -> bool:
+        return bool(get_settings().glama_api_key)
+
     def mirror_interval(self) -> float | None:
-        return 86400.0 if get_settings().glama_api_key else None
+        return 86400.0
 
     async def mirror_pages(
         self, http: httpx.AsyncClient, *, since: str | None

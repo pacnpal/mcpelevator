@@ -179,7 +179,7 @@ async def lifespan(app: FastAPI):
     usage_flusher = asyncio.create_task(usage.run_forever())
     tasks = [reconciler, usage_flusher]
     if get_settings().catalog_mirror:
-        sources = catalog_registry.all_sources()
+        sources = catalog_registry.enabled_sources()
         tasks.append(asyncio.create_task(catalog_mirror.run_forever(sources, app.state.http)))
     try:
         # Starlette doesn't run a route's ASGI lifespan: run /api/mcp's session manager here.

@@ -22,6 +22,11 @@ SOURCES: dict[str, Source] = {s.id: s for s in _SOURCES}
 DEFAULT_SOURCE: str = _SOURCES[0].id
 
 
+def enabled_sources() -> list[Source]:
+    """The sources currently offered, in display order (see ``Source.enabled``)."""
+    return [s for s in _SOURCES if s.enabled()]
+
+
 def get_source(source_id: str) -> Source | None:
     """
     Get the catalog source registered for the given identifier.
@@ -30,14 +35,11 @@ def get_source(source_id: str) -> Source | None:
     	source_id (str): The source identifier.
     
     Returns:
-    	Source | None: The matching source, or None if no source is registered for the identifier.
+    	Source | None: The matching source, or None if none is registered for the identifier
+    	or it is disabled.
     """
-    return SOURCES.get(source_id)
-
-
-def all_sources() -> list[Source]:
-    """Every registered source, in display order."""
-    return list(_SOURCES)
+    src = SOURCES.get(source_id)
+    return src if src is not None and src.enabled() else None
 
 
 def source_list() -> list[dict[str, str | None]]:
@@ -55,5 +57,5 @@ def source_list() -> list[dict[str, str | None]]:
             "install_support": s.install_support,
             "attribution_url": s.attribution_url,
         }
-        for s in _SOURCES
+        for s in enabled_sources()
     ]

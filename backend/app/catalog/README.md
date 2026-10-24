@@ -23,7 +23,7 @@ answer when a live fetch fails.
 | `base.py` | The `Source` protocol + shared infra: fail-fast `get_json`, `TTLCache`, `clamp_limit`, `CatalogUpstreamError`. |
 | `mapping.py` | **Pure** launch-spec core for *package-based* registries: `package_draft()` turns a `server.json` package (npm/pypi/…) into a draft. No I/O, no clocks — same input → same output. |
 | `official.py` | `OfficialSource` — the MCP Registry (`registry.modelcontextprotocol.io`). Auto-install. |
-| `glama.py` | `GlamaSource` — the Glama directory. Discovery-only (no launch spec ⇒ manual scaffold). Needs `MCPE_GLAMA_API_KEY`. |
+| `glama.py` | `GlamaSource` — the Glama directory. Discovery-only (no launch spec ⇒ manual scaffold). Disabled until `MCPE_GLAMA_API_KEY` is set. |
 | `mirror.py` | The local copy of every directory: background sync (`run_forever`), and the reads (`list_page`, `get`) sources try before going live. |
 | `registry.py` | **SSOT**: the list of available sources. The only place that enumerates them. |
 
@@ -53,6 +53,10 @@ class Source(Protocol):
 
     async def list_versions(self, http, *, id) -> list[str]: ...
     #   → version strings, latest first; [] for a source with no version concept
+
+    def enabled(self) -> bool: ...
+    #   → False hides the source everywhere: source list, API (400 like an unknown
+    #     source) and mirror. Use it for a directory that needs a key to work.
 
     def mirror_interval(self) -> float | None: ...
     #   → seconds between background syncs, or None to not mirror this source
@@ -156,6 +160,9 @@ class AcmeSource:
         # Acme has no version concept — the picker just shows the latest. A versioned
         # registry would fetch and return the version strings here, latest first.
         return []
+
+    def enabled(self):
+        return True
 
     def mirror_interval(self):
         # Not mirrored: every request goes live. To mirror, return an interval and

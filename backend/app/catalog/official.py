@@ -235,6 +235,9 @@ class OfficialSource:
     def __init__(self) -> None:
         self._cache = base.TTLCache()
 
+    def enabled(self) -> bool:
+        return True  # public and unauthenticated
+
     def mirror_interval(self) -> float | None:
         return 3600.0  # the registry asks aggregators for "about once per hour"
 

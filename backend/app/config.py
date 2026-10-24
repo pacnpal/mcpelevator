@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     # Registry promises no uptime and asks consumers to sync about hourly.
     catalog_mirror: bool = True
     # Glama's directory API requires a key (https://glama.ai/settings/api-keys). Without
-    # one the Glama tab explains that instead of failing on a 401.
+    # one the Glama directory isn't offered at all.
     glama_api_key: str = ""
     # Debug mode: DEBUG logging everywhere (bridges too), a one-line trace of every
     # request with credentials fingerprinted, and an admin-only diagnostics bundle at

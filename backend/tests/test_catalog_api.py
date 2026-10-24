@@ -549,15 +549,16 @@ async def test_mirror_incremental_sync_updates_status_and_full_sync_drops_missin
         assert await mirror.get("glama", "acme/cool") is not None
 
 
-def test_glama_without_key_says_so_without_calling_upstream(monkeypatch):
+def test_glama_is_hidden_without_a_key(monkeypatch):
     calls = _stub(monkeypatch, {})
     monkeypatch.setattr(get_settings(), "glama_api_key", "")
     with TestClient(app) as c:
+        ids = [s["id"] for s in c.get("/api/catalog/sources", headers=LOOPBACK).json()]
         r = c.get("/api/catalog/servers", params={"source": "glama"}, headers=LOOPBACK)
-    assert r.status_code == 503
-    assert "MCPE_GLAMA_API_KEY" in r.json()["detail"]
+    assert ids == ["official"]
+    assert r.status_code == 400  # same as any unknown source
     assert calls == []
-    assert registry.SOURCES["glama"].mirror_interval() is None  # and nothing to sync
+    assert registry.SOURCES["glama"] not in registry.enabled_sources()  # and never synced
 
 
 def test_sources_carry_attribution():
