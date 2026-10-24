@@ -526,7 +526,11 @@ hand-typing `npx -y …`.
   one): **one-click install**.
 - **Glama** (`glama.ai`) — a larger, curated directory for **discovery**. It publishes no
   launch command, so installs open the review form pre-filled with the name + required
-  env-var keys + a repo link for you to complete.
+  env-var keys + a repo link for you to complete. Glama's API needs a key, so this
+  directory only shows up once you set one: create it at
+  [glama.ai/settings/api-keys](https://glama.ai/settings/api-keys), set
+  `MCPE_GLAMA_API_KEY`, and restart. Its data license requires a Glama credit on the page
+  and a link from each listing to its Glama page, which the browse view shows.
 
 **Filter by type** — narrow the browse list to one or more package/registry types (`npm`,
 `pypi`, `oci`, `nuget`, `mcpb`, `remote`) with the type chips. A server that publishes a
@@ -537,6 +541,13 @@ in upstream auth before starting.
 Open **Browse** in the header (or `/catalog`). The backend proxies the directories
 (`GET /api/catalog/servers`, `GET /api/catalog/server`) so the SPA stays same-origin;
 installing posts the reviewed draft to `POST /api/servers` tagged `source=catalog:<id>`.
+
+The MCP Registry promises no uptime and asks consumers to sync about hourly and keep their
+own copy, so mcpelevator does: a background task mirrors each directory into
+`<data_dir>/catalog-mirror.db` (the registry hourly and incrementally, Glama daily). Once a directory has synced, browsing and search read the local copy and keep
+working when the upstream is down. Until then, and for anything the mirror doesn't hold
+(an older version, say), requests go live, and a failed one falls back to the last good
+answer it cached. The file is a cache: delete it and the next sync rebuilds it.
 
 Adding another directory is a small plugin: one `Source` module + one line in the source
 registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md).
@@ -555,6 +566,8 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_MINT_ADMIN_TOKEN` | `false` | Force-mint a fresh admin token on boot and print it (recovery for a lost token); unset after grabbing it |
 | `MCPE_ALLOW_PRIVATE_LAN` | `false` | First-boot seed for the LAN-access setting (headless bootstrap); see **Security** |
 | `MCPE_DOCKER_RUNNER` | `false` | First-boot seed for the (root-equivalent) docker-runner setting; needs the Docker socket mounted or a dind sidecar |
+| `MCPE_CATALOG_MIRROR` | `true` | Keep a local copy of each catalog directory, synced in the background, so browsing survives an upstream outage; `false` always asks the upstream live |
+| `MCPE_GLAMA_API_KEY` | _(none)_ | API key for the Glama directory ([create one](https://glama.ai/settings/api-keys)); the catalog only offers Glama when it's set |
 | `MCPE_CONTROL_MCP` | `true` | Provision the built-in mcpelevator MCP server on boot when it's missing; `false` skips that (an existing one stays, turn it off in Settings) |
 | `MCPE_CF_ACCESS_TEAM_DOMAIN` | _(none)_ | Cloudflare Access team domain (`myteam.cloudflareaccess.com`). With `MCPE_CF_ACCESS_AUD`, the built-in server accepts Cloudflare Access sign-ins; see **Manage mcpelevator from an agent** |
 | `MCPE_CF_ACCESS_AUD` | _(none)_ | The Access application's AUD tag (comma-separated for several applications) |

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { createServer, errorMessage } from '$lib/api';
-	import { takePendingInstall, type PendingInstall } from '$lib/catalogInstall';
+	import { safeUrl, takePendingInstall, type PendingInstall } from '$lib/catalogInstall';
 	import ServerForm from '$lib/components/ServerForm.svelte';
 	import type { ServerCreate } from '$lib/types';
 
@@ -17,18 +17,6 @@
 		pending = p;
 	});
 
-	// Repo/web links come from public directory metadata (untrusted). Only render an
-	// anchor when the URL parses as http(s), so a malicious entry can't slip a
-	// `javascript:` (or other unsafe-scheme) href into the review page.
-	function safeUrl(url: string | null): string | null {
-		if (!url) return null;
-		try {
-			const u = new URL(url);
-			return u.protocol === 'http:' || u.protocol === 'https:' ? url : null;
-		} catch {
-			return null;
-		}
-	}
 	const repoUrl = $derived(safeUrl(pending?.repositoryUrl ?? null));
 	const webUrl = $derived(safeUrl(pending?.webUrl ?? null));
 

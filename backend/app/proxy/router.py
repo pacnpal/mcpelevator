@@ -24,6 +24,7 @@ import httpx
 from fastapi import APIRouter, Request
 from sqlmodel import Session
 from starlette.responses import Response, StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from app import usage
 from app.auth.middleware import enforce
@@ -33,6 +34,25 @@ from app.db.models import BUILTIN_RUNNER
 from app.runners.builtin import GROUP_HEADER, ORIGINAL_HOST_HEADER
 
 logger = logging.getLogger(__name__)
+
+
+class _RelayResponse(StreamingResponse):
+    """A StreamingResponse that runs ``on_close`` once, however the response ends.
+
+    Cleanup can't live in the body generator's ``finally``: when the client is already
+    gone at response start, Starlette raises before it ever iterates the body, so the
+    generator never starts and its ``finally`` never runs. That leaked the pooled
+    upstream connection and the server's in-flight count for good."""
+
+    def __init__(self, content, on_close, **kwargs) -> None:
+        super().__init__(content, **kwargs)
+        self._on_close = on_close
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._on_close()
 
 router = APIRouter()
 
@@ -183,16 +203,13 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
     }
     resp_headers["x-accel-buffering"] = "no"  # tell any outer proxy not to buffer SSE
 
-    async def relay():
-        try:
-            async for chunk in upstream.aiter_raw():
-                yield chunk
-        finally:
-            await upstream.aclose()
-            sup.request_finished(server.id)
+    async def close() -> None:
+        await upstream.aclose()
+        sup.request_finished(server.id)
 
-    return StreamingResponse(
-        relay(),
+    return _RelayResponse(
+        upstream.aiter_raw(),
+        close,
         status_code=upstream.status_code,
         headers=resp_headers,
         media_type=upstream.headers.get("content-type"),

@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from conftest import LOOPBACK
 
 from app.catalog import base, registry
+from app.config import get_settings
 from app.main import app
 
 
@@ -61,15 +62,20 @@ _GLAMA_DETAIL = {"id": "abc", "namespace": "acme", "slug": "cool", "name": "cool
 
 
 @pytest.fixture(autouse=True)
-def _clear_cache():
+def _clear_cache(monkeypatch):
     """
-    Clear cached catalog source data before and after each test.
+    Clear cached catalog source data (and the local mirror) before and after each
+    test, and give Glama an API key so its calls go through.
     """
+    monkeypatch.setattr(get_settings(), "glama_api_key", "test-key")
+
     def clear():
         for src in registry.SOURCES.values():
             cache = getattr(src, "_cache", None)
             if cache is not None:
                 cache._store.clear()
+        for suffix in ("", "-wal", "-shm"):
+            (get_settings().data_dir / f"catalog-mirror.db{suffix}").unlink(missing_ok=True)
 
     clear()
     yield
@@ -89,7 +95,7 @@ def _stub(monkeypatch, routes: dict):
     """
     calls: list[tuple[str, dict]] = []
 
-    async def fake_get_json(http, url, params):
+    async def fake_get_json(http, url, params, headers=None):
         calls.append((url, params))
         for needle, payload in routes.items():
             if needle in url:
@@ -288,11 +294,11 @@ def test_official_versions_endpoint_latest_first(monkeypatch):
         assert r.json()["versions"] == ["1.0.1", "1.0.0"]
 
 
-def test_official_versions_malformed_payload_is_502(monkeypatch):
+def test_official_versions_malformed_payload_is_503(monkeypatch):
     _stub(monkeypatch, {"/versions": {"unexpected": "shape"}})
     with TestClient(app) as c:
         r = c.get("/api/catalog/server/versions", params={"id": "io.x/srv"}, headers=LOOPBACK)
-        assert r.status_code == 502, r.text
+        assert r.status_code == 503, r.text
 
 
 def test_glama_versions_endpoint_is_empty():
@@ -405,14 +411,14 @@ def test_unknown_source_is_400():
         assert r.status_code == 400, r.text
 
 
-def test_upstream_error_is_502(monkeypatch):
+def test_upstream_error_is_503(monkeypatch):
     async def boom(http, url, params):
         raise base.CatalogUpstreamError("connection refused")
 
     monkeypatch.setattr(base, "get_json", boom)
     with TestClient(app) as c:
         r = c.get("/api/catalog/servers", headers=LOOPBACK)
-        assert r.status_code == 502, r.text
+        assert r.status_code == 503, r.text
 
 
 def test_detail_404_passthrough(monkeypatch):
@@ -427,3 +433,172 @@ def test_detail_404_passthrough(monkeypatch):
     with TestClient(app) as c:
         r = c.get("/api/catalog/server", params={"id": "io.example/missing"}, headers=LOOPBACK)
         assert r.status_code == 404, r.text
+
+
+def test_upstream_timeout_detail_names_the_exception():
+    # An httpx timeout stringifies empty; the detail must still say what failed.
+    import asyncio
+
+    import httpx
+
+    class _Client:
+        async def get(self, url, **kw):
+            raise httpx.ConnectTimeout("")
+
+    with pytest.raises(base.CatalogUpstreamError, match="^ConnectTimeout$"):
+        asyncio.run(base.get_json(_Client(), "https://x", {}))
+
+
+# --- stale-on-error, the local mirror, and the Glama key ---------------------------
+
+
+@pytest.fixture
+def mirror_on(monkeypatch):
+    """Mirror reads on, for tests that drive ``mirror.sync`` directly (conftest keeps the
+    setting off so no TestClient lifespan starts a background sync)."""
+    monkeypatch.setattr(get_settings(), "catalog_mirror", True)
+
+
+def _reg(name, version="1.0.0", status="active", description=""):
+    return {
+        "server": {"name": name, "title": name, "version": version, "description": description,
+                   "packages": []},
+        "_meta": {"io.modelcontextprotocol.registry/official": {"status": status, "isLatest": True}},
+    }
+
+
+def test_list_serves_stale_copy_when_upstream_goes_down(monkeypatch):
+    _stub(monkeypatch, {"/v0.1/servers": _OFFICIAL_LIST})
+    with TestClient(app) as c:
+        first = c.get("/api/catalog/servers", headers=LOOPBACK).json()
+        src = registry.SOURCES["official"]
+        for key, (_, value) in list(src._cache._store.items()):
+            src._cache._store[key] = (0.0, value)  # expire every entry
+
+        async def down(http, url, params, headers=None):
+            raise base.CatalogUpstreamError("PoolTimeout")
+
+        monkeypatch.setattr(base, "get_json", down)
+        r = c.get("/api/catalog/servers", headers=LOOPBACK)
+        assert r.status_code == 200, r.text
+        assert r.json() == first
+
+
+async def test_mirror_serves_list_search_paging_and_detail(monkeypatch, mirror_on):
+    import httpx
+
+    from app.catalog import mirror
+
+    pages = {
+        None: {"servers": [_reg("io.a/alpha", description="weather data"), _reg("io.b/beta")],
+               "metadata": {"nextCursor": "c1"}},
+        "c1": {"servers": [_reg("io.c/gamma"), _reg("io.d/gone", status="deleted")],
+               "metadata": {}},
+    }
+
+    async def fake(http, url, params, headers=None):
+        return pages[params.get("cursor")]
+
+    monkeypatch.setattr(base, "get_json", fake)
+    src = registry.SOURCES["official"]
+    async with httpx.AsyncClient() as http:
+        assert await src.list_servers(http, search=None, cursor=None, limit=2) is not None
+        assert await mirror.sync(src, http) == 4
+
+        async def down(http, url, params, headers=None):
+            raise base.CatalogUpstreamError("down")
+
+        monkeypatch.setattr(base, "get_json", down)  # from here on, only the mirror answers
+        page1 = await src.list_servers(http, search=None, cursor=None, limit=2)
+        assert [s["id"] for s in page1["servers"]] == ["io.a/alpha", "io.b/beta"]
+        page2 = await src.list_servers(http, search=None, cursor=page1["next_cursor"], limit=2)
+        assert [s["id"] for s in page2["servers"]] == ["io.c/gamma"]  # deleted is never listed
+        assert page2["next_cursor"] is None
+        hits = await src.list_servers(http, search="WEATHER", cursor=None, limit=10)
+        assert [s["id"] for s in hits["servers"]] == ["io.a/alpha"]
+        detail = await src.get_detail(http, id="io.c/gamma", version="latest")
+        assert detail["server"]["name"] == "io.c/gamma"
+        assert await src.list_versions(http, id="io.c/gamma") == ["1.0.0"]
+
+
+async def test_mirror_incremental_sync_updates_status_and_full_sync_drops_missing(monkeypatch, mirror_on):
+    import httpx
+
+    from app.catalog import mirror
+
+    seen: list[dict] = []
+    payload = {"servers": [_reg("io.a/alpha"), _reg("io.b/beta")], "metadata": {}}
+
+    async def fake(http, url, params, headers=None):
+        seen.append(params)
+        return payload
+
+    monkeypatch.setattr(base, "get_json", fake)
+    official = registry.SOURCES["official"]
+    async with httpx.AsyncClient() as http:
+        await mirror.sync(official, http)
+        assert seen[-1].get("updated_since") is None  # first pass is full
+        payload = {"servers": [_reg("io.b/beta", status="deleted")], "metadata": {}}
+        await mirror.sync(official, http)
+        assert seen[-1]["updated_since"]  # later passes only ask for changes
+        page = await official.list_servers(http, search=None, cursor=None, limit=10)
+        assert [s["id"] for s in page["servers"]] == ["io.a/alpha"]
+        # The deleted one is still held, so its detail can say why install is blocked.
+        assert (await mirror.get("official", "io.b/beta")) is not None
+
+        glama = registry.SOURCES["glama"]
+        payload = {"servers": [_GLAMA_DETAIL, {**_GLAMA_DETAIL, "slug": "other"}],
+                   "pageInfo": {"hasNextPage": False, "endCursor": None}}
+        await mirror.sync(glama, http)
+        payload = {"servers": [_GLAMA_DETAIL], "pageInfo": {"hasNextPage": False, "endCursor": None}}
+        await mirror.sync(glama, http)  # Glama can't filter by date: a full pass each time
+        assert await mirror.get("glama", "acme/other") is None
+        assert await mirror.get("glama", "acme/cool") is not None
+
+
+def test_glama_is_hidden_without_a_key(monkeypatch):
+    calls = _stub(monkeypatch, {})
+    monkeypatch.setattr(get_settings(), "glama_api_key", "")
+    with TestClient(app) as c:
+        ids = [s["id"] for s in c.get("/api/catalog/sources", headers=LOOPBACK).json()]
+        r = c.get("/api/catalog/servers", params={"source": "glama"}, headers=LOOPBACK)
+    assert ids == ["official"]
+    assert r.status_code == 400  # same as any unknown source
+    assert calls == []
+    assert registry.SOURCES["glama"] not in registry.enabled_sources()  # and never synced
+
+
+def test_sources_carry_attribution():
+    with TestClient(app) as c:
+        sources = {s["id"]: s for s in c.get("/api/catalog/sources", headers=LOOPBACK).json()}
+    assert sources["glama"]["attribution_url"] == "https://glama.ai"
+    assert sources["official"]["attribution_url"] is None
+
+
+def test_glama_sends_the_api_key(monkeypatch):
+    sent = []
+
+    async def fake(http, url, params, headers=None):
+        sent.append(headers)
+        return _GLAMA_LIST
+
+    monkeypatch.setattr(base, "get_json", fake)
+    with TestClient(app) as c:
+        c.get("/api/catalog/servers", params={"source": "glama"}, headers=LOOPBACK)
+    assert sent == [{"Authorization": "Bearer test-key"}]
+
+
+async def test_turning_the_mirror_off_stops_serving_the_old_copy(monkeypatch, mirror_on):
+    import httpx
+
+    from app.catalog import mirror
+
+    calls = _stub(monkeypatch, {"/v0.1/servers": {"servers": [_reg("io.a/alpha")], "metadata": {}}})
+    src = registry.SOURCES["official"]
+    async with httpx.AsyncClient() as http:
+        await mirror.sync(src, http)
+        monkeypatch.setattr(get_settings(), "catalog_mirror", False)
+        calls.clear()
+        await src.list_servers(http, search=None, cursor=None, limit=10)
+        assert await mirror.get("official", "io.a/alpha") is None
+    assert calls  # went live instead of reading the leftover copy

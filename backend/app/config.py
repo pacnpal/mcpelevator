@@ -107,6 +107,13 @@ class Settings(BaseSettings):
     # name is the signed-in email (see app.auth.cf_access).
     cf_access_team_domain: str = ""
     cf_access_aud: str = ""
+    # Catalog: keep a local copy of each directory (data_dir/catalog-mirror.db), synced
+    # in the background, so browsing doesn't depend on the upstream being up. The MCP
+    # Registry promises no uptime and asks consumers to sync about hourly.
+    catalog_mirror: bool = True
+    # Glama's directory API requires a key (https://glama.ai/settings/api-keys). Without
+    # one the Glama directory isn't offered at all.
+    glama_api_key: str = ""
     # Debug mode: DEBUG logging everywhere (bridges too), a one-line trace of every
     # request with credentials fingerprinted, and an admin-only diagnostics bundle at
     # GET /api/debug. Off by default; see app.debug.

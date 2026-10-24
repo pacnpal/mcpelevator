@@ -5,10 +5,16 @@ The catalog lets operators **discover** MCP servers from public directories and
 architecture: each upstream directory is a self-contained `Source`, and the rest of the
 app (API + SPA) is source-agnostic.
 
-mcpelevator never persists directory data. A catalog request resolves an upstream
-document on demand into a deterministic, reviewable **draft** (`runner`/`command`/`args`/
-`env`); the operator reviews it and posts it to `POST /api/servers` like any other
-server, tagged with `source="catalog:<id>"`.
+A catalog request resolves an upstream document into a deterministic, reviewable
+**draft** (`runner`/`command`/`args`/`env`); the operator reviews it and posts it to
+`POST /api/servers` like any other server, tagged with `source="catalog:<id>"`.
+
+Directory data is cached, never treated as desired state. `mirror.py` keeps a local copy
+of each directory in `<data_dir>/catalog-mirror.db`, synced in the background on each
+source's `mirror_interval()`, because the MCP Registry promises no uptime and asks
+consumers to sync about hourly. Once a source has finished one full sync, its list and
+detail views read the copy; otherwise they go live, and `base.cached` serves the last good
+answer when a live fetch fails.
 
 ## Layout
 
@@ -17,7 +23,8 @@ server, tagged with `source="catalog:<id>"`.
 | `base.py` | The `Source` protocol + shared infra: fail-fast `get_json`, `TTLCache`, `clamp_limit`, `CatalogUpstreamError`. |
 | `mapping.py` | **Pure** launch-spec core for *package-based* registries: `package_draft()` turns a `server.json` package (npm/pypi/…) into a draft. No I/O, no clocks — same input → same output. |
 | `official.py` | `OfficialSource` — the MCP Registry (`registry.modelcontextprotocol.io`). Auto-install. |
-| `glama.py` | `GlamaSource` — the Glama directory. Discovery-only (no launch spec ⇒ manual scaffold). |
+| `glama.py` | `GlamaSource` — the Glama directory. Discovery-only (no launch spec ⇒ manual scaffold). Disabled until `MCPE_GLAMA_API_KEY` is set. |
+| `mirror.py` | The local copy of every directory: background sync (`run_forever`), and the reads (`list_page`, `get`) sources try before going live. |
 | `registry.py` | **SSOT**: the list of available sources. The only place that enumerates them. |
 
 The API (`app/api/catalog.py`) and the SPA (`/catalog`) read from `registry.py`; they
@@ -35,6 +42,8 @@ class Source(Protocol):
     id: str               # stable key, e.g. "official"
     label: str            # display name, e.g. "MCP Registry"
     install_support: str  # "auto" (a runnable command is derivable) | "manual" (discovery only)
+    attribution_url: str | None  # set when the data license requires a visible credit
+    mirror_incremental: bool      # True when mirror_pages() honors `since`
 
     async def list_servers(self, http, *, search, cursor, limit) -> dict: ...
     #   → {"servers": [CatalogServer-dict, ...], "next_cursor": str | None}
@@ -44,6 +53,17 @@ class Source(Protocol):
 
     async def list_versions(self, http, *, id) -> list[str]: ...
     #   → version strings, latest first; [] for a source with no version concept
+
+    def enabled(self) -> bool: ...
+    #   → False hides the source everywhere: source list, API (400 like an unknown
+    #     source) and mirror. Use it for a directory that needs a key to work.
+
+    def mirror_interval(self) -> float | None: ...
+    #   → seconds between background syncs, or None to not mirror this source
+
+    def mirror_pages(self, http, *, since) -> AsyncIterator[list[MirrorRow]]: ...
+    #   → the whole directory a page at a time (only what changed after `since`, an
+    #     RFC 3339 timestamp, when mirror_incremental is True)
 ```
 
 All three are required (the version picker calls `list_versions`); a source without a
@@ -112,6 +132,8 @@ class AcmeSource:
     id = "acme"
     label = "Acme Registry"
     install_support = "auto"   # or "manual" for discovery-only directories
+    attribution_url = None
+    mirror_incremental = False
 
     def __init__(self) -> None:
         self._cache = base.TTLCache()
@@ -138,6 +160,19 @@ class AcmeSource:
         # Acme has no version concept — the picker just shows the latest. A versioned
         # registry would fetch and return the version strings here, latest first.
         return []
+
+    def enabled(self):
+        return True
+
+    def mirror_interval(self):
+        # Not mirrored: every request goes live. To mirror, return an interval and
+        # implement mirror_pages(), then read mirror.list_page()/mirror.get() first in
+        # list_servers()/get_detail() the way official.py does.
+        return None
+
+    async def mirror_pages(self, http, *, since):
+        return
+        yield
 ```
 
 Guidelines:

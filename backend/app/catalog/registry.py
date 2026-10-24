@@ -22,6 +22,11 @@ SOURCES: dict[str, Source] = {s.id: s for s in _SOURCES}
 DEFAULT_SOURCE: str = _SOURCES[0].id
 
 
+def enabled_sources() -> list[Source]:
+    """The sources currently offered, in display order (see ``Source.enabled``)."""
+    return [s for s in _SOURCES if s.enabled()]
+
+
 def get_source(source_id: str) -> Source | None:
     """
     Get the catalog source registered for the given identifier.
@@ -30,20 +35,27 @@ def get_source(source_id: str) -> Source | None:
     	source_id (str): The source identifier.
     
     Returns:
-    	Source | None: The matching source, or None if no source is registered for the identifier.
+    	Source | None: The matching source, or None if none is registered for the identifier
+    	or it is disabled.
     """
-    return SOURCES.get(source_id)
+    src = SOURCES.get(source_id)
+    return src if src is not None and src.enabled() else None
 
 
-def source_list() -> list[dict[str, str]]:
+def source_list() -> list[dict[str, str | None]]:
     """
     Return the catalog source descriptors used by the browse view.
     
     Returns:
-        list[dict[str, str]]: A list of source descriptors containing each source's
-        ``id``, ``label``, and ``install_support`` values.
+        list[dict[str, str | None]]: A list of source descriptors containing each source's
+        ``id``, ``label``, ``install_support`` and ``attribution_url`` values.
     """
     return [
-        {"id": s.id, "label": s.label, "install_support": s.install_support}
-        for s in _SOURCES
+        {
+            "id": s.id,
+            "label": s.label,
+            "install_support": s.install_support,
+            "attribution_url": s.attribution_url,
+        }
+        for s in enabled_sources()
     ]

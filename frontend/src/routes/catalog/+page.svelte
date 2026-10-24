@@ -7,7 +7,7 @@
 		listCatalog,
 		listCatalogSources
 	} from '$lib/api';
-	import { setPendingInstall } from '$lib/catalogInstall';
+	import { safeUrl, setPendingInstall } from '$lib/catalogInstall';
 	import { canonicalRemoteTransport } from '$lib/remote';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
 	import { flashToast } from '$lib/toast.svelte';
@@ -365,6 +365,12 @@
 				{activeSource.label} is a discovery directory — it has no launch command, so installs open the form pre-filled for you to complete manually.
 			</p>
 		{/if}
+		{#if activeSource?.attribution_url}
+			<!-- The directory's data license requires this credit on every page showing it. -->
+			<p class="text-xs text-[var(--color-ink-dim)]">
+				MCP data from <a href={activeSource.attribution_url} target="_blank" rel="noopener" class="font-medium text-[var(--color-accent)] transition hover:text-[var(--color-accent-strong)]">{activeSource.label}</a>
+			</p>
+		{/if}
 		<!-- Type facet: filter by package/registry type (npm, pypi, remote, …). -->
 		{#if availableTypes.length > 1}
 			<div class="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter by type">
@@ -498,6 +504,12 @@
 							{/if}
 							{#if server.status && server.status !== 'active'}
 								<span style="color: {statusTone(server.status)}">{server.status}</span>
+							{/if}
+							{#if activeSource?.attribution_url && safeUrl(server.web_url)}
+								<!-- License-required link from each listing back to the directory's own page. -->
+								<a href={safeUrl(server.web_url)} target="_blank" rel="noopener" class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]">
+									View on {activeSource.label}
+								</a>
 							{/if}
 						</div>
 						<button

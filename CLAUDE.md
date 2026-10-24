@@ -131,7 +131,9 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   authorization, not isolation: local runners execute as the process user (README "Security",
   trust caveat).
 - **Catalog** (`catalog/`): backend proxies public MCP directories (official registry, Glama) into
-  reviewable launch specs; the SPA stays same-origin.
+  reviewable launch specs; the SPA stays same-origin. `catalog/mirror.py` keeps a local copy of
+  each directory (`<data_dir>/catalog-mirror.db`, a cache, never desired state) synced in the
+  background, and sources read it before going live, so browsing survives an upstream outage.
 - **Frontend** (`frontend/src/`): SvelteKit (Svelte 5) SPA, `adapter-static`, no SSR — rendered
   entirely in the browser, served by the backend catch-all. Lifecycle controls are shared
   components, not per-page copies: `ServerActionButton` (start/stop/retry, with

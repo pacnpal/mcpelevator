@@ -8,12 +8,13 @@ shared ``mapping`` core). List/detail entries are wrapped as
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
-from app.catalog import base, mapping
+from app.catalog import base, mapping, mirror
 from app.runners.remote import canonical_transport
 
 BASE_URL = "https://registry.modelcontextprotocol.io"
@@ -212,13 +213,52 @@ def _remote_entry(r: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def mirror_row(entry: dict[str, Any]) -> base.MirrorRow | None:
+    """A registry list entry as the local mirror stores it, keyed by server name."""
+    server, status = _unwrap(entry)
+    name = str(server.get("name") or "")
+    if not name:
+        return None
+    text = " ".join(str(server.get(k) or "") for k in ("name", "title", "description"))
+    return base.MirrorRow(id=name, status=status, text=text, raw=entry)
+
+
 class OfficialSource:
     id = "official"
     label = "MCP Registry"
     install_support = "auto"
+    attribution_url = None
+    # The registry filters by ``updated_since`` (status changes included), so after the
+    # first full pass each sync only pulls what changed.
+    mirror_incremental = True
 
     def __init__(self) -> None:
         self._cache = base.TTLCache()
+
+    def enabled(self) -> bool:
+        return True  # public and unauthenticated
+
+    def mirror_interval(self) -> float | None:
+        return 3600.0  # the registry asks aggregators for "about once per hour"
+
+    async def mirror_pages(
+        self, http: httpx.AsyncClient, *, since: str | None
+    ) -> AsyncIterator[list[base.MirrorRow]]:
+        cursor = None
+        while True:
+            data = await base.get_json(
+                http,
+                f"{BASE_URL}/v0.1/servers",
+                {"cursor": cursor, "limit": base.MAX_LIMIT, "version": "latest", "updated_since": since},
+            )
+            servers = data.get("servers") if isinstance(data, dict) else None
+            if not isinstance(servers, list):
+                raise base.CatalogUpstreamError("unexpected list response from the MCP Registry")
+            rows = [mirror_row(e) for e in servers if isinstance(e, dict)]
+            yield [r for r in rows if r is not None]
+            cursor = _dict_or_empty(data.get("metadata")).get("nextCursor")
+            if not cursor:
+                return
 
     async def list_servers(
         self, http: httpx.AsyncClient, *, search: str | None, cursor: str | None, limit: int | None
@@ -235,29 +275,31 @@ class OfficialSource:
         	dict[str, Any]: A dictionary containing a normalized `servers` list and the next pagination cursor.
         """
         page = base.clamp_limit(limit)
-        key = f"list:{search}:{cursor}:{page}"
-        cached = self._cache.get(key)
-        if cached is not None:
-            return cached
-        # Ask upstream for latest-only so pages aren't underfilled with versions we'd
-        # discard (and a page can't collapse to empty while a cursor remains). dedupe_latest
-        # below stays as a defensive net in case the filter is ignored.
-        data = await base.get_json(
-            http,
-            f"{BASE_URL}/v0.1/servers",
-            {"search": search, "cursor": cursor, "limit": page, "version": "latest"},
-        )
-        servers = data.get("servers") if isinstance(data, dict) else None
-        if not isinstance(servers, list):
-            raise base.CatalogUpstreamError("unexpected list response from the MCP Registry")
-        metadata = _dict_or_empty(data.get("metadata"))
-        entries = dedupe_latest([e for e in servers if isinstance(e, dict)])
-        result = {
-            "servers": [_list_item(e) for e in entries],
-            "next_cursor": metadata.get("nextCursor"),
-        }
-        self._cache.put(key, result)
-        return result
+        local = await mirror.list_page(self.id, search, cursor, page)
+        if local is not None:
+            entries, next_cursor = local
+            return {"servers": [_list_item(e) for e in entries], "next_cursor": next_cursor}
+
+        async def fetch() -> dict[str, Any]:
+            # Ask upstream for latest-only so pages aren't underfilled with versions we'd
+            # discard (and a page can't collapse to empty while a cursor remains).
+            # dedupe_latest below stays as a defensive net in case the filter is ignored.
+            data = await base.get_json(
+                http,
+                f"{BASE_URL}/v0.1/servers",
+                {"search": search, "cursor": cursor, "limit": page, "version": "latest"},
+            )
+            servers = data.get("servers") if isinstance(data, dict) else None
+            if not isinstance(servers, list):
+                raise base.CatalogUpstreamError("unexpected list response from the MCP Registry")
+            metadata = _dict_or_empty(data.get("metadata"))
+            entries = dedupe_latest([e for e in servers if isinstance(e, dict)])
+            return {
+                "servers": [_list_item(e) for e in entries],
+                "next_cursor": metadata.get("nextCursor"),
+            }
+
+        return await base.cached(self._cache, f"list:{search}:{cursor}:{page}", fetch)
 
     async def get_detail(
         self, http: httpx.AsyncClient, *, id: str, version: str
@@ -269,22 +311,41 @@ class OfficialSource:
         Returns:
         	dict[str, Any]: The normalized detail record for the requested server version.
         """
-        enc_name = quote(id, safe="")
-        enc_version = quote(version or "latest", safe="")
-        url = f"{BASE_URL}/v0.1/servers/{enc_name}/versions/{enc_version}"
-        data = await base.get_json(http, url, {})
-        if not isinstance(data, dict):
-            raise base.CatalogUpstreamError("unexpected detail response from the MCP Registry")
-        return to_detail(data)
+        version = version or "latest"
+        # The mirror holds each server's latest version; registry metadata is immutable
+        # apart from its status, which the hourly sync keeps current.
+        local = await mirror.get(self.id, id)
+        if local is not None and version in ("latest", _unwrap(local)[0].get("version")):
+            return to_detail(local)
+        url = f"{BASE_URL}/v0.1/servers/{quote(id, safe='')}/versions/{quote(version, safe='')}"
+
+        async def fetch() -> dict[str, Any]:
+            data = await base.get_json(http, url, {})
+            if not isinstance(data, dict):
+                raise base.CatalogUpstreamError("unexpected detail response from the MCP Registry")
+            return to_detail(data)
+
+        return await base.cached(self._cache, f"detail:{id}:{version}", fetch)
 
     async def list_versions(self, http: httpx.AsyncClient, *, id: str) -> list[str]:
         """List a server's published versions, the registry's ``isLatest`` one first."""
         url = f"{BASE_URL}/v0.1/servers/{quote(id, safe='')}/versions"
+        try:
+            return await base.cached(self._cache, f"versions:{id}", lambda: self._fetch_versions(http, url))
+        except base.CatalogUpstreamError:
+            # Down upstream with nothing cached: the mirrored latest is still a valid pick.
+            local = await mirror.get(self.id, id)
+            version = _unwrap(local)[0].get("version") if local else None
+            if not version:
+                raise
+            return [str(version)]
+
+    async def _fetch_versions(self, http: httpx.AsyncClient, url: str) -> list[str]:
         data = await base.get_json(http, url, {})
         servers = data.get("servers") if isinstance(data, dict) else None
         if not isinstance(servers, list):
             # Fail loud, not silent: returning [] would make a registry outage look like
-            # a versionless server. The API layer maps this to a 502.
+            # a versionless server. The API layer maps this to a 503.
             raise base.CatalogUpstreamError("unexpected versions response from the MCP Registry")
         latest: list[str] = []
         rest: list[str] = []
