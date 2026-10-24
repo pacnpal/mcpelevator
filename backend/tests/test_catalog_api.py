@@ -288,11 +288,11 @@ def test_official_versions_endpoint_latest_first(monkeypatch):
         assert r.json()["versions"] == ["1.0.1", "1.0.0"]
 
 
-def test_official_versions_malformed_payload_is_502(monkeypatch):
+def test_official_versions_malformed_payload_is_503(monkeypatch):
     _stub(monkeypatch, {"/versions": {"unexpected": "shape"}})
     with TestClient(app) as c:
         r = c.get("/api/catalog/server/versions", params={"id": "io.x/srv"}, headers=LOOPBACK)
-        assert r.status_code == 502, r.text
+        assert r.status_code == 503, r.text
 
 
 def test_glama_versions_endpoint_is_empty():
@@ -405,14 +405,14 @@ def test_unknown_source_is_400():
         assert r.status_code == 400, r.text
 
 
-def test_upstream_error_is_502(monkeypatch):
+def test_upstream_error_is_503(monkeypatch):
     async def boom(http, url, params):
         raise base.CatalogUpstreamError("connection refused")
 
     monkeypatch.setattr(base, "get_json", boom)
     with TestClient(app) as c:
         r = c.get("/api/catalog/servers", headers=LOOPBACK)
-        assert r.status_code == 502, r.text
+        assert r.status_code == 503, r.text
 
 
 def test_detail_404_passthrough(monkeypatch):
@@ -427,3 +427,17 @@ def test_detail_404_passthrough(monkeypatch):
     with TestClient(app) as c:
         r = c.get("/api/catalog/server", params={"id": "io.example/missing"}, headers=LOOPBACK)
         assert r.status_code == 404, r.text
+
+
+def test_upstream_timeout_detail_names_the_exception():
+    # An httpx timeout stringifies empty; the detail must still say what failed.
+    import asyncio
+
+    import httpx
+
+    class _Client:
+        async def get(self, url, **kw):
+            raise httpx.ConnectTimeout("")
+
+    with pytest.raises(base.CatalogUpstreamError, match="^ConnectTimeout$"):
+        asyncio.run(base.get_json(_Client(), "https://x", {}))

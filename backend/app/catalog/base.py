@@ -8,11 +8,13 @@ source — they iterate the registry and speak the normalized shapes in ``api.sc
 Shared, side-effect-free-ish infrastructure lives here: a fail-fast JSON GET (the
 shared ``app.state.http`` client has ``timeout=None`` for SSE proxying, wrong for a
 directory fetch), a small TTL cache, and the upstream-error wrapper that the API maps
-to a clean 502.
+to a clean 503 (not 502: Cloudflare replaces an origin 502/504 with its own error
+page, hiding the detail).
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Literal, Protocol
 
@@ -21,6 +23,8 @@ import httpx
 _TIMEOUT = httpx.Timeout(15.0)
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 100
+
+logger = logging.getLogger(__name__)
 
 
 class CatalogUpstreamError(Exception):
@@ -68,7 +72,11 @@ async def get_json(http: httpx.AsyncClient, url: str, params: dict[str, Any]) ->
             raise  # let the source/API map 404 → 404
         raise CatalogUpstreamError(f"upstream returned {exc.response.status_code}") from exc
     except (httpx.HTTPError, ValueError) as exc:
-        raise CatalogUpstreamError(str(exc) or "upstream request failed") from exc
+        # httpx timeouts often stringify empty; the type (ConnectTimeout vs ReadTimeout vs
+        # ConnectError) is what tells an operator whether egress, DNS or the upstream is at fault.
+        reason = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        logger.warning("catalog upstream %s failed: %s", url, reason)
+        raise CatalogUpstreamError(reason) from exc
 
 
 class TTLCache:

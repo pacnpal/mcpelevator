@@ -111,10 +111,10 @@ async def list_catalog_servers(
         )
     except httpx.HTTPStatusError as exc:
         # A list endpoint shouldn't 404, but guard anyway so a bad upstream status
-        # surfaces as 502 rather than an uncaught 500 (mirrors get_catalog_server).
-        raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable") from exc
+        # surfaces as 503 rather than an uncaught 500 (mirrors get_catalog_server).
+        raise HTTPException(status_code=503, detail=f"{src.label} directory unavailable") from exc
     except CatalogUpstreamError as exc:
-        raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"{src.label} directory unavailable: {exc}") from exc
     return _gate_list_docker(
         CatalogList(source=source, servers=data["servers"], next_cursor=data["next_cursor"]),
         runtime_settings.docker_runner(session),
@@ -133,9 +133,9 @@ async def get_catalog_versions(
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise HTTPException(status_code=404, detail="server not found in catalog") from exc
-        raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable") from exc
+        raise HTTPException(status_code=503, detail=f"{src.label} directory unavailable") from exc
     except CatalogUpstreamError as exc:
-        raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"{src.label} directory unavailable: {exc}") from exc
     return CatalogVersions(versions=versions)
 
 
@@ -166,9 +166,9 @@ async def get_catalog_server(
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise HTTPException(status_code=404, detail="server not found in catalog") from exc
-        raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable") from exc
+        raise HTTPException(status_code=503, detail=f"{src.label} directory unavailable") from exc
     except CatalogUpstreamError as exc:
-        raise HTTPException(status_code=502, detail=f"{src.label} directory unavailable: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"{src.label} directory unavailable: {exc}") from exc
     # Build the model here (rather than leaning on FastAPI's response_model coercion) so the
     # docker gate can read/adjust typed drafts before returning.
     return _gate_detail_docker(CatalogDetail(**detail), runtime_settings.docker_runner(session))

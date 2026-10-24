@@ -284,7 +284,7 @@ class OfficialSource:
         servers = data.get("servers") if isinstance(data, dict) else None
         if not isinstance(servers, list):
             # Fail loud, not silent: returning [] would make a registry outage look like
-            # a versionless server. The API layer maps this to a 502.
+            # a versionless server. The API layer maps this to a 503.
             raise base.CatalogUpstreamError("unexpected versions response from the MCP Registry")
         latest: list[str] = []
         rest: list[str] = []
