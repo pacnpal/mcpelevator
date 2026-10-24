@@ -585,6 +585,9 @@ class CatalogSource(BaseModel):
     # "auto": a runnable command can be derived (npm/pypi); "manual": discovery only,
     # the operator supplies the command in the review form.
     install_support: Literal["auto", "manual"]
+    # Set when the directory's license requires a visible credit: the SPA shows it on
+    # the page and links each listing (its web_url) back to the directory.
+    attribution_url: Optional[str] = None
 
 
 class CatalogServer(BaseModel):

@@ -45,3 +45,16 @@ export function takePendingInstall(): PendingInstall | null {
 	pending = null;
 	return value;
 }
+
+/** Repo/web links come from public directory metadata (untrusted). Only render an
+ * anchor when the URL parses as http(s), so a malicious entry can't slip a
+ * `javascript:` (or other unsafe-scheme) href into the page. */
+export function safeUrl(url: string | null): string | null {
+	if (!url) return null;
+	try {
+		const u = new URL(url);
+		return u.protocol === 'http:' || u.protocol === 'https:' ? url : null;
+	} catch {
+		return null;
+	}
+}

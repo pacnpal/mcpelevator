@@ -35,15 +35,25 @@ def get_source(source_id: str) -> Source | None:
     return SOURCES.get(source_id)
 
 
-def source_list() -> list[dict[str, str]]:
+def all_sources() -> list[Source]:
+    """Every registered source, in display order."""
+    return list(_SOURCES)
+
+
+def source_list() -> list[dict[str, str | None]]:
     """
     Return the catalog source descriptors used by the browse view.
     
     Returns:
-        list[dict[str, str]]: A list of source descriptors containing each source's
-        ``id``, ``label``, and ``install_support`` values.
+        list[dict[str, str | None]]: A list of source descriptors containing each source's
+        ``id``, ``label``, ``install_support`` and ``attribution_url`` values.
     """
     return [
-        {"id": s.id, "label": s.label, "install_support": s.install_support}
+        {
+            "id": s.id,
+            "label": s.label,
+            "install_support": s.install_support,
+            "attribution_url": s.attribution_url,
+        }
         for s in _SOURCES
     ]

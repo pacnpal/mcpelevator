@@ -4,18 +4,35 @@ A *discovery-only* directory: entries are flat metadata (name, description, repo
 ``environmentVariablesJsonSchema``) with **no launch spec**, so installs are *manual*.
 We scaffold the name + required env-var keys and link to the repo; the operator supplies
 the runner/package/command in the review form.
+
+Glama's directory API needs an API key (``MCPE_GLAMA_API_KEY``), and its data license
+requires a visible Glama credit on any page showing it and a link from every listing to
+its Glama page. The SPA does both off ``attribution_url`` and each item's ``web_url``.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
-from app.catalog import base, mapping
+from app.catalog import base, mapping, mirror
+from app.config import get_settings
 
 BASE_URL = "https://glama.ai/api/mcp"
+
+
+def _auth() -> dict[str, str]:
+    """The API key header, or a clear error before we spend a request on a 401."""
+    key = get_settings().glama_api_key
+    if not key:
+        raise base.CatalogUpstreamError(
+            "Glama requires an API key. Create one at https://glama.ai/settings/api-keys "
+            "and set MCPE_GLAMA_API_KEY."
+        )
+    return {"Authorization": f"Bearer {key}"}
 
 
 def _repo_url(server: dict[str, Any]) -> str | None:
@@ -135,16 +152,55 @@ def to_detail(server: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def mirror_row(server: dict[str, Any]) -> base.MirrorRow | None:
+    """A Glama server as the local mirror stores it, keyed by its detail lookup id."""
+    lookup = _lookup_id(server)
+    if not lookup:
+        return None
+    text = " ".join(str(server.get(k) or "") for k in ("namespace", "slug", "name", "description"))
+    return base.MirrorRow(id=lookup, status="active", text=text, raw=server)
+
+
 class GlamaSource:
     id = "glama"
     label = "Glama"
     install_support = "manual"
+    attribution_url = "https://glama.ai"
+    # No "changed since" filter, so every sync is a full pass (a few hundred requests,
+    # well inside Glama's rate limit) and anything it no longer lists is dropped.
+    mirror_incremental = False
 
     def __init__(self) -> None:
         """
         Initialize the Glama source cache.
         """
         self._cache = base.TTLCache()
+
+    def mirror_interval(self) -> float | None:
+        return 86400.0 if get_settings().glama_api_key else None
+
+    async def mirror_pages(
+        self, http: httpx.AsyncClient, *, since: str | None
+    ) -> AsyncIterator[list[base.MirrorRow]]:
+        cursor = None
+        while True:
+            # added-at:desc is the order Glama documents for full catalog sync (the
+            # relevance sort stops after 1000 results).
+            data = await base.get_json(
+                http,
+                f"{BASE_URL}/v1/servers",
+                {"after": cursor, "first": base.MAX_LIMIT, "sort": "added-at:desc"},
+                headers=_auth(),
+            )
+            servers = data.get("servers") if isinstance(data, dict) else None
+            if not isinstance(servers, list):
+                raise base.CatalogUpstreamError("unexpected list response from the Glama directory")
+            rows = [mirror_row(s) for s in servers if isinstance(s, dict)]
+            yield [r for r in rows if r is not None]
+            page_info = data.get("pageInfo") or {}
+            cursor = page_info.get("endCursor")
+            if not page_info.get("hasNextPage") or not cursor:
+                return
 
     async def list_servers(
         self, http: httpx.AsyncClient, *, search: str | None, cursor: str | None, limit: int | None
@@ -161,24 +217,29 @@ class GlamaSource:
         	dict[str, Any]: A dictionary containing the server list and the next pagination cursor.
         """
         page = base.clamp_limit(limit)
-        key = f"list:{search}:{cursor}:{page}"
-        cached = self._cache.get(key)
-        if cached is not None:
-            return cached
-        data = await base.get_json(
-            http, f"{BASE_URL}/v1/servers", {"query": search, "after": cursor, "first": page}
-        )
-        servers = data.get("servers") if isinstance(data, dict) else None
-        if not isinstance(servers, list):
-            raise base.CatalogUpstreamError("unexpected list response from the Glama directory")
-        page_info = data.get("pageInfo") or {}
-        next_cursor = page_info.get("endCursor") if page_info.get("hasNextPage") else None
-        result = {
-            "servers": [_list_item(s) for s in servers if isinstance(s, dict)],
-            "next_cursor": next_cursor,
-        }
-        self._cache.put(key, result)
-        return result
+        local = await mirror.list_page(self.id, search, cursor, page)
+        if local is not None:
+            servers, next_cursor = local
+            return {"servers": [_list_item(s) for s in servers], "next_cursor": next_cursor}
+
+        async def fetch() -> dict[str, Any]:
+            data = await base.get_json(
+                http,
+                f"{BASE_URL}/v1/servers",
+                {"query": search, "after": cursor, "first": page},
+                headers=_auth(),
+            )
+            servers = data.get("servers") if isinstance(data, dict) else None
+            if not isinstance(servers, list):
+                raise base.CatalogUpstreamError("unexpected list response from the Glama directory")
+            page_info = data.get("pageInfo") or {}
+            next_cursor = page_info.get("endCursor") if page_info.get("hasNextPage") else None
+            return {
+                "servers": [_list_item(s) for s in servers if isinstance(s, dict)],
+                "next_cursor": next_cursor,
+            }
+
+        return await base.cached(self._cache, f"list:{search}:{cursor}:{page}", fetch)
 
     async def get_detail(
         self, http: httpx.AsyncClient, *, id: str, version: str
@@ -196,11 +257,18 @@ class GlamaSource:
         """
         # ``safe="/"`` keeps the namespace/slug separator a path separator while still
         # percent-encoding any unsafe characters within each segment.
+        local = await mirror.get(self.id, id)
+        if local is not None:
+            return to_detail(local)
         url = f"{BASE_URL}/v1/servers/{quote(id, safe='/')}"
-        data = await base.get_json(http, url, {})
-        if not isinstance(data, dict):
-            raise base.CatalogUpstreamError("unexpected detail response from the Glama directory")
-        return to_detail(data)
+
+        async def fetch() -> dict[str, Any]:
+            data = await base.get_json(http, url, {}, headers=_auth())
+            if not isinstance(data, dict):
+                raise base.CatalogUpstreamError("unexpected detail response from the Glama directory")
+            return to_detail(data)
+
+        return await base.cached(self._cache, f"detail:{id}", fetch)
 
     async def list_versions(self, http: httpx.AsyncClient, *, id: str) -> list[str]:
         """Glama has no version concept — there's nothing to pick from."""

@@ -373,6 +373,9 @@ export interface CatalogSource {
 	id: string;
 	label: string;
 	install_support: 'auto' | 'manual';
+	/** Set when the directory's license requires a visible credit on the page and a
+	 * link from each listing (its `web_url`) back to the directory. */
+	attribution_url: string | null;
 }
 
 /** One browse-view row, normalized across sources (GET /api/catalog/servers). */

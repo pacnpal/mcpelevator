@@ -30,6 +30,8 @@ from app.api import tokens as tokens_api
 from app.api import usage as usage_api
 from app.api import users as users_api
 from app.auth import cf_access
+from app.catalog import mirror as catalog_mirror
+from app.catalog import registry as catalog_registry
 from app.auth.control_plane import (
     ensure_control_token,
     enforcement_enabled,
@@ -175,6 +177,10 @@ async def lifespan(app: FastAPI):
     # Usage counters accumulate in memory on the data-plane hot path; this task is
     # what ever writes them (and applies their retention).
     usage_flusher = asyncio.create_task(usage.run_forever())
+    tasks = [reconciler, usage_flusher]
+    if get_settings().catalog_mirror:
+        sources = catalog_registry.all_sources()
+        tasks.append(asyncio.create_task(catalog_mirror.run_forever(sources, app.state.http)))
     try:
         # Starlette doesn't run a route's ASGI lifespan: run /api/mcp's session manager here.
         control = app.state.control_mcp.inner
@@ -182,9 +188,9 @@ async def lifespan(app: FastAPI):
             yield
     finally:
         await supervisor.shutdown()
-        reconciler.cancel()
-        usage_flusher.cancel()
-        for task in (reconciler, usage_flusher):
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             try:
                 await task
             except asyncio.CancelledError:

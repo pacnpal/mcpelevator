@@ -7,16 +7,18 @@ source — they iterate the registry and speak the normalized shapes in ``api.sc
 
 Shared, side-effect-free-ish infrastructure lives here: a fail-fast JSON GET (the
 shared ``app.state.http`` client has ``timeout=None`` for SSE proxying, wrong for a
-directory fetch), a small TTL cache, and the upstream-error wrapper that the API maps
-to a clean 503 (not 502: Cloudflare replaces an origin 502/504 with its own error
-page, hiding the detail).
+directory fetch), a small TTL cache that can serve its last good value when the
+upstream is down (``cached``), and the upstream-error wrapper that the API maps to a
+clean 503 (not 502: Cloudflare replaces an origin 502/504 with its own error page,
+hiding the detail).
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Literal, Protocol
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any, Literal, NamedTuple, Protocol, TypeVar
 
 import httpx
 
@@ -46,7 +48,12 @@ def clamp_limit(limit: int | None) -> int:
     return min(limit, MAX_LIMIT)
 
 
-async def get_json(http: httpx.AsyncClient, url: str, params: dict[str, Any]) -> Any:
+async def get_json(
+    http: httpx.AsyncClient,
+    url: str,
+    params: dict[str, Any],
+    headers: dict[str, str] | None = None,
+) -> Any:
     """
     Fetch JSON from an upstream endpoint.
     
@@ -54,6 +61,7 @@ async def get_json(http: httpx.AsyncClient, url: str, params: dict[str, Any]) ->
     	http (httpx.AsyncClient): HTTP client used for the request.
     	url (str): Request URL.
     	params (dict[str, Any]): Query parameters to include after removing entries with `None` or empty-string values.
+    	headers (dict[str, str] | None): Extra request headers (e.g. an upstream API key).
     
     Returns:
     	Any: The decoded JSON response.
@@ -64,12 +72,13 @@ async def get_json(http: httpx.AsyncClient, url: str, params: dict[str, Any]) ->
     """
     clean = {k: v for k, v in params.items() if v not in (None, "")}
     try:
-        resp = await http.get(url, params=clean, timeout=_TIMEOUT)
+        resp = await http.get(url, params=clean, headers=headers, timeout=_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise  # let the source/API map 404 → 404
+        logger.warning("catalog upstream %s returned %s", url, exc.response.status_code)
         raise CatalogUpstreamError(f"upstream returned {exc.response.status_code}") from exc
     except (httpx.HTTPError, ValueError) as exc:
         # httpx timeouts often stringify empty; the type (ConnectTimeout vs ReadTimeout vs
@@ -106,13 +115,16 @@ class TTLCache:
         	The cached value if present and not expired, or None.
         """
         hit = self._store.get(key)
-        if hit is None:
+        if hit is None or hit[0] < time.monotonic():
             return None
-        expires, value = hit
-        if expires < time.monotonic():
-            self._store.pop(key, None)
-            return None
-        return value
+        return hit[1]
+
+    def stale(self, key: str) -> Any | None:
+        """The last value stored under ``key``, expired or not. An expired entry stays
+        until ``put`` prunes it at the size cap, so it can stand in for an upstream
+        that is down."""
+        hit = self._store.get(key)
+        return None if hit is None else hit[1]
 
     def put(self, key: str, value: Any) -> None:
         """
@@ -137,6 +149,37 @@ class TTLCache:
         self._store[key] = (time.monotonic() + self._ttl, value)
 
 
+T = TypeVar("T")
+
+
+async def cached(cache: TTLCache, key: str, fetch: Callable[[], Awaitable[T]]) -> T:
+    """Return a fresh cache hit, else fetch and cache. If the fetch fails upstream and
+    an expired value is still held, serve that instead of the error: a directory
+    listing an hour old beats a catalog page that won't load."""
+    hit = cache.get(key)
+    if hit is not None:
+        return hit
+    try:
+        value = await fetch()
+    except CatalogUpstreamError:
+        stale = cache.stale(key)
+        if stale is None:
+            raise
+        logger.warning("catalog upstream down, serving stale %s", key)
+        return stale
+    cache.put(key, value)
+    return value
+
+
+class MirrorRow(NamedTuple):
+    """One upstream record as the local mirror stores it (see ``catalog.mirror``)."""
+
+    id: str  # the same key ``get_detail`` takes
+    status: str  # "deleted" rows are kept (so a status change lands) but never listed
+    text: str  # what local search matches against
+    raw: dict[str, Any]  # the upstream document, re-normalized on read
+
+
 class Source(Protocol):
     """One upstream MCP directory.
 
@@ -151,6 +194,10 @@ class Source(Protocol):
     # "auto" (a runnable command is derivable) | "manual" (discovery only). Same literal
     # domain as the CatalogSource API contract, so sources are type-checked against it.
     install_support: Literal["auto", "manual"]
+    # A license-required credit link, or None (see CatalogSource.attribution_url).
+    attribution_url: str | None
+    # True when ``mirror_pages`` honors ``since``; False means each sync is a full pass.
+    mirror_incremental: bool
 
     async def list_servers(
         self, http: httpx.AsyncClient, *, search: str | None, cursor: str | None, limit: int | None
@@ -189,5 +236,20 @@ class Source(Protocol):
 
         Returns an empty list for sources without a version concept (e.g. discovery-only
         directories). Raises ``CatalogUpstreamError`` on a bad upstream.
+        """
+        ...
+
+    def mirror_interval(self) -> float | None:
+        """Seconds between mirror syncs, or None to not mirror this source (yet)."""
+        ...
+
+    def mirror_pages(
+        self, http: httpx.AsyncClient, *, since: str | None
+    ) -> AsyncIterator[list[MirrorRow]]:
+        """Yield the whole directory a page at a time, for ``catalog.mirror``.
+
+        ``since`` (an RFC 3339 timestamp) asks for only what changed after it; a source
+        that can't filter that way ignores it and returns everything, and says so with
+        ``mirror_incremental = False``.
         """
         ...

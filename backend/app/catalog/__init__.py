@@ -3,9 +3,10 @@
 A small plugin architecture: each upstream directory is a ``Source`` (``base.Source``)
 in its own module (``official``, ``glama``, …), registered once in ``registry`` (the
 SSOT). The shared, pure ``mapping`` core turns a registry *package* into an mcpelevator
-launch spec the existing ``ServerForm`` / ``POST /api/servers`` flow consumes. mcpelevator
-stays a control plane — we never persist registry data, just resolve it on demand into a
-reviewable, deterministic draft.
+launch spec the existing ``ServerForm`` / ``POST /api/servers`` flow consumes. Directory
+data is only ever cached: ``mirror`` keeps a local copy of each directory so browsing
+survives an upstream outage, and every request still resolves into a reviewable,
+deterministic draft.
 
 Adding a registry = one module implementing ``Source`` + one line in ``registry``.
 """
