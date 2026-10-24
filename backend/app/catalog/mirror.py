@@ -144,8 +144,9 @@ async def list_page(
 ) -> tuple[list[dict], str | None] | None:
     """A page of raw records from the mirror, with the next cursor, or None when the
     live API should answer instead: the mirror hasn't finished its first sync, or the
-    caller is partway through paging an upstream cursor."""
-    if cursor and not cursor.startswith(CURSOR_PREFIX):
+    caller is partway through paging an upstream cursor, or mirroring is off (a copy
+    left from before it was turned off would otherwise go stale forever)."""
+    if not get_settings().catalog_mirror or (cursor and not cursor.startswith(CURSOR_PREFIX)):
         return None
     try:
         offset = int(cursor[len(CURSOR_PREFIX):]) if cursor else 0
@@ -158,7 +159,9 @@ async def list_page(
 
 
 async def get(source: str, id: str) -> dict | None:
-    """The mirrored raw record for ``id``, if this source has been synced and has it."""
+    """The mirrored raw record for ``id``, if mirroring is on and the mirror has it."""
+    if not get_settings().catalog_mirror:
+        return None
     return await asyncio.to_thread(_get, source, id)
 
 

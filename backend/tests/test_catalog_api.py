@@ -452,6 +452,13 @@ def test_upstream_timeout_detail_names_the_exception():
 # --- stale-on-error, the local mirror, and the Glama key ---------------------------
 
 
+@pytest.fixture
+def mirror_on(monkeypatch):
+    """Mirror reads on, for tests that drive ``mirror.sync`` directly (conftest keeps the
+    setting off so no TestClient lifespan starts a background sync)."""
+    monkeypatch.setattr(get_settings(), "catalog_mirror", True)
+
+
 def _reg(name, version="1.0.0", status="active", description=""):
     return {
         "server": {"name": name, "title": name, "version": version, "description": description,
@@ -477,7 +484,7 @@ def test_list_serves_stale_copy_when_upstream_goes_down(monkeypatch):
         assert r.json() == first
 
 
-async def test_mirror_serves_list_search_paging_and_detail(monkeypatch):
+async def test_mirror_serves_list_search_paging_and_detail(monkeypatch, mirror_on):
     import httpx
 
     from app.catalog import mirror
@@ -514,7 +521,7 @@ async def test_mirror_serves_list_search_paging_and_detail(monkeypatch):
         assert await src.list_versions(http, id="io.c/gamma") == ["1.0.0"]
 
 
-async def test_mirror_incremental_sync_updates_status_and_full_sync_drops_missing(monkeypatch):
+async def test_mirror_incremental_sync_updates_status_and_full_sync_drops_missing(monkeypatch, mirror_on):
     import httpx
 
     from app.catalog import mirror
@@ -579,3 +586,19 @@ def test_glama_sends_the_api_key(monkeypatch):
     with TestClient(app) as c:
         c.get("/api/catalog/servers", params={"source": "glama"}, headers=LOOPBACK)
     assert sent == [{"Authorization": "Bearer test-key"}]
+
+
+async def test_turning_the_mirror_off_stops_serving_the_old_copy(monkeypatch, mirror_on):
+    import httpx
+
+    from app.catalog import mirror
+
+    calls = _stub(monkeypatch, {"/v0.1/servers": {"servers": [_reg("io.a/alpha")], "metadata": {}}})
+    src = registry.SOURCES["official"]
+    async with httpx.AsyncClient() as http:
+        await mirror.sync(src, http)
+        monkeypatch.setattr(get_settings(), "catalog_mirror", False)
+        calls.clear()
+        await src.list_servers(http, search=None, cursor=None, limit=10)
+        assert await mirror.get("official", "io.a/alpha") is None
+    assert calls  # went live instead of reading the leftover copy
