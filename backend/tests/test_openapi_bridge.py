@@ -250,8 +250,10 @@ def test_fetch_retries_a_protected_document_with_credentials():
             return httpx.Response(401)
         return httpx.Response(200, content=b"spec")
 
-    raw = openapi.fetch_document(DOC_URL, {"X-Api-Key": "k"}, transport=httpx.MockTransport(handler))
-    assert raw == b"spec"
+    raw, served_from = openapi.fetch_document(
+        DOC_URL, {"X-Api-Key": "k"}, transport=httpx.MockTransport(handler)
+    )
+    assert (raw, served_from) == (b"spec", DOC_URL)
 
 
 def test_fetch_never_follows_a_redirect_with_credentials():
@@ -282,6 +284,37 @@ def test_bridge_exits_with_one_line_on_a_bad_document(monkeypatch):
     with pytest.raises(SystemExit) as exited:
         host.main()
     assert str(exited.value.code) == "openapi: not an OpenAPI 3 document (openapi: 'missing')"
+
+
+async def test_relative_servers_resolve_against_the_redirected_document():
+    """OpenAPI resolves a relative server URL against where the document actually lives,
+    so a redirected document's API is on the redirect target, not the entry URL."""
+    doc = {
+        "openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+        "servers": [{"url": "./api"}],
+        "paths": {"/pets": {"get": {"operationId": "listPets",
+                                    "responses": {"200": {"description": "ok"}}}}},
+    }
+
+    def serve_document(request):
+        if request.url.host == "entry.example":
+            return httpx.Response(302, headers={"location": "https://actual.example/v2/openapi.json"})
+        return httpx.Response(200, json=doc)
+
+    called: list[str] = []
+
+    def api(request):
+        called.append(str(request.url))
+        return httpx.Response(200, json={"pets": []})
+
+    server = openapi.build_server(
+        {"command": "https://entry.example/spec"},
+        transport=httpx.MockTransport(serve_document),
+        api_transport=httpx.MockTransport(api),
+    )
+    async with Client(server) as client:
+        await client.call_tool("listPets", {})
+    assert called == ["https://actual.example/v2/api/pets"]
 
 
 def test_fetch_caps_document_size(monkeypatch):

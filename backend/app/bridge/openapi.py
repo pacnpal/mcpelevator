@@ -71,8 +71,11 @@ def _read_capped(response: httpx.Response) -> bytes:
     return bytes(body)
 
 
-def fetch_document(url: str, headers: dict[str, str], *, transport=None) -> bytes:
-    """Download the OpenAPI document at ``url``.
+def fetch_document(url: str, headers: dict[str, str], *, transport=None) -> tuple[bytes, str]:
+    """Download the OpenAPI document at ``url``: its bytes, and the URL that served them.
+
+    The served URL differs from ``url`` after a redirect, and it's the one a relative
+    ``servers`` entry resolves against (OpenAPI: relative to the document's location).
 
     Tried without credentials first: most documents are public, and the configured headers
     are the API's credentials, not the document host's. Only when the document itself
@@ -85,10 +88,10 @@ def fetch_document(url: str, headers: dict[str, str], *, transport=None) -> byte
             denied = response.status_code in (401, 403)
             if not (denied and headers):
                 response.raise_for_status()
-                return _read_capped(response)
+                return _read_capped(response), str(response.url)
         with client.stream("GET", url, headers=headers, follow_redirects=False) as response:
             response.raise_for_status()
-            return _read_capped(response)
+            return _read_capped(response), url
 
 
 def parse_document(raw: bytes) -> dict[str, Any]:
@@ -196,11 +199,11 @@ def build_server(spec: dict, *, transport=None, api_transport=None) -> FastMCP:
     headers = dict(spec.get("env") or {})
     args = list(spec.get("args") or [])
     try:
-        raw = fetch_document(url, headers, transport=transport)
+        raw, served_from = fetch_document(url, headers, transport=transport)
     except httpx.HTTPError as exc:
         raise DocumentError(f"can't fetch the OpenAPI document: {exc}") from exc
     doc = parse_document(raw)
-    base_url = resolve_base_url(doc, url, args[0] if args else None)
+    base_url = resolve_base_url(doc, served_from, args[0] if args else None)
     info = doc.get("info") if isinstance(doc.get("info"), dict) else {}
     title = info.get("title")
     logger.info("serving OpenAPI document %r against %s", title or url, base_url)
