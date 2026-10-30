@@ -29,6 +29,7 @@ from app.db.models import BUILTIN_RUNNER, RUNNERS, Server
 from app.registry import settings as runtime_settings
 from app.runners import build_spec
 from app.runners import remote as remote_runner
+from app.runners.repo import normalize_repo
 from app.runners.uvx import pin_insert_index
 from app.runners.docker import (
     DOCKER_RUN_VALUE_FLAGS,
@@ -1310,7 +1311,7 @@ def _config_hash_salt() -> bytes:
 
 
 def _hash_payload(server: Server) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "runner": server.runner,
         "command": server.command,
         "args": server.args,
@@ -1355,6 +1356,16 @@ def _hash_payload(server: Server) -> dict[str, Any]:
         # auth_provider is intentionally excluded: it's enforced at the proxy
         # per-request, so changing it must NOT restart the bridge process.
     }
+    # The repository checkout (app.runners.repo) decides what code runs, so it's launch
+    # config — but present only when set: these keys are new, and adding them as blanks
+    # would change every existing row's hash and bounce every bridge on upgrade.
+    if server.repo_url:
+        payload["repo"] = {
+            "url": server.repo_url,
+            "ref": server.repo_ref or "",
+            "post_clone_script": server.post_clone_script or "",
+        }
+    return payload
 
 
 def _require_pinnable_uvx(command: str, args) -> None:
@@ -1765,6 +1776,30 @@ def _normalize_setup_script(runner: str, setup_script: str) -> str:
     return setup_script
 
 
+def _normalize_repo_fields(
+    runner: str, repo_url: str, repo_ref: str, post_clone_script: str
+) -> tuple[str, str, str]:
+    """Canonicalize a server's repository checkout (app.runners.repo). Blank url clears all
+    three; a url on a non-local runner is refused (a container or a remote URL has no host
+    checkout to run in)."""
+    repo_url, repo_ref = normalize_repo(repo_url, repo_ref)
+    if not repo_url:
+        if post_clone_script.strip():
+            raise ValueError("a post-clone script needs a repository URL")
+        return "", "", ""
+    if runner not in _LOCAL_EXEC_RUNNERS:
+        raise ValueError(
+            "Repositories are supported only by the npx, uvx, and command local runners."
+        )
+    return repo_url, repo_ref, post_clone_script if post_clone_script.strip() else ""
+
+
+def scripts_invoke_docker(runner: str, *scripts: Optional[str]) -> bool:
+    """``setup_script_invokes_docker`` over every shell script a server runs before launch
+    (its setup script and its repository's post-clone script)."""
+    return any(setup_script_invokes_docker(runner, script) for script in scripts)
+
+
 def _require_launchable_spec(server: Server) -> None:
     """Refuse a config the bridge could never be exec'd with.
 
@@ -1798,6 +1833,9 @@ def create_server(
     env: Optional[dict[str, str]] = None,
     cwd: Optional[str] = None,
     setup_script: str = "",
+    repo_url: str = "",
+    repo_ref: str = "",
+    post_clone_script: str = "",
     pin_mcp1: bool = False,
     mcp_http: bool = True,
     rest_openapi: bool = False,
@@ -1830,7 +1868,10 @@ def create_server(
     elif enabled and local_exec_invokes_docker(runner, command, args):
         raise ValueError("Docker CLI invocations require the docker runner")
     setup_script = _normalize_setup_script(runner, setup_script)
-    if enabled and setup_script_invokes_docker(runner, setup_script):
+    repo_url, repo_ref, post_clone_script = _normalize_repo_fields(
+        runner, repo_url, repo_ref, post_clone_script
+    )
+    if enabled and scripts_invoke_docker(runner, setup_script, post_clone_script):
         raise ValueError("Docker CLI invocations require the docker runner")
     # A remote server reuses command/args for the upstream URL + transport; canonicalize
     # them up front so the persisted row (and config_hash) is deterministic. There is no
@@ -1877,6 +1918,9 @@ def create_server(
         env=dict(env or {}),
         cwd=cwd,
         setup_script=setup_script,
+        repo_url=repo_url,
+        repo_ref=repo_ref,
+        post_clone_script=post_clone_script,
         pin_mcp1=pin_mcp1,
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
@@ -1914,6 +1958,9 @@ _MUTABLE_FIELDS = {
     "env",
     "cwd",
     "setup_script",
+    "repo_url",
+    "repo_ref",
+    "post_clone_script",
     "pin_mcp1",
     "mcp_http",
     "rest_openapi",
@@ -2035,11 +2082,17 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         raise ValueError("Docker CLI invocations require the docker runner")
     try:
         server.setup_script = _normalize_setup_script(server.runner, server.setup_script or "")
+        server.repo_url, server.repo_ref, server.post_clone_script = _normalize_repo_fields(
+            server.runner,
+            server.repo_url or "",
+            server.repo_ref or "",
+            server.post_clone_script or "",
+        )
     except ValueError:
         session.rollback()
         raise
-    if server.enabled and setup_script_invokes_docker(
-            server.runner, server.setup_script):
+    if server.enabled and scripts_invoke_docker(
+            server.runner, server.setup_script, server.post_clone_script):
         session.expire(server)  # raises before any autoflush — discard just this instance's edits
         raise ValueError("Docker CLI invocations require the docker runner")
     if server.runner == "remote":
@@ -2143,6 +2196,10 @@ def clone_server(
         env=dict(src.env or {}),
         cwd=src.cwd,
         setup_script=src.setup_script or "",
+        # The copy gets its own checkout (keyed by its own id), built on its first start.
+        repo_url=src.repo_url or "",
+        repo_ref=src.repo_ref or "",
+        post_clone_script=src.post_clone_script or "",
         pin_mcp1=bool(src.pin_mcp1),
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,
@@ -2175,7 +2232,8 @@ def set_enabled(session: Session, server_id: str, enabled: bool) -> Server:
         _require_docker_enabled(session)
     elif enabled and (
             local_exec_invokes_docker(server.runner, server.command, server.args)
-            or setup_script_invokes_docker(server.runner, server.setup_script)):
+            or scripts_invoke_docker(
+                server.runner, server.setup_script, server.post_clone_script)):
         raise ValueError("Docker CLI invocations require the docker runner")
     server.enabled = enabled
     return repo.save_server(session, server)

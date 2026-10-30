@@ -15,7 +15,13 @@ export type ServerState =
 	/** Enabled but quiesced for inactivity; the proxy wakes it on the next request. */
 	| 'idle';
 
-export type StartupPhase = 'queued' | 'setup' | 'bridge' | 'readiness' | 'retry_wait';
+export type StartupPhase =
+	| 'queued'
+	| 'checkout'
+	| 'setup'
+	| 'bridge'
+	| 'readiness'
+	| 'retry_wait';
 
 export interface StartupStatus {
 	phase: StartupPhase;
@@ -215,6 +221,11 @@ export interface ServerDetail extends ServerSummary {
 	 * (e.g. --name, --shm-size=1g). Always [] for other runners. */
 	run_args: string[];
 	setup_script: string;
+	/** Local runners: a git checkout to launch from ('' = none), its branch/tag/commit
+	 * ('' = default branch), and the install/build steps run in it after a clone or update. */
+	repo_url: string;
+	repo_ref: string;
+	post_clone_script: string;
 	env: Record<string, string>;
 	cwd: string | null;
 	/** uvx runner only: the mcp<2 SDK compatibility pin. Always false elsewhere. */
@@ -281,6 +292,12 @@ export interface ServerCreate {
 	 * are rejected with a 400; forced [] for non-docker runners server-side. */
 	run_args?: string[];
 	setup_script?: string;
+	/** Local runners: launch from a checkout of this git repository ('' clears it). */
+	repo_url?: string;
+	/** Branch, tag or commit to check out ('' = the default branch). */
+	repo_ref?: string;
+	/** Runs in the checkout when the commit or this script changes (install + build). */
+	post_clone_script?: string;
 	env: Record<string, string>;
 	cwd?: string | null;
 	/** uvx runner only: launch with the Python mcp SDK pinned below 2.0
@@ -421,6 +438,10 @@ export interface CatalogDraft {
 	reason: string | null;
 	/** Required/secret values the operator must fill in before starting. */
 	warnings: string[];
+	/** A repository install: the checkout and its detected build steps ('' otherwise). */
+	repo_url: string;
+	repo_ref: string;
+	post_clone_script: string;
 }
 
 export interface CatalogRemote {

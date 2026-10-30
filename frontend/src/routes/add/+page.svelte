@@ -1,6 +1,14 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { createServer, errorMessage, importServers } from '$lib/api';
+	import {
+		createServer,
+		errorMessage,
+		getAuthStatus,
+		getRepositoryDraft,
+		importServers
+	} from '$lib/api';
+	import { pendingFromDraft, setPendingInstall } from '$lib/catalogInstall';
 	import { canonicalRemoteTransport } from '$lib/remote';
 	import type {
 		ImportResult,
@@ -11,8 +19,17 @@
 	import ServerForm from '$lib/components/ServerForm.svelte';
 	import { flashToast } from '$lib/toast.svelte';
 
-	type Tab = 'manual' | 'import';
+	type Tab = 'manual' | 'import' | 'repo';
 	let tab = $state<Tab>('manual');
+
+	// A repository installs through npx/uvx — local runners — so the tab is hidden from an
+	// account that may not configure them (the backend refuses the create regardless).
+	let localRunnersAllowed = $state(true);
+	onMount(() => {
+		getAuthStatus()
+			.then((a) => (localRunnersAllowed = a.user ? a.user.local_runners : true))
+			.catch(() => (localRunnersAllowed = true));
+	});
 
 	// ---- Manual create --------------------------------------------------------
 	let creating = $state(false);
@@ -28,6 +45,38 @@
 		} catch (err) {
 			createError = errorMessage(err);
 			creating = false;
+		}
+	}
+
+	// ---- From a GitHub repository --------------------------------------------
+	// For servers never published to npm/PyPI ("clone, build, run"): the backend reads the
+	// repo's package.json / pyproject.toml and drafts a checkout of it — detected install/
+	// build steps and start command, all editable — reviewed in the same form a catalog
+	// install uses.
+	let repoUrl = $state('');
+	let resolving = $state(false);
+	let repoError = $state<string | null>(null);
+
+	async function handleResolve(event: SubmitEvent) {
+		event.preventDefault();
+		if (resolving || !repoUrl.trim()) return;
+		resolving = true;
+		repoError = null;
+		try {
+			const detail = await getRepositoryDraft(repoUrl.trim());
+			const tag = detail.server.version ? `#${detail.server.version}` : '';
+			setPendingInstall(
+				pendingFromDraft(detail, {
+					source: `github:${detail.server.name}${tag}`,
+					sourceLabel: 'GitHub',
+					back: { href: '/add', label: 'Back to add a server' }
+				})
+			);
+			await goto('/catalog/install');
+		} catch (err) {
+			repoError = errorMessage(err);
+		} finally {
+			resolving = false;
 		}
 	}
 
@@ -229,8 +278,9 @@
 			Add a server
 		</h1>
 		<p class="mt-1 text-sm text-[var(--color-ink-muted)]">
-			Point mcpelevator at a runner, or import an existing
-			<code class="font-mono text-xs">mcpServers</code> config.
+			Point mcpelevator at a runner, import an existing
+			<code class="font-mono text-xs">mcpServers</code> config, or install straight from a
+			GitHub repository.
 		</p>
 	</div>
 
@@ -264,6 +314,20 @@
 		>
 			Import JSON
 		</button>
+		{#if localRunnersAllowed}
+			<button
+				type="button"
+				role="tab"
+				aria-selected={tab === 'repo'}
+				onclick={() => (tab = 'repo')}
+				class="flex-1 rounded-md px-4 py-1.5 text-sm font-medium transition sm:flex-none"
+				style={tab === 'repo'
+					? 'background-color: var(--color-elevated); color: var(--color-ink);'
+					: 'color: var(--color-ink-muted);'}
+			>
+				From GitHub
+			</button>
+		{/if}
 	</div>
 
 	{#if tab === 'manual'}
@@ -274,6 +338,68 @@
 			onsubmit={handleCreate}
 			oncancel={() => goto('/')}
 		/>
+	{:else if tab === 'repo'}
+		<!-- From GitHub tab -->
+		<form class="flex flex-col gap-4" onsubmit={handleResolve} novalidate>
+			<div class="flex flex-col gap-2">
+				<label for="repo-url" class="text-sm font-medium text-[var(--color-ink)]">
+					Repository URL
+				</label>
+				<input
+					id="repo-url"
+					type="text"
+					bind:value={repoUrl}
+					autocomplete="off"
+					spellcheck="false"
+					placeholder="https://github.com/owner/repo"
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				/>
+				<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+					For servers that aren't published to npm or PyPI. mcpelevator clones the repository,
+					runs its install and build steps, and starts it from the checkout. The steps are
+					detected from <code class="font-mono">package.json</code> or
+					<code class="font-mono">pyproject.toml</code> where possible; you review and can edit
+					all of them next (and later, from the server's edit page). Add
+					<code class="font-mono">/tree/&lt;branch-or-tag&gt;</code> to pin a version.
+				</p>
+			</div>
+
+			{#if repoError}
+				<p
+					role="alert"
+					class="rounded-lg border px-3.5 py-3 text-xs leading-relaxed"
+					style="border-color: color-mix(in oklab, var(--color-state-failed) 35%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 10%, transparent); color: var(--color-state-failed);"
+				>
+					{repoError}
+				</p>
+			{/if}
+
+			<div class="flex items-center justify-end gap-2 pt-1">
+				<button
+					type="button"
+					onclick={() => goto('/')}
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+				>
+					Cancel
+				</button>
+				<button
+					type="submit"
+					disabled={resolving || !repoUrl.trim()}
+					aria-busy={resolving}
+					class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-5 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+				>
+					{#if resolving}
+						<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+							<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
+							<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+						</svg>
+						Reading repository
+					{:else}
+						Continue
+					{/if}
+				</button>
+			</div>
+		</form>
 	{:else}
 		<!-- Import tab -->
 		<div class="flex flex-col gap-4">

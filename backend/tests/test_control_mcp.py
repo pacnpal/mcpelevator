@@ -395,12 +395,62 @@ def test_install_from_catalog_drops_warnings_the_caller_filled(client, monkeypat
     assert not is_error and out["warnings"] == [] and out["server"]["enabled"] is True
 
 
+def _stub_repository(monkeypatch, package_json: str | None):
+    from app.catalog import repository
+
+    async def fake_fetch_text(http, url):
+        return package_json if url.endswith("/package.json") else None
+
+    async def fake_file_exists(http, url):
+        return url.endswith("/package-lock.json")
+
+    monkeypatch.setattr(repository, "fetch_text", fake_fetch_text)
+    monkeypatch.setattr(repository, "file_exists", fake_file_exists)
+
+
+_PKG = '{"name": "srv", "bin": "dist/index.js", "scripts": {"build": "tsc"}}'
+
+
+def test_get_repository_draft(client, monkeypatch):
+    _stub_repository(monkeypatch, _PKG)
+    is_error, out = _call(client, "get_repository_draft", {"url": "https://github.com/o/srv"})
+    assert not is_error, out
+    draft = out["drafts"][0]
+    assert (draft["command"], draft["args"]) == ("node", ["dist/index.js"])
+    assert draft["post_clone_script"] == "npm ci\nnpm run build"
+
+
+def test_install_from_repository_detects_and_takes_overrides(client, monkeypatch):
+    _stub_repository(monkeypatch, _PKG)
+    is_error, out = _call(
+        client,
+        "install_from_repository",
+        {"url": "https://github.com/o/srv/tree/v2", "post_clone_script": "npm ci",
+         "enabled": False},
+    )
+    assert not is_error, out
+    srv = out["server"]
+    detail = client.get(f"/api/servers/{srv['id']}", headers=LOOPBACK).json()
+    assert (detail["runner"], detail["command"], detail["args"]) == (
+        "command", "node", ["dist/index.js"]
+    )
+    assert (detail["repo_url"], detail["repo_ref"]) == ("https://github.com/o/srv", "v2")
+    assert detail["post_clone_script"] == "npm ci"  # the override, not the detected steps
+    assert detail["source"] == "github:o/srv#v2"
+    assert srv["enabled"] is False
+
+    # Detection failing with no command given is an error that says what to pass.
+    _stub_repository(monkeypatch, None)
+    is_error, out = _call(client, "install_from_repository", {"url": "o/empty"})
+    assert is_error and "pass command" in str(out)
+
+
 def test_annotations_only_call_additive_tools_non_destructive(client):
     status, msg = _rpc(client, "tools/list")
     hints = {t["name"]: (t.get("annotations") or {}).get("destructiveHint") for t in msg["result"]["tools"]}
     for name in ("update_settings", "update_server", "update_user", "put_group", "call_server_tool"):
         assert hints[name] is not False, name
-    for name in ("create_server", "create_token", "install_from_catalog"):
+    for name in ("create_server", "create_token", "install_from_catalog", "install_from_repository"):
         assert hints[name] is False, name
 
 

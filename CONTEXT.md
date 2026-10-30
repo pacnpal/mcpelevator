@@ -29,6 +29,14 @@ A runner whose upstream MCP server executes in mcpelevator's host environment. T
 An optional multiline POSIX shell script attached to a Server. It prepares a local runner at the start of every Startup attempt and fails that attempt if an unhandled command fails; scripts must be safe to rerun. Files and other external effects persist, but shell-local state does not carry into the MCP child.
 _Avoid_: Setup commands, pre-start hook
 
+**Source repository**:
+A git repository a local-runner Server launches from (`repo_url`, `repo_ref`). mcpelevator owns the checkout under its data directory, fetches the ref on every Server activation, and runs the command inside it. Part of the launch spec.
+_Avoid_: Git runner, source package
+
+**Post-clone script**:
+A Server's install/build steps for its Source repository, run in the checkout during a Startup attempt's checkout phase only when the checked-out commit or the script changed since its last successful run. Unlike a Setup script it does not rerun on every attempt.
+_Avoid_: Build hook, install script
+
 **Disabled tool**:
 An upstream tool the operator has hidden from a Server (by name, in the Server's `disabled_tools`). The bridge drops it from every exposed surface — MCP `tools/list`, the REST/OpenAPI routes, and any group — and refuses it if called, so it's indistinguishable from a tool that was never registered. Part of the launch spec: changing the set restarts the bridge.
 _Avoid_: Removed tool, deleted tool

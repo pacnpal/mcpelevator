@@ -147,6 +147,9 @@
 			extraArgsText: extra0,
 			transport: transport0,
 			setupScript: init.setup_script ?? '',
+			repoUrl: init.repo_url ?? '',
+			repoRef: init.repo_ref ?? '',
+			postCloneScript: init.post_clone_script ?? '',
 			cwd: init.cwd ?? '',
 			pinMcp1: init.pin_mcp1 ?? false,
 			mcpHttp: init.mcp_http ?? true,
@@ -213,6 +216,12 @@
 	let oauthRemoveSecret = $state(false);
 
 	let cwd = $state(seed.cwd);
+	// Local runners: launch from a git checkout mcpelevator clones and keeps at repoRef,
+	// running postCloneScript (install + build) there when the commit or script changes.
+	let repoUrl = $state(seed.repoUrl);
+	let repoRef = $state(seed.repoRef);
+	let postCloneScript = $state(seed.postCloneScript);
+	let repoOpen = $state(seed.repoUrl.trim().length > 0);
 	// uvx only: launch with the Python mcp SDK pinned <2 (compatibility escape hatch).
 	let pinMcp1 = $state(seed.pinMcp1);
 	let mcpHttp = $state(seed.mcpHttp);
@@ -295,6 +304,12 @@
 	const setupUsesDocker = $derived(isDocker || commandUsesDocker);
 	const setupAllowed = $derived(!isRemote && !setupUsesDocker);
 	const setupBlocked = $derived(!setupAllowed && setupScript.trim().length > 0);
+	// A checkout needs a host process to run in, and a post-clone script needs a checkout.
+	const repoAllowed = $derived(!isRemote && !isDocker);
+	const repoBlocked = $derived(
+		(!repoAllowed && (repoUrl.trim().length > 0 || postCloneScript.trim().length > 0)) ||
+			(postCloneScript.trim().length > 0 && !repoUrl.trim())
+	);
 	// A docker server is only *started* when created with "Start after creating" on; editing
 	// or saving a disabled docker server is always allowed (the backend gates on enable, not
 	// on storing a disabled row) so an imported config can be reviewed first.
@@ -375,6 +390,7 @@
 			idleTimeoutValid &&
 			!dockerBlocked &&
 			!setupBlocked &&
+			!repoBlocked &&
 			!busy
 	);
 
@@ -425,6 +441,12 @@
 			run_args: isDocker ? resolvedRunArgs : [],
 			// Preserve executable text byte-for-byte; canonicalize whitespace-only input to blank.
 			setup_script: setupScript.trim() ? setupScript : '',
+			// Always sent (blank clears) so an edit can drop the checkout, and a runner
+			// switch can't strand one the backend would refuse.
+			repo_url: repoAllowed ? repoUrl.trim() : '',
+			repo_ref: repoAllowed && repoUrl.trim() ? repoRef.trim() : '',
+			post_clone_script:
+				repoAllowed && repoUrl.trim() && postCloneScript.trim() ? postCloneScript : '',
 			env: buildEnv(),
 			cwd: isRemote || isDocker ? null : cwd.trim() ? cwd.trim() : null,
 			// uvx only; the backend forces it off elsewhere, but keep the payload
@@ -962,6 +984,107 @@
 			</div>
 		{/if}
 
+		{#if repoAllowed || repoBlocked}
+			<!-- Source repository: for servers distributed as source ("clone, build, run"). -->
+			<div
+				class="overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]"
+			>
+				<button
+					type="button"
+					onclick={() => (repoOpen = !repoOpen)}
+					aria-expanded={repoOpen}
+					class="flex w-full items-center justify-between gap-3 px-3.5 py-3 text-left transition hover:bg-[var(--color-surface-2)]"
+				>
+					<span class="flex flex-col gap-0.5">
+						<span class="text-sm font-medium text-[var(--color-ink)]">
+							Source repository <span class="font-normal text-[var(--color-ink-dim)]">(optional)</span>
+						</span>
+						<span class="truncate text-xs text-[var(--color-ink-dim)]">
+							{repoUrl.trim()
+								? `${repoUrl.trim()}${repoRef.trim() ? ` @ ${repoRef.trim()}` : ''}`
+								: 'Clone a git repository, build it, and run the command inside it'}
+						</span>
+					</span>
+					<svg
+						class="size-4 shrink-0 text-[var(--color-ink-muted)] transition-transform"
+						style={repoOpen ? 'transform: rotate(180deg);' : ''}
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="m6 9 6 6 6-6" />
+					</svg>
+				</button>
+
+				{#if repoOpen || repoBlocked}
+					<div class="flex flex-col gap-3 border-t border-[var(--color-line)] px-3.5 py-3.5">
+						<div class="flex flex-col gap-1.5 sm:flex-row sm:gap-2">
+							<div class="flex min-w-0 flex-1 flex-col gap-1.5">
+								<label for="srv-repo-url" class="text-xs font-medium text-[var(--color-ink-muted)]">
+									Repository URL
+								</label>
+								<input
+									id="srv-repo-url"
+									type="text"
+									bind:value={repoUrl}
+									autocomplete="off"
+									spellcheck="false"
+									placeholder="https://github.com/owner/repo"
+									class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								/>
+							</div>
+							<div class="flex flex-col gap-1.5 sm:w-40">
+								<label for="srv-repo-ref" class="text-xs font-medium text-[var(--color-ink-muted)]">
+									Branch, tag or commit
+								</label>
+								<input
+									id="srv-repo-ref"
+									type="text"
+									bind:value={repoRef}
+									autocomplete="off"
+									spellcheck="false"
+									placeholder="default branch"
+									class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								/>
+							</div>
+						</div>
+						<div class="flex flex-col gap-1.5">
+							<label for="srv-post-clone" class="text-xs font-medium text-[var(--color-ink-muted)]">
+								Post-clone script <span class="text-[var(--color-ink-dim)]">(install and build)</span>
+							</label>
+							<textarea
+								id="srv-post-clone"
+								bind:value={postCloneScript}
+								rows="3"
+								spellcheck="false"
+								placeholder="npm ci&#10;npm run build"
+								class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							></textarea>
+						</div>
+						{#if repoBlocked}
+							<p role="alert" class="text-xs text-[var(--color-state-failed)]">
+								{repoAllowed
+									? 'A post-clone script needs a repository URL.'
+									: 'Remote and Docker servers can’t run from a repository checkout. Clear these fields.'}
+							</p>
+						{/if}
+						<p class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
+							mcpelevator clones the repository into its data directory and fetches the branch,
+							tag or commit on every start (keeping the last checkout if the fetch fails). The
+							post-clone script runs there with <code class="font-mono text-[var(--color-ink-muted)]">/bin/sh -e -c</code>
+							only when the commit or the script changes, then the command above runs with the
+							checkout as its working directory (a relative working directory below is taken
+							inside it).
+						</p>
+					</div>
+				{/if}
+			</div>
+		{/if}
+
 		{#if isRemote}
 			<!-- Remote endpoint preview (no local process to spawn) -->
 			<div class="flex flex-col gap-1.5">
@@ -1011,6 +1134,7 @@
 			class="overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]"
 		>
 			<button
+				id="srv-advanced-toggle"
 				type="button"
 				onclick={() => (advancedOpen = !advancedOpen)}
 				aria-expanded={advancedOpen}
@@ -1211,7 +1335,7 @@
 					bind:value={cwd}
 					autocomplete="off"
 					spellcheck="false"
-					placeholder="/path/to/project"
+					placeholder={repoUrl.trim() ? 'relative to the checkout, e.g. packages/server' : '/path/to/project'}
 					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 				/>
 			</div>

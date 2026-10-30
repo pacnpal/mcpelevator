@@ -87,6 +87,15 @@ class Server(SQLModel, table=True):
     run_args: Optional[list] = Field(default=None, sa_column=Column(JSON))
     cwd: Optional[str] = None
     setup_script: str = ""
+    # Local runners only: launch from a git checkout mcpelevator manages itself
+    # (app.runners.repo) — cloned into <data_dir>/repos/<id>, brought to `repo_ref` (blank =
+    # the default branch) on each activation, `post_clone_script` run there when the commit
+    # or the script changed, and the command launched with the checkout as its cwd. For
+    # servers distributed only as source ("clone, build, run"). Blank url = no checkout.
+    # Part of config_hash, so a change restarts (and, when needed, rebuilds) the server.
+    repo_url: str = ""
+    repo_ref: str = ""
+    post_clone_script: str = ""
 
     # JSON array of upstream tool names to hide from every exposed surface (MCP
     # tools/list + call, the REST/OpenAPI routes, and the group hub, which all funnel

@@ -1,7 +1,9 @@
 """Catalog API — browse upstream MCP directories and resolve install drafts.
 
 Read-only and stateless: each call dispatches to a ``Source`` from the SSOT registry
-(``catalog.registry``) and returns the normalized shapes. The API never special-cases a
+(``catalog.registry``) and returns the normalized shapes. ``/catalog/repository`` is the
+one directory-less route: it resolves a pasted GitHub repository URL into the same
+``CatalogDetail`` shape (``catalog.repository``), so it installs through the same review. The API never special-cases a
 source — adding a registry there makes it appear here automatically. Installing is *not*
 a catalog endpoint: the SPA posts a resolved draft to ``POST /api/servers`` (with
 ``source="catalog:<id>"``), reusing the normal create + review path.
@@ -14,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlmodel import Session
 
 from app.api.schemas import CatalogDetail, CatalogList, CatalogSource, CatalogVersions
-from app.catalog import registry
+from app.catalog import registry, repository
 from app.catalog.base import CatalogUpstreamError, Source
 from app.db import get_session
 from app.registry import settings as runtime_settings
@@ -172,3 +174,22 @@ async def get_catalog_server(
     # Build the model here (rather than leaning on FastAPI's response_model coercion) so the
     # docker gate can read/adjust typed drafts before returning.
     return _gate_detail_docker(CatalogDetail(**detail), runtime_settings.docker_runner(session))
+
+
+@router.get("/catalog/repository", response_model=CatalogDetail)
+async def get_catalog_repository(
+    request: Request,
+    url: str = Query(..., max_length=2048, description="a GitHub repository URL"),
+):
+    """Resolve a GitHub repository URL into a reviewable install draft (npx or uvx from git).
+
+    400 for a URL that isn't a GitHub repository root; 503 when GitHub can't be reached.
+    A repository with no recognizable manifest still answers 200, as a manual draft that
+    says why — the operator can complete it by hand."""
+    try:
+        detail = await repository.get_repository(request.app.state.http, url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CatalogUpstreamError as exc:
+        raise HTTPException(status_code=503, detail=f"GitHub unavailable: {exc}") from exc
+    return CatalogDetail(**detail)

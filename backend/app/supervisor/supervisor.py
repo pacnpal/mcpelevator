@@ -404,8 +404,8 @@ class Supervisor:
             # predates this guard, and even while the runner is on.
             if registry_service.local_exec_invokes_docker(
                 sv.runner, sv.command, sv.args
-            ) or registry_service.setup_script_invokes_docker(
-                sv.runner, sv.setup_script
+            ) or registry_service.scripts_invoke_docker(
+                sv.runner, sv.setup_script, sv.post_clone_script
             ):
                 forbidden_docker.append(
                     (sv, "Docker CLI invocations require the docker runner")

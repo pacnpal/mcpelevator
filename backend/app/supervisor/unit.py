@@ -9,7 +9,7 @@ import os
 import signal
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -31,6 +31,8 @@ from app.config import (
 )
 from app.db.models import Server, utcnow
 from app.runners import build_spec
+from app.runners import repo as repo_checkout
+from app.runners.base import ProcessSpec
 from app.runners.docker import DOCKER_BIN, server_label
 from app.supervisor.hints import startup_hint
 from app.supervisor.logbuffer import LogBuffer
@@ -81,6 +83,17 @@ def tool_summary(tool) -> dict:
     return summary
 
 
+def _with_checkout_cwd(spec: ProcessSpec, server_id: str) -> ProcessSpec:
+    """A repository server runs inside its checkout: ``cwd`` blank = the checkout root, a
+    relative one is taken inside it (e.g. a monorepo package dir), an absolute one stands.
+    Resolved here rather than in the runner so builders stay pure (no data-dir global)."""
+    if not spec.repo:
+        return spec
+    root = repo_checkout.checkout_dir(get_settings().data_dir, server_id)
+    cwd = root / spec.cwd if spec.cwd else root
+    return replace(spec, cwd=str(cwd))
+
+
 class ServerUnit:
     def __init__(
         self,
@@ -96,7 +109,7 @@ class ServerUnit:
         self.config_hash = server.config_hash
         self.runner = server.runner
         self.pin_mcp1 = bool(server.pin_mcp1)
-        self.spec = build_spec(server)
+        self.spec = _with_checkout_cwd(build_spec(server), server.id)
         self.exposure = {"mcp_http": server.mcp_http, "rest_openapi": server.rest_openapi}
 
         self.host = get_settings().bridge_host
@@ -237,6 +250,10 @@ class ServerUnit:
         # UNTRUSTED child output: any failure here must never break failure
         # reporting itself (an exception on this path would leave the unit stuck
         # in "starting" with its port unreleased).
+        if failure.startswith("checkout "):
+            # The clone/build log is right above in the server's logs; the launch and
+            # setup remedies startup_hint knows don't apply to it.
+            return failure
         try:
             hint = startup_hint(
                 self.logs.lines,
@@ -253,6 +270,8 @@ class ServerUnit:
     async def _run_attempt(self, attempt: int, max_attempts: int) -> tuple[bool, int]:
         self.last_error = None
         self.tools = []
+        if self.spec.repo:
+            await self._run_checkout(attempt, max_attempts)
         if self.spec.setup_script:
             await self._run_setup(attempt, max_attempts)
         await self._launch_bridge(attempt, max_attempts)
@@ -265,24 +284,72 @@ class ServerUnit:
         self.logs.append(f"[mcpelevator] ready - {len(self.tools)} tool(s)")
         return await self._wait_for_bridge_exit(get_settings().restart_stable_s)
 
+    async def _run_checkout(self, attempt: int, max_attempts: int) -> None:
+        """Clone/fetch the server's repository and run its post-clone script when the
+        commit or the script changed (app.runners.repo). Its own phase and deadline: a
+        first build routinely outlasts start_timeout_s."""
+        settings = get_settings()
+        repo = self.spec.repo
+        assert repo is not None
+        script = repo_checkout.checkout_script(
+            repo["url"],
+            repo["ref"],
+            repo["post_clone_script"],
+            repo_checkout.checkout_dir(settings.data_dir, self.id),
+            repo_checkout.stamp_path(settings.data_dir, self.id),
+        )
+        # The checkout's parent must exist before the shell can cd anywhere near it.
+        repo_checkout.checkout_dir(settings.data_dir, self.id).parent.mkdir(
+            parents=True, exist_ok=True
+        )
+        await self._run_shell(
+            "checkout",
+            script,
+            cwd=str(repo_checkout.checkout_dir(settings.data_dir, self.id).parent),
+            timeout=float(settings.repo_build_timeout_s),
+            attempt=attempt,
+            max_attempts=max_attempts,
+        )
+
     async def _run_setup(self, attempt: int, max_attempts: int) -> None:
-        timeout = float(get_settings().start_timeout_s)
+        await self._run_shell(
+            "setup",
+            self.spec.setup_script,
+            cwd=self._effective_child_cwd(),
+            timeout=float(get_settings().start_timeout_s),
+            attempt=attempt,
+            max_attempts=max_attempts,
+        )
+
+    async def _run_shell(
+        self,
+        phase: str,
+        script: str,
+        *,
+        cwd: str,
+        timeout: float,
+        attempt: int,
+        max_attempts: int,
+    ) -> None:
+        """Run one pre-launch phase (``setup`` or ``checkout``) as ``sh -e -c`` with the
+        child's scrubbed env. Every failure string starts with the phase name, which is how
+        ``_with_hint`` tells which phase failed."""
         self._set_state("starting")
         self._set_status(
-            "setup",
+            phase,
             attempt=attempt,
             max_attempts=max_attempts,
             deadline_at=utcnow() + timedelta(seconds=timeout),
         )
-        self.logs.append(f"[mcpelevator] attempt {attempt}/{max_attempts}: setup")
+        self.logs.append(f"[mcpelevator] attempt {attempt}/{max_attempts}: {phase}")
         try:
             async with asyncio.timeout(timeout):
                 self.setup_proc = await asyncio.create_subprocess_exec(
                     "/bin/sh",
                     "-e",
                     "-c",
-                    self.spec.setup_script,
-                    cwd=self._effective_child_cwd(),
+                    script,
+                    cwd=cwd,
                     env=self._effective_child_env(),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
@@ -301,14 +368,14 @@ class ServerUnit:
             await self._finish_log_task(self._setup_log_task)
             self.setup_proc = None
             self._setup_log_task = None
-            raise _AttemptFailed(f"setup timed out after {timeout:g}s") from exc
+            raise _AttemptFailed(f"{phase} timed out after {timeout:g}s") from exc
         except (OSError, ValueError) as exc:
-            raise _AttemptFailed(f"setup could not start: {exc}") from exc
+            raise _AttemptFailed(f"{phase} could not start: {exc}") from exc
         rc = self.setup_proc.returncode
         self.setup_proc = None
         self._setup_log_task = None
         if rc != 0:
-            raise _AttemptFailed(f"setup exited with code {rc}")
+            raise _AttemptFailed(f"{phase} exited with code {rc}")
 
     async def _launch_bridge(self, attempt: int, max_attempts: int) -> None:
         settings = get_settings()

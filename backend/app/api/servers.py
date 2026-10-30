@@ -47,6 +47,7 @@ from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
 from app.db import get_engine, get_session, repo
 from app.db.models import BUILTIN_RUNNER, Server
+from app.runners import repo as repo_checkout
 from app.runners.builtin import ORIGINAL_HOST_HEADER
 from app.groups import registry as group_registry
 from app.registry import service
@@ -132,6 +133,7 @@ def _visible(
 
 _LAUNCH_FIELDS = {
     "runner", "command", "args", "run_args", "env", "cwd", "setup_script", "pin_mcp1",
+    "repo_url", "repo_ref", "post_clone_script",
 }
 
 
@@ -142,6 +144,8 @@ def _row_launch_value(row: Server, key: str):
         return getattr(row, key) or []
     if key == "pin_mcp1":
         return bool(getattr(row, key))
+    if key in ("repo_url", "repo_ref", "post_clone_script"):
+        return getattr(row, key) or ""
     return getattr(row, key)
 
 
@@ -279,6 +283,9 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         env=server.env,
         cwd=server.cwd,
         setup_script=server.setup_script or "",
+        repo_url=server.repo_url or "",
+        repo_ref=server.repo_ref or "",
+        post_clone_script=server.post_clone_script or "",
         pin_mcp1=bool(server.pin_mcp1),
         auth_provider=server.auth_provider,
         oauth=bool(server.oauth),
@@ -331,11 +338,11 @@ async def create_server(
         ServerSummary: The created server summary.
     """
     fields = payload.model_dump()
-    # Provenance: only a "catalog:<id>" value is trusted (a registry install); any other
-    # client-supplied string falls back to the service default ("manual"). Cap length so a
-    # giant value can't bloat the row.
+    # Provenance: only a "catalog:<id>" (a registry install) or "github:<owner>/<repo>" (an
+    # install from a GitHub repository) value is trusted; any other client-supplied string falls
+    # back to the service default ("manual"). Cap length so a giant value can't bloat the row.
     raw_source = fields.pop("source", None)
-    if isinstance(raw_source, str) and raw_source.startswith("catalog:"):
+    if isinstance(raw_source, str) and raw_source.startswith(("catalog:", "github:")):
         fields["source"] = raw_source[:200]
     else:
         fields["source"] = "manual"
@@ -664,6 +671,9 @@ async def delete_server(
         # sending the operator to inspect a configuration that is gone.
         oauth_flow.cancel_pending(server_id, deleted=True)
         ServerTokenStorage(server_id).clear()
+        # A repository server's checkout (and its build) can be large; it's keyed by the
+        # deleted id, so nothing else would ever reuse or remove it.
+        await run_in_threadpool(repo_checkout.remove_checkout, get_settings().data_dir, server_id)
         await resync_groups(request)
     return Response(status_code=204)
 

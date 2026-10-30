@@ -114,7 +114,7 @@ describe('ServerForm setup script', () => {
 			onsubmit: vi.fn()
 		});
 
-		const advanced = target.querySelector<HTMLButtonElement>('button[aria-expanded]');
+		const advanced = target.querySelector<HTMLButtonElement>('#srv-advanced-toggle');
 		const command = target.querySelector<HTMLInputElement>('#srv-command');
 		if (!advanced || !command) throw new Error('Command controls not found');
 		advanced.click();
@@ -183,5 +183,79 @@ describe('ServerForm docker run options', () => {
 			new SubmitEvent('submit', { bubbles: true, cancelable: true })
 		);
 		expect(onsubmit).toHaveBeenCalledWith(expect.objectContaining({ run_args: [] }));
+	});
+});
+
+describe('ServerForm source repository', () => {
+	function submit(target: HTMLElement) {
+		target.querySelector('form')?.dispatchEvent(
+			new SubmitEvent('submit', { bubbles: true, cancelable: true })
+		);
+	}
+
+	it('seeds a repository install open and submits edited build steps', () => {
+		const onsubmit = vi.fn();
+		const target = render({
+			initial: {
+				name: 'console',
+				runner: 'command',
+				command: 'node',
+				args: ['dist/mcp/server.js'],
+				repo_url: 'https://github.com/ooples/mcp-console-automation',
+				repo_ref: '',
+				post_clone_script: 'npm ci'
+			},
+			onsubmit
+		});
+
+		const script = target.querySelector<HTMLTextAreaElement>('#srv-post-clone');
+		const ref = target.querySelector<HTMLInputElement>('#srv-repo-ref');
+		if (!script || !ref) throw new Error('Repository fields not found');
+		expect(script.value).toBe('npm ci');
+		script.value = 'npm ci\nnpm run build';
+		script.dispatchEvent(new Event('input', { bubbles: true }));
+		ref.value = ' v1.1.5 ';
+		ref.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		submit(target);
+
+		expect(onsubmit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				runner: 'command',
+				command: 'node',
+				repo_url: 'https://github.com/ooples/mcp-console-automation',
+				repo_ref: 'v1.1.5',
+				post_clone_script: 'npm ci\nnpm run build'
+			})
+		);
+	});
+
+	it('blocks a post-clone script without a repository', () => {
+		const target = render({
+			initial: {
+				name: 'x',
+				runner: 'command',
+				command: 'node',
+				args: [],
+				repo_url: '',
+				post_clone_script: 'npm ci'
+			},
+			onsubmit: vi.fn()
+		});
+		const submitButton = target.querySelector<HTMLButtonElement>('button[type="submit"]');
+		expect(target.textContent).toContain('A post-clone script needs a repository URL.');
+		expect(submitButton?.disabled).toBe(true);
+	});
+
+	it('sends blank repository fields when there is none', () => {
+		const onsubmit = vi.fn();
+		const target = render({
+			initial: { name: 'plain', runner: 'command', command: '/usr/bin/server', args: [] },
+			onsubmit
+		});
+		submit(target);
+		expect(onsubmit).toHaveBeenCalledWith(
+			expect.objectContaining({ repo_url: '', repo_ref: '', post_clone_script: '' })
+		);
 	});
 });

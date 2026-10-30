@@ -13,6 +13,7 @@ export const SLOW_POLL_MS = 5000;
 
 const PHASE_LABELS: Record<StartupPhase, string> = {
 	queued: 'Queued',
+	checkout: 'Cloning and building',
 	setup: 'Running setup',
 	bridge: 'Starting bridge',
 	readiness: 'Checking readiness',

@@ -132,6 +132,9 @@ class Settings(BaseSettings):
     port_range_end: int = 49400
     max_running: int = 50
     start_timeout_s: float = 120.0  # generous: covers npx/uvx cold-start install
+    # Deadline for a repository server's checkout + post-clone build (app.runners.repo);
+    # a first clone-and-build can take minutes, far past start_timeout_s.
+    repo_build_timeout_s: float = 900.0
     health_interval_s: float = 10.0
     restart_budget: int = 5  # consecutive failed (re)starts before -> FAILED
     restart_stable_s: float = 60.0

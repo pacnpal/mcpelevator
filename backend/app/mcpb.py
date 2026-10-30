@@ -58,7 +58,7 @@ def manifest(server: Server) -> dict:
     """The MCPB ``manifest.json`` for a local stdio server.
 
     Raises ``ValueError`` for a non-stdio (remote) server, and for a spec that
-    depends on launch context a bundle can't carry (``cwd``/``setup_script``) —
+    depends on launch context a bundle can't carry (``cwd``/``setup_script``/a repository) —
     exporting those would hand out a bundle that can't reproduce the server.
     ``env`` is embedded verbatim — the download is control-plane-gated, and the
     same principal already reads those values on the server detail endpoint.
@@ -70,10 +70,10 @@ def manifest(server: Server) -> dict:
     spec = build_spec(server)
     if spec.transport != "stdio":
         raise ValueError("only local stdio servers can be exported as .mcpb")
-    if spec.cwd or spec.setup_script:
+    if spec.cwd or spec.setup_script or spec.repo:
         raise ValueError(
-            "this server depends on a working directory or setup script, "
-            "which a .mcpb bundle cannot carry"
+            "this server depends on a working directory, setup script or repository "
+            "checkout, which a .mcpb bundle cannot carry"
         )
     # A relative command path (./server, bin\server.exe) resolves against the
     # elevator's own working directory — it cannot exist where a client launches
