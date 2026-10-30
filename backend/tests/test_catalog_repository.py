@@ -104,14 +104,22 @@ def test_node_ref_is_carried():
     assert detail["server"]["repository_url"] == "https://github.com/o/r/tree/v1.2.0"
 
 
+_COREPACK = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 npx -y corepack"
+
+
 @pytest.mark.parametrize(
     "over, lockfiles, script",
     [
         ({}, set(), "npm install"),
         ({"scripts": {"build": "tsc"}}, {"package-lock.json"}, "npm ci\nnpm run build"),
-        ({}, {"pnpm-lock.yaml"}, "corepack enable pnpm\npnpm install --frozen-lockfile"),
-        ({"scripts": {"build": "tsc"}}, {"yarn.lock"}, "corepack enable yarn\nyarn install\nyarn run build"),
-        ({"packageManager": "pnpm@9.1.0"}, set(), "corepack enable pnpm\npnpm install --frozen-lockfile"),
+        # npm and pnpm build through `prepare` on install, so no explicit step.
+        ({}, {"pnpm-lock.yaml"}, f"{_COREPACK} pnpm install --frozen-lockfile"),
+        ({"packageManager": "pnpm@9.1.0"}, set(), f"{_COREPACK} pnpm install --frozen-lockfile"),
+        ({"scripts": {"build": "tsc"}}, {"yarn.lock"},
+         f"{_COREPACK} yarn install\n{_COREPACK} yarn run build"),
+        # Modern Yarn never runs `prepare` on install, so it builds even with one.
+        ({"scripts": {"build": "tsc", "prepare": "npm run build"}}, {"yarn.lock"},
+         f"{_COREPACK} yarn install\n{_COREPACK} yarn run build"),
     ],
 )
 def test_node_install_steps_follow_the_lockfile(over, lockfiles, script):
@@ -120,7 +128,10 @@ def test_node_install_steps_follow_the_lockfile(over, lockfiles, script):
 
 
 def test_node_start_command_fallbacks():
-    start = repo_detail(RepoRef("o", "r"), _pkg(bin=None, scripts={"start": "node x"}), None)
+    # npm runs the start script even for a pnpm project (no corepack at launch).
+    start = repo_detail(
+        RepoRef("o", "r"), _pkg(bin=None, scripts={"start": "node x"}), None, {"pnpm-lock.yaml"}
+    )
     assert start["drafts"][0]["command"] == "npm"
     assert start["drafts"][0]["args"] == ["run", "--silent", "start"]
     main = repo_detail(RepoRef("o", "r"), _pkg(bin=None, scripts={}, main="./index.js"), None)

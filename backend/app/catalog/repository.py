@@ -169,17 +169,23 @@ def _repo_draft(index: int, kind: str, ref: RepoRef) -> dict[str, Any]:
     return draft
 
 
-def _node_install(pkg: dict[str, Any], lockfiles: set[str]) -> tuple[str, str]:
-    """(install command, the package-manager word for `<pm> run build`)."""
+# Corepack runs the exact pnpm/yarn a repo pins (`packageManager`). It no longer ships with
+# Node (25+, and the image runs 26), so it's fetched through npx and invoked as
+# `corepack <pm> …` rather than `corepack enable` — no global shims to write. The prompt
+# would otherwise ask before downloading the package manager.
+_COREPACK = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 npx -y corepack"
+
+
+def _node_install(pkg: dict[str, Any], lockfiles: set[str]) -> tuple[str, str, str]:
+    """(install command, the prefix for `<prefix> build`, package manager)."""
     declared = pkg.get("packageManager") if isinstance(pkg.get("packageManager"), str) else ""
     if "pnpm-lock.yaml" in lockfiles or declared.startswith("pnpm"):
-        # corepack (bundled with Node) runs the exact pnpm the repo pins.
-        return "corepack enable pnpm\npnpm install --frozen-lockfile", "pnpm"
+        return f"{_COREPACK} pnpm install --frozen-lockfile", f"{_COREPACK} pnpm run", "pnpm"
     if "yarn.lock" in lockfiles or declared.startswith("yarn"):
-        return "corepack enable yarn\nyarn install", "yarn"
+        return f"{_COREPACK} yarn install", f"{_COREPACK} yarn run", "yarn"
     if lockfiles & {"package-lock.json", "npm-shrinkwrap.json"}:
-        return "npm ci", "npm"
-    return "npm install", "npm"
+        return "npm ci", "npm run", "npm"
+    return "npm install", "npm run", "npm"
 
 
 def node_draft(
@@ -187,13 +193,13 @@ def node_draft(
 ) -> dict[str, Any]:
     """A ``package.json`` → install + build steps and a ``node`` start command."""
     draft = _repo_draft(index, "npm", ref)
-    install, pm = _node_install(pkg, lockfiles)
+    install, run, pm = _node_install(pkg, lockfiles)
     scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
     steps = [install]
-    # Installing runs `prepare` itself (npm, pnpm and yarn all do), so an explicit build
-    # step is only added when the package doesn't already build that way.
-    if "build" in scripts and "prepare" not in scripts:
-        steps.append(f"{pm} run build")
+    # npm and pnpm run `prepare` on install, so a package that builds there needs no
+    # explicit step. Modern Yarn never runs `prepare` on install, so Yarn always builds.
+    if "build" in scripts and ("prepare" not in scripts or pm == "yarn"):
+        steps.append(f"{run} build")
     draft["post_clone_script"] = "\n".join(steps)
 
     bins = _bins(pkg)
@@ -213,8 +219,9 @@ def node_draft(
         else:
             draft["command"], draft["args"] = f"./{target}", []
     elif "start" in scripts:
-        # --silent: npm's "> pkg start" banner would land on stdout, the MCP channel.
-        draft["command"], draft["args"] = pm, ["run", "--silent", "start"]
+        # npm runs a script whichever package manager installed the project; --silent
+        # keeps its "> pkg start" banner off stdout, the MCP channel.
+        draft["command"], draft["args"] = "npm", ["run", "--silent", "start"]
     elif main:
         draft["command"], draft["args"] = "node", [_rel(main)]
     else:

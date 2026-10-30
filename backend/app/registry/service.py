@@ -2080,6 +2080,14 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         # commit on this session — without tearing down unrelated work in the same transaction.
         session.expire(server)
         raise ValueError("Docker CLI invocations require the docker runner")
+    if (
+        "repo_url" in changes
+        and not (changes["repo_url"] or "").strip()
+        and "post_clone_script" not in changes
+    ):
+        # Dropping the repository drops its build steps with it; a script the same change
+        # supplies explicitly is still refused below (a post-clone script needs a repo).
+        server.post_clone_script = ""
     try:
         server.setup_script = _normalize_setup_script(server.runner, server.setup_script or "")
         server.repo_url, server.repo_ref, server.post_clone_script = _normalize_repo_fields(

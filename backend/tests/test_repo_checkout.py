@@ -293,15 +293,23 @@ def test_api_round_trip_validation_and_delete_cleanup():
             )
             assert bad.status_code == 400
 
-            # Dropping the repository clears its build steps with it.
-            cleared = c.patch(
+            # Supplying a post-clone script while dropping the repo is still refused.
+            bad = c.patch(
                 f"/api/servers/{server_id}",
-                json={"repo_url": "", "post_clone_script": ""},
+                json={"repo_url": "", "post_clone_script": "npm ci"},
                 headers=LOOPBACK,
+            )
+            assert bad.status_code == 400 and "repository URL" in bad.json()["detail"]
+
+            # Dropping the repository alone clears its ref and build steps with it.
+            cleared = c.patch(
+                f"/api/servers/{server_id}", json={"repo_url": ""}, headers=LOOPBACK
             )
             assert cleared.status_code == 200, cleared.text
             detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK).json()
-            assert (detail["repo_url"], detail["repo_ref"]) == ("", "")
+            assert (detail["repo_url"], detail["repo_ref"], detail["post_clone_script"]) == (
+                "", "", ""
+            )
 
             checkout.mkdir(parents=True)
             (checkout / "x").write_text("x")
