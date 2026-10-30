@@ -205,7 +205,9 @@ commit or script changed); deleting the server deletes its checkout. Like setup 
 the post-clone script runs as the mcpelevator process user with the server's environment,
 so it is gated by the same local-runner permission. Private repositories work with
 credentials in the URL (`https://<token>@github.com/…`, stored as plain config like `env`)
-or an SSH key available to the process user.
+or an SSH key available to the process user. The image ships the SSH client; in Docker,
+mount the key and a `known_hosts` entry for the host into the container user's `~/.ssh`
+(git won't prompt to accept an unknown host key).
 
 ### Per-server setup and startup retries
 
