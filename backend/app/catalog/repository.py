@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import re
+import shlex
 import tomllib
 from typing import Any, NamedTuple
 from urllib.parse import quote, urlsplit
@@ -212,6 +213,8 @@ def _node_install(pkg: dict[str, Any], lockfiles: set[str]) -> tuple[str, str, s
         manager = "pnpm"
     elif declared.startswith("yarn"):
         manager = "yarn"
+    elif declared.startswith("npm"):
+        manager = "npm"
     elif "pnpm-lock.yaml" in lockfiles:
         manager = "pnpm"
     elif "yarn.lock" in lockfiles:
@@ -267,6 +270,10 @@ def node_draft(
         if target.endswith(_JS_EXT):
             draft["command"], draft["args"] = "node", [target]
         else:
+            # A bin's mode comes from git, and a root install (unlike installing it as a
+            # dependency) never marks it executable — so the post-clone script does.
+            steps.append(f"chmod +x {shlex.quote(target)}")
+            draft["post_clone_script"] = "\n".join(steps)
             draft["command"], draft["args"] = f"./{target}", []
     elif "start" in scripts:
         # npm runs a script whichever package manager installed the project; --silent

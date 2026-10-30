@@ -41,6 +41,11 @@ _SCP = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._~/-]+$")
 _SHORTHAND = re.compile(r"^(?:github:)?([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]{1,100})$")
 # Network transports only: file:// would read the box's own disk and ext:: runs a command.
 _SCHEMES = {"https", "http", "ssh", "git"}
+# Environment variables pointing a Python tool at mcpelevator's OWN virtualenv
+# (`uv run uvicorn …` exports VIRTUAL_ENV; uv sync/run also honor UV_PROJECT_ENVIRONMENT).
+# A checkout builds into, and launches from, its own .venv, so neither the build nor the
+# launched server inherits them (a server's explicit env still sets them at launch).
+FOREIGN_ENV = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")
 
 
 def normalize_repo(url: Optional[str], ref: Optional[str]) -> tuple[str, str]:
@@ -148,10 +153,8 @@ fi
 rm -f "$stamp"
 echo "[mcpelevator] checked out $sha; running post-clone script"
 cd "$dir"
-# The build is for this checkout, never for whatever virtualenv mcpelevator itself runs in
-# (`uv run uvicorn …` exports VIRTUAL_ENV, and uv/pip install into it; uv sync also
-# honors UV_PROJECT_ENVIRONMENT).
-unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT
+# The build is for this checkout, never for whatever virtualenv mcpelevator itself runs in.
+unset {" ".join(FOREIGN_ENV)}
 {post}printf '%s\\n' "$want" > "$stamp"
 """
 

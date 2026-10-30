@@ -495,6 +495,7 @@ class _HandshakeOnceProxyClient(ProxyClient):
 # NARROW set we inherit from the operator's env into the CLI; ``is_forbidden_container_env`` is
 # the broader "a container must not supply this" set (adds Go proxy vars).
 from app.config import is_control_plane_env_var as _is_control_plane_env_var  # noqa: E402
+from app.runners.repo import FOREIGN_ENV as _CHECKOUT_FOREIGN_ENV  # noqa: E402
 from app.runners.docker import (  # noqa: E402
     is_forbidden_container_env as _is_forbidden_container_env,
     is_reserved_docker_env as _is_reserved_docker_env,
@@ -539,6 +540,10 @@ def _child_env(spec: dict) -> dict[str, str]:
     # it; a server may still set an ``MCPE_``-named var explicitly (it wins) — that carries the
     # operator's chosen value, not the elevator's.
     base = {k: v for k, v in os.environ.items() if not _is_control_plane_env_var(k)}
+    if spec.get("checkout"):
+        # A source checkout runs from its own .venv, never the control plane's.
+        for key in _CHECKOUT_FOREIGN_ENV:
+            base.pop(key, None)
     return {**base, **server_env}
 
 

@@ -169,16 +169,18 @@ mcpelevator manages:
 In the UI, **Add → From GitHub** takes a repository URL (an SSH address or an https URL with
 a token is kept as the clone URL) and detects what it can from the root manifests:
 
-- `package.json`: the install command follows the lockfile (`npm ci`, otherwise
-  `npm install`; pnpm and Yarn run through Corepack via `npx`, since Node 25+ no longer ships
+- `package.json`: the install command follows a declared `packageManager`, else the
+  lockfile (`npm ci`, otherwise `npm install`; pnpm and Yarn run through Corepack via `npx`, since Node 25+ no longer ships
   it, and Yarn installs a `node_modules` tree rather than Plug'n'Play). A `build` script is
   added as a step unless `prepare` already runs it on install (never assumed for Yarn). The
-  start command comes from `bin`, else the `start` script (`npm run --silent start`), else
-  `main`.
+  start command comes from `bin` (a non-JS bin is made executable after the build), else
+  the `start` script (`npm run --silent start`), else `main`.
 - `pyproject.toml`: `uv sync` (`--frozen` with a `uv.lock`), then `uv run --no-sync <script>`.
   A legacy Poetry project (no `[project]` table) is installed with `uv pip install .` into
   the checkout's `.venv` and flagged for review before it starts. So is a project with no
   `[build-system]` (and no `tool.uv.package = true`), whose entry point `uv sync` won't install.
+  The build and the server both run without the control plane's own `VIRTUAL_ENV` /
+  `UV_PROJECT_ENVIRONMENT`, so they share the checkout's `.venv`.
 
 Anything it can't work out is left blank with the reason; every step is editable in the
 review form and later on the server's edit page (**Source repository**). Over the API,

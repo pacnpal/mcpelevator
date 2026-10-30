@@ -595,6 +595,10 @@ class ServerUnit:
         # plane's own ``MCPE_*`` secrets, plus the server's declared vars. It must not see the
         # elevator's admin token / signing keys / the bridge spec even though it's operator code.
         base = {k: v for k, v in os.environ.items() if not is_control_plane_env_var(k)}
+        if self.spec.repo:
+            # Same as the launch (bridge.host._child_env): the checkout's own .venv only.
+            for key in repo_checkout.FOREIGN_ENV:
+                base.pop(key, None)
         return {**base, **self.spec.env}
 
     def _effective_child_cwd(self) -> str:

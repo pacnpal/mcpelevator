@@ -132,6 +132,8 @@ _COREPACK = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 npx -y corepack"
         ({}, {"pnpm-lock.yaml"}, f"{_COREPACK} pnpm install --frozen-lockfile"),
         # Declared pnpm without a committed lockfile: pnpm must be free to write one.
         ({"packageManager": "pnpm@9.1.0"}, set(), f"{_COREPACK} pnpm install"),
+        # A declared npm is honored too: Corepack refuses pnpm/yarn in that project.
+        ({"packageManager": "npm@10.8.0"}, {"pnpm-lock.yaml", "yarn.lock"}, "npm install"),
         # A declared manager beats a stray lockfile from another one.
         # (Yarn always builds explicitly: it doesn't run `prepare` on install.)
         ({"packageManager": "yarn@4.1.0"}, {"pnpm-lock.yaml"},
@@ -163,6 +165,8 @@ def test_node_start_command_fallbacks():
     assert (main["drafts"][0]["command"], main["drafts"][0]["args"]) == ("node", ["index.js"])
     shell = repo_detail(RepoRef("o", "r"), _pkg(bin="bin/serve"), None)
     assert (shell["drafts"][0]["command"], shell["drafts"][0]["args"]) == ("./bin/serve", [])
+    # Launched directly, so made executable: a root install never chmods its own bin.
+    assert shell["drafts"][0]["post_clone_script"].endswith("\nchmod +x bin/serve")
 
 
 def test_node_ambiguous_bins_pick_one_with_a_note():

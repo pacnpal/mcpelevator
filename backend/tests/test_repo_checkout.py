@@ -251,6 +251,37 @@ def test_relative_cwd_is_taken_inside_the_checkout(tmp_path, monkeypatch):
     )
 
 
+def test_checkout_launch_never_inherits_mcpelevators_own_virtualenv(tmp_path, monkeypatch):
+    """The build installs into the checkout's .venv, so the launch (`uv run --no-sync …`)
+    must look there too — not at the control plane's VIRTUAL_ENV / UV_PROJECT_ENVIRONMENT."""
+    from test_unit import _settings
+
+    from app.bridge.host import _child_env
+    from app.bridge.spec import bridge_payload
+    from app.supervisor import unit as unit_module
+    from app.supervisor.unit import ServerUnit
+
+    monkeypatch.setattr(unit_module, "get_settings", lambda: _settings(tmp_path))
+    monkeypatch.setenv("VIRTUAL_ENV", "/control-plane/.venv")
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/control-plane/.venv")
+    common = dict(runner="command", command="uv", args=["run", "--no-sync", "srv"], env={},
+                  config_hash="h")
+    repo = ServerUnit(Server(id="r", slug="r", name="r", repo_url="https://github.com/o/r",
+                             **common))
+    plain = ServerUnit(Server(id="p", slug="p", name="p", **common))
+
+    for unit, inherits in ((repo, False), (plain, True)):
+        launch = _child_env(bridge_payload(unit.spec, "x", mcp_http=True, rest_openapi=False))
+        for env in (launch, unit._effective_child_env()):
+            assert ("VIRTUAL_ENV" in env) is inherits
+            assert ("UV_PROJECT_ENVIRONMENT" in env) is inherits
+    # An operator who sets one on the server explicitly still gets it.
+    pinned = ServerUnit(Server(id="q", slug="q", name="q", repo_url="https://github.com/o/r",
+                               **{**common, "env": {"VIRTUAL_ENV": "/srv/venv"}}))
+    payload = bridge_payload(pinned.spec, "x", mcp_http=True, rest_openapi=False)
+    assert _child_env(payload)["VIRTUAL_ENV"] == "/srv/venv"
+
+
 # ---- API ----------------------------------------------------------------------------
 
 
