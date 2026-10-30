@@ -175,6 +175,9 @@ def test_node_without_a_start_is_editable_not_dropped():
 
 
 _PYPROJECT = """
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 [project]
 name = "weather-mcp"
 description = "weather"
@@ -195,6 +198,17 @@ def test_python_repo_maps_to_uv_sync_and_run():
     assert draft["installable"] is True
     assert detail["server"]["description"] == "weather"
     assert not any("several commands" in n for n in detail["notes"])
+
+
+def test_python_without_a_build_backend_waits_for_review():
+    """uv installs a project's entry points only when it's a package (a [build-system],
+    or tool.uv.package = true); otherwise `uv run <script>` has nothing to run."""
+    text = '[project]\nname = "w"\n[project.scripts]\nw = "w:main"\n'
+    draft = repo_detail(RepoRef("o", "r"), None, text)["drafts"][0]
+    assert draft["args"] == ["run", "--no-sync", "w"]
+    assert any("[build-system]" in w for w in draft["warnings"])
+    packaged = text + "[tool.uv]\npackage = true\n"
+    assert repo_detail(RepoRef("o", "r"), None, packaged)["drafts"][0]["warnings"] == []
 
 
 def test_python_legacy_poetry_installs_into_a_venv_and_waits_for_review():

@@ -177,7 +177,8 @@ a token is kept as the clone URL) and detects what it can from the root manifest
   `main`.
 - `pyproject.toml`: `uv sync` (`--frozen` with a `uv.lock`), then `uv run --no-sync <script>`.
   A legacy Poetry project (no `[project]` table) is installed with `uv pip install .` into
-  the checkout's `.venv` and flagged for review before it starts.
+  the checkout's `.venv` and flagged for review before it starts. So is a project with no
+  `[build-system]` (and no `tool.uv.package = true`), whose entry point `uv sync` won't install.
 
 Anything it can't work out is left blank with the reason; every step is editable in the
 review form and later on the server's edit page (**Source repository**). Over the API,

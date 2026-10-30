@@ -330,6 +330,18 @@ def python_draft(
     else:
         # --no-sync: the post-clone script already synced; a start must not re-resolve.
         draft["command"], draft["args"] = "uv", ["run", "--no-sync", chosen]
+        tool = pyproject.get("tool") if isinstance(pyproject.get("tool"), dict) else {}
+        uv_cfg = tool.get("uv") if isinstance(tool.get("uv"), dict) else {}
+        if "build-system" not in pyproject and uv_cfg.get("package") is not True:
+            # uv treats a project with no build backend as a non-package: `uv sync`
+            # installs its dependencies but never the project itself, so the entry
+            # point it declares doesn't exist. Keep the draft, but hold it for review.
+            draft["warnings"].append(
+                f"pyproject.toml has no [build-system], so `uv sync` won't install the "
+                f"`{chosen}` command — add `package = true` under [tool.uv] upstream, or "
+                "change the command to run the server module directly (e.g. "
+                "`uv run --no-sync python -m <module>`) before starting."
+            )
     draft["installable"] = True
     return draft
 
