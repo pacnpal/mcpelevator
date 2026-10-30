@@ -55,6 +55,12 @@ Typical flows:
   entry's id (pass env for required values), then wait_for_server. A "failed"
   state is explained by get_server_logs. For full control, get_catalog_server
   returns the launch spec to edit and pass to create_server.
+- Serve a REST API from its OpenAPI document: create_server with runner
+  "openapi", command the document's http(s) URL, args [] (or [base_url] to
+  override its servers entry), env the API's HTTP headers, and enabled true;
+  then wait_for_server. Each operation becomes a tool. A failed start is
+  explained by one "openapi: ..." line in get_server_logs. restart_server
+  re-reads the document.
 - Bulk add: import_servers with a standard {"mcpServers": {...}} config. Imported
   servers start disabled. Review them, then enable_server and wait_for_server.
 - Hide or relabel a server's tools: update_server with disabled_tools or

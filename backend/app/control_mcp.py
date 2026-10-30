@@ -190,14 +190,20 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.tool(annotations=_ADD)
     async def create_server(spec: ServerCreate) -> Any:
         """Register a server. ``runner`` is one of npx, uvx, command, remote (``command``
-        is then the upstream MCP URL), or docker (``command`` is the image). Created
+        is then the upstream MCP URL), docker (``command`` is the image), or openapi (a
+        plain REST API, each operation served as a tool: ``command`` is the http(s) URL of
+        its OpenAPI 3 document, ``args`` is [] or [base_url] to override the document's
+        ``servers`` entry, and ``env`` is the HTTP headers sent to the API). Created
         disabled unless ``enabled`` is true."""
         return await api("POST", "/api/servers", json=spec.model_dump(exclude_unset=True))
 
     @mcp.tool(annotations=_WRITE)
     async def update_server(server_id: str, changes: ServerUpdate) -> Any:
         """Edit a server; only the fields given change (an explicit null resets the
-        nullable ones to inherit). A launch-spec change restarts its bridge."""
+        nullable ones to inherit). A launch-spec change restarts its bridge. For an
+        openapi server, ``command`` / ``args`` / ``env`` are the document URL, base-URL
+        override and API headers; its document is re-read on every start, so
+        restart_server picks up a changed API."""
         if changes.model_fields_set & _RESTARTING_FIELDS:
             _refuse_self(server_id, "change its exposure or tool policy")
         return await api(
@@ -380,9 +386,10 @@ def build(app: FastAPI) -> "_Gate":
     async def create_user(
         name: str, role: Role = "member", local_runners: bool = False, control_mcp: bool = True
     ) -> Any:
-        """Create a user. ``local_runners`` lets a member use npx/uvx/command (code
-        execution on this host); ``control_mcp`` lets them use this MCP server. Mint
-        their login with create_user_credential."""
+        """Create a user. ``local_runners`` lets a member use npx/uvx/command/docker
+        (code execution on this host; remote and openapi need no permission);
+        ``control_mcp`` lets them use this MCP server. Mint their login with
+        create_user_credential."""
         payload = {
             "name": name, "role": role, "local_runners": local_runners, "control_mcp": control_mcp
         }

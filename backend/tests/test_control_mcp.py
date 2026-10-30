@@ -13,12 +13,12 @@ from sqlmodel import Session, delete
 from conftest import LOOPBACK, mint_token
 
 from app.db import get_engine, repo
-from app.db.models import BUILTIN_RUNNER, Server, Token, User
+from app.db.models import BUILTIN_RUNNER, RUNNERS, Server, Token, User
 from app.groups import registry
 from app.main import app
 from app.registry import service
 from app.registry import settings as runtime_settings
-from app.runners.builtin import INTERNAL_HEADER, INTERNAL_SECRET
+from app.runners.builtin import INSTRUCTIONS, INTERNAL_HEADER, INTERNAL_SECRET
 from app.supervisor.supervisor import Supervisor
 from app.util import hash_token, new_id, new_token
 
@@ -67,6 +67,11 @@ def _call(client, tool: str, args: dict | None = None, headers: dict | None = No
         return result["isError"], json.loads(text)
     except ValueError:
         return result["isError"], text
+
+
+def _description(client, tool: str) -> str:
+    _, msg = _rpc(client, "tools/list")
+    return next(t for t in msg["result"]["tools"] if t["name"] == tool)["description"]
 
 
 def _builtin() -> Server:
@@ -324,6 +329,46 @@ def test_install_from_catalog(client, monkeypatch):
     assert (srv["runner"], srv["name"], srv["enabled"]) == ("npx", "Memory", False)
     with Session(get_engine()) as s:
         assert repo.get_server(s, srv["id"]).source == "catalog:io.example/memory@1.0.0"
+
+
+def test_create_server_names_every_runner(client):
+    # The tool description is the only documentation an agent sees: a new runner
+    # that skips the control MCP fails here.
+    description = _description(client, "create_server")
+    missing = [r for r in RUNNERS if r not in description]
+    assert not missing, f"create_server doesn't describe runner(s) {missing}"
+
+
+def test_openapi_server_through_the_control_mcp(client):
+    assert "openapi" in _description(client, "update_server")
+    # The instructions carry the flow, down to the one log line that explains a failure.
+    flow = next(line for line in INSTRUCTIONS.split("\n- ") if "OpenAPI document" in line)
+    assert '"openapi"' in flow and "wait_for_server" in flow and '"openapi: ..."' in flow
+    spec = {
+        "name": "petstore",
+        "runner": "openapi",
+        "command": "https://petstore.example/openapi.json",
+        "args": ["https://api.petstore.example/v3"],
+        "env": {"Authorization": "Bearer k"},
+    }
+    is_error, created = _call(client, "create_server", {"spec": spec})
+    assert not is_error, created
+    assert created["enabled"] is False
+    is_error, detail = _call(client, "get_server", {"server_id": created["id"]})
+    assert not is_error
+    assert (detail["runner"], detail["command"], detail["args"], detail["env"]) == (
+        "openapi",
+        spec["command"],
+        spec["args"],
+        spec["env"],
+    )
+    # A document that isn't a URL is the API's 400, surfaced as a tool error.
+    is_error, refused = _call(
+        client,
+        "create_server",
+        {"spec": {"name": "bad", "runner": "openapi", "command": "/etc/openapi.json"}},
+    )
+    assert is_error and "http(s)://" in json.dumps(refused)
 
 
 def test_resources_and_prompts(client):
