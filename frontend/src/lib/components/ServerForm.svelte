@@ -55,8 +55,14 @@
 		{ value: 'uvx', label: 'uvx', hint: 'Python package (uv)' },
 		{ value: 'command', label: 'command', hint: 'Any local binary' },
 		{ value: 'docker', label: 'docker', hint: 'Docker / OCI image' },
-		{ value: 'remote', label: 'remote', hint: 'Remote HTTP/SSE URL' }
+		{ value: 'remote', label: 'remote', hint: 'Remote HTTP/SSE URL' },
+		{ value: 'openapi', label: 'openapi', hint: 'REST API from an OpenAPI spec' }
 	];
+
+	// Runners that execute code on the box (mirrors the backend's policy.LOCAL_RUNNERS);
+	// a restricted account may only use the rest, which just make HTTP calls.
+	const LOCAL_RUNNERS: Runner[] = ['npx', 'uvx', 'command', 'docker'];
+	const isLocalRunner = (r: Runner) => LOCAL_RUNNERS.includes(r);
 
 	// Whether the (root-equivalent, opt-in) docker runner is enabled. Fetched once; when
 	// off we surface a banner and block submitting a docker server. `null` = not yet known.
@@ -75,14 +81,15 @@
 			.catch(() => (localRunnersAllowed = true));
 	});
 
-	// Restricted accounts get `remote` plus whatever the form is CURRENTLY set to:
+	// Restricted accounts get the HTTP-only runners (`remote`, `openapi`) plus whatever
+	// the form is CURRENTLY set to:
 	// in edit mode that keeps an admin-provisioned local server's runner visible
 	// (the backend allows non-launch edits, so the form must still render/submit),
 	// and in create mode the snap-to-remote effect below makes the extra entry moot.
 	const offeredRunners = $derived(
 		localRunnersAllowed
 			? RUNNERS
-			: RUNNERS.filter((r) => r.value === 'remote' || r.value === runner)
+			: RUNNERS.filter((r) => !isLocalRunner(r.value) || r.value === runner)
 	);
 
 	// A restricted account's CREATE form must not sit on the (default) npx runner
@@ -90,7 +97,7 @@
 	// left alone: the seeded runner reflects a stored row, and the backend rejects
 	// launch-affecting changes with a clear 403 if they're not allowed.
 	$effect(() => {
-		if (!localRunnersAllowed && mode === 'create' && runner !== 'remote') {
+		if (!localRunnersAllowed && mode === 'create' && isLocalRunner(runner)) {
 			runner = 'remote';
 			onRunnerChange();
 		}
@@ -136,6 +143,8 @@
 			runner0 === 'remote'
 				? (canonicalRemoteTransport(args0[0]) ?? 'streamable-http')
 				: 'streamable-http';
+		// openapi stores [] or [base URL override] in args (command holds the document URL).
+		const baseUrl0 = runner0 === 'openapi' ? (args0[0] ?? '') : '';
 		return {
 			name: init.name ?? '',
 			slug: init.slug ?? '',
@@ -146,6 +155,7 @@
 			pkg: pkg0,
 			extraArgsText: extra0,
 			transport: transport0,
+			baseUrl: baseUrl0,
 			setupScript: init.setup_script ?? '',
 			repoUrl: init.repo_url ?? '',
 			repoRef: init.repo_ref ?? '',
@@ -196,6 +206,9 @@
 
 	// Remote runner: the upstream transport (command holds the URL; args = [transport]).
 	let transport = $state(seed.transport);
+	// OpenAPI runner: optional override for the API base URL (blank = the document's own
+	// `servers` entry; command holds the document URL; args = [] or [baseUrl]).
+	let baseUrl = $state(seed.baseUrl);
 	let setupScript = $state(seed.setupScript);
 
 	// Remote runner upstream auth: static Headers (the default) vs OAuth. When OAuth is
@@ -267,7 +280,7 @@
 		} else {
 			syncFromFriendly();
 		}
-		if ((runner === 'docker' || runner === 'remote') && setupScript.trim()) {
+		if ((runner === 'docker' || runner === 'remote' || runner === 'openapi') && setupScript.trim()) {
 			advancedOpen = true;
 		}
 	}
@@ -297,12 +310,16 @@
 	);
 
 	const isRemote = $derived(runner === 'remote');
+	const isOpenapi = $derived(runner === 'openapi');
+	// No local process: the server is reached over HTTP, so it has headers instead of an
+	// environment, and no working directory, setup script, or stdio-only options.
+	const isHttpUpstream = $derived(isRemote || isOpenapi);
 	const isDocker = $derived(runner === 'docker');
 	const commandUsesDocker = $derived(
 		(runner === 'npx' || runner === 'uvx' || runner === 'command') && isDockerLauncher(command)
 	);
 	const setupUsesDocker = $derived(isDocker || commandUsesDocker);
-	const setupAllowed = $derived(!isRemote && !setupUsesDocker);
+	const setupAllowed = $derived(!isHttpUpstream && !setupUsesDocker);
 	const setupBlocked = $derived(!setupAllowed && setupScript.trim().length > 0);
 	// A checkout needs a host process to run in, and a post-clone script needs a checkout.
 	const repoAllowed = $derived(!isRemote && !isDocker);
@@ -367,7 +384,8 @@
 		if (!normalized.includes('/')) return true;
 		return /^[/.~]/.test(normalized) || /^[a-zA-Z]:/.test(command);
 	}
-	const remoteUrlValid = $derived(!isRemote || isValidRemoteUrl(command));
+	const remoteUrlValid = $derived(!isHttpUpstream || isValidRemoteUrl(command));
+	const baseUrlValid = $derived(!isOpenapi || !baseUrl.trim() || isValidRemoteUrl(baseUrl));
 
 	// Mirror the backend's slugify so the operator sees the value that will actually
 	// be stored (lowercased, non-alphanumerics collapsed to single dashes).
@@ -387,6 +405,7 @@
 		nameValid &&
 			commandValid &&
 			remoteUrlValid &&
+			baseUrlValid &&
 			idleTimeoutValid &&
 			!dockerBlocked &&
 			!setupBlocked &&
@@ -433,9 +452,16 @@
 			name: name.trim(),
 			runner,
 			command: command.trim(),
-			// remote stores [transport] in args; there's no local process, so no cwd.
-			// docker stores command=image + args=container args, and cwd is meaningless.
-			args: isRemote ? [transport] : resolvedArgs,
+			// remote stores [transport] in args, openapi [] or [base URL]; neither has a
+			// local process, so no cwd. docker stores command=image + args=container args,
+			// and cwd is meaningless.
+			args: isRemote
+				? [transport]
+				: isOpenapi
+					? baseUrl.trim()
+						? [baseUrl.trim()]
+						: []
+					: resolvedArgs,
 			// docker only: extra `docker run` options before the image (empty elsewhere,
 			// matching the backend's normalization).
 			run_args: isDocker ? resolvedRunArgs : [],
@@ -448,7 +474,7 @@
 			post_clone_script:
 				repoAllowed && repoUrl.trim() && postCloneScript.trim() ? postCloneScript : '',
 			env: buildEnv(),
-			cwd: isRemote || isDocker ? null : cwd.trim() ? cwd.trim() : null,
+			cwd: isHttpUpstream || isDocker ? null : cwd.trim() ? cwd.trim() : null,
 			// uvx only; the backend forces it off elsewhere, but keep the payload
 			// honest so a runner switch clears it client-side too.
 			pin_mcp1: runner === 'uvx' && pinMcp1,
@@ -457,7 +483,7 @@
 			normalize_schema_dialect: normalizeSchemaDialect,
 			// Stdio runners only; a remote upstream has its own session per request, so the
 			// bridge ignores it there — keep the payload honest on a runner switch.
-			serialize_client_requests: !isRemote && serializeClientRequests,
+			serialize_client_requests: !isHttpUpstream && serializeClientRequests,
 			idle_timeout_s: idleTimeoutText.trim() === '' ? null : Number(idleTimeoutText.trim()),
 			auth_provider: authProvider,
 			// Upstream OAuth only applies to remote; the backend forces it off elsewhere,
@@ -869,6 +895,54 @@
 					</div>
 				{/if}
 			</div>
+		{:else if isOpenapi}
+			<!-- runner === openapi: a plain REST API, served as MCP tools translated from its
+			     OpenAPI document. command = document URL, args = [] or [base URL override],
+			     env = headers sent to the API. No local process. -->
+			<div class="flex flex-col gap-2">
+				<label for="srv-spec-url" class="text-sm font-medium text-[var(--color-ink)]">
+					OpenAPI document URL
+				</label>
+				<input
+					id="srv-spec-url"
+					type="url"
+					inputmode="url"
+					bind:value={command}
+					autocomplete="off"
+					spellcheck="false"
+					placeholder="https://api.example.com/openapi.json"
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				/>
+				{#if command.trim() && !remoteUrlValid}
+					<p class="text-xs text-[var(--color-state-failed)]">
+						Enter the http(s):// URL of the API's OpenAPI 3 document (JSON or YAML).
+					</p>
+				{/if}
+				<label for="srv-base-url" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
+					API base URL <span class="text-[var(--color-ink-dim)]">(optional)</span>
+				</label>
+				<input
+					id="srv-base-url"
+					type="url"
+					inputmode="url"
+					bind:value={baseUrl}
+					autocomplete="off"
+					spellcheck="false"
+					placeholder="From the document's servers entry"
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				/>
+				{#if baseUrl.trim() && !baseUrlValid}
+					<p class="text-xs text-[var(--color-state-failed)]">
+						Enter an http(s):// URL, or leave blank to use the document's own.
+					</p>
+				{/if}
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					mcpelevator reads the document each time the server starts and serves every
+					operation as an MCP tool, calling the API with the headers below. Restart the
+					server to pick up a changed API; hide operations you don't want exposed from
+					its tool list.
+				</p>
+			</div>
 		{:else if isDocker}
 			<!-- runner === docker: command = OCI image ref, args = the container's own args.
 			     The backend synthesizes the hardened `docker run …` (see dockerPreview). -->
@@ -1099,6 +1173,20 @@
 					{/if}
 				</div>
 			</div>
+		{:else if isOpenapi}
+			<!-- OpenAPI preview: where the tools come from (no local process to spawn) -->
+			<div class="flex flex-col gap-1.5">
+				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Translates</span>
+				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
+					{#if command.trim()}
+						<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
+							{command.trim()} → {baseUrl.trim() || '(document servers)'}
+						</code>
+					{:else}
+						<code class="font-mono text-xs text-[var(--color-ink-dim)]">(URL not set)</code>
+					{/if}
+				</div>
+			</div>
 		{:else if isDocker}
 			<!-- Docker: show the hardened `docker run …` the backend synthesizes. -->
 			<div class="flex flex-col gap-1.5">
@@ -1186,7 +1274,7 @@
 							<p id="setup-validation" role="alert" class="text-xs text-[var(--color-state-failed)]">
 								{setupUsesDocker
 									? 'Setup scripts are not supported for Docker servers. Put setup in the image, or clear this field.'
-									: 'Setup scripts are not supported for remote servers. Clear this field.'}
+									: `Setup scripts are not supported for ${runner} servers. Clear this field.`}
 							</p>
 						{/if}
 						<p id="setup-warning" class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
@@ -1242,11 +1330,11 @@
 			{/if}
 		</div>
 
-		<!-- Environment variables (upstream headers when remote) -->
+		<!-- Environment variables (upstream headers when remote/openapi) -->
 		<fieldset class="flex flex-col gap-2 border-0 p-0">
 			<div class="flex items-center justify-between">
 				<legend class="text-sm font-medium text-[var(--color-ink)]">
-					{isRemote ? (oauth ? 'Extra headers' : 'Headers') : 'Environment'}
+					{isHttpUpstream ? (isRemote && oauth ? 'Extra headers' : 'Headers') : 'Environment'}
 				</legend>
 				<button
 					type="button"
@@ -1271,11 +1359,13 @@
 				<p
 					class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-3 text-xs text-[var(--color-ink-dim)]"
 				>
-					{isRemote
-						? oauth
-							? 'No extra headers. OAuth supplies the Authorization header; add others only if the upstream needs them.'
-							: 'No headers. Add upstream auth (e.g. Authorization) the remote endpoint needs.'
-						: 'No environment variables. Add API keys or config the server needs.'}
+					{isOpenapi
+						? 'No headers. Add the auth (e.g. Authorization, X-API-Key) the API needs; it is sent with every API call.'
+						: isRemote
+							? oauth
+								? 'No extra headers. OAuth supplies the Authorization header; add others only if the upstream needs them.'
+								: 'No headers. Add upstream auth (e.g. Authorization) the remote endpoint needs.'
+							: 'No environment variables. Add API keys or config the server needs.'}
 				</p>
 			{:else}
 				<div class="flex flex-col gap-2">
@@ -1323,8 +1413,8 @@
 			{/if}
 		</fieldset>
 
-		<!-- Working directory (not applicable to a remote upstream or a docker container) -->
-		{#if !isRemote && !isDocker}
+		<!-- Working directory (not applicable to an HTTP upstream or a docker container) -->
+		{#if !isHttpUpstream && !isDocker}
 			<div class="flex flex-col gap-2">
 				<label for="srv-cwd" class="text-sm font-medium text-[var(--color-ink)]">
 					Working directory <span class="font-normal text-[var(--color-ink-dim)]">(optional)</span>
@@ -1424,7 +1514,7 @@
 		</label>
 		<!-- A stdio child is one connection shared by every client, and a request it sends
 		     back names no caller — so by default those are refused (issue #143). -->
-		{#if !isRemote && !isBuiltin}
+		{#if !isHttpUpstream && !isBuiltin}
 			<label
 				class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
 			>

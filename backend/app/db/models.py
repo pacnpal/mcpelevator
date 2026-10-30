@@ -24,7 +24,7 @@ def utcnow() -> datetime:
 
 # --- enums kept as plain string constants for deterministic SQLite storage ---
 
-RUNNERS = ("npx", "uvx", "command", "docker", "remote")
+RUNNERS = ("npx", "uvx", "command", "docker", "remote", "openapi")
 # The built-in control-plane server (app.control_mcp): provisioned on boot, exactly one
 # row, never creatable through the API, so deliberately NOT in RUNNERS.
 BUILTIN_RUNNER = "mcpelevator"
@@ -73,12 +73,12 @@ class Server(SQLModel, table=True):
 
     # launch spec
     runner: str = "npx"  # one of RUNNERS
-    command: str = ""  # package name / image ref / argv0 / upstream URL (remote)
+    command: str = ""  # package name / image ref / argv0 / upstream URL (remote) / OpenAPI doc URL (openapi)
     # JSON array; always set by service. For runner="remote" this is [transport],
-    # e.g. ["streamable-http"] or ["sse"].
+    # e.g. ["streamable-http"] or ["sse"]; for runner="openapi" it is [] or [base_url].
     args: list = Field(sa_column=Column(JSON))
-    # JSON object; always set by service. For runner="remote" this is the upstream
-    # HTTP headers (e.g. {"Authorization": "Bearer …"}), not process env.
+    # JSON object; always set by service. For runner="remote"/"openapi" this is the
+    # upstream HTTP headers (e.g. {"Authorization": "Bearer …"}), not process env.
     env: dict = Field(sa_column=Column(JSON))
     # JSON array; runner="docker" only — extra `docker run` options placed before the
     # image (e.g. --name, --shm-size=1g), validated at the service boundary

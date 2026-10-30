@@ -107,6 +107,14 @@ def test_local_runner_permission():
             )
             assert r.status_code == 403
             assert _mk(client, member, "remote ok")
+            # openapi makes HTTP calls only, nothing executes locally — allowed like remote.
+            r = client.post(
+                "/api/servers",
+                json={"name": "api", "runner": "openapi",
+                      "command": "http://127.0.0.1:9/openapi.json"},
+                headers=member,
+            )
+            assert r.status_code == 201
 
             # Grant the permission -> npx create succeeds and is owned.
             client.patch(f"/api/users/{uid}", json={"local_runners": True}, headers=admin)

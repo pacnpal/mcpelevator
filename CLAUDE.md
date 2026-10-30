@@ -81,6 +81,11 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   with the bridge, which reads them and auto-refreshes. Tokens live off the DB, so authenticating
   never re-hashes the row or bounces the bridge.
 - **Runners** (`runners/`): `npx`, `uvx`, `command`, `remote` (proxy an already-remote MCP URL),
+  `openapi` (no MCP upstream: the bridge fetches a REST API's OpenAPI document at startup and
+  serves each operation as a tool via FastMCP's `OpenAPIProvider`, `bridge/openapi.py`, under
+  the same `_tool_transform`; `command` = document URL, `args` = `[]` or `[base_url]`, `env` =
+  API headers, which always win and are dropped from tool arguments — and the caller's request
+  headers are never forwarded to the API),
   and `docker` (image-packaged servers — opt-in + root-equivalent behind the `docker_runner`
   setting). Each runner is a pure `Server -> ProcessSpec` builder; `docker` stores the canonical
   image+container-args+env shape and synthesizes a hardened `docker run` (the bridge scrubs the

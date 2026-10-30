@@ -13,9 +13,11 @@ module as a subprocess, passing the spec + port via environment variables:
     MCPE_BRIDGE_HOST  loopback host (default 127.0.0.1)
     MCPE_BRIDGE_PORT  port to listen on
 
-``transport`` selects the upstream: ``stdio`` (spawn command/args) or
+``transport`` selects the upstream: ``stdio`` (spawn command/args),
 ``streamable-http`` / ``sse`` (front a remote URL; ``command`` is the URL and ``env``
-is the upstream HTTP headers).
+is the upstream HTTP headers), or ``openapi`` (no MCP upstream: serve a REST API's
+operations as tools, translated from the OpenAPI document at ``command`` — see
+:mod:`app.bridge.openapi`).
 
 Session isolation: the proxy serves each request from a fresh upstream client (no
 cross-client context mixing). A remote upstream gets a fresh session per request; a
@@ -1477,6 +1479,15 @@ def build_proxy(spec: dict) -> FastMCP:
     instead, one request at a time when ``serialize_client_requests`` is set (ignored for
     a remote upstream, whose per-request sessions already know their caller).
     """
+    if spec.get("transport") == "openapi":
+        # No MCP upstream: the tools ARE the API's operations, translated in-process from its
+        # OpenAPI document (app.bridge.openapi). The same policy transform as below still
+        # applies, so hidden/renamed tools reach every surface exactly as for a proxy.
+        from app.bridge import openapi
+
+        server = openapi.build_server(spec)
+        server.add_transform(_tool_transform(spec))
+        return server
     transport = _build_transport(spec)
     # Wrap the transport in a ProxyClient ourselves so we can install a roots
     # handler that tolerates clients without roots support (see _forward_roots), and
@@ -1667,7 +1678,17 @@ def main() -> None:
         _UPSTREAM_LOG.addHandler(handler)
         _UPSTREAM_LOG.setLevel(logging.INFO)
 
-    proxy = build_proxy(spec)
+    if spec.get("transport") == "openapi":
+        from app.bridge.openapi import DocumentError
+
+        try:
+            proxy = build_proxy(spec)
+        except DocumentError as exc:
+            # A bad document is an operator fix (URL, auth, format), not a crash: one line
+            # in the server's log says which, instead of a traceback burying it.
+            raise SystemExit(f"openapi: {exc}") from None
+    else:
+        proxy = build_proxy(spec)
     if spec.get("rest_openapi"):
         # Compose MCP + REST into one app; run uvicorn directly (http_app carries
         # the session-manager lifespan, which uvicorn executes).
