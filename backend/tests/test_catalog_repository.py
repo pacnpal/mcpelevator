@@ -114,12 +114,16 @@ _COREPACK = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 npx -y corepack"
         ({"scripts": {"build": "tsc"}}, {"package-lock.json"}, "npm ci\nnpm run build"),
         # npm and pnpm build through `prepare` on install, so no explicit step.
         ({}, {"pnpm-lock.yaml"}, f"{_COREPACK} pnpm install --frozen-lockfile"),
-        ({"packageManager": "pnpm@9.1.0"}, set(), f"{_COREPACK} pnpm install --frozen-lockfile"),
+        # Declared pnpm without a committed lockfile: pnpm must be free to write one.
+        ({"packageManager": "pnpm@9.1.0"}, set(), f"{_COREPACK} pnpm install"),
+        # Yarn installs a node_modules tree (not Plug'n'Play) so `node <bin>` resolves.
         ({"scripts": {"build": "tsc"}}, {"yarn.lock"},
-         f"{_COREPACK} yarn install\n{_COREPACK} yarn run build"),
+         f"export YARN_NODE_LINKER=node-modules\n{_COREPACK} yarn install\n"
+         f"{_COREPACK} yarn run build"),
         # Modern Yarn never runs `prepare` on install, so it builds even with one.
         ({"scripts": {"build": "tsc", "prepare": "npm run build"}}, {"yarn.lock"},
-         f"{_COREPACK} yarn install\n{_COREPACK} yarn run build"),
+         f"export YARN_NODE_LINKER=node-modules\n{_COREPACK} yarn install\n"
+         f"{_COREPACK} yarn run build"),
     ],
 )
 def test_node_install_steps_follow_the_lockfile(over, lockfiles, script):
@@ -180,11 +184,15 @@ def test_python_repo_maps_to_uv_sync_and_run():
     assert not any("several commands" in n for n in detail["notes"])
 
 
-def test_python_poetry_scripts():
+def test_python_legacy_poetry_installs_into_a_venv_and_waits_for_review():
+    """`uv sync` refuses a project with no [project] table, so a legacy Poetry project is
+    built through its backend into .venv — flagged so it doesn't auto-start unreviewed."""
     text = '[tool.poetry]\nname = "p"\n[tool.poetry.scripts]\nserve = "p:main"\n'
     draft = repo_detail(RepoRef("o", "r"), None, text)["drafts"][0]
-    assert draft["args"] == ["run", "--no-sync", "serve"]
-    assert draft["post_clone_script"] == "uv sync"
+    assert draft["post_clone_script"] == "uv venv --allow-existing\nuv pip install ."
+    assert (draft["command"], draft["args"]) == (".venv/bin/serve", [])
+    assert draft["installable"] is True
+    assert any("legacy Poetry" in w for w in draft["warnings"])
 
 
 def test_python_without_scripts_is_editable():

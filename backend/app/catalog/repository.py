@@ -180,9 +180,17 @@ def _node_install(pkg: dict[str, Any], lockfiles: set[str]) -> tuple[str, str, s
     """(install command, the prefix for `<prefix> build`, package manager)."""
     declared = pkg.get("packageManager") if isinstance(pkg.get("packageManager"), str) else ""
     if "pnpm-lock.yaml" in lockfiles or declared.startswith("pnpm"):
-        return f"{_COREPACK} pnpm install --frozen-lockfile", f"{_COREPACK} pnpm run", "pnpm"
+        # Frozen only against a committed lockfile; without one pnpm must write it.
+        frozen = " --frozen-lockfile" if "pnpm-lock.yaml" in lockfiles else ""
+        return f"{_COREPACK} pnpm install{frozen}", f"{_COREPACK} pnpm run", "pnpm"
     if "yarn.lock" in lockfiles or declared.startswith("yarn"):
-        return f"{_COREPACK} yarn install", f"{_COREPACK} yarn run", "yarn"
+        # Modern Yarn defaults to Plug'n'Play, which a plain `node <bin>` launch can't
+        # resolve; a node_modules install works for any launch command (Yarn 1 ignores it).
+        return (
+            f"export YARN_NODE_LINKER=node-modules\n{_COREPACK} yarn install",
+            f"{_COREPACK} yarn run",
+            "yarn",
+        )
     if lockfiles & {"package-lock.json", "npm-shrinkwrap.json"}:
         return "npm ci", "npm run", "npm"
     return "npm install", "npm run", "npm"
@@ -235,6 +243,7 @@ def node_draft(
 
 
 def _python_scripts(pyproject: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """(project name, scripts) from [project], else from a legacy [tool.poetry] table."""
     project = pyproject.get("project") if isinstance(pyproject.get("project"), dict) else {}
     scripts = project.get("scripts")
     name = project.get("name")
@@ -254,7 +263,14 @@ def python_draft(
 ) -> dict[str, Any]:
     """A ``pyproject.toml`` → ``uv sync`` and ``uv run --no-sync <script>``."""
     draft = _repo_draft(index, "pypi", ref)
-    draft["post_clone_script"] = "uv sync --frozen" if "uv.lock" in lockfiles else "uv sync"
+    # `uv sync` needs a [project] table. A legacy Poetry project (metadata only under
+    # [tool.poetry]) still builds through its PEP 517 backend, so it's installed into a
+    # plain .venv and launched from there instead.
+    legacy = not isinstance(pyproject.get("project"), dict)
+    if legacy:
+        draft["post_clone_script"] = "uv venv --allow-existing\nuv pip install ."
+    else:
+        draft["post_clone_script"] = "uv sync --frozen" if "uv.lock" in lockfiles else "uv sync"
     name, scripts = _python_scripts(pyproject)
     if not scripts:
         draft["reason"] = (
@@ -273,8 +289,17 @@ def python_draft(
             f"The package has several commands ({', '.join(sorted(scripts))}); `{chosen}` was "
             "picked — change the last argument to run another."
         )
-    # --no-sync: the post-clone script already synced; a start must not re-resolve.
-    draft["command"], draft["args"] = "uv", ["run", "--no-sync", chosen]
+    if legacy:
+        draft["command"], draft["args"] = f".venv/bin/{chosen}", []
+        # Detected, but from the older format: review before it starts on its own.
+        draft["warnings"].append(
+            "This is a legacy Poetry project (no [project] table), so it's installed with "
+            "`uv pip install .` instead of `uv sync` — check the post-clone script and "
+            "command before starting it."
+        )
+    else:
+        # --no-sync: the post-clone script already synced; a start must not re-resolve.
+        draft["command"], draft["args"] = "uv", ["run", "--no-sync", chosen]
     draft["installable"] = True
     return draft
 
