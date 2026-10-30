@@ -56,6 +56,29 @@ def test_setup_script_api_round_trip_and_runner_validation():
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
+def test_openapi_document_only_on_request():
+    """The detail route is polled; a stored document (megabytes, potentially) rides along
+    only when the edit form asks for it."""
+    doc = "openapi: 3.1.0\ninfo: {title: t, version: '1'}\nservers: [{url: 'https://api.example'}]\npaths: {}\n"
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Inline", "runner": "openapi", "command": "", "openapi_document": doc},
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            polled = c.get(f"/api/servers/{server_id}", headers=LOOPBACK).json()
+            assert (polled["command"], polled["openapi_document"]) == ("", "")
+            editing = c.get(
+                f"/api/servers/{server_id}?include_document=true", headers=LOOPBACK
+            ).json()
+            assert editing["openapi_document"] == doc
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
 def test_disabled_tools_api_round_trip():
     """disabled_tools is accepted on create, normalized (deduped/sorted — names kept
     exactly), echoed on GET, and replaceable via PATCH ([] re-exposes everything)."""

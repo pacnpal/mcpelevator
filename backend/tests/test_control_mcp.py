@@ -105,6 +105,20 @@ def test_tool_calls_go_through_the_api(client):
     assert not is_error
 
 
+def test_get_server_returns_a_stored_openapi_document_on_request(client):
+    doc = "openapi: 3.1.0\ninfo: {title: t, version: '1'}\nservers: [{url: 'https://api.example'}]\npaths: {}\n"
+    _, created = _call(
+        client,
+        "create_server",
+        {"spec": {"name": "pasted", "runner": "openapi", "command": "", "openapi_document": doc}},
+    )
+    _, plain = _call(client, "get_server", {"server_id": created["id"]})
+    assert plain["openapi_document"] == ""
+    _, full = _call(client, "get_server", {"server_id": created["id"], "include_document": True})
+    assert full["openapi_document"] == doc
+    _call(client, "delete_server", {"server_id": created["id"]})
+
+
 def test_global_switch_is_the_builtin_enabled_flag(client):
     assert client.get("/api/settings", headers=LOOPBACK).json()["control_mcp"] is True
     r = client.patch("/api/settings", json={"control_mcp": False}, headers=LOOPBACK)

@@ -182,18 +182,26 @@ def build(app: FastAPI) -> "_Gate":
         return await api("GET", "/api/servers")
 
     @mcp.tool(annotations=_READ)
-    async def get_server(server_id: str) -> Any:
+    async def get_server(server_id: str, include_document: bool = False) -> Any:
         """One server's full detail: launch spec, live state, startup status, OAuth
-        status, tools, and its /s/<slug> URLs."""
-        return await api("GET", f"/api/servers/{_seg(server_id)}")
+        status, tools, and its /s/<slug> URLs. ``include_document`` also returns an
+        openapi server's stored document (``openapi_document``; it can be large, so
+        it's left out by default) to read before editing it."""
+        return await api(
+            "GET",
+            f"/api/servers/{_seg(server_id)}",
+            params={"include_document": "true" if include_document else None},
+        )
 
     @mcp.tool(annotations=_ADD)
     async def create_server(spec: ServerCreate) -> Any:
         """Register a server. ``runner`` is one of npx, uvx, command, remote (``command``
         is then the upstream MCP URL), docker (``command`` is the image), or openapi (a
         plain REST API, each operation served as a tool: ``command`` is the http(s) URL of
-        its OpenAPI 3 document, ``args`` is [] or [base_url] to override the document's
-        ``servers`` entry, and ``env`` is the HTTP headers sent to the API). Created
+        its OpenAPI 3 document (or blank, with the document itself as JSON or YAML text in
+        ``openapi_document``), ``args`` is [] or [base_url] to override the document's
+        ``servers`` entry (required for a relative one in a pasted document), and ``env``
+        is the HTTP headers sent to the API). Created
         disabled unless ``enabled`` is true. A local runner can launch from a git checkout:
         ``repo_url`` (+ optional ``repo_ref``) is cloned, ``post_clone_script`` runs in it
         when the commit or script changes, and the command runs inside it."""
@@ -207,7 +215,9 @@ def build(app: FastAPI) -> "_Gate":
         rebuilds on the next start; ``repo_url: ""`` drops the checkout). For an
         openapi server, ``command`` / ``args`` / ``env`` are the document URL, base-URL
         override and API headers; its document is re-read on every start, so
-        restart_server picks up a changed API."""
+        restart_server picks up a changed API. A pasted document lives in
+        ``openapi_document`` (with ``command`` ""); switching between the two sends both
+        fields, the unused one blank."""
         if changes.model_fields_set & _RESTARTING_FIELDS:
             _refuse_self(server_id, "change its exposure or tool policy")
         return await api(

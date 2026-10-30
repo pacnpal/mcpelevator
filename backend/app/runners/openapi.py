@@ -6,7 +6,8 @@ and serves each operation as an MCP tool (FastMCP's ``OpenAPIProvider``; see
 REST mirror, groups, idle, usage — treats it like any other server. The Server row reuses
 the launch spec verbatim (SSOT): ``command`` is the document URL, ``args`` is ``[]`` or
 ``[base_url]`` (an override for the API's own ``servers`` entry), and ``env`` is the HTTP
-headers sent to the API. So ``config_hash`` already covers every input, and re-activating
+headers sent to the API. A document pasted or uploaded instead of linked lives in
+``openapi_document`` (``command`` blank) and reaches the bridge on stdin. So ``config_hash`` already covers every input, and re-activating
 the server (a restart) re-reads the document — the way a restart re-discovers an MCP
 upstream's tools. Like every runner this is a pure ``Server -> ProcessSpec`` mapping.
 """
@@ -30,4 +31,5 @@ def build(server: Server) -> ProcessSpec:
         disabled_tools=list(server.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),
+        openapi_document=server.openapi_document or "",  # pasted/uploaded; blank = fetch
     )

@@ -392,6 +392,7 @@ class ServerUnit:
                 "app.bridge.host",
                 cwd=str(settings.backend_root),
                 env=env,
+                stdin=asyncio.subprocess.PIPE if self.spec.openapi_document else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
@@ -400,7 +401,18 @@ class ServerUnit:
             raise _AttemptFailed(f"bridge could not start: {exc}") from exc
         self.logs.append(f"[mcpelevator] starting bridge pid={self.proc.pid} port={self.port}")
         assert self.proc.stdout is not None
+        # Pumping first: the bridge may log before it reads stdin, and a full stdout pipe
+        # would then stall both sides of the write below.
         self._log_task = asyncio.create_task(self._pump_stream(self.proc.stdout))
+        if self.proc.stdin is not None:
+            try:
+                self.proc.stdin.write(self.spec.openapi_document.encode())
+                await asyncio.wait_for(self.proc.stdin.drain(), settings.start_timeout_s)
+                self.proc.stdin.close()
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the bridge already exited; readiness reports it with its log
+            except asyncio.TimeoutError as exc:
+                raise _AttemptFailed("bridge did not read its OpenAPI document") from exc
 
     def _bridge_payload(self) -> dict:
         return bridge_payload(self.spec, self.name, **self.exposure)

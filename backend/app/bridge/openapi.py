@@ -233,20 +233,25 @@ def build_server(spec: dict, *, transport=None, api_transport=None) -> FastMCP:
     ``transport`` / ``api_transport`` are httpx transports for the document fetch and the
     API calls respectively — test seams only; the bridge always uses the network.
     """
-    url = spec["command"]
+    url = spec.get("command") or ""
     headers = dict(spec.get("env") or {})
     args = list(spec.get("args") or [])
-    try:
-        raw, served_from = fetch_document(
-            url, headers, api_base=args[0] if args else None, transport=transport
-        )
-    except httpx.HTTPError as exc:
-        raise DocumentError(f"can't fetch the OpenAPI document: {exc}") from exc
+    if spec.get("document") is not None:
+        # Pasted/uploaded rather than linked (main() reads it off stdin). It has no URL,
+        # so a relative `servers` entry can't resolve. The registry demands an override.
+        raw, served_from = spec["document"], ""
+    else:
+        try:
+            raw, served_from = fetch_document(
+                url, headers, api_base=args[0] if args else None, transport=transport
+            )
+        except httpx.HTTPError as exc:
+            raise DocumentError(f"can't fetch the OpenAPI document: {exc}") from exc
     doc = parse_document(raw)
     base_url = resolve_base_url(doc, served_from, args[0] if args else None)
     info = doc.get("info") if isinstance(doc.get("info"), dict) else {}
     title = info.get("title")
-    logger.info("serving OpenAPI document %r against %s", title or url, base_url)
+    logger.info("serving OpenAPI document %r against %s", title or url or "(stored document)", base_url)
     client = httpx.AsyncClient(
         base_url=base_url,
         headers=headers,

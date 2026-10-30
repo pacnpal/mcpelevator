@@ -26,7 +26,7 @@
 	async function load() {
 		loadState = 'loading';
 		try {
-			server = await getServer(id);
+			server = await getServer(id, true);
 			ownerChoice = server.owner_id ?? '';
 			loadState = 'ready';
 			try {
@@ -59,6 +59,7 @@
 					repo_url: server.repo_url,
 					repo_ref: server.repo_ref,
 					post_clone_script: server.post_clone_script,
+					openapi_document: server.openapi_document,
 					env: server.env,
 					cwd: server.cwd,
 					pin_mcp1: server.pin_mcp1,

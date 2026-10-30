@@ -599,6 +599,61 @@ def test_openapi_server_rejects_bad_urls(session, command, args):
         service.create_server(session, name="P", runner="openapi", command=command, args=args)
 
 
+_INLINE_DOC = (
+    "openapi: 3.1.0\ninfo: {title: t, version: '1'}\n"
+    "servers: [{url: 'https://api.example/v1'}]\npaths: {}\n"
+)
+
+
+def test_openapi_server_takes_a_pasted_document(session):
+    s = service.create_server(
+        session, name="Inline", runner="openapi", command="", openapi_document=_INLINE_DOC
+    )
+    assert (s.command, s.args, s.openapi_document) == ("", [], _INLINE_DOC)
+    before = s.config_hash
+    edited = service.update_server(
+        session, s.id, {"openapi_document": _INLINE_DOC.replace("t,", "t2,")}
+    )
+    assert edited.config_hash != before  # a new document restarts the bridge
+    # Back to a URL: the stored document is dropped with the switch.
+    linked = service.update_server(
+        session, s.id, {"command": "https://api.example/openapi.json", "openapi_document": ""}
+    )
+    assert (linked.command, linked.openapi_document) == ("https://api.example/openapi.json", "")
+    # Never carried by another runner.
+    other = service.create_server(
+        session, name="N", runner="npx", command="npx", args=["-y", "p"],
+        openapi_document=_INLINE_DOC,
+    )
+    assert other.openapi_document == ""
+
+
+@pytest.mark.parametrize(
+    "command, document, args, message",
+    [
+        ("https://api.example/openapi.json", _INLINE_DOC, [], "not both"),
+        ("", "swagger: '2.0'\n", [], "Swagger"),
+        ("", "not: [an, openapi, doc]\n", [], "not an OpenAPI 3 document"),
+        # No URL of its own, so a relative servers entry needs the override.
+        ("", _INLINE_DOC.replace("https://api.example/v1", "/v1"), [], "base URL override"),
+    ],
+)
+def test_openapi_pasted_document_is_validated(session, command, document, args, message):
+    with pytest.raises(ValueError, match=message):
+        service.create_server(
+            session, name="P", runner="openapi", command=command, args=args,
+            openapi_document=document,
+        )
+
+
+def test_openapi_pasted_document_with_relative_servers_and_an_override(session):
+    s = service.create_server(
+        session, name="P", runner="openapi", command="", args=["https://api.example"],
+        openapi_document=_INLINE_DOC.replace("https://api.example/v1", "/v1"),
+    )
+    assert s.args == ["https://api.example"]
+
+
 def test_openapi_update_converts_and_clears_local_fields(session):
     s = service.create_server(
         session, name="L", runner="npx", command="npx", args=["-y", "p"], cwd="/tmp"

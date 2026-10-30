@@ -80,6 +80,11 @@ class Server(SQLModel, table=True):
     # JSON object; always set by service. For runner="remote"/"openapi" this is the
     # upstream HTTP headers (e.g. {"Authorization": "Bearer …"}), not process env.
     env: dict = Field(sa_column=Column(JSON))
+    # runner="openapi" only: the OpenAPI document itself, pasted or uploaded, for an API
+    # whose spec isn't published at a URL. Set = ``command`` is blank and the bridge reads
+    # this instead of fetching (it reaches the bridge on stdin, not in the size-capped
+    # spec env var). Blank = fetch ``command``. Part of config_hash (as a digest).
+    openapi_document: str = ""
     # JSON array; runner="docker" only — extra `docker run` options placed before the
     # image (e.g. --name, --shm-size=1g), validated at the service boundary
     # (runners.docker.run_args_error) and forced [] for every other runner. Nullable:

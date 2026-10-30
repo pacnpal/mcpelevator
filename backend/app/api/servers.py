@@ -133,7 +133,7 @@ def _visible(
 
 _LAUNCH_FIELDS = {
     "runner", "command", "args", "run_args", "env", "cwd", "setup_script", "pin_mcp1",
-    "repo_url", "repo_ref", "post_clone_script",
+    "repo_url", "repo_ref", "post_clone_script", "openapi_document",
 }
 
 
@@ -144,7 +144,7 @@ def _row_launch_value(row: Server, key: str):
         return getattr(row, key) or []
     if key == "pin_mcp1":
         return bool(getattr(row, key))
-    if key in ("repo_url", "repo_ref", "post_clone_script"):
+    if key in ("repo_url", "repo_ref", "post_clone_script", "openapi_document"):
         return getattr(row, key) or ""
     return getattr(row, key)
 
@@ -271,7 +271,9 @@ def _oauth_status(server: Server) -> OAuthStatus:
     )
 
 
-def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
+def _detail(
+    server: Server, sup, session: Session, base: str, *, include_document: bool = False
+) -> ServerDetail:
     live = _live_state(server, sup, session)
     summary = _summary(server, sup, session, base, live)
     tools = live[4]
@@ -286,6 +288,9 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         repo_url=server.repo_url or "",
         repo_ref=server.repo_ref or "",
         post_clone_script=server.post_clone_script or "",
+        # Opt-in: the detail page polls this route, and a stored document can run to
+        # megabytes. Only the edit form asks for it.
+        openapi_document=(server.openapi_document or "") if include_document else "",
         pin_mcp1=bool(server.pin_mcp1),
         auth_provider=server.auth_provider,
         oauth=bool(server.oauth),
@@ -380,9 +385,16 @@ async def get_server(
     request: Request,
     session: Session = Depends(get_session),
     principal: Principal = Depends(current_principal),
+    include_document: bool = Query(default=False),
 ):
     server = _visible(principal, session, server_id)
-    return _detail(server, request.app.state.supervisor, session, base_url(request))
+    return _detail(
+        server,
+        request.app.state.supervisor,
+        session,
+        base_url(request),
+        include_document=include_document,
+    )
 
 
 @router.get("/servers/{server_id}/usage", response_model=ServerUsage)

@@ -316,6 +316,49 @@ def test_bridge_exits_with_one_line_on_a_bad_document(monkeypatch):
     assert str(exited.value.code) == "openapi: not an OpenAPI 3 document (openapi: 'missing')"
 
 
+async def test_stored_document_is_served_without_a_fetch():
+    """A pasted/uploaded document arrives in the spec (read off stdin by main), so nothing is fetched."""
+    outer, seen, api = _api()
+    doc = api.openapi()
+    doc["servers"] = [{"url": "https://pets.example/v1"}]
+
+    def no_fetch(request):
+        raise AssertionError(f"fetched {request.url}")
+
+    server = openapi.build_server(
+        {"command": "", "document": json.dumps(doc).encode(), "env": {"X-Api-Key": "k1"}},
+        transport=httpx.MockTransport(no_fetch),
+        api_transport=httpx.ASGITransport(app=outer),
+    )
+    async with Client(server) as client:
+        result = await client.call_tool("getPet", {"pet_id": "3"})
+    assert result.structured_content == {"id": "3", "name": "rex"}
+    assert seen == [("GET", "/v1/pets/3", "k1")]
+
+
+def test_bridge_reads_a_stored_document_from_stdin(monkeypatch):
+    import io
+    import sys
+
+    from app.bridge import host
+
+    got = {}
+
+    def capture(spec):
+        got.update(spec)
+        raise openapi.DocumentError("stop")
+
+    monkeypatch.setattr(openapi, "build_server", capture)
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"openapi: 3.1.0")))
+    monkeypatch.setenv(
+        "MCPE_BRIDGE_SPEC", json.dumps({"command": "", "transport": "openapi", "document_on_stdin": True})
+    )
+    monkeypatch.setenv("MCPE_BRIDGE_PORT", "0")
+    with pytest.raises(SystemExit):
+        host.main()
+    assert got["document"] == b"openapi: 3.1.0"
+
+
 async def test_relative_servers_resolve_against_the_redirected_document():
     """OpenAPI resolves a relative server URL against where the document actually lives,
     so a redirected document's API is on the redirect target, not the entry URL."""

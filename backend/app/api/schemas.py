@@ -262,6 +262,9 @@ class ServerDetail(ServerSummary):
     repo_url: str = ""
     repo_ref: str = ""
     post_clone_script: str = ""
+    # openapi runner only: the pasted/uploaded document, returned only for
+    # ``?include_document=true`` (a blank ``command`` says one is stored either way).
+    openapi_document: str = ""
     # uvx runner only: the mcp<2 SDK compatibility pin. Always false elsewhere.
     pin_mcp1: bool = False
     auth_provider: str = "inherit"
@@ -316,6 +319,9 @@ class ServerCreate(BaseModel):
     repo_url: str = ""
     repo_ref: str = ""
     post_clone_script: str = ""
+    # openapi runner only: the OpenAPI 3 document itself (JSON or YAML), for an API whose
+    # spec isn't at a URL. Set = leave ``command`` blank. Forced "" for other runners.
+    openapi_document: str = ""
     # uvx runner only: launch with the Python mcp SDK pinned below 2.0
     # (`uvx --with "mcp<2" …`) for servers not yet compatible with the 2.x line.
     # Forced false for every other runner server-side.
@@ -369,6 +375,8 @@ class ServerUpdate(BaseModel):
     repo_url: Optional[str] = None
     repo_ref: Optional[str] = None
     post_clone_script: Optional[str] = None
+    # openapi runner only. Omitted (null) = unchanged; "" = fetch ``command`` instead.
+    openapi_document: Optional[str] = None
     # uvx runner only: the mcp<2 SDK compatibility pin. Omitted (null) = unchanged.
     pin_mcp1: Optional[bool] = None
     mcp_http: Optional[bool] = None

@@ -137,8 +137,11 @@ export function listServers(): Promise<ServerSummary[]> {
 	return request<ServerSummary[]>('/servers');
 }
 
-export function getServer(id: string): Promise<ServerDetail> {
-	return request<ServerDetail>(`/servers/${encodeURIComponent(id)}`);
+/** `includeDocument`: also return an openapi server's stored document (edit form only;
+ * it can be megabytes, so the polled detail view leaves it out). */
+export function getServer(id: string, includeDocument = false): Promise<ServerDetail> {
+	const q = includeDocument ? '?include_document=true' : '';
+	return request<ServerDetail>(`/servers/${encodeURIComponent(id)}${q}`);
 }
 
 /**
