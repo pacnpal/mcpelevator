@@ -206,11 +206,23 @@ _COREPACK = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 npx -y corepack"
 def _node_install(pkg: dict[str, Any], lockfiles: set[str]) -> tuple[str, str, str]:
     """(install command, the prefix for `<prefix> build`, package manager)."""
     declared = pkg.get("packageManager") if isinstance(pkg.get("packageManager"), str) else ""
-    if "pnpm-lock.yaml" in lockfiles or declared.startswith("pnpm"):
+    # A declared packageManager is authoritative (Corepack refuses any other manager in
+    # that project); only without one does a lockfile decide.
+    if declared.startswith("pnpm"):
+        manager = "pnpm"
+    elif declared.startswith("yarn"):
+        manager = "yarn"
+    elif "pnpm-lock.yaml" in lockfiles:
+        manager = "pnpm"
+    elif "yarn.lock" in lockfiles:
+        manager = "yarn"
+    else:
+        manager = "npm"
+    if manager == "pnpm":
         # Frozen only against a committed lockfile; without one pnpm must write it.
         frozen = " --frozen-lockfile" if "pnpm-lock.yaml" in lockfiles else ""
         return f"{_COREPACK} pnpm install{frozen}", f"{_COREPACK} pnpm run", "pnpm"
-    if "yarn.lock" in lockfiles or declared.startswith("yarn"):
+    if manager == "yarn":
         # Modern Yarn defaults to Plug'n'Play, which a plain `node <bin>` launch can't
         # resolve; a node_modules install works for any launch command (Yarn 1 ignores it).
         return (

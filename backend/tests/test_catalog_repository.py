@@ -132,6 +132,11 @@ _COREPACK = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 npx -y corepack"
         ({}, {"pnpm-lock.yaml"}, f"{_COREPACK} pnpm install --frozen-lockfile"),
         # Declared pnpm without a committed lockfile: pnpm must be free to write one.
         ({"packageManager": "pnpm@9.1.0"}, set(), f"{_COREPACK} pnpm install"),
+        # A declared manager beats a stray lockfile from another one.
+        # (Yarn always builds explicitly: it doesn't run `prepare` on install.)
+        ({"packageManager": "yarn@4.1.0"}, {"pnpm-lock.yaml"},
+         f"export YARN_NODE_LINKER=node-modules\n{_COREPACK} yarn install\n"
+         f"{_COREPACK} yarn run build"),
         # Yarn installs a node_modules tree (not Plug'n'Play) so `node <bin>` resolves.
         ({"scripts": {"build": "tsc"}}, {"yarn.lock"},
          f"export YARN_NODE_LINKER=node-modules\n{_COREPACK} yarn install\n"
@@ -333,13 +338,22 @@ async def test_fetch_text_statuses_and_size_cap(monkeypatch):
     import httpx
 
     monkeypatch.setattr(repository, "_MAX_MANIFEST_BYTES", 10)
+    pulled: list[int] = []
+
+    class Chunks(httpx.AsyncByteStream):
+        """A 40-byte body in 4-byte chunks that records how many were pulled."""
+
+        async def __aiter__(self):
+            for _ in range(10):
+                pulled.append(1)
+                yield b"xxxx"
 
     def handler(request):
         name = request.url.path.rsplit("/", 1)[-1]
         return {
             "ok": httpx.Response(200, text="{}"),
             "missing": httpx.Response(404),
-            "huge": httpx.Response(200, content=b"x" * 11),
+            "huge": httpx.Response(200, stream=Chunks()),
             "down": httpx.Response(502),
         }[name]
 
@@ -348,5 +362,6 @@ async def test_fetch_text_statuses_and_size_cap(monkeypatch):
         assert await repository.fetch_text(http, "https://raw.example/missing") is None
         # Past the cap it's treated as absent, read no further than the cap.
         assert await repository.fetch_text(http, "https://raw.example/huge") is None
+        assert len(pulled) == 3  # 12 bytes > 10: stopped there, not at the full 40
         with pytest.raises(CatalogUpstreamError):
             await repository.fetch_text(http, "https://raw.example/down")
