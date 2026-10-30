@@ -3,7 +3,7 @@
 // the live backend's OpenAPI schema at /openapi.json).
 
 /** `mcpelevator` is the built-in control-plane server: provisioned, never created. */
-export type Runner = 'npx' | 'uvx' | 'command' | 'docker' | 'remote' | 'mcpelevator';
+export type Runner = 'npx' | 'uvx' | 'command' | 'docker' | 'remote' | 'openapi' | 'mcpelevator';
 
 export type ServerState =
 	| 'stopped'

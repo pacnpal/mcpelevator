@@ -230,6 +230,23 @@ def test_remote_runner_defaults_transport_when_args_empty():
     assert spec.transport == "streamable-http"
 
 
+def test_openapi_runner_maps_document_base_url_headers():
+    s = _server(
+        runner="openapi",
+        command="https://api.example/openapi.json",
+        args=["https://api.example/v2"],
+        env={"X-Api-Key": "k"},
+        disabled_tools=["deletePet"],
+    )
+    spec = build_spec(s)
+    assert spec.transport == "openapi"
+    assert spec.command == "https://api.example/openapi.json"  # document URL
+    assert spec.args == ["https://api.example/v2"]  # base-URL override
+    assert spec.env == {"X-Api-Key": "k"}  # API headers
+    assert spec.disabled_tools == ["deletePet"]
+    assert spec.setup_script == ""
+
+
 def test_local_runner_transport_is_stdio():
     # The discriminator defaults so existing runners are unchanged.
     assert build_spec(_server(runner="npx", command="npx")).transport == "stdio"

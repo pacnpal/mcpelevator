@@ -23,7 +23,11 @@ _Avoid_: Reboot, reload, refresh
 A Server that has remained running without interruption for the configured stability window. Reaching a Stable run restores the retry budget for later recovery.
 
 **Local runner**:
-A runner whose upstream MCP server executes in mcpelevator's host environment. The local runners are `npx`, `uvx`, and `command`; `docker` and `remote` are not local runners.
+A runner whose upstream MCP server executes in mcpelevator's host environment. The local runners are `npx`, `uvx`, and `command`; `docker`, `remote`, and `openapi` are not local runners.
+
+**OpenAPI server**:
+A Server with no MCP upstream: its tools are the operations of a REST API, translated by the bridge from the API's OpenAPI document each time the Server is activated. Calls are plain HTTP requests carrying only the operator's configured headers. A restart re-reads the document, the way it re-discovers an MCP upstream's tools.
+_Avoid_: Generated server, API wrapper
 
 **Setup script**:
 An optional multiline POSIX shell script attached to a Server. It prepares a local runner at the start of every Startup attempt and fails that attempt if an unhandled command fails; scripts must be safe to rerun. Files and other external effects persist, but shell-local state does not carry into the MCP child.
