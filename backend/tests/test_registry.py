@@ -636,6 +636,7 @@ def test_openapi_server_takes_a_pasted_document(session):
         ("", "not: [an, openapi, doc]\n", [], "not an OpenAPI 3 document"),
         # No URL of its own, so a relative servers entry needs the override.
         ("", _INLINE_DOC.replace("https://api.example/v1", "/v1"), [], "base URL override"),
+        ("", _INLINE_DOC.replace("https://api.example/v1", "https://"), [], "base URL override"),
     ],
 )
 def test_openapi_pasted_document_is_validated(session, command, document, args, message):

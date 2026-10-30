@@ -225,10 +225,21 @@ def test_resolve_base_url(servers, override, expected):
     assert openapi.resolve_base_url(doc, "https://docs.example/spec.json", override) == expected
 
 
-def test_resolve_base_url_refuses_non_http_server():
-    doc = {"openapi": "3.1.0", "paths": {}, "servers": [{"url": "ftp://files.example"}]}
+@pytest.mark.parametrize(
+    "server, document_url",
+    [
+        ({"url": "ftp://files.example"}, "https://docs.example/spec.json"),
+        # No host: a pasted document has no URL of its own to borrow one from.
+        ({"url": "https://"}, ""),
+        ({"url": "https://{host}/v1", "variables": {"host": {"default": ""}}}, ""),
+        # A different scheme doesn't borrow the document's host either.
+        ({"url": "http://:8080/v1"}, "https://docs.example/spec.json"),
+    ],
+)
+def test_resolve_base_url_refuses_unusable_server(server, document_url):
+    doc = {"openapi": "3.1.0", "paths": {}, "servers": [server]}
     with pytest.raises(ValueError, match="base URL override"):
-        openapi.resolve_base_url(doc, "https://docs.example/spec.json", None)
+        openapi.resolve_base_url(doc, document_url, None)
 
 
 # --- document fetch -------------------------------------------------------------------
