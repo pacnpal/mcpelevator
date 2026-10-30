@@ -563,6 +563,54 @@ def test_remote_create_ignores_cwd(session):
     assert s.cwd is None
 
 
+def test_openapi_server_canonicalizes_and_validates(session):
+    s = service.create_server(
+        session,
+        name="Pets",
+        runner="openapi",
+        command=" https://api.example/openapi.yaml ",
+        args=["", "  "],  # blank override collapses to "use the document's servers"
+        env={"X-Api-Key": "k"},
+        cwd="/tmp",
+    )
+    assert s.runner == "openapi"
+    assert s.command == "https://api.example/openapi.yaml"
+    assert s.args == []
+    assert s.cwd is None  # no process, no working directory
+    with_base = service.create_server(
+        session, name="P2", runner="openapi", command="https://api.example/openapi.json",
+        args=["https://api.example/v2"],
+    )
+    assert with_base.args == ["https://api.example/v2"]
+    assert with_base.config_hash != s.config_hash
+
+
+@pytest.mark.parametrize(
+    "command, args",
+    [
+        ("/etc/openapi.json", []),  # local paths would read the host's files
+        ("file:///etc/passwd", []),
+        ("https://api.example/openapi.json", ["not-a-url"]),
+        ("https://api.example/openapi.json", ["https://a.example", "https://b.example"]),
+    ],
+)
+def test_openapi_server_rejects_bad_urls(session, command, args):
+    with pytest.raises(ValueError):
+        service.create_server(session, name="P", runner="openapi", command=command, args=args)
+
+
+def test_openapi_update_converts_and_clears_local_fields(session):
+    s = service.create_server(
+        session, name="L", runner="npx", command="npx", args=["-y", "p"], cwd="/tmp"
+    )
+    updated = service.update_server(
+        session, s.id, {"runner": "openapi", "command": "https://x.example/openapi.json", "args": []}
+    )
+    assert updated.runner == "openapi"
+    assert updated.args == []
+    assert updated.cwd is None
+
+
 def test_remote_config_hash_is_deterministic(session):
     """Same logical remote config (alias-normalized) → same hash; a transport change
     re-hashes (drives one idempotent reconcile)."""

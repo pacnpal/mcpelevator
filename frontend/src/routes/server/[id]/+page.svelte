@@ -629,6 +629,10 @@
 	const commandLine = $derived.by(() => {
 		// The built-in server has no stored launch line: its upstream is this instance.
 		if (server?.runner === 'mcpelevator') return 'built-in: this instance’s control plane (/api/mcp)';
+		// No launch line either: tools are translated from the document, calls go to the API.
+		if (server?.runner === 'openapi') {
+			return `openapi: ${server.command} → ${server.args?.[0] || '(document servers)'}`;
+		}
 		if (server?.runner === 'docker') {
 			return [
 				'docker run -i --rm --init […]',

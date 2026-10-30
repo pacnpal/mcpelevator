@@ -54,6 +54,26 @@ def _launcher_basename(command: str) -> str:
 # The transport vocabulary lives in one place (app.runners.remote); we canonicalize
 # through it so the stored value is always canonical and config_hash (and therefore
 # reconcile) is deterministic regardless of input spelling.
+def _is_http_url(url: str) -> bool:
+    """Whether ``url`` is a well-formed ``http(s)://`` URL with a host.
+
+    Parse rather than prefix-match: reject schemeless, hostless (https://), or
+    whitespace-bearing values that would only fail later when the bridge connects.
+    urlsplit lowercases the scheme, so an uppercase HTTPS:// is accepted. Check
+    hostname, not just netloc: "https://:443/mcp" has a truthy netloc (":443") but no
+    host. Also validate the port — `parsed.port` raises ValueError on a malformed one."""
+    parsed = urlsplit(url)
+    try:
+        parsed.port  # noqa: B018 — property access validates the port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in ("http", "https")
+        and bool(parsed.hostname)
+        and not any(c.isspace() for c in url)
+    )
+
+
 def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list[str]]:
     """Validate + canonicalize a remote server's (url, [transport]).
 
@@ -63,24 +83,7 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
     on a malformed URL or unsupported transport.
     """
     url = (command or "").strip()
-    # Parse rather than prefix-match: reject schemeless, hostless (https://), or
-    # whitespace-bearing values that would only fail later when the bridge connects.
-    # urlsplit lowercases the scheme, so an uppercase HTTPS:// is accepted.
-    parsed = urlsplit(url)
-    # Check hostname, not just netloc: "https://:443/mcp" has a truthy netloc (":443")
-    # but no host, and would only fail later when the bridge tries to connect. Also
-    # validate the port — `parsed.port` raises ValueError on a malformed one (":bad").
-    try:
-        parsed.port  # noqa: B018 — property access validates the port
-        valid_port = True
-    except ValueError:
-        valid_port = False
-    if (
-        parsed.scheme not in ("http", "https")
-        or not parsed.hostname
-        or not valid_port
-        or any(c.isspace() for c in url)
-    ):
+    if not _is_http_url(url):
         raise ValueError("a remote server's command must be an http(s):// URL with a host")
     transport = canonical_transport(args[0] if args else None)
     if transport is None:
@@ -89,6 +92,26 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
             f"(got {args[0]!r})"
         )
     return url, [transport]
+
+
+def normalize_openapi(command: str, args: Optional[list[str]]) -> tuple[str, list[str]]:
+    """Validate + canonicalize an openapi server's (document url, [base_url?]).
+
+    ``command`` is the OpenAPI document's ``http(s)://`` URL. ``args`` is empty (use the
+    document's own ``servers`` entry) or a single base-URL override; a blank override
+    collapses to ``[]`` so the stored shape — and ``config_hash`` — is deterministic.
+    Only URLs are accepted: a local path would let anyone allowed to add an openapi
+    server (not a local runner) read files off the host through the bridge.
+    """
+    url = (command or "").strip()
+    if not _is_http_url(url):
+        raise ValueError("an openapi server's command must be the http(s):// URL of its OpenAPI document")
+    rest = [str(a).strip() for a in (args or []) if str(a).strip()]
+    if len(rest) > 1:
+        raise ValueError("an openapi server takes at most one argument: the API base URL")
+    if rest and not _is_http_url(rest[0]):
+        raise ValueError("an openapi server's base URL override must be an http(s):// URL with a host")
+    return url, rest
 
 
 def normalize_oauth(
@@ -1838,6 +1861,9 @@ def create_server(
     if runner == "remote":
         command, args = normalize_remote(command, args)
         cwd = None
+    elif runner == "openapi":
+        command, args = normalize_openapi(command, args)
+        cwd = None
     # OAuth applies only to remote; normalize (and force-off elsewhere) before hashing.
     oauth, oauth_scopes, oauth_client_id, oauth_client_secret = normalize_oauth(
         runner, oauth, oauth_scopes, oauth_client_id, oauth_client_secret
@@ -2047,6 +2073,9 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
         # the stale working directory here (remote has no process) to keep the row canonical.
         server.cwd = None
+    elif server.runner == "openapi":
+        server.command, server.args = normalize_openapi(server.command, server.args)
+        server.cwd = None  # likewise: no process, so no working directory
     # Normalize OAuth (and force it off for any non-remote runner) so a stray secret can't
     # ride along on a converted server and the hash stays deterministic.
     server.oauth, server.oauth_scopes, server.oauth_client_id, server.oauth_client_secret = (

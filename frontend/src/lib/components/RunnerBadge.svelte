@@ -9,6 +9,7 @@
 		command: 'cmd',
 		docker: 'docker',
 		remote: 'remote',
+		openapi: 'openapi',
 		mcpelevator: 'built-in'
 	};
 </script>

@@ -18,6 +18,8 @@ dependencies = [
     "python-multipart>=0.0.9",
     # Cloudflare Access assertion checks (app.auth.cf_access); crypto for RS256.
     "pyjwt[crypto]>=2.10",
+    # YAML OpenAPI documents for the openapi runner (app.bridge.openapi).
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
