@@ -108,6 +108,7 @@ def parse_repo_url(url: str) -> RepoRef:
     # How to clone it, when that isn't anonymous https: (form, userinfo) — rebuilt from
     # the parsed owner/repo below, so a /tree/<ref> suffix or fragment never leaks in.
     transport: tuple[str, str] | None = None
+    port = ""
     # scp-like clone URL: git@github.com:owner/repo.git
     scp = re.match(r"^(?P<user>[\w.-]+)@(?P<host>[^:/]+):(?P<path>.+)$", text)
     if scp and "://" not in text:
@@ -117,6 +118,8 @@ def parse_repo_url(url: str) -> RepoRef:
         parsed = urlsplit(text if "://" in text else f"https://{text}")
         host, path = (parsed.hostname or "").lower(), parsed.path
         userinfo = parsed.netloc.rsplit("@", 1)[0] if "@" in parsed.netloc else ""
+        # An explicit port (ssh://git@host:2222/…) is part of how to reach the repository.
+        port = f":{parsed.port}" if parsed.port else ""
         scheme = parsed.scheme.lower().removeprefix("git+")
         if scheme == "ssh":
             transport = ("ssh", userinfo or "git")
@@ -153,8 +156,8 @@ def parse_repo_url(url: str) -> RepoRef:
     where = f"{found.owner}/{found.repo}"
     clone_url = {
         "scp": f"{userinfo}@github.com:{where}.git",
-        "ssh": f"ssh://{userinfo}@github.com/{where}.git",
-        "https": f"https://{userinfo}@github.com/{where}",
+        "ssh": f"ssh://{userinfo}@github.com{port}/{where}.git",
+        "https": f"https://{userinfo}@github.com{port}/{where}",
     }[form]
     return found._replace(clone_url=clone_url)
 
@@ -302,6 +305,14 @@ def python_draft(
     else:
         draft["post_clone_script"] = "uv sync --frozen" if "uv.lock" in lockfiles else "uv sync"
     name, scripts = _python_scripts(pyproject)
+    if legacy:
+        # The older format: review before it starts on its own, whether or not a start
+        # command was detected (a caller may supply one for a script-less project).
+        draft["warnings"].append(
+            "This is a legacy Poetry project (no [project] table), so it's installed with "
+            "`uv pip install .` instead of `uv sync` — check the post-clone script and "
+            "command before starting it."
+        )
     if not scripts:
         draft["reason"] = (
             "Couldn't tell how to start it: pyproject.toml declares no [project.scripts] "
@@ -321,12 +332,6 @@ def python_draft(
         )
     if legacy:
         draft["command"], draft["args"] = f".venv/bin/{chosen}", []
-        # Detected, but from the older format: review before it starts on its own.
-        draft["warnings"].append(
-            "This is a legacy Poetry project (no [project] table), so it's installed with "
-            "`uv pip install .` instead of `uv sync` — check the post-clone script and "
-            "command before starting it."
-        )
     else:
         # --no-sync: the post-clone script already synced; a start must not re-resolve.
         draft["command"], draft["args"] = "uv", ["run", "--no-sync", chosen]

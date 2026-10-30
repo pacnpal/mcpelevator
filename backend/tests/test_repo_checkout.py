@@ -141,7 +141,11 @@ def test_checkout_clones_builds_once_and_rebuilds_on_change(tmp_path, upstream):
 def test_post_clone_never_targets_mcpelevators_own_virtualenv(tmp_path, upstream, monkeypatch):
     # Running under `uv run uvicorn …` exports VIRTUAL_ENV; a build must not install there.
     monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "control-plane-venv"))
-    out = _run(tmp_path, str(upstream), post='test -z "${VIRTUAL_ENV:-}"')
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(tmp_path / "control-plane-venv"))
+    out = _run(
+        tmp_path, str(upstream),
+        post='test -z "${VIRTUAL_ENV:-}"\ntest -z "${UV_PROJECT_ENVIRONMENT:-}"',
+    )
     assert out.returncode == 0, out.stdout + out.stderr
 
 
@@ -368,5 +372,6 @@ def test_repo_build_timeout_must_be_positive():
 
     from app.config import Settings
 
-    with pytest.raises(ValidationError, match="repo_build_timeout_s"):
-        Settings(repo_build_timeout_s=0)
+    for bad in (0, -1, float("nan"), float("inf")):
+        with pytest.raises(ValidationError, match="repo_build_timeout_s"):
+            Settings(repo_build_timeout_s=bad)

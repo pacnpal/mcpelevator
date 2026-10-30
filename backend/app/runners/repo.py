@@ -149,8 +149,9 @@ rm -f "$stamp"
 echo "[mcpelevator] checked out $sha; running post-clone script"
 cd "$dir"
 # The build is for this checkout, never for whatever virtualenv mcpelevator itself runs in
-# (`uv run uvicorn …` exports one, and uv/pip install into an active VIRTUAL_ENV).
-unset VIRTUAL_ENV
+# (`uv run uvicorn …` exports VIRTUAL_ENV, and uv/pip install into it; uv sync also
+# honors UV_PROJECT_ENVIRONMENT).
+unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT
 {post}printf '%s\\n' "$want" > "$stamp"
 """
 

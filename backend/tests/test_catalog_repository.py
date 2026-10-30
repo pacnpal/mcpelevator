@@ -38,6 +38,9 @@ from app.main import app
         # with them), rebuilt from owner/repo so a /tree suffix never leaks into the clone.
         ("git@github.com:o/r.git", RepoRef("o", "r", None, "git@github.com:o/r.git")),
         ("ssh://git@github.com/o/r.git", RepoRef("o", "r", None, "ssh://git@github.com/o/r.git")),
+        ("ssh://git@github.com:2222/o/r.git",
+         RepoRef("o", "r", None, "ssh://git@github.com:2222/o/r.git")),
+        ("https://tok@github.com:8443/o/r", RepoRef("o", "r", None, "https://tok@github.com:8443/o/r")),
         ("https://tok@github.com/o/r/tree/v1", RepoRef("o", "r", "v1", "https://tok@github.com/o/r")),
         ("git+https://u:p@github.com/o/r.git", RepoRef("o", "r", None, "https://u:p@github.com/o/r")),
         ("github:o/r", RepoRef("o", "r")),
@@ -222,6 +225,10 @@ def test_python_legacy_poetry_installs_into_a_venv_and_waits_for_review():
     assert (draft["command"], draft["args"]) == (".venv/bin/serve", [])
     assert draft["installable"] is True
     assert any("legacy Poetry" in w for w in draft["warnings"])
+    # Still held for review when no start command could be detected.
+    scriptless = repo_detail(RepoRef("o", "r"), None, '[tool.poetry]\nname = "p"\n')["drafts"][0]
+    assert scriptless["installable"] is False
+    assert any("legacy Poetry" in w for w in scriptless["warnings"])
 
 
 def test_python_without_scripts_is_editable():

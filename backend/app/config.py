@@ -7,6 +7,8 @@ the SQLite ``setting`` table so the UI can edit them — see app.registry.settin
 
 from __future__ import annotations
 
+import math
+
 from functools import lru_cache
 from pathlib import Path
 
@@ -149,8 +151,10 @@ class Settings(BaseSettings):
     @field_validator("repo_build_timeout_s")
     @classmethod
     def _positive_repo_build_timeout(cls, value: float) -> float:
-        if value <= 0:
-            raise ValueError("repo_build_timeout_s must be greater than zero")
+        # `nan <= 0` is False and `inf` overflows the deadline's timedelta, so neither
+        # may pass: both would fail every checkout with an opaque error.
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("repo_build_timeout_s must be a finite number greater than zero")
         return value
 
     @field_validator("restart_budget")
