@@ -194,13 +194,17 @@ def build(app: FastAPI) -> "_Gate":
         plain REST API, each operation served as a tool: ``command`` is the http(s) URL of
         its OpenAPI 3 document, ``args`` is [] or [base_url] to override the document's
         ``servers`` entry, and ``env`` is the HTTP headers sent to the API). Created
-        disabled unless ``enabled`` is true."""
+        disabled unless ``enabled`` is true. A local runner can launch from a git checkout:
+        ``repo_url`` (+ optional ``repo_ref``) is cloned, ``post_clone_script`` runs in it
+        when the commit or script changes, and the command runs inside it."""
         return await api("POST", "/api/servers", json=spec.model_dump(exclude_unset=True))
 
     @mcp.tool(annotations=_WRITE)
     async def update_server(server_id: str, changes: ServerUpdate) -> Any:
         """Edit a server; only the fields given change (an explicit null resets the
-        nullable ones to inherit). A launch-spec change restarts its bridge. For an
+        nullable ones to inherit). A launch-spec change restarts its bridge. That includes
+        ``repo_url``/``repo_ref``/``post_clone_script`` (a changed script or commit
+        rebuilds on the next start; ``repo_url: ""`` drops the checkout). For an
         openapi server, ``command`` / ``args`` / ``env`` are the document URL, base-URL
         override and API headers; its document is re-read on every start, so
         restart_server picks up a changed API."""
@@ -457,6 +461,68 @@ def build(app: FastAPI) -> "_Gate":
     async def list_catalog_versions(id: str, source: Optional[str] = None) -> Any:
         """The published versions of a catalog entry."""
         return await api("GET", "/api/catalog/server/versions", params={"id": id, "source": source})
+
+    @mcp.tool(annotations={**_READ, "openWorldHint": True})
+    async def get_repository_draft(url: str) -> Any:
+        """Resolve a GitHub repository URL (a server distributed as source, not on npm or
+        PyPI) into reviewable drafts: repo_url/repo_ref, a detected post_clone_script
+        (install + build) and the start command run inside the checkout. Anything that
+        couldn't be detected is blank with a ``reason``. Edit as needed and pass to
+        create_server."""
+        return await api("GET", "/api/catalog/repository", params={"url": url})
+
+    @mcp.tool(annotations={**_ADD, "openWorldHint": True})
+    async def install_from_repository(
+        url: str,
+        name: Optional[str] = None,
+        post_clone_script: Optional[str] = None,
+        command: Optional[str] = None,
+        args: Optional[list[str]] = None,
+        env: Optional[dict[str, str]] = None,
+        enabled: Optional[bool] = None,
+    ) -> Any:
+        """Install a server from a GitHub repository in one step: mcpelevator clones it,
+        runs the post-clone script (install + build) and launches the command inside the
+        checkout. Steps are auto-detected from package.json / pyproject.toml; pass
+        ``post_clone_script``, ``command`` or ``args`` to override them. It starts only
+        when a command is known, unless ``enabled`` says otherwise. Returns the server
+        plus ``warnings`` and ``notes``; first start can take minutes (wait_for_server)."""
+        detail = await api("GET", "/api/catalog/repository", params={"url": url})
+        meta = detail["server"]
+        draft = next((d for d in detail["drafts"] if d["installable"]), detail["drafts"][0])
+        spec = {
+            "runner": "command",
+            "command": draft["command"] if command is None else command,
+            "args": draft["args"] if args is None else args,
+            "env": {**draft["env"], **(env or {})},
+            "repo_url": draft["repo_url"],
+            "repo_ref": draft["repo_ref"],
+            "post_clone_script": (
+                draft["post_clone_script"] if post_clone_script is None else post_clone_script
+            ),
+        }
+        if not spec["command"].strip():
+            raise ToolError(
+                "couldn't detect how to start this repository; pass command (and args). "
+                + " ".join([draft.get("reason") or ""] + detail.get("notes", []))
+            )
+        tag = f"#{meta['version']}" if meta.get("version") else ""
+        created = await api(
+            "POST",
+            "/api/servers",
+            json={
+                **spec,
+                "name": name or meta.get("title") or meta["name"],
+                "source": f"github:{meta['name']}{tag}",
+                "enabled": not draft["warnings"] if enabled is None else enabled,
+            },
+        )
+        notes = list(detail.get("notes", []))
+        if not draft["installable"] and draft.get("reason"):
+            # What detection couldn't work out (no install/build steps, no start command)
+            # — the caller supplied the command, but should know what else is blank.
+            notes.append(draft["reason"])
+        return {"server": created, "warnings": draft["warnings"], "notes": notes}
 
     @mcp.tool(annotations={**_ADD, "openWorldHint": True})
     async def install_from_catalog(

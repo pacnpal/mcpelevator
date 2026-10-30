@@ -55,6 +55,10 @@ def bridge_payload(spec, name: str, *, mcp_http: bool, rest_openapi: bool) -> di
         payload["forward_authorization"] = True
     if spec.instructions:
         payload["instructions"] = spec.instructions
+    # Same rule: present only for a server launched from a source checkout, whose child
+    # must not inherit the control plane's own virtualenv (`_child_env`).
+    if spec.repo:
+        payload["checkout"] = True
     return payload
 
 

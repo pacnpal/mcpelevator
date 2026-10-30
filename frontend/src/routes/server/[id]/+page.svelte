@@ -1225,6 +1225,21 @@
 				{/if}
 			</div>
 
+			{#if server.repo_url}
+				<div class="flex flex-col gap-1.5">
+					<span class="text-xs font-medium text-[var(--color-ink-muted)]">Source repository</span>
+					<code class="font-mono text-xs break-all text-[var(--color-ink)]">
+						{server.repo_url}{server.repo_ref ? ` @ ${server.repo_ref}` : ' (default branch)'}
+					</code>
+				</div>
+				{#if server.post_clone_script}
+					<div class="flex flex-col gap-1.5">
+						<span class="text-xs font-medium text-[var(--color-ink-muted)]">Post-clone script</span>
+						<pre class="m-0 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5 font-mono text-xs whitespace-pre-wrap text-[var(--color-ink)]">{server.post_clone_script}</pre>
+					</div>
+				{/if}
+			{/if}
+
 			{#if server.setup_script}
 				<div class="flex flex-col gap-1.5">
 					<span class="text-xs font-medium text-[var(--color-ink-muted)]">Setup script</span>

@@ -25,6 +25,7 @@ answer when a live fetch fails.
 | `official.py` | `OfficialSource` — the MCP Registry (`registry.modelcontextprotocol.io`). Auto-install. |
 | `glama.py` | `GlamaSource` — the Glama directory. Discovery-only (no launch spec ⇒ manual scaffold). Disabled until `MCPE_GLAMA_API_KEY` is set. |
 | `mirror.py` | The local copy of every directory: background sync (`run_forever`), and the reads (`list_page`, `get`) sources try before going live. |
+| `repository.py` | Not a directory: resolves a pasted GitHub repository URL into a source-repository draft (`repo_url`, detected `post_clone_script` and start command) for `GET /api/catalog/repository`. Pure mapping + raw-file fetches built from validated parts. |
 | `registry.py` | **SSOT**: the list of available sources. The only place that enumerates them. |
 
 The API (`app/api/catalog.py`) and the SPA (`/catalog`) read from `registry.py`; they

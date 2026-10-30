@@ -55,6 +55,11 @@ Typical flows:
   entry's id (pass env for required values), then wait_for_server. A "failed"
   state is explained by get_server_logs. For full control, get_catalog_server
   returns the launch spec to edit and pass to create_server.
+- Install from a GitHub repository (a server not published to npm or PyPI):
+  install_from_repository with the repo URL clones it, runs the detected install/
+  build steps, and launches it from the checkout (override post_clone_script,
+  command, args). get_repository_draft returns the draft to edit by hand; fix a
+  build later with update_server's post_clone_script.
 - Serve a REST API from its OpenAPI document: create_server with runner
   "openapi", command the document's http(s) URL, args [] (or [base_url] to
   override its servers entry), env the API's HTTP headers, and enabled true;

@@ -19,7 +19,7 @@ AuthProvider = Literal["inherit", "none", "bearer", "oauth"]
 # ('auto' = self-probe CIMD with DCR fallback, 'cimd'/'dcr' = explicit, probe-free).
 OauthClientMode = Literal["inherit", "auto", "cimd", "dcr"]
 EffectiveAuthProvider = Literal["none", "bearer", "oauth"]
-StartupPhase = Literal["queued", "setup", "bridge", "readiness", "retry_wait"]
+StartupPhase = Literal["queued", "checkout", "setup", "bridge", "readiness", "retry_wait"]
 
 
 class Transports(BaseModel):
@@ -257,6 +257,11 @@ class ServerDetail(ServerSummary):
     env: dict[str, str] = {}
     cwd: Optional[str] = None
     setup_script: str = ""
+    # Local runners: launch from a git checkout mcpelevator manages (app.runners.repo).
+    # Blank repo_url = none. See ServerCreate.
+    repo_url: str = ""
+    repo_ref: str = ""
+    post_clone_script: str = ""
     # uvx runner only: the mcp<2 SDK compatibility pin. Always false elsewhere.
     pin_mcp1: bool = False
     auth_provider: str = "inherit"
@@ -302,6 +307,15 @@ class ServerCreate(BaseModel):
     env: dict[str, str] = {}
     cwd: Optional[str] = None
     setup_script: str = ""
+    # Local runners only (npx/uvx/command): launch from a git checkout of this repository,
+    # cloned into <data_dir>/repos/<id> and re-fetched at repo_ref (branch/tag/commit; blank
+    # = default branch) on each activation. post_clone_script runs in the checkout when the
+    # commit or the script changed (install + build); the command then runs with the
+    # checkout as its working directory (a relative cwd is taken inside it). GitHub
+    # shorthand (owner/repo) and page URLs (…/tree/<ref>) are canonicalized server-side.
+    repo_url: str = ""
+    repo_ref: str = ""
+    post_clone_script: str = ""
     # uvx runner only: launch with the Python mcp SDK pinned below 2.0
     # (`uvx --with "mcp<2" …`) for servers not yet compatible with the 2.x line.
     # Forced false for every other runner server-side.
@@ -332,8 +346,9 @@ class ServerCreate(BaseModel):
     # configure a one-second shutdown instead of failing validation.
     idle_timeout_s: Optional[StrictInt] = None
     enabled: bool = False
-    # Provenance. Only a "catalog:<id>" value is honored (a registry install);
-    # anything else falls back to "manual" server-side. See servers.create_server.
+    # Provenance. Only a "catalog:<id>" (registry install) or "github:<owner>/<repo>"
+    # (repository install) value is honored; anything else falls back to "manual"
+    # server-side. See servers.create_server.
     source: Optional[str] = None
 
 
@@ -350,6 +365,10 @@ class ServerUpdate(BaseModel):
     env: Optional[dict[str, str]] = None
     cwd: Optional[str] = None
     setup_script: Optional[str] = None
+    # Omitted (null) = unchanged; send repo_url "" to drop the checkout.
+    repo_url: Optional[str] = None
+    repo_ref: Optional[str] = None
+    post_clone_script: Optional[str] = None
     # uvx runner only: the mcp<2 SDK compatibility pin. Omitted (null) = unchanged.
     pin_mcp1: Optional[bool] = None
     mcp_http: Optional[bool] = None
@@ -631,6 +650,11 @@ class CatalogDraft(BaseModel):
     installable: bool = False
     reason: Optional[str] = None  # why this draft isn't auto-installable, if so
     warnings: list[str] = []  # required/secret values the operator must fill in
+    # A repository install (app.catalog.repository): the checkout and its detected build
+    # steps, passed through to ServerCreate. Blank for registry packages.
+    repo_url: str = ""
+    repo_ref: str = ""
+    post_clone_script: str = ""
 
 
 class CatalogRemote(BaseModel):

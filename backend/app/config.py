@@ -7,6 +7,8 @@ the SQLite ``setting`` table so the UI can edit them — see app.registry.settin
 
 from __future__ import annotations
 
+import math
+
 from functools import lru_cache
 from pathlib import Path
 
@@ -132,6 +134,9 @@ class Settings(BaseSettings):
     port_range_end: int = 49400
     max_running: int = 50
     start_timeout_s: float = 120.0  # generous: covers npx/uvx cold-start install
+    # Deadline for a repository server's checkout + post-clone build (app.runners.repo);
+    # a first clone-and-build can take minutes, far past start_timeout_s.
+    repo_build_timeout_s: float = 900.0
     health_interval_s: float = 10.0
     restart_budget: int = 5  # consecutive failed (re)starts before -> FAILED
     restart_stable_s: float = 60.0
@@ -141,6 +146,15 @@ class Settings(BaseSettings):
     def _positive_start_timeout(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("start_timeout_s must be greater than zero")
+        return value
+
+    @field_validator("repo_build_timeout_s")
+    @classmethod
+    def _positive_repo_build_timeout(cls, value: float) -> float:
+        # `nan <= 0` is False and `inf` overflows the deadline's timedelta, so neither
+        # may pass: both would fail every checkout with an opaque error.
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("repo_build_timeout_s must be a finite number greater than zero")
         return value
 
     @field_validator("restart_budget")

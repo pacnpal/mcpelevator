@@ -21,8 +21,10 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Node 26 (Current line until it goes Active LTS in Oct 2026) is pinned deliberately
 # to match the frontend build stage above — runtime npx and build-time Node stay on
 # one major. Bump both together when moving to the next line.
+# openssh-client: git's ssh transport for source-repository servers (`ssh://…`,
+# `git@host:path`); --no-install-recommends would otherwise drop it from git's deps.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates gnupg tini git \
+        curl ca-certificates gnupg tini git openssh-client \
     && curl -fsSL https://deb.nodesource.com/setup_26.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     # Refresh npm to a build whose bundled deps carry the fixes Trivy flags in the

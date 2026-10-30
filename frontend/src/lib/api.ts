@@ -240,6 +240,18 @@ export function getCatalogServer(
 }
 
 /**
+ * Resolves a GitHub repository URL to install drafts (npx or uvx installing from git),
+ * in the same shape as a catalog entry so it reviews through the same form.
+ *
+ * @param url - The repository URL, e.g. `https://github.com/owner/repo`
+ * @returns The resolved details
+ */
+export function getRepositoryDraft(url: string): Promise<CatalogDetail> {
+	const q = new URLSearchParams({ url });
+	return request<CatalogDetail>(`/catalog/repository?${q.toString()}`);
+}
+
+/**
  * Updates a server.
  *
  * @param id - The server ID.

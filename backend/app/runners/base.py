@@ -35,6 +35,10 @@ class ProcessSpec:
     env: dict[str, str] = field(default_factory=dict)  # server-specific vars / headers
     cwd: str | None = None
     setup_script: str = ""
+    # A git checkout to launch from (app.runners.repo): {"url", "ref", "post_clone_script"},
+    # or None. The supervisor prepares it before setup and resolves ``cwd`` inside it — the
+    # builder stays pure, so it never sees where the data dir is.
+    repo: dict | None = None
     # Per-tool policy, applied together by one FastMCP transform in the bridge (see
     # app.bridge.host._tool_transform). `disabled_tools` are upstream names dropped from
     # tools/list and refused on call; `tool_overrides` maps an upstream name to a
@@ -97,6 +101,15 @@ def passthrough(server: Server) -> ProcessSpec:
         env=dict(server.env or {}),
         cwd=server.cwd,
         setup_script=server.setup_script or "",
+        repo=(
+            {
+                "url": server.repo_url,
+                "ref": server.repo_ref or "",
+                "post_clone_script": server.post_clone_script or "",
+            }
+            if server.repo_url
+            else None
+        ),
         disabled_tools=list(server.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),

@@ -116,7 +116,7 @@ _TAIL_LINES = 400
 # an unbounded group would raise and (via the unit's failure path) could block the
 # activation from converging to "failed".
 _PHASE_MARKER = re.compile(
-    r"^\[mcpelevator\] attempt (\d{1,9})/\d+: (setup|bridge|readiness)\b"
+    r"^\[mcpelevator\] attempt (\d{1,9})/\d+: (checkout|setup|bridge|readiness)\b"
 )
 
 
@@ -151,7 +151,9 @@ def startup_hint(
             if latest_attempt is None or attempt > latest_attempt:
                 latest_attempt = attempt
                 relevant.clear()
-            phase = "setup" if marker.group(2) == "setup" else "launch"
+            # A checkout section (repository clone + post-clone build) is neither
+            # phase: its lines are never evidence for a setup or launch remedy.
+            phase = {"setup": "setup", "checkout": "checkout"}.get(marker.group(2), "launch")
             continue
         if phase == wanted:
             relevant.append(line)

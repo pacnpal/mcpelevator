@@ -149,7 +149,16 @@ output enters the authenticated server log stream. Both may contain credentials 
 sensitive data and should be handled like `env` secrets. The official container currently
 runs mcpelevator and setup as root. Files outside mounted or otherwise persistent paths,
 including system changes made by setup, disappear on container replacement; only persistent
-paths and package caches configured on them survive. The **docker runner** is opt-in and
+paths and package caches configured on them survive.
+
+A **source repository** (`repo_url`) runs code fetched from that repository: the
+post-clone script and the launch command execute it as the mcpelevator process user with
+the server's environment, and every activation fetches the configured ref, so pin a tag or
+commit (`repo_ref`) when the upstream isn't trusted to stay as reviewed. Only network git
+transports are accepted (`https`, `ssh`, `git`, `git@host:path`) — never `file://` or
+`ext::`. Credentials embedded in the URL are stored like `env` and stripped from the
+clone log line. The checkout lives under `<data_dir>/repos/` and is deleted with the
+server. The **docker runner** is opt-in and
 root-equivalent: it is disabled by default behind the `docker_runner` setting, enforced
 at the service layer (a
 docker server can't be created-enabled or enabled while it's off) and again in the

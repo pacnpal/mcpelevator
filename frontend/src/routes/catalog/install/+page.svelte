@@ -17,6 +17,8 @@
 		pending = p;
 	});
 
+	// Where this hand-off came from (the catalog, or Add → From GitHub).
+	const back = $derived(pending?.back ?? { href: '/catalog', label: 'Back to catalog' });
 	const repoUrl = $derived(safeUrl(pending?.repositoryUrl ?? null));
 	const webUrl = $derived(safeUrl(pending?.webUrl ?? null));
 
@@ -43,13 +45,13 @@
 <section class="mx-auto flex w-full max-w-2xl flex-col gap-7">
 	<!-- Back -->
 	<a
-		href="/catalog"
+		href={back.href}
 		class="inline-flex items-center gap-1.5 self-start text-sm text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
 	>
 		<svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 			<path d="M19 12H5M12 19l-7-7 7-7" />
 		</svg>
-		Back to catalog
+		{back.label}
 	</a>
 
 	{#if pending}
@@ -110,7 +112,7 @@
 			error={createError}
 			submitLabel="Install server"
 			onsubmit={handleCreate}
-			oncancel={() => goto('/catalog')}
+			oncancel={() => goto(back.href)}
 		/>
 	{/if}
 </section>

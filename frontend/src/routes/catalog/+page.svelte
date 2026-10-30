@@ -7,11 +7,11 @@
 		listCatalog,
 		listCatalogSources
 	} from '$lib/api';
-	import { safeUrl, setPendingInstall } from '$lib/catalogInstall';
+	import { pendingFromDraft, safeUrl, setPendingInstall } from '$lib/catalogInstall';
 	import { canonicalRemoteTransport } from '$lib/remote';
 	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
 	import { flashToast } from '$lib/toast.svelte';
-	import type { CatalogServer, CatalogSource, Runner } from '$lib/types';
+	import type { CatalogServer, CatalogSource } from '$lib/types';
 
 	// ---- Sources --------------------------------------------------------------
 	let sources = $state<CatalogSource[]>([]);
@@ -214,7 +214,6 @@
 				return;
 			}
 			const installableDraft = detail.drafts.find((d) => d.installable);
-			const draft = installableDraft ?? detail.drafts[0] ?? null;
 			const supportMeta = sources.find((s) => s.id === server.source);
 			const versionTag = detail.server.version ? `@${detail.server.version}` : '';
 
@@ -252,38 +251,12 @@
 				return;
 			}
 
-			const autoInstallable = !!draft?.installable;
-
-			// Notes shown above the form: source notes, plus (when we couldn't derive a
-			// runnable command) why, and any remote endpoints — so a manual/empty form is
-			// always explained rather than mysteriously blank.
-			const notes = [...detail.notes];
-			if (!autoInstallable && draft?.reason) notes.push(draft.reason);
-			for (const r of detail.remotes) {
-				notes.push(`Remote ${r.type} endpoint (not a local runner): ${r.url}`);
-			}
-
-			const warnings = draft?.warnings ?? [];
-			setPendingInstall({
-				initial: {
-					name: detail.server.title || detail.server.name,
-					runner: (draft?.runner ?? 'npx') as Runner,
-					command: draft?.command ?? '',
-					args: draft?.args ?? [],
-					env: draft?.env ?? {},
-					// Only auto-start a clean, fully-resolved install; anything with
-					// required/secret/placeholder values or no runnable command must be
-					// reviewed first, so don't boot a broken server.
-					enabled: autoInstallable && warnings.length === 0
-				},
-				source: `catalog:${detail.server.name}${versionTag}`,
-				sourceLabel: supportMeta?.label ?? server.source,
-				installSupport: detail.manual_install || !autoInstallable ? 'manual' : 'auto',
-				warnings,
-				notes,
-				repositoryUrl: detail.server.repository_url,
-				webUrl: detail.server.web_url
-			});
+			setPendingInstall(
+				pendingFromDraft(detail, {
+					source: `catalog:${detail.server.name}${versionTag}`,
+					sourceLabel: supportMeta?.label ?? server.source
+				})
+			);
 			await goto('/catalog/install');
 		} catch (err) {
 			flashToast(errorMessage(err), 'error');

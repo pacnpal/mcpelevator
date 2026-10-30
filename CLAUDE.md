@@ -54,6 +54,16 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   declined, logs to the bridge log); the per-server `serialize_client_requests` flag runs one
   proxied request at a time (`_SerializeClientRequests` middleware) and fills the slot, so the
   child can only be asking that caller (issue #143). Progress is bound per call by its token.
+- **Source repositories** (`runners/repo.py`, `catalog/repository.py`): a local-runner server
+  can launch from a git checkout mcpelevator owns (`repo_url`/`repo_ref`/`post_clone_script`,
+  all in `config_hash`). The unit runs a generated checkout script as its own `checkout`
+  startup phase (under `repo_build_timeout_s`, before setup): clone/fetch into
+  `<data_dir>/repos/<id>`, keep the old checkout if the fetch fails, and run the post-clone
+  script only when the commit or script changed (a stamp beside the checkout). The runner
+  stays pure — the unit resolves `cwd` inside the checkout. `GET /api/catalog/repository`
+  (and the control MCP's `get_repository_draft` / `install_from_repository`) detect the
+  steps from a GitHub repo's manifests; detection is best effort and every field stays
+  editable.
 - **Upstream OAuth** (`auth/oauth_store.py`, `auth/oauth_flow.py`): a `remote` server can
   authenticate to its upstream via OAuth instead of static `env` headers. The interactive
   authorization-code grant (DCR + PKCE) runs in the control plane (`/api/servers/{id}/oauth/authorize`

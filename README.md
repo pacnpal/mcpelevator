@@ -150,6 +150,65 @@ file. To diagnose an unauthenticated endpoint independently of the host client, 
 npx -p mcp-remote@latest mcp-remote-client https://mcp.example.com/s/memory/mcp
 ```
 
+### Install from a source repository
+
+Some MCP servers are never published to npm or PyPI: their README says "clone, build, run"
+(for example [ooples/mcp-console-automation](https://github.com/ooples/mcp-console-automation)).
+A local-runner server (`npx`, `uvx`, `command`) can launch from a git checkout that
+mcpelevator manages:
+
+- **`repo_url`** — the repository (`https://`, `ssh://`, `git://` or `git@host:path`; GitHub
+  `owner/repo` shorthand and `…/tree/<ref>` page URLs are accepted). It's cloned into
+  `<data_dir>/repos/<server id>`.
+- **`repo_ref`** — a branch, tag or commit (blank = the default branch). It's fetched on
+  every activation; if the fetch fails and an earlier checkout exists, that one starts.
+- **`post_clone_script`** — the install/build steps (`npm ci`, `npm run build`, `uv sync`,
+  …), run with `/bin/sh -e -c` inside the checkout, **only** when the checked-out commit or
+  the script itself changed since its last successful run. A restart doesn't rebuild.
+- The **command** then runs with the checkout as its working directory (a relative `cwd`
+  is taken inside it), e.g. `node dist/mcp/server.js`.
+
+In the UI, **Add → From GitHub** takes a repository URL (an SSH address or an https URL with
+a token is kept as the clone URL) and detects what it can from the root manifests:
+
+- `package.json`: the install command follows a declared `packageManager`, else the
+  lockfile (`npm ci`, otherwise `npm install`; pnpm and Yarn run through Corepack via `npx`, since Node 25+ no longer ships
+  it, and Yarn installs a `node_modules` tree rather than Plug'n'Play). A `build` script is
+  added as a step unless `prepare` already runs it on install (never assumed for Yarn). The
+  start command comes from `bin` (a non-JS bin is made executable after the build), else
+  the `start` script (`npm run --silent start`), else `main`.
+- `pyproject.toml`: `uv sync` (`--frozen` with a `uv.lock`), then `uv run --no-sync <script>`.
+  A legacy Poetry project (no `[project]` table) is installed with `uv pip install .` into
+  the checkout's `.venv` and flagged for review before it starts. So is a project with no
+  `[build-system]` (and no `tool.uv.package = true`), whose entry point `uv sync` won't install.
+  The build and the server both run without the control plane's own `VIRTUAL_ENV` /
+  `UV_PROJECT_ENVIRONMENT`, so they share the checkout's `.venv`.
+
+Anything it can't work out is left blank with the reason; every step is editable in the
+review form and later on the server's edit page (**Source repository**). Over the API,
+send the fields directly:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/json' -d '{
+  "name": "Console automation", "runner": "command",
+  "command": "node", "args": ["dist/mcp/server.js"],
+  "repo_url": "https://github.com/ooples/mcp-console-automation",
+  "post_clone_script": "npm ci", "enabled": true
+}'
+```
+
+`GET /api/catalog/repository?url=…` returns the detected draft without creating anything.
+The checkout and build run under `MCPE_REPO_BUILD_TIMEOUT_S` (15 minutes by default) rather
+than the start timeout, and show as the **checkout** startup phase with their output in the
+server's logs. Editing any of the three fields restarts the server (rebuilding when the
+commit or script changed); deleting the server deletes its checkout. Like setup scripts,
+the post-clone script runs as the mcpelevator process user with the server's environment,
+so it is gated by the same local-runner permission. Private repositories work with
+credentials in the URL (`https://<token>@github.com/…`, stored as plain config like `env`)
+or an SSH key available to the process user. The image ships the SSH client; in Docker,
+mount the key and a `known_hosts` entry for the host into the container user's `~/.ssh`
+(git won't prompt to accept an unknown host key).
+
 ### Per-server setup and startup retries
 
 `setup_script` is optional and supported only by the `npx`, `uvx`, and `command`
@@ -517,7 +576,7 @@ never in the database, so authenticating never restarts the bridge on its own.
 
 ## Manage mcpelevator from an agent (the built-in MCP server)
 
-Every install has one built-in server named **mcpelevator**, provisioned on boot (existing installs get it on upgrade). It serves the control plane itself over MCP at `/s/mcpelevator/mcp`, so an agent can do what the UI does. If a server of yours already had that slug, the built-in one gets `mcpelevator-2` instead. Boot prints the URL it actually lands on, and the dashboard shows it. It has 41 tools: list, create, edit, enable, disable, restart and delete servers (any runner, including an `openapi` server that serves a REST API from its OpenAPI document), import an `mcpServers` config, install a catalog entry in one call, wait for a server to settle, try a server's tools, read its logs and usage, export a `.mcpb` bundle, manage groups, tokens, users and settings, and ask `whoami`. The read-only views are also MCP resources (`mcpelevator://servers`, `mcpelevator://servers/{id}`, `mcpelevator://servers/{id}/logs`, `mcpelevator://groups`, `mcpelevator://settings`). The `install_server` and `diagnose_server` prompts walk an agent through the two most common jobs, and the server sends instructions on connect that explain the flows, among them serving a REST API through the `openapi` runner (`command` is the document URL, `args` an optional base-URL override, `env` the API's headers).
+Every install has one built-in server named **mcpelevator**, provisioned on boot (existing installs get it on upgrade). It serves the control plane itself over MCP at `/s/mcpelevator/mcp`, so an agent can do what the UI does. If a server of yours already had that slug, the built-in one gets `mcpelevator-2` instead. Boot prints the URL it actually lands on, and the dashboard shows it. It has 43 tools: list, create, edit, enable, disable, restart and delete servers (any runner, including an `openapi` server that serves a REST API from its OpenAPI document), import an `mcpServers` config, install a catalog entry or a GitHub repository in one call, wait for a server to settle, try a server's tools, read its logs and usage, export a `.mcpb` bundle, manage groups, tokens, users and settings, and ask `whoami`. The read-only views are also MCP resources (`mcpelevator://servers`, `mcpelevator://servers/{id}`, `mcpelevator://servers/{id}/logs`, `mcpelevator://groups`, `mcpelevator://settings`). The `install_server` and `diagnose_server` prompts walk an agent through the two most common jobs, and the server sends instructions on connect that explain the flows, among them serving a REST API through the `openapi` runner (`command` is the document URL, `args` an optional base-URL override, `env` the API's headers).
 
 It's a server like the others. It shows on the dashboard, and you can hide or rename tools, rewrite descriptions, set its idle timeout, rename its slug, or set its auth to `none` or `bearer`. Its launch line is fixed (there's nothing to launch), and it can't be deleted, cloned, or handed to another owner. REST/OpenAPI stays off, because a REST call can't carry your token through to the control plane. It joins a group only when you name it in the group's member list: `"*"` skips it, so a wildcard bundle you hand to agents never picks up admin tools on upgrade.
 
@@ -560,7 +619,9 @@ the endpoint's declared headers into the review form (required ones flagged) so 
 in upstream auth before starting.
 
 Open **Browse** in the header (or `/catalog`). The backend proxies the directories
-(`GET /api/catalog/servers`, `GET /api/catalog/server`) so the SPA stays same-origin;
+(`GET /api/catalog/servers`, `GET /api/catalog/server`, and `GET /api/catalog/repository`
+for a GitHub repository URL — see [Install from a source repository](#install-from-a-source-repository))
+so the SPA stays same-origin;
 installing posts the reviewed draft to `POST /api/servers` tagged `source=catalog:<id>`.
 
 The MCP Registry promises no uptime and asks consumers to sync about hourly and keep their
@@ -599,6 +660,7 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_PORT_RANGE_START` / `_END` | `49200` / `49400` | Loopback ports for bridge processes |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrent running servers |
 | `MCPE_START_TIMEOUT_S` | `120` | Separate timeout for setup and for readiness on each startup attempt (covers npx/uvx cold start) |
+| `MCPE_REPO_BUILD_TIMEOUT_S` | `900` | Timeout for a repository server's checkout + post-clone build on each startup attempt (a first build can take minutes) |
 | `MCPE_RESTART_BUDGET` | `5` | Startup attempts before `failed`; retry waits are 2/4/8/16 seconds and cap at 16 |
 | `MCPE_RESTART_STABLE_S` | `60` | Uninterrupted running time before the retry budget is restored |
 | `MCPE_VERSION` | _(image: release tag)_ | Version the instance reports (`/api/health`, UI badge). Set by the published image from the release tag; you don't normally set it. Unset → derived from the adjacent `pyproject.toml` (source tree), else installed package metadata |
@@ -695,7 +757,7 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 ## Status / roadmap
 
-**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop / retry / **restart** (bounce a running server to pick up its upstream's new tools), with optional setup scripts for local runners. **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh), and `openapi` (serve a plain REST API's operations as MCP tools, translated from its OpenAPI document). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: local bearer tokens or external-AS OAuth JWTs for `/s` and `/g`, control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
+**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop / retry / **restart** (bounce a running server to pick up its upstream's new tools), with optional setup scripts for local runners and **source-repository** servers (clone + editable post-clone build, auto-detected from a GitHub URL). **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh), and `openapi` (serve a plain REST API's operations as MCP tools, translated from its OpenAPI document). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: local bearer tokens or external-AS OAuth JWTs for `/s` and `/g`, control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
 
 Also working: a **tool playground** on the server page (invoke any discovered tool from a schema-built form, no client needed), **per-tool disable** (toggle individual tools off to hide them from every surface — MCP, REST, and groups — and refuse them if called), **per-tool overrides** (rename a tool or rewrite its description when the upstream's wording trips up models — applied to every surface, no upstream rebuild needed), **idle shutdown with wake-on-request** (quiesce inactive servers, restart transparently on the next request), an opt-in **REST/OpenAPI surface** per server (`/s/<slug>/rest/<tool>` + a generated `openapi.json`), and a **multi-user control plane** (admin/member roles, per-user server ownership and token scoping, a per-user local-runner permission, and login-token credentials minted from Settings → Users — see README Security for the trust model).
 
