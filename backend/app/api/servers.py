@@ -133,7 +133,7 @@ def _visible(
 
 _LAUNCH_FIELDS = {
     "runner", "command", "args", "run_args", "env", "cwd", "setup_script", "pin_mcp1",
-    "repo_url", "repo_ref", "post_clone_script",
+    "repo_url", "repo_ref", "post_clone_script", "openapi_document",
 }
 
 
@@ -144,7 +144,7 @@ def _row_launch_value(row: Server, key: str):
         return getattr(row, key) or []
     if key == "pin_mcp1":
         return bool(getattr(row, key))
-    if key in ("repo_url", "repo_ref", "post_clone_script"):
+    if key in ("repo_url", "repo_ref", "post_clone_script", "openapi_document"):
         return getattr(row, key) or ""
     return getattr(row, key)
 
@@ -286,6 +286,7 @@ def _detail(server: Server, sup, session: Session, base: str) -> ServerDetail:
         repo_url=server.repo_url or "",
         repo_ref=server.repo_ref or "",
         post_clone_script=server.post_clone_script or "",
+        openapi_document=server.openapi_document or "",
         pin_mcp1=bool(server.pin_mcp1),
         auth_provider=server.auth_provider,
         oauth=bool(server.oauth),

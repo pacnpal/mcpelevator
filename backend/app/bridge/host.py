@@ -43,6 +43,7 @@ import json
 import logging
 import os
 import re
+import sys
 import weakref
 from collections.abc import Callable, Iterator, Sequence
 from contextvars import ContextVar
@@ -1657,6 +1658,8 @@ def build_app(spec: dict, proxy: FastMCP):
 def main() -> None:
     """Entry point: read the ProcessSpec + port from the environment and serve."""
     spec = json.loads(os.environ["MCPE_BRIDGE_SPEC"])
+    if spec.get("document_on_stdin"):  # a stored OpenAPI document (app.bridge.spec)
+        spec["document"] = sys.stdin.buffer.read()
     host = os.environ.get("MCPE_BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ["MCPE_BRIDGE_PORT"])
 

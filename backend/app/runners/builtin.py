@@ -61,7 +61,8 @@ Typical flows:
   command, args). get_repository_draft returns the draft to edit by hand; fix a
   build later with update_server's post_clone_script.
 - Serve a REST API from its OpenAPI document: create_server with runner
-  "openapi", command the document's http(s) URL, args [] (or [base_url] to
+  "openapi", command the document's http(s) URL (or command "" and the
+  document's JSON/YAML text in openapi_document), args [] (or [base_url] to
   override its servers entry), env the API's HTTP headers, and enabled true;
   then wait_for_server. Each operation becomes a tool. A failed start is
   explained by one "openapi: ..." line in get_server_logs. restart_server

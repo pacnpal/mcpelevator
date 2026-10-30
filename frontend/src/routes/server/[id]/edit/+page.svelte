@@ -59,6 +59,7 @@
 					repo_url: server.repo_url,
 					repo_ref: server.repo_ref,
 					post_clone_script: server.post_clone_script,
+					openapi_document: server.openapi_document,
 					env: server.env,
 					cwd: server.cwd,
 					pin_mcp1: server.pin_mcp1,

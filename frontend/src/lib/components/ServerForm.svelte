@@ -156,6 +156,7 @@
 			extraArgsText: extra0,
 			transport: transport0,
 			baseUrl: baseUrl0,
+			openapiDocument: init.openapi_document ?? '',
 			setupScript: init.setup_script ?? '',
 			repoUrl: init.repo_url ?? '',
 			repoRef: init.repo_ref ?? '',
@@ -209,6 +210,23 @@
 	// OpenAPI runner: optional override for the API base URL (blank = the document's own
 	// `servers` entry; command holds the document URL; args = [] or [baseUrl]).
 	let baseUrl = $state(seed.baseUrl);
+	// …or the document itself, pasted or loaded from a file (command blank then).
+	let openapiDocument = $state(seed.openapiDocument);
+	let specPasted = $state(seed.openapiDocument.length > 0);
+	let specFileError = $state('');
+
+	async function loadSpecFile(e: Event) {
+		const input = e.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = ''; // picking the same file again still fires
+		if (!file) return;
+		try {
+			openapiDocument = await file.text();
+			specFileError = '';
+		} catch {
+			specFileError = `Couldn't read ${file.name}.`;
+		}
+	}
 	let setupScript = $state(seed.setupScript);
 
 	// Remote runner upstream auth: static Headers (the default) vs OAuth. When OAuth is
@@ -335,7 +353,10 @@
 	const nameValid = $derived(name.trim().length > 0);
 	// The built-in mcpelevator server has no stored launch line (its runner derives it).
 	const isBuiltin = $derived(runner === 'mcpelevator');
-	const commandValid = $derived(isBuiltin || command.trim().length > 0);
+	const specFromDocument = $derived(isOpenapi && specPasted);
+	const commandValid = $derived(
+		isBuiltin || (specFromDocument ? openapiDocument.trim() : command.trim()).length > 0
+	);
 	// Blank = inherit; otherwise a whole non-negative number of seconds.
 	const idleTimeoutValid = $derived(
 		idleTimeoutText.trim() === '' || /^\d+$/.test(idleTimeoutText.trim())
@@ -384,7 +405,9 @@
 		if (!normalized.includes('/')) return true;
 		return /^[/.~]/.test(normalized) || /^[a-zA-Z]:/.test(command);
 	}
-	const remoteUrlValid = $derived(!isHttpUpstream || isValidRemoteUrl(command));
+	const remoteUrlValid = $derived(
+		!isHttpUpstream || specFromDocument || isValidRemoteUrl(command)
+	);
 	const baseUrlValid = $derived(!isOpenapi || !baseUrl.trim() || isValidRemoteUrl(baseUrl));
 
 	// Mirror the backend's slugify so the operator sees the value that will actually
@@ -451,7 +474,9 @@
 		const payload: ServerCreate & { slug?: string } = {
 			name: name.trim(),
 			runner,
-			command: command.trim(),
+			command: specFromDocument ? '' : command.trim(),
+			// openapi only, and only when pasted; '' tells the backend to fetch `command`.
+			openapi_document: specFromDocument ? openapiDocument : '',
 			// remote stores [transport] in args, openapi [] or [base URL]; neither has a
 			// local process, so no cwd. docker stores command=image + args=container args,
 			// and cwd is meaningless.
@@ -900,23 +925,62 @@
 			     OpenAPI document. command = document URL, args = [] or [base URL override],
 			     env = headers sent to the API. No local process. -->
 			<div class="flex flex-col gap-2">
-				<label for="srv-spec-url" class="text-sm font-medium text-[var(--color-ink)]">
-					OpenAPI document URL
-				</label>
-				<input
-					id="srv-spec-url"
-					type="url"
-					inputmode="url"
-					bind:value={command}
-					autocomplete="off"
-					spellcheck="false"
-					placeholder="https://api.example.com/openapi.json"
-					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-				/>
-				{#if command.trim() && !remoteUrlValid}
-					<p class="text-xs text-[var(--color-state-failed)]">
-						Enter the http(s):// URL of the API's OpenAPI 3 document (JSON or YAML).
-					</p>
+				<span class="text-sm font-medium text-[var(--color-ink)]">OpenAPI document</span>
+				<div class="grid grid-cols-2 gap-2">
+					{#each [{ pasted: false, title: 'URL', hint: 'Fetched on every start' }, { pasted: true, title: 'Paste or upload', hint: 'Stored with the server' }] as opt (opt.title)}
+						<label
+							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+							style={specPasted === opt.pasted
+								? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+								: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+						>
+							<span class="flex items-center gap-2">
+								<input type="radio" name="spec-source" checked={specPasted === opt.pasted} onchange={() => (specPasted = opt.pasted)} />
+								<span class="text-sm font-medium text-[var(--color-ink)]">{opt.title}</span>
+							</span>
+							<span class="text-xs text-[var(--color-ink-dim)]">{opt.hint}</span>
+						</label>
+					{/each}
+				</div>
+				{#if specPasted}
+					<textarea
+						id="srv-spec-document"
+						aria-label="OpenAPI document"
+						bind:value={openapiDocument}
+						rows="8"
+						spellcheck="false"
+						placeholder={'{"openapi": "3.1.0", …}  or  openapi: 3.1.0 …'}
+						class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+					></textarea>
+					<label class="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+						Or load a file:
+						<input
+							type="file"
+							accept=".json,.yaml,.yml,application/json,application/yaml,text/yaml"
+							onchange={loadSpecFile}
+							class="text-xs file:mr-2 file:rounded-md file:border file:border-[var(--color-line)] file:bg-[var(--color-surface-2)] file:px-2 file:py-1 file:text-xs file:text-[var(--color-ink)]"
+						/>
+					</label>
+					{#if specFileError}
+						<p class="text-xs text-[var(--color-state-failed)]">{specFileError}</p>
+					{/if}
+				{:else}
+					<input
+						id="srv-spec-url"
+						type="url"
+						inputmode="url"
+						aria-label="OpenAPI document URL"
+						bind:value={command}
+						autocomplete="off"
+						spellcheck="false"
+						placeholder="https://api.example.com/openapi.json"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+					/>
+					{#if command.trim() && !remoteUrlValid}
+						<p class="text-xs text-[var(--color-state-failed)]">
+							Enter the http(s):// URL of the API's OpenAPI 3 document (JSON or YAML).
+						</p>
+					{/if}
 				{/if}
 				<label for="srv-base-url" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
 					API base URL <span class="text-[var(--color-ink-dim)]">(optional)</span>
@@ -937,10 +1001,18 @@
 					</p>
 				{/if}
 				<p class="text-xs text-[var(--color-ink-dim)]">
-					mcpelevator reads the document each time the server starts and serves every
-					operation as an MCP tool, calling the API with the headers below. Restart the
-					server to pick up a changed API; hide operations you don't want exposed from
-					its tool list.
+					{#if specPasted}
+						mcpelevator serves every operation in the stored document as an MCP tool,
+						calling the API with the headers below. A pasted document has no URL of its
+						own, so if its <code class="font-mono">servers</code> entry is relative (or
+						missing), set the API base URL. Edit the document here to pick up a changed API;
+						hide operations you don't want exposed from its tool list.
+					{:else}
+						mcpelevator reads the document each time the server starts and serves every
+						operation as an MCP tool, calling the API with the headers below. Restart the
+						server to pick up a changed API; hide operations you don't want exposed from
+						its tool list.
+					{/if}
 				</p>
 			</div>
 		{:else if isDocker}
@@ -1178,12 +1250,14 @@
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Translates</span>
 				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
-					{#if command.trim()}
+					{#if specFromDocument ? openapiDocument.trim() : command.trim()}
 						<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
-							{command.trim()} → {baseUrl.trim() || '(document servers)'}
+							{specFromDocument ? '(stored document)' : command.trim()} → {baseUrl.trim() || '(document servers)'}
 						</code>
 					{:else}
-						<code class="font-mono text-xs text-[var(--color-ink-dim)]">(URL not set)</code>
+						<code class="font-mono text-xs text-[var(--color-ink-dim)]">
+							{specFromDocument ? '(document not set)' : '(URL not set)'}
+						</code>
 					{/if}
 				</div>
 			</div>

@@ -73,6 +73,9 @@ class ProcessSpec:
     # MCP server instructions for the bridge to answer initialize with (the built-in
     # server's; a real upstream's never reach a proxy). Empty = none.
     instructions: str = ""
+    # openapi runner: the stored OpenAPI document to serve instead of fetching ``command``.
+    # Too big for the spec env var, so the supervisor writes it to the bridge's stdin.
+    openapi_document: str = ""
 
 
 Builder = Callable[[Server], ProcessSpec]

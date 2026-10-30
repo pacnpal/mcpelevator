@@ -192,8 +192,10 @@ def build(app: FastAPI) -> "_Gate":
         """Register a server. ``runner`` is one of npx, uvx, command, remote (``command``
         is then the upstream MCP URL), docker (``command`` is the image), or openapi (a
         plain REST API, each operation served as a tool: ``command`` is the http(s) URL of
-        its OpenAPI 3 document, ``args`` is [] or [base_url] to override the document's
-        ``servers`` entry, and ``env`` is the HTTP headers sent to the API). Created
+        its OpenAPI 3 document — or blank, with the document itself (JSON or YAML text) in
+        ``openapi_document`` — ``args`` is [] or [base_url] to override the document's
+        ``servers`` entry (required for a relative one in a pasted document), and ``env``
+        is the HTTP headers sent to the API). Created
         disabled unless ``enabled`` is true. A local runner can launch from a git checkout:
         ``repo_url`` (+ optional ``repo_ref``) is cloned, ``post_clone_script`` runs in it
         when the commit or script changes, and the command runs inside it."""
@@ -207,7 +209,9 @@ def build(app: FastAPI) -> "_Gate":
         rebuilds on the next start; ``repo_url: ""`` drops the checkout). For an
         openapi server, ``command`` / ``args`` / ``env`` are the document URL, base-URL
         override and API headers; its document is re-read on every start, so
-        restart_server picks up a changed API."""
+        restart_server picks up a changed API. A pasted document lives in
+        ``openapi_document`` (with ``command`` ""); switching between the two sends both
+        fields, the unused one blank."""
         if changes.model_fields_set & _RESTARTING_FIELDS:
             _refuse_self(server_id, "change its exposure or tool policy")
         return await api(

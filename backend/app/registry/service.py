@@ -7,6 +7,7 @@ Sits above the repo: generates identity (id/slug), computes the idempotency
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -95,24 +96,52 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
     return url, [transport]
 
 
-def normalize_openapi(command: str, args: Optional[list[str]]) -> tuple[str, list[str]]:
-    """Validate + canonicalize an openapi server's (document url, [base_url?]).
+def normalize_openapi(
+    command: str, args: Optional[list[str]], document: str = ""
+) -> tuple[str, list[str], str]:
+    """Validate + canonicalize an openapi server's (document url, [base_url?], document).
 
-    ``command`` is the OpenAPI document's ``http(s)://`` URL. ``args`` is empty (use the
-    document's own ``servers`` entry) or a single base-URL override; a blank override
-    collapses to ``[]`` so the stored shape — and ``config_hash`` — is deterministic.
-    Only URLs are accepted: a local path would let anyone allowed to add an openapi
+    ``command`` is the OpenAPI document's ``http(s)://`` URL — or blank, when ``document``
+    holds the document itself (pasted or uploaded). ``args`` is empty (use the document's
+    own ``servers`` entry) or a single base-URL override; a blank override collapses to
+    ``[]`` so the stored shape — and ``config_hash`` — is deterministic. Only URLs are
+    accepted for ``command``: a local path would let anyone allowed to add an openapi
     server (not a local runner) read files off the host through the bridge.
+
+    A stored document is parsed here with the bridge's own rules, so a bad one is a 400
+    rather than a failed start; it has no URL of its own, so a relative ``servers`` entry
+    needs the base-URL override.
     """
     url = (command or "").strip()
-    if not _is_http_url(url):
-        raise ValueError("an openapi server's command must be the http(s):// URL of its OpenAPI document")
     rest = [str(a).strip() for a in (args or []) if str(a).strip()]
     if len(rest) > 1:
         raise ValueError("an openapi server takes at most one argument: the API base URL")
     if rest and not _is_http_url(rest[0]):
         raise ValueError("an openapi server's base URL override must be an http(s):// URL with a host")
-    return url, rest
+    if not (document or "").strip():
+        if not _is_http_url(url):
+            raise ValueError(
+                "an openapi server's command must be the http(s):// URL of its OpenAPI "
+                "document (or paste the document itself)"
+            )
+        return url, rest, ""
+    if url:
+        raise ValueError(
+            "an openapi server takes its document's URL or the document itself, not both"
+        )
+    # Lazy: the bridge module patches FastMCP's OpenAPI tool on import, which only the
+    # bridge serves; the control plane just borrows the parser.
+    from app.bridge import openapi as bridge_openapi
+
+    raw = document.encode()
+    if len(raw) > bridge_openapi.MAX_DOCUMENT_BYTES:
+        raise ValueError(
+            f"OpenAPI document is larger than "
+            f"{bridge_openapi.MAX_DOCUMENT_BYTES // (1024 * 1024)} MiB"
+        )
+    doc = bridge_openapi.parse_document(raw)  # DocumentError is a ValueError
+    bridge_openapi.resolve_base_url(doc, "", rest[0] if rest else None)
+    return "", rest, document
 
 
 def normalize_oauth(
@@ -1388,6 +1417,10 @@ def _hash_payload(server: Server) -> dict[str, Any]:
             "ref": server.repo_ref or "",
             "post_clone_script": server.post_clone_script or "",
         }
+    # A pasted/uploaded OpenAPI document is what the bridge serves. Same rule as above
+    # (present only when set), and a digest: the hash input needn't carry megabytes.
+    if server.openapi_document:
+        payload["openapi_document"] = hashlib.sha256(server.openapi_document.encode()).hexdigest()
     return payload
 
 
@@ -1859,6 +1892,7 @@ def create_server(
     repo_url: str = "",
     repo_ref: str = "",
     post_clone_script: str = "",
+    openapi_document: str = "",
     pin_mcp1: bool = False,
     mcp_http: bool = True,
     rest_openapi: bool = False,
@@ -1880,7 +1914,7 @@ def create_server(
 ) -> Server:
     if runner not in RUNNERS:
         raise ValueError(f"unknown runner {runner!r}; must be one of {RUNNERS}")
-    if not command.strip():
+    if not command.strip() and not (runner == "openapi" and (openapi_document or "").strip()):
         raise ValueError("command is required")
     # A local-exec runner (npx/uvx/command) pointed at the docker CLI IS the docker runner —
     # route it through the docker machinery (normalize + validate + gate + hardening +
@@ -1903,8 +1937,10 @@ def create_server(
         command, args = normalize_remote(command, args)
         cwd = None
     elif runner == "openapi":
-        command, args = normalize_openapi(command, args)
+        command, args, openapi_document = normalize_openapi(command, args, openapi_document)
         cwd = None
+    if runner != "openapi":
+        openapi_document = ""
     # OAuth applies only to remote; normalize (and force-off elsewhere) before hashing.
     oauth, oauth_scopes, oauth_client_id, oauth_client_secret = normalize_oauth(
         runner, oauth, oauth_scopes, oauth_client_id, oauth_client_secret
@@ -1947,6 +1983,7 @@ def create_server(
         repo_url=repo_url,
         repo_ref=repo_ref,
         post_clone_script=post_clone_script,
+        openapi_document=openapi_document,
         pin_mcp1=pin_mcp1,
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
@@ -1987,6 +2024,7 @@ _MUTABLE_FIELDS = {
     "repo_url",
     "repo_ref",
     "post_clone_script",
+    "openapi_document",
     "pin_mcp1",
     "mcp_http",
     "rest_openapi",
@@ -2135,8 +2173,12 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         # the stale working directory here (remote has no process) to keep the row canonical.
         server.cwd = None
     elif server.runner == "openapi":
-        server.command, server.args = normalize_openapi(server.command, server.args)
+        server.command, server.args, server.openapi_document = normalize_openapi(
+            server.command, server.args, server.openapi_document or ""
+        )
         server.cwd = None  # likewise: no process, so no working directory
+    if server.runner != "openapi":
+        server.openapi_document = ""
     # Normalize OAuth (and force it off for any non-remote runner) so a stray secret can't
     # ride along on a converted server and the hash stays deterministic.
     server.oauth, server.oauth_scopes, server.oauth_client_id, server.oauth_client_secret = (
@@ -2237,6 +2279,7 @@ def clone_server(
         repo_url=src.repo_url or "",
         repo_ref=src.repo_ref or "",
         post_clone_script=src.post_clone_script or "",
+        openapi_document=src.openapi_document or "",
         pin_mcp1=bool(src.pin_mcp1),
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,

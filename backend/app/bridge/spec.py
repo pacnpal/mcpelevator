@@ -59,6 +59,10 @@ def bridge_payload(spec, name: str, *, mcp_http: bool, rest_openapi: bool) -> di
     # must not inherit the control plane's own virtualenv (`_child_env`).
     if spec.repo:
         payload["checkout"] = True
+    # Same rule: the stored OpenAPI document itself follows on the bridge's stdin (it can
+    # run to megabytes, far past this env var's limit), so only the flag rides here.
+    if spec.openapi_document:
+        payload["document_on_stdin"] = True
     return payload
 
 
