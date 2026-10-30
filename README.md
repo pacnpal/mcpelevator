@@ -166,13 +166,22 @@ mcpelevator manages:
 - The **command** then runs with the checkout as its working directory (a relative `cwd`
   is taken inside it), e.g. `node dist/mcp/server.js`.
 
-In the UI, **Add → From GitHub** takes a repository URL and detects what it can from the
-root `package.json` (install command from the lockfile — `npm ci`, pnpm or yarn — plus
-`npm run build` when the package doesn't build in `prepare`; start command from `bin`, a
-`start` script or `main`) or `pyproject.toml` (`uv sync`, then `uv run --no-sync <script>`).
-Anything it can't work out is left blank for you; every step is editable in the review form
-and later on the server's edit page (**Source repository**). Over the API, send the fields
-directly:
+In the UI, **Add → From GitHub** takes a repository URL (an SSH address or an https URL with
+a token is kept as the clone URL) and detects what it can from the root manifests:
+
+- `package.json`: the install command follows the lockfile (`npm ci`, otherwise
+  `npm install`; pnpm and Yarn run through Corepack via `npx`, since Node 25+ no longer ships
+  it, and Yarn installs a `node_modules` tree rather than Plug'n'Play). A `build` script is
+  added as a step unless `prepare` already runs it on install (never assumed for Yarn). The
+  start command comes from `bin`, else the `start` script (`npm run --silent start`), else
+  `main`.
+- `pyproject.toml`: `uv sync` (`--frozen` with a `uv.lock`), then `uv run --no-sync <script>`.
+  A legacy Poetry project (no `[project]` table) is installed with `uv pip install .` into
+  the checkout's `.venv` and flagged for review before it starts.
+
+Anything it can't work out is left blank with the reason; every step is editable in the
+review form and later on the server's edit page (**Source repository**). Over the API,
+send the fields directly:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/json' -d '{
