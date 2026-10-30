@@ -65,6 +65,10 @@ class RepoRef(NamedTuple):
     owner: str
     repo: str
     ref: str | None = None  # None = the repository's default branch
+    # The clone URL to store when the pasted one carries something the canonical
+    # https://github.com/<owner>/<repo> would lose: an SSH transport or https credentials
+    # (a private repository). None = clone over anonymous https.
+    clone_url: str | None = None
 
 
 def _valid(owner: str, repo: str, ref: str | None) -> RepoRef:
@@ -101,13 +105,23 @@ def parse_repo_url(url: str) -> RepoRef:
             raise ValueError("expected github:<owner>/<repo>")
         return _valid(parts[0], parts[1], ref or None)
 
+    # How to clone it, when that isn't anonymous https: (form, userinfo) — rebuilt from
+    # the parsed owner/repo below, so a /tree/<ref> suffix or fragment never leaks in.
+    transport: tuple[str, str] | None = None
     # scp-like clone URL: git@github.com:owner/repo.git
-    scp = re.match(r"^[\w.-]+@(?P<host>[^:/]+):(?P<path>.+)$", text)
+    scp = re.match(r"^(?P<user>[\w.-]+)@(?P<host>[^:/]+):(?P<path>.+)$", text)
     if scp and "://" not in text:
         host, path = scp.group("host").lower(), scp.group("path")
+        transport = ("scp", scp.group("user"))
     elif "://" in text or text.lower().startswith(("github.com/", "www.github.com/")):
         parsed = urlsplit(text if "://" in text else f"https://{text}")
         host, path = (parsed.hostname or "").lower(), parsed.path
+        userinfo = parsed.netloc.rsplit("@", 1)[0] if "@" in parsed.netloc else ""
+        scheme = parsed.scheme.lower().removeprefix("git+")
+        if scheme == "ssh":
+            transport = ("ssh", userinfo or "git")
+        elif scheme == "https" and userinfo:
+            transport = ("https", userinfo)
     else:
         host, path = "github.com", text  # bare owner/repo
     if host not in _HOSTS:
@@ -132,7 +146,17 @@ def parse_repo_url(url: str) -> RepoRef:
                 "point at the repository root — installing from a subdirectory isn't "
                 "supported (for a branch name containing '/', use github:<owner>/<repo>#<branch>)"
             )
-    return _valid(owner, repo, ref)
+    found = _valid(owner, repo, ref)
+    if transport is None:
+        return found
+    form, userinfo = transport
+    where = f"{found.owner}/{found.repo}"
+    clone_url = {
+        "scp": f"{userinfo}@github.com:{where}.git",
+        "ssh": f"ssh://{userinfo}@github.com/{where}.git",
+        "https": f"https://{userinfo}@github.com/{where}",
+    }[form]
+    return found._replace(clone_url=clone_url)
 
 
 def _unscoped(name: str) -> str:
@@ -163,7 +187,7 @@ def _repo_draft(index: int, kind: str, ref: RepoRef) -> dict[str, Any]:
     """The common shape: a ``command`` server launched from a checkout of ``ref``."""
     draft = mapping.blank_draft(index, kind, f"{ref.owner}/{ref.repo}", ref.ref)
     draft["runner"] = "command"
-    draft["repo_url"] = f"https://github.com/{ref.owner}/{ref.repo}"
+    draft["repo_url"] = ref.clone_url or f"https://github.com/{ref.owner}/{ref.repo}"
     draft["repo_ref"] = ref.ref or ""
     draft["post_clone_script"] = ""
     return draft
@@ -204,9 +228,12 @@ def node_draft(
     install, run, pm = _node_install(pkg, lockfiles)
     scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
     steps = [install]
-    # npm and pnpm run `prepare` on install, so a package that builds there needs no
-    # explicit step. Modern Yarn never runs `prepare` on install, so Yarn always builds.
-    if "build" in scripts and ("prepare" not in scripts or pm == "yarn"):
+    # npm and pnpm run `prepare` on install, so a package whose `prepare` runs its build
+    # needs no second one. A `prepare` that does something else (installing git hooks)
+    # doesn't count, and modern Yarn never runs `prepare` on install, so Yarn always builds.
+    prepare = scripts.get("prepare") if isinstance(scripts.get("prepare"), str) else ""
+    builds_on_install = pm != "yarn" and "build" in prepare
+    if "build" in scripts and not builds_on_install:
         steps.append(f"{run} build")
     draft["post_clone_script"] = "\n".join(steps)
 
@@ -395,17 +422,21 @@ def _upstream_error(url: str, exc: httpx.HTTPError) -> CatalogUpstreamError:
 async def fetch_text(http: httpx.AsyncClient, url: str) -> str | None:
     """GET a raw file: its text, ``None`` when absent (404), or ``CatalogUpstreamError``."""
     try:
-        resp = await http.get(url, timeout=_TIMEOUT, follow_redirects=True)
+        async with http.stream("GET", url, timeout=_TIMEOUT, follow_redirects=True) as resp:
+            if resp.status_code == 404:
+                return None
+            if resp.status_code >= 400:
+                logger.warning("repository fetch %s returned %s", url, resp.status_code)
+                raise CatalogUpstreamError(f"upstream returned {resp.status_code}")
+            # Streamed, so an oversized file is abandoned at the cap rather than buffered.
+            body = bytearray()
+            async for chunk in resp.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > _MAX_MANIFEST_BYTES:
+                    return None
+            return body.decode(resp.encoding or "utf-8", errors="replace")
     except httpx.HTTPError as exc:
         raise _upstream_error(url, exc) from exc
-    if resp.status_code == 404:
-        return None
-    if resp.status_code >= 400:
-        logger.warning("repository fetch %s returned %s", url, resp.status_code)
-        raise CatalogUpstreamError(f"upstream returned {resp.status_code}")
-    if len(resp.content) > _MAX_MANIFEST_BYTES:
-        return None
-    return resp.text
 
 
 async def file_exists(http: httpx.AsyncClient, url: str) -> bool:

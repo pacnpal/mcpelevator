@@ -34,8 +34,12 @@ from app.main import app
         ("https://github.com/o/r/commit/abc123", RepoRef("o", "r", "abc123")),
         ("https://github.com/o/r/releases/tag/v2", RepoRef("o", "r", "v2")),
         ("git+https://github.com/o/r.git", RepoRef("o", "r")),
-        ("git@github.com:o/r.git", RepoRef("o", "r")),
-        ("ssh://git@github.com/o/r.git", RepoRef("o", "r")),
+        # SSH and credentialed https keep their transport (a private repository clones
+        # with them), rebuilt from owner/repo so a /tree suffix never leaks into the clone.
+        ("git@github.com:o/r.git", RepoRef("o", "r", None, "git@github.com:o/r.git")),
+        ("ssh://git@github.com/o/r.git", RepoRef("o", "r", None, "ssh://git@github.com/o/r.git")),
+        ("https://tok@github.com/o/r/tree/v1", RepoRef("o", "r", "v1", "https://tok@github.com/o/r")),
+        ("git+https://u:p@github.com/o/r.git", RepoRef("o", "r", None, "https://u:p@github.com/o/r")),
         ("github:o/r", RepoRef("o", "r")),
         ("github:o/r#feature/x", RepoRef("o", "r", "feature/x")),
     ],
@@ -97,6 +101,12 @@ def test_node_repo_detects_install_build_and_start():
     assert any("post-clone" in n for n in detail["notes"])
 
 
+def test_draft_keeps_the_pasted_clone_transport():
+    ref = parse_repo_url("git@github.com:o/private.git")
+    draft = repo_detail(ref, _pkg(), None)["drafts"][0]
+    assert draft["repo_url"] == "git@github.com:o/private.git"
+
+
 def test_node_ref_is_carried():
     detail = repo_detail(RepoRef("o", "r", "v1.2.0"), _pkg(), None)
     assert detail["drafts"][0]["repo_ref"] == "v1.2.0"
@@ -111,6 +121,9 @@ _COREPACK = "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 npx -y corepack"
     "over, lockfiles, script",
     [
         ({}, set(), "npm install"),
+        # A `prepare` that doesn't build (git hooks) doesn't stand in for the build.
+        ({"scripts": {"build": "tsc", "prepare": "husky install"}}, {"package-lock.json"},
+         "npm ci\nnpm run build"),
         ({"scripts": {"build": "tsc"}}, {"package-lock.json"}, "npm ci\nnpm run build"),
         # npm and pnpm build through `prepare` on install, so no explicit step.
         ({}, {"pnpm-lock.yaml"}, f"{_COREPACK} pnpm install --frozen-lockfile"),
@@ -285,3 +298,32 @@ def test_repository_endpoint_upstream_down_is_503(monkeypatch):
     assert r.status_code == 503
     assert "GitHub unavailable" in r.json()["detail"]
 
+
+
+def _client(handler):
+    import httpx
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_fetch_text_statuses_and_size_cap(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(repository, "_MAX_MANIFEST_BYTES", 10)
+
+    def handler(request):
+        name = request.url.path.rsplit("/", 1)[-1]
+        return {
+            "ok": httpx.Response(200, text="{}"),
+            "missing": httpx.Response(404),
+            "huge": httpx.Response(200, content=b"x" * 11),
+            "down": httpx.Response(502),
+        }[name]
+
+    async with _client(handler) as http:
+        assert await repository.fetch_text(http, "https://raw.example/ok") == "{}"
+        assert await repository.fetch_text(http, "https://raw.example/missing") is None
+        # Past the cap it's treated as absent, read no further than the cap.
+        assert await repository.fetch_text(http, "https://raw.example/huge") is None
+        with pytest.raises(CatalogUpstreamError):
+            await repository.fetch_text(http, "https://raw.example/down")

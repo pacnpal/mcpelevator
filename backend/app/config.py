@@ -146,6 +146,13 @@ class Settings(BaseSettings):
             raise ValueError("start_timeout_s must be greater than zero")
         return value
 
+    @field_validator("repo_build_timeout_s")
+    @classmethod
+    def _positive_repo_build_timeout(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("repo_build_timeout_s must be greater than zero")
+        return value
+
     @field_validator("restart_budget")
     @classmethod
     def _positive_restart_budget(cls, value: int) -> int:

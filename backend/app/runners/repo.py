@@ -153,6 +153,10 @@ cd "$dir"
 
 
 def remove_checkout(data_dir: Path, server_id: str) -> None:
-    """Delete a server's checkout and build stamp (on server delete). Best-effort."""
+    """Delete a server's checkout and build stamp (on server delete). Best-effort: a
+    leftover directory is only wasted disk, never a reason to fail the delete."""
     shutil.rmtree(checkout_dir(data_dir, server_id), ignore_errors=True)
-    stamp_path(data_dir, server_id).unlink(missing_ok=True)
+    try:
+        stamp_path(data_dir, server_id).unlink(missing_ok=True)
+    except OSError:
+        pass

@@ -444,6 +444,14 @@ def test_install_from_repository_detects_and_takes_overrides(client, monkeypatch
     is_error, out = _call(client, "install_from_repository", {"url": "o/empty"})
     assert is_error and "pass command" in str(out)
 
+    # Given a command, an undetectable repo installs, and says what detection left blank.
+    is_error, out = _call(
+        client, "install_from_repository",
+        {"url": "o/empty", "command": "node", "args": ["server.js"], "enabled": False},
+    )
+    assert not is_error, out
+    assert any("No package.json or pyproject.toml" in n for n in out["notes"])
+
 
 def test_annotations_only_call_additive_tools_non_destructive(client):
     status, msg = _rpc(client, "tools/list")

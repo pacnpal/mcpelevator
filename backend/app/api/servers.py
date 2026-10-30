@@ -671,10 +671,11 @@ async def delete_server(
         # sending the operator to inspect a configuration that is gone.
         oauth_flow.cancel_pending(server_id, deleted=True)
         ServerTokenStorage(server_id).clear()
-        # A repository server's checkout (and its build) can be large; it's keyed by the
-        # deleted id, so nothing else would ever reuse or remove it.
-        await run_in_threadpool(repo_checkout.remove_checkout, get_settings().data_dir, server_id)
         await resync_groups(request)
+        # A repository server's checkout (and its build) can be large; it's keyed by the
+        # deleted id, so nothing else would ever reuse or remove it. Last, and best-effort,
+        # so a filesystem hiccup can't skip the group resync above.
+        await run_in_threadpool(repo_checkout.remove_checkout, get_settings().data_dir, server_id)
     return Response(status_code=204)
 
 

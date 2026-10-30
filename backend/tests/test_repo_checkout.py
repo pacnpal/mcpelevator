@@ -344,3 +344,22 @@ def test_api_refuses_docker_in_a_post_clone_script():
             headers=LOOPBACK,
         )
         assert r.status_code == 400 and "docker runner" in r.json()["detail"]
+
+
+def test_remove_checkout_is_best_effort(tmp_path):
+    checkout = repo_checkout.checkout_dir(tmp_path, "srv")
+    (checkout / "node_modules").mkdir(parents=True)
+    # A stamp path that can't be unlinked (here a directory) must not fail the delete.
+    repo_checkout.stamp_path(tmp_path, "srv").mkdir()
+    repo_checkout.remove_checkout(tmp_path, "srv")
+    assert not checkout.exists()
+    repo_checkout.remove_checkout(tmp_path, "never-existed")
+
+
+def test_repo_build_timeout_must_be_positive():
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    with pytest.raises(ValidationError, match="repo_build_timeout_s"):
+        Settings(repo_build_timeout_s=0)

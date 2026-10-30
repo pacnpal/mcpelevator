@@ -510,7 +510,12 @@ def build(app: FastAPI) -> "_Gate":
                 "enabled": not draft["warnings"] if enabled is None else enabled,
             },
         )
-        return {"server": created, "warnings": draft["warnings"], "notes": detail.get("notes", [])}
+        notes = list(detail.get("notes", []))
+        if not draft["installable"] and draft.get("reason"):
+            # What detection couldn't work out (no install/build steps, no start command)
+            # — the caller supplied the command, but should know what else is blank.
+            notes.append(draft["reason"])
+        return {"server": created, "warnings": draft["warnings"], "notes": notes}
 
     @mcp.tool(annotations={**_ADD, "openWorldHint": True})
     async def install_from_catalog(
