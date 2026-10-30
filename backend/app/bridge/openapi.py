@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 import yaml
@@ -165,7 +165,9 @@ def resolve_base_url(doc: dict[str, Any], document_url: str, override: str | Non
         default = variable.get("default", "") if isinstance(variable, dict) else ""
         url = url.replace(f"{{{name}}}", str(default))
     base = urljoin(document_url, url)
-    if not base.startswith(("http://", "https://")):
+    # A host too: "https://" or an empty `{host}` default would otherwise start fine and
+    # then fail every call, with nowhere to connect.
+    if not base.startswith(("http://", "https://")) or not urlsplit(base).hostname:
         raise DocumentError(
             f"can't call the API at {base!r}; set a base URL override for this server"
         )
