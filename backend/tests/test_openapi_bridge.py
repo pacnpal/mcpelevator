@@ -252,9 +252,35 @@ def test_fetch_retries_a_protected_document_with_credentials():
         return httpx.Response(200, content=b"spec")
 
     raw, served_from = openapi.fetch_document(
-        DOC_URL, {"X-Api-Key": "k"}, transport=httpx.MockTransport(handler)
+        DOC_URL, {"X-Api-Key": "k"},
+        api_base="https://pets.example/v1",  # the document is on the API's own origin
+        transport=httpx.MockTransport(handler),
     )
     assert (raw, served_from) == (b"spec", DOC_URL)
+
+
+@pytest.mark.parametrize(
+    "api_base",
+    [
+        None,  # the API's origin would come from the document itself: it can't vouch
+        "https://api.example/v1",  # a docs host that isn't the API
+        "http://pets.example/v1",  # same host, different scheme
+    ],
+)
+def test_fetch_never_sends_credentials_off_the_api_origin(api_base):
+    """A docs host answering 401 must not collect the API's key."""
+    seen: list = []
+
+    def handler(request):
+        seen.append(request.headers.get("x-api-key"))
+        return httpx.Response(401)
+
+    with pytest.raises(openapi.DocumentError, match="only sent to the API's own host"):
+        openapi.fetch_document(
+            DOC_URL, {"X-Api-Key": "k"}, api_base=api_base,
+            transport=httpx.MockTransport(handler),
+        )
+    assert seen == [None]
 
 
 def test_fetch_never_follows_a_redirect_with_credentials():
@@ -264,7 +290,10 @@ def test_fetch_never_follows_a_redirect_with_credentials():
         return httpx.Response(401)
 
     with pytest.raises(httpx.HTTPStatusError):
-        openapi.fetch_document(DOC_URL, {"X-Api-Key": "k"}, transport=httpx.MockTransport(handler))
+        openapi.fetch_document(
+            DOC_URL, {"X-Api-Key": "k"}, api_base="https://pets.example/",
+            transport=httpx.MockTransport(handler),
+        )
 
 
 def test_unfetchable_document_is_a_document_error():

@@ -71,17 +71,27 @@ def _read_capped(response: httpx.Response) -> bytes:
     return bytes(body)
 
 
-def fetch_document(url: str, headers: dict[str, str], *, transport=None) -> tuple[bytes, str]:
+def _origin(url: str | httpx.URL) -> tuple[str, str, int | None]:
+    url = httpx.URL(url)
+    return url.scheme, url.host, url.port
+
+
+def fetch_document(
+    url: str, headers: dict[str, str], *, api_base: str | None = None, transport=None
+) -> tuple[bytes, str]:
     """Download the OpenAPI document at ``url``: its bytes, and the URL that served them.
 
     The served URL differs from ``url`` after a redirect, and it's the one a relative
     ``servers`` entry resolves against (OpenAPI: relative to the document's location).
 
     Tried without credentials first: most documents are public, and the configured headers
-    are the API's credentials, not the document host's. Only when the document itself
-    answers 401/403 is it retried with them (the API serving its own spec behind its own
-    auth), and that retry follows no redirect, so the credentials reach exactly the URL the
-    operator typed and nowhere it might bounce them.
+    are the API's credentials, not the document host's. A document answering 401/403 is
+    retried with them only when it is served from the API's own origin — the API guarding
+    its spec with its own auth — which is known only from the operator's base-URL override
+    (``api_base``); without one the API's origin comes from the very document being
+    fetched, so it can't vouch for itself. Anything else would hand the key to whichever
+    host serves the document, a compromised docs site included, just by answering 401. The
+    retry follows no redirect, so the credentials reach exactly the URL the operator typed.
     """
     with httpx.Client(timeout=TIMEOUT_S, transport=transport) as client:
         with client.stream("GET", url, follow_redirects=True) as response:
@@ -89,6 +99,12 @@ def fetch_document(url: str, headers: dict[str, str], *, transport=None) -> tupl
             if not (denied and headers):
                 response.raise_for_status()
                 return _read_capped(response), str(response.url)
+        if api_base is None or _origin(url) != _origin(api_base):
+            raise DocumentError(
+                f"the OpenAPI document answered {response.status_code}; the configured "
+                "headers are only sent to the API's own host, so set the API base URL "
+                "(on the document's host) to allow sending them"
+            )
         with client.stream("GET", url, headers=headers, follow_redirects=False) as response:
             response.raise_for_status()
             return _read_capped(response), url
@@ -200,7 +216,7 @@ def _guard_api_requests(base_url: str, headers: dict[str, str]):
 
     async def guard(request: httpx.Request) -> None:
         url = request.url
-        if (url.scheme, url.host, url.port) != (api.scheme, api.host, api.port):
+        if _origin(url) != _origin(api):
             raise httpx.RequestError(
                 f"refusing to call {url.scheme}://{url.netloc.decode()} — "
                 f"not the API at {api.scheme}://{api.netloc.decode()}",
@@ -221,7 +237,9 @@ def build_server(spec: dict, *, transport=None, api_transport=None) -> FastMCP:
     headers = dict(spec.get("env") or {})
     args = list(spec.get("args") or [])
     try:
-        raw, served_from = fetch_document(url, headers, transport=transport)
+        raw, served_from = fetch_document(
+            url, headers, api_base=args[0] if args else None, transport=transport
+        )
     except httpx.HTTPError as exc:
         raise DocumentError(f"can't fetch the OpenAPI document: {exc}") from exc
     doc = parse_document(raw)
