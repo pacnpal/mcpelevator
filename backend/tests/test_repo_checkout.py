@@ -138,6 +138,13 @@ def test_checkout_clones_builds_once_and_rebuilds_on_change(tmp_path, upstream):
     assert count.read_text().count("build") == 4
 
 
+def test_post_clone_never_targets_mcpelevators_own_virtualenv(tmp_path, upstream, monkeypatch):
+    # Running under `uv run uvicorn …` exports VIRTUAL_ENV; a build must not install there.
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "control-plane-venv"))
+    out = _run(tmp_path, str(upstream), post='test -z "${VIRTUAL_ENV:-}"')
+    assert out.returncode == 0, out.stdout + out.stderr
+
+
 def test_failed_build_is_retried_on_the_next_start(tmp_path, upstream):
     flag = tmp_path / "fail"
     flag.write_text("")

@@ -148,6 +148,9 @@ fi
 rm -f "$stamp"
 echo "[mcpelevator] checked out $sha; running post-clone script"
 cd "$dir"
+# The build is for this checkout, never for whatever virtualenv mcpelevator itself runs in
+# (`uv run uvicorn …` exports one, and uv/pip install into an active VIRTUAL_ENV).
+unset VIRTUAL_ENV
 {post}printf '%s\\n' "$want" > "$stamp"
 """
 

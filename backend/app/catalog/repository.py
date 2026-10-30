@@ -295,7 +295,10 @@ def python_draft(
     # plain .venv and launched from there instead.
     legacy = not isinstance(pyproject.get("project"), dict)
     if legacy:
-        draft["post_clone_script"] = "uv venv --allow-existing\nuv pip install ."
+        # --python pins the target to the checkout's .venv whatever environment is active.
+        draft["post_clone_script"] = (
+            "uv venv --allow-existing\nuv pip install --python .venv/bin/python ."
+        )
     else:
         draft["post_clone_script"] = "uv sync --frozen" if "uv.lock" in lockfiles else "uv sync"
     name, scripts = _python_scripts(pyproject)

@@ -202,7 +202,9 @@ def test_python_legacy_poetry_installs_into_a_venv_and_waits_for_review():
     built through its backend into .venv — flagged so it doesn't auto-start unreviewed."""
     text = '[tool.poetry]\nname = "p"\n[tool.poetry.scripts]\nserve = "p:main"\n'
     draft = repo_detail(RepoRef("o", "r"), None, text)["drafts"][0]
-    assert draft["post_clone_script"] == "uv venv --allow-existing\nuv pip install ."
+    assert draft["post_clone_script"] == (
+        "uv venv --allow-existing\nuv pip install --python .venv/bin/python ."
+    )
     assert (draft["command"], draft["args"]) == (".venv/bin/serve", [])
     assert draft["installable"] is True
     assert any("legacy Poetry" in w for w in draft["warnings"])
