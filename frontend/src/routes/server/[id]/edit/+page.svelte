@@ -26,7 +26,7 @@
 	async function load() {
 		loadState = 'loading';
 		try {
-			server = await getServer(id);
+			server = await getServer(id, true);
 			ownerChoice = server.owner_id ?? '';
 			loadState = 'ready';
 			try {

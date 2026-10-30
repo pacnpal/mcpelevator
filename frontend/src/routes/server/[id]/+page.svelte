@@ -631,7 +631,7 @@
 		if (server?.runner === 'mcpelevator') return 'built-in: this instance’s control plane (/api/mcp)';
 		// No launch line either: tools are translated from the document, calls go to the API.
 		if (server?.runner === 'openapi') {
-			const source = server.openapi_document ? '(stored document)' : server.command;
+			const source = server.command || '(stored document)';
 			return `openapi: ${source} → ${server.args?.[0] || '(document servers)'}`;
 		}
 		if (server?.runner === 'docker') {

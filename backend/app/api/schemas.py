@@ -262,7 +262,8 @@ class ServerDetail(ServerSummary):
     repo_url: str = ""
     repo_ref: str = ""
     post_clone_script: str = ""
-    # openapi runner only: the pasted/uploaded document. Blank = fetched from ``command``.
+    # openapi runner only: the pasted/uploaded document, returned only for
+    # ``?include_document=true`` (a blank ``command`` says one is stored either way).
     openapi_document: str = ""
     # uvx runner only: the mcp<2 SDK compatibility pin. Always false elsewhere.
     pin_mcp1: bool = False

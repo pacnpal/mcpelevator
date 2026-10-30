@@ -226,7 +226,8 @@ export interface ServerDetail extends ServerSummary {
 	repo_url: string;
 	repo_ref: string;
 	post_clone_script: string;
-	/** openapi runner only: the pasted/uploaded document ('' = fetched from `command`). */
+	/** openapi runner only: the pasted/uploaded document. Only present with
+	 * `getServer(id, true)`; a blank `command` means one is stored. */
 	openapi_document: string;
 	env: Record<string, string>;
 	cwd: string | null;
