@@ -192,8 +192,8 @@ def build(app: FastAPI) -> "_Gate":
         """Register a server. ``runner`` is one of npx, uvx, command, remote (``command``
         is then the upstream MCP URL), docker (``command`` is the image), or openapi (a
         plain REST API, each operation served as a tool: ``command`` is the http(s) URL of
-        its OpenAPI 3 document — or blank, with the document itself (JSON or YAML text) in
-        ``openapi_document`` — ``args`` is [] or [base_url] to override the document's
+        its OpenAPI 3 document (or blank, with the document itself as JSON or YAML text in
+        ``openapi_document``), ``args`` is [] or [base_url] to override the document's
         ``servers`` entry (required for a relative one in a pasted document), and ``env``
         is the HTTP headers sent to the API). Created
         disabled unless ``enabled`` is true. A local runner can launch from a git checkout:

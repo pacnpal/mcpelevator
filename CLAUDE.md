@@ -83,9 +83,9 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
 - **Runners** (`runners/`): `npx`, `uvx`, `command`, `remote` (proxy an already-remote MCP URL),
   `openapi` (no MCP upstream: the bridge fetches a REST API's OpenAPI document at startup and
   serves each operation as a tool via FastMCP's `OpenAPIProvider`, `bridge/openapi.py`, under
-  the same `_tool_transform`; `command` = document URL — or blank, with a pasted/uploaded
-  document in `openapi_document`, handed to the bridge on stdin since it can outgrow the
-  spec env var — `args` = `[]` or `[base_url]`, `env` =
+  the same `_tool_transform`; `command` = document URL, or blank with a pasted/uploaded
+  document in `openapi_document` (handed to the bridge on stdin since it can outgrow the
+  spec env var); `args` = `[]` or `[base_url]`, `env` =
   API headers, which always win and are dropped from tool arguments — and the caller's request
   headers are never forwarded to the API),
   and `docker` (image-packaged servers — opt-in + root-equivalent behind the `docker_runner`

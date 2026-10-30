@@ -101,7 +101,7 @@ def normalize_openapi(
 ) -> tuple[str, list[str], str]:
     """Validate + canonicalize an openapi server's (document url, [base_url?], document).
 
-    ``command`` is the OpenAPI document's ``http(s)://`` URL — or blank, when ``document``
+    ``command`` is the OpenAPI document's ``http(s)://`` URL, or blank when ``document``
     holds the document itself (pasted or uploaded). ``args`` is empty (use the document's
     own ``servers`` entry) or a single base-URL override; a blank override collapses to
     ``[]`` so the stored shape — and ``config_hash`` — is deterministic. Only URLs are

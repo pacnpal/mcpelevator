@@ -317,7 +317,7 @@ def test_bridge_exits_with_one_line_on_a_bad_document(monkeypatch):
 
 
 async def test_stored_document_is_served_without_a_fetch():
-    """A pasted/uploaded document arrives in the spec (read off stdin by main) — no fetch."""
+    """A pasted/uploaded document arrives in the spec (read off stdin by main), so nothing is fetched."""
     outer, seen, api = _api()
     doc = api.openapi()
     doc["servers"] = [{"url": "https://pets.example/v1"}]

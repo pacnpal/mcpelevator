@@ -238,7 +238,7 @@ def build_server(spec: dict, *, transport=None, api_transport=None) -> FastMCP:
     args = list(spec.get("args") or [])
     if spec.get("document") is not None:
         # Pasted/uploaded rather than linked (main() reads it off stdin). It has no URL,
-        # so a relative `servers` entry can't resolve — the registry demands an override.
+        # so a relative `servers` entry can't resolve. The registry demands an override.
         raw, served_from = spec["document"], ""
     else:
         try:
