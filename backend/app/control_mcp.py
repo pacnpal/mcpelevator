@@ -182,10 +182,16 @@ def build(app: FastAPI) -> "_Gate":
         return await api("GET", "/api/servers")
 
     @mcp.tool(annotations=_READ)
-    async def get_server(server_id: str) -> Any:
+    async def get_server(server_id: str, include_document: bool = False) -> Any:
         """One server's full detail: launch spec, live state, startup status, OAuth
-        status, tools, and its /s/<slug> URLs."""
-        return await api("GET", f"/api/servers/{_seg(server_id)}")
+        status, tools, and its /s/<slug> URLs. ``include_document`` also returns an
+        openapi server's stored document (``openapi_document``; it can be large, so
+        it's left out by default) to read before editing it."""
+        return await api(
+            "GET",
+            f"/api/servers/{_seg(server_id)}",
+            params={"include_document": "true" if include_document else None},
+        )
 
     @mcp.tool(annotations=_ADD)
     async def create_server(spec: ServerCreate) -> Any:
