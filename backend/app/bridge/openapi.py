@@ -119,8 +119,15 @@ def parse_document(raw: bytes) -> dict[str, Any]:
         raise DocumentError(
             f"not an OpenAPI 3 document (openapi: {version or 'missing'!r})"
         )
-    if not isinstance(doc.get("paths") or {}, dict):
+    paths = doc.get("paths") or {}
+    if not isinstance(paths, dict):
         raise DocumentError("OpenAPI document's `paths` must be an object")
+    # OpenAPI requires every path to begin with "/", relative to the server URL. One that
+    # doesn't — an absolute "https://elsewhere/…" — would send its calls, with the
+    # configured credentials, to a host of the document's choosing instead of the API.
+    for path in paths:
+        if not str(path).startswith("/"):
+            raise DocumentError(f"OpenAPI path {path!r} must start with '/'")
     return doc
 
 
@@ -153,7 +160,7 @@ def _configured_header_hider(headers: dict[str, str]):
     """An ``mcp_component_fn`` dropping, from each tool's arguments, every header parameter
     the operator already supplies (typically the API key the document declares per
     operation). The model is never asked for a credential it can't know, and — together
-    with :func:`_force_headers` — can't override the real one by guessing."""
+    with :func:`_guard_api_requests` — can't override the real one by guessing."""
     configured = {name.lower() for name in headers}
 
     def hide(route: HTTPRoute, component) -> None:
@@ -178,15 +185,30 @@ def _configured_header_hider(headers: dict[str, str]):
     return hide
 
 
-def _force_headers(headers: dict[str, str]):
-    """An httpx request hook putting the operator's headers on every API request. The tool
-    only fills a header the request doesn't already carry, so a header parameter in the
-    arguments would otherwise win over the configured credential."""
+def _guard_api_requests(base_url: str, headers: dict[str, str]):
+    """An httpx request hook every API call passes through before it's sent.
 
-    async def force(request: httpx.Request) -> None:
+    It refuses a request bound for any origin but the API's: the document decides each
+    operation's URL, and the tool has already attached the configured credentials by the
+    time it sends, so stripping them here would still leak the call's arguments — the
+    request mustn't leave at all. (``parse_document`` refuses absolute paths up front; this
+    holds whatever else the request builder might produce.) It then puts the operator's
+    headers on the request: the tool only fills a header the request doesn't already carry,
+    so a header parameter in the arguments would otherwise win over the configured
+    credential."""
+    api = httpx.URL(base_url)
+
+    async def guard(request: httpx.Request) -> None:
+        url = request.url
+        if (url.scheme, url.host, url.port) != (api.scheme, api.host, api.port):
+            raise httpx.RequestError(
+                f"refusing to call {url.scheme}://{url.netloc.decode()} — "
+                f"not the API at {api.scheme}://{api.netloc.decode()}",
+                request=request,
+            )
         request.headers.update(headers)
 
-    return force
+    return guard
 
 
 def build_server(spec: dict, *, transport=None, api_transport=None) -> FastMCP:
@@ -212,7 +234,7 @@ def build_server(spec: dict, *, transport=None, api_transport=None) -> FastMCP:
         headers=headers,
         timeout=TIMEOUT_S,
         transport=api_transport,
-        event_hooks={"request": [_force_headers(headers)]},
+        event_hooks={"request": [_guard_api_requests(base_url, headers)]},
     )
     try:
         return FastMCP.from_openapi(
