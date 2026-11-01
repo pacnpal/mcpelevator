@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { installOptions, INSTALL_GROUP_ORDER, type InstallOption } from '$lib/install';
-	import type { ServerSummary } from '$lib/types';
+	import { installOptions, INSTALL_GROUP_ORDER, type InstallOption } from '#lib/install.js';
+	import type { ServerSummary } from '#lib/types.js';
 
 	let { server }: { server: ServerSummary } = $props();
 

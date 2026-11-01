@@ -16,7 +16,7 @@
 		putGroup,
 		updateSettings,
 		updateUser
-	} from '$lib/api';
+	} from '#lib/api.js';
 	import type {
 		AuthProvider,
 		AuthUser,
@@ -31,16 +31,16 @@
 		UpstreamOauthClientMode,
 		UserCredential,
 		UserInfo
-	} from '$lib/types';
-	import { clearToken, setToken } from '$lib/auth';
-	import { isLoopbackHost, isPrivateIpHost, normalizeHost } from '$lib/host';
-	import { pollingInterval, shouldPollFast } from '$lib/startup';
-	import CopyButton from '$lib/components/CopyButton.svelte';
-	import CopyMenu from '$lib/components/CopyMenu.svelte';
-	import RestartButton from '$lib/components/RestartButton.svelte';
-	import ServerActionButton from '$lib/components/ServerActionButton.svelte';
-	import StatePill from '$lib/components/StatePill.svelte';
-	import { flashToast } from '$lib/toast.svelte';
+	} from '#lib/types.js';
+	import { clearToken, setToken } from '#lib/auth.js';
+	import { isLoopbackHost, isPrivateIpHost, normalizeHost } from '#lib/host.js';
+	import { pollingInterval, shouldPollFast } from '#lib/startup.js';
+	import CopyButton from '#lib/components/CopyButton.svelte';
+	import CopyMenu from '#lib/components/CopyMenu.svelte';
+	import RestartButton from '#lib/components/RestartButton.svelte';
+	import ServerActionButton from '#lib/components/ServerActionButton.svelte';
+	import StatePill from '#lib/components/StatePill.svelte';
+	import { flashToast } from '#lib/toast.svelte.js';
 
 	type LoadState = 'loading' | 'ready' | 'error';
 

@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { startupPhaseLabel } from '$lib/startup';
-	import type { ServerState, StartupStatus } from '$lib/types';
+	import { startupPhaseLabel } from '#lib/startup.js';
+	import type { ServerState, StartupStatus } from '#lib/types.js';
 
 	let {
 		state,

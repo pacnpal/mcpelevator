@@ -1,7 +1,7 @@
 import { flushSync, mount, unmount, type ComponentProps } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { ToolOverride } from '$lib/types';
+import type { ToolOverride } from '#lib/types.js';
 import ToolLabelModal from './ToolLabelModal.svelte';
 
 let dispose: (() => void) | undefined;

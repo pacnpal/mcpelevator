@@ -6,7 +6,7 @@
 	// The dialog holds a LOCAL draft: typing changes nothing until Save, which hands the
 	// override back to the caller to stage. The staged batch is still what an Apply
 	// writes (one PATCH, one bridge restart) — this only moves where the typing happens.
-	import type { ToolOverride } from '$lib/types';
+	import type { ToolOverride } from '#lib/types.js';
 
 	let {
 		upstreamName,

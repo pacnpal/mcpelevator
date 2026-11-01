@@ -3,9 +3,9 @@
 	// detail header, its dashboard card, a group row in Settings — renders THIS component,
 	// so what "restart" means (which endpoint, the in-flight state, the wording, the error
 	// toast) is defined once. Callers only vary the target and the skin.
-	import { errorMessage, restartGroup, restartServer } from '$lib/api';
-	import type { ServerSummary } from '$lib/types';
-	import { flashToast } from '$lib/toast.svelte';
+	import { errorMessage, restartGroup, restartServer } from '#lib/api.js';
+	import type { ServerSummary } from '#lib/types.js';
+	import { flashToast } from '#lib/toast.svelte.js';
 
 	let {
 		target,

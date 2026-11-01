@@ -1,7 +1,7 @@
 import { mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { UsageRow } from '$lib/usage';
+import type { UsageRow } from '#lib/usage.js';
 import UsageRows from './UsageRows.svelte';
 
 let host: HTMLElement | null = null;
