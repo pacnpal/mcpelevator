@@ -193,6 +193,17 @@ def test_parse_yaml_coerces_to_json_shapes():
     assert list(get["responses"]) == ["200"] and get["x-since"] == "2024-01-01"
 
 
+def test_parse_yaml_keeps_aliases_shared():
+    """Nested aliases stay shared objects; copying them would expand to 8**12 nodes."""
+    levels = "".join(f"  l{i}: &l{i} [{', '.join([f'*l{i-1}'] * 8)}]\n" for i in range(1, 13))
+    raw = (
+        "openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths: {}\n"
+        "x-bomb:\n  l0: &l0 [x]\n" + levels
+    ).encode()
+    bomb = openapi.parse_document(raw)["x-bomb"]
+    assert bomb["l12"][0] is bomb["l12"][1] is bomb["l11"]
+
+
 def test_parse_accepts_json_and_yaml():
     doc = {"openapi": "3.0.3", "info": {"title": "t", "version": "1"}, "paths": {}}
     assert openapi.parse_document(json.dumps(doc).encode()) == doc

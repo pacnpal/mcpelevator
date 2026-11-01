@@ -120,12 +120,24 @@ _YamlLoader.yaml_implicit_resolvers = {
 }
 
 
-def _json_shaped(node: Any) -> Any:
-    """String every mapping key, as JSON would: YAML loads an unquoted ``200:`` as an int."""
+def _json_shaped(node: Any, seen: dict[int, Any] | None = None) -> Any:
+    """String every mapping key, as JSON would: YAML loads an unquoted ``200:`` as an int.
+
+    ``seen`` keeps YAML aliases shared. Copying each one instead would let a few KB of
+    nested aliases expand exponentially in the control plane (a billion-laughs document).
+    """
+    seen = {} if seen is None else seen
+    if id(node) in seen:
+        return seen[id(node)]
     if isinstance(node, dict):
-        return {str(k): _json_shaped(v) for k, v in node.items()}
+        out: dict[str, Any] = seen.setdefault(id(node), {})
+        for k, v in node.items():
+            out[str(k)] = _json_shaped(v, seen)
+        return out
     if isinstance(node, list):
-        return [_json_shaped(v) for v in node]
+        items: list[Any] = seen.setdefault(id(node), [])
+        items.extend(_json_shaped(v, seen) for v in node)
+        return items
     return node
 
 
