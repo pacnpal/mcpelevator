@@ -5,8 +5,8 @@
 	// renders both: `table` for reading exact numbers and timestamps, `bars` for
 	// seeing the shape of the distribution at a glance. A row with zero calls is
 	// deliberately still a row — finding it is the point.
-	import type { UsageRow } from '$lib/usage';
-	import { peakCalls } from '$lib/usage';
+	import type { UsageRow } from '#lib/usage.js';
+	import { peakCalls } from '#lib/usage.js';
 
 	let {
 		rows,

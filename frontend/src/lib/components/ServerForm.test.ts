@@ -15,7 +15,7 @@ const api = vi.hoisted(() => ({
 	})
 }));
 
-vi.mock('$lib/api', () => api);
+vi.mock('#lib/api.js', () => api);
 
 let dispose: (() => void) | undefined;
 

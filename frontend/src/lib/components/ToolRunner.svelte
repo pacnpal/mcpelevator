@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { callServerTool, errorMessage } from '$lib/api';
-	import type { ServerTool, ToolCallResult } from '$lib/types';
+	import { callServerTool, errorMessage } from '#lib/api.js';
+	import type { ServerTool, ToolCallResult } from '#lib/types.js';
 
 	let {
 		serverId,

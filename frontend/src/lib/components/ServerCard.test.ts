@@ -1,7 +1,7 @@
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { ServerSummary, StartupStatus } from '$lib/types';
+import type { ServerSummary, StartupStatus } from '#lib/types.js';
 import ServerCard from './ServerCard.svelte';
 
 const api = vi.hoisted(() => ({
@@ -13,7 +13,7 @@ const api = vi.hoisted(() => ({
 	errorMessage: vi.fn((error: unknown) => (error instanceof Error ? error.message : 'error'))
 }));
 
-vi.mock('$lib/api', () => api);
+vi.mock('#lib/api.js', () => api);
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 
 const startup: StartupStatus = {

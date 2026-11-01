@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { errorMessage, getAuthStatus } from '$lib/api';
-	import { clearToken, setToken } from '$lib/auth';
+	import { errorMessage, getAuthStatus } from '#lib/api.js';
+	import { clearToken, setToken } from '#lib/auth.js';
 
 	let token = $state('');
 	let busy = $state(false);

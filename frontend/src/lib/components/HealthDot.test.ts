@@ -1,12 +1,12 @@
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { HealthResponse } from '$lib/types';
+import type { HealthResponse } from '#lib/types.js';
 import HealthDot from './HealthDot.svelte';
 
 const api = vi.hoisted(() => ({ getHealth: vi.fn() }));
 
-vi.mock('$lib/api', () => api);
+vi.mock('#lib/api.js', () => api);
 
 let dispose: (() => void) | undefined;
 

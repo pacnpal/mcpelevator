@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { getHealth } from '$lib/api';
-	import type { HealthResponse } from '$lib/types';
+	import { getHealth } from '#lib/api.js';
+	import type { HealthResponse } from '#lib/types.js';
 
 	let {
 		intervalMs = 5000,
