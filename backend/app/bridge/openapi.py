@@ -120,11 +120,31 @@ _YamlLoader.yaml_implicit_resolvers = {
 }
 
 
+def _expanded_size(node: Any, sizes: dict[int, int], active: set[int]) -> int:
+    """About how many bytes ``node`` would take as JSON, with every YAML alias written out
+    in full. That's what each later reader of the document pays (FastMCP's models, a
+    str() in an error or the preview), so it has to fit the same limit as a JSON document
+    does. Memoized per shared object, so measuring a billion-laughs graph stays cheap."""
+    if not isinstance(node, (dict, list)):
+        return len(node) + 2 if isinstance(node, str) else 8
+    key = id(node)
+    if key in sizes:
+        return sizes[key]
+    if key in active:
+        raise DocumentError("OpenAPI document has a recursive YAML alias")
+    active.add(key)
+    pairs = node.items() if isinstance(node, dict) else (("", value) for value in node)
+    total = 2 + sum(len(str(k)) + 4 + _expanded_size(v, sizes, active) for k, v in pairs)
+    active.discard(key)
+    sizes[key] = total
+    return total
+
+
 def _json_shaped(node: Any, seen: dict[int, Any] | None = None) -> Any:
     """String every mapping key, as JSON would: YAML loads an unquoted ``200:`` as an int.
 
-    ``seen`` keeps YAML aliases shared. Copying each one instead would let a few KB of
-    nested aliases expand exponentially in the control plane (a billion-laughs document).
+    ``seen`` keeps YAML aliases shared, so this pass doesn't expand them either; the
+    document's expanded size was already checked (``_expanded_size``).
     """
     seen = {} if seen is None else seen
     if id(node) in seen:
@@ -151,9 +171,17 @@ def parse_document(raw: bytes) -> dict[str, Any]:
         doc = json.loads(text)
     except ValueError:
         try:
-            doc = _json_shaped(yaml.load(text, Loader=_YamlLoader))
+            loaded = yaml.load(text, Loader=_YamlLoader)
+            if _expanded_size(loaded, {}, set()) > MAX_DOCUMENT_BYTES:
+                raise DocumentError(
+                    "OpenAPI document's YAML aliases expand past "
+                    f"{MAX_DOCUMENT_BYTES // (1024 * 1024)} MiB"
+                )
+            doc = _json_shaped(loaded)
         except yaml.YAMLError as exc:
             raise DocumentError(f"OpenAPI document is neither JSON nor YAML: {exc}") from None
+        except RecursionError:
+            raise DocumentError("OpenAPI document is nested too deeply") from None
     if not isinstance(doc, dict):
         raise DocumentError("OpenAPI document must be a JSON/YAML object")
     # Unquoted `openapi: 3.0` / `version: 1.0` load as floats; both are strings in OpenAPI.

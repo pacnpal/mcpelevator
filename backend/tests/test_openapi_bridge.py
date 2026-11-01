@@ -193,23 +193,43 @@ def test_parse_yaml_coerces_to_json_shapes():
     assert list(get["responses"]) == ["200"] and get["x-since"] == "2024-01-01"
 
 
+def _alias_levels(depth: int) -> str:
+    return "".join(f"  l{i}: &l{i} [{', '.join([f'*l{i-1}'] * 8)}]\n" for i in range(1, depth + 1))
+
+
 def test_parse_yaml_keeps_aliases_shared():
-    """Nested aliases stay shared objects; copying them would expand to 8**12 nodes."""
-    levels = "".join(f"  l{i}: &l{i} [{', '.join([f'*l{i-1}'] * 8)}]\n" for i in range(1, 13))
+    """Aliases stay shared objects, so normalizing them doesn't expand them."""
     raw = (
         "openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths: {}\n"
-        "x-bomb:\n  l0: &l0 [x]\n" + levels
+        "x-shared:\n  l0: &l0 [x]\n" + _alias_levels(3)
     ).encode()
-    bomb = openapi.parse_document(raw)["x-bomb"]
-    assert bomb["l12"][0] is bomb["l12"][1] is bomb["l11"]
+    shared = openapi.parse_document(raw)["x-shared"]
+    assert shared["l3"][0] is shared["l3"][1] is shared["l2"]
+
+
+@pytest.mark.parametrize(
+    "bomb, message",
+    [
+        # Nested aliases: 8**12 leaves once written out, wherever they're used.
+        ("x-b:\n  l0: &l0 [x]\n" + _alias_levels(12) + "servers: [{url: *l12}]\n", "expand past"),
+        # No nesting needed: one big string, aliased many times.
+        ("x-s: &s '" + "y" * 100_000 + "'\nx-b: [" + ", ".join(["*s"] * 400) + "]\n", "expand past"),
+        ("x-r: &r [*r]\n", "recursive YAML alias"),
+    ],
+)
+def test_parse_refuses_yaml_that_expands_past_the_size_limit(bomb, message):
+    """Every reader of the document (FastMCP, an error message, the preview) pays the
+    expanded size, so it's held to the same limit as a JSON document."""
+    raw = ("openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths: {}\n" + bomb).encode()
+    with pytest.raises(openapi.DocumentError, match=message):
+        openapi.parse_document(raw)
 
 
 def test_parse_refuses_a_non_string_title():
     """info.title gets printed (the preview, the bridge's log line); an alias graph there
     would expand into one giant string, so only a string (or a number) is accepted."""
-    levels = "".join(f"  l{i}: &l{i} [{', '.join([f'*l{i-1}'] * 8)}]\n" for i in range(1, 7))
     raw = (
-        "openapi: 3.1.0\nx-bomb:\n  l0: &l0 [x]\n" + levels
+        "openapi: 3.1.0\nx-bomb:\n  l0: &l0 [x]\n" + _alias_levels(6)
         + "info: {title: *l6, version: '1'}\npaths: {}\n"
     ).encode()
     with pytest.raises(openapi.DocumentError, match="title must be a string"):
