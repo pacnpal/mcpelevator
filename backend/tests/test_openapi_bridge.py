@@ -530,3 +530,15 @@ def test_preview_reports_the_documents_base_url(monkeypatch):
         assert pasted["base_url"] is None and "base URL override" in pasted["error"]
         assert c.post("/api/openapi/preview", json={"command": "ftp://x"},
                       headers=LOOPBACK).status_code == 400
+
+
+def test_server_variables_fill_in_one_pass():
+    """A default naming another variable isn't expanded again: chained, they would
+    double the URL per variable."""
+    variables = {f"v{i}": {"default": f"{{v{i + 1}}}{{v{i + 1}}}"} for i in range(40)}
+    variables["v40"] = {"default": "a"}
+    doc = {"servers": [{"url": "https://example.com/{v0}", "variables": variables}]}
+    assert openapi.resolve_base_url(doc, "", None) == "https://example.com/{v1}{v1}"
+    long = {"servers": [{"url": "https://e.com/" + "{v}" * 100, "variables": {"v": {"default": "x" * 100}}}]}
+    with pytest.raises(openapi.DocumentError, match="too long"):
+        openapi.resolve_base_url(long, "", None)

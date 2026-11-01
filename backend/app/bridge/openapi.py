@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -218,6 +219,11 @@ def parse_document(raw: bytes) -> dict[str, Any]:
     return doc
 
 
+_SERVER_VARIABLE = re.compile(r"\{([^{}]*)\}")
+# Longer than any real API's base URL; past it, a server URL is an attack, not an address.
+MAX_BASE_URL = 8192
+
+
 def resolve_base_url(doc: dict[str, Any], document_url: str, override: str | None) -> str:
     """The URL API calls are made against.
 
@@ -230,11 +236,24 @@ def resolve_base_url(doc: dict[str, Any], document_url: str, override: str | Non
         return override
     servers = doc.get("servers") or [{"url": "/"}]
     first = servers[0] if isinstance(servers, list) and servers else {}
-    url = str(first.get("url") or "/") if isinstance(first, dict) else "/"
+    url = first.get("url") if isinstance(first, dict) else None
+    if not isinstance(url, str):
+        url = "/"
     variables = first.get("variables") if isinstance(first, dict) else None
-    for name, variable in (variables or {}).items():
-        default = variable.get("default", "") if isinstance(variable, dict) else ""
-        url = url.replace(f"{{{name}}}", str(default))
+    defaults = {
+        name: variable["default"]
+        for name, variable in (variables if isinstance(variables, dict) else {}).items()
+        if isinstance(variable, dict) and isinstance(variable.get("default"), str)
+    }
+    # One pass, as OpenAPI means it: a default that names another variable isn't expanded
+    # again (chained ones would double the URL per step), and the result is sized before
+    # it's built, since even one pass can repeat a long default many times.
+    names = _SERVER_VARIABLE.findall(url)
+    if len(url) + sum(len(defaults.get(name, "")) for name in names) > MAX_BASE_URL:
+        raise DocumentError(
+            "the document's server URL is too long once its variables are filled in"
+        )
+    url = _SERVER_VARIABLE.sub(lambda m: defaults.get(m[1], m[0]), url)
     base = urljoin(document_url, url)
     # A host too: "https://" or an empty `{host}` default would otherwise start fine and
     # then fail every call, with nowhere to connect.
