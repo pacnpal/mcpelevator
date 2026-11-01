@@ -173,3 +173,15 @@ def test_lost_key_names_the_values_to_reenter():
     foreign = sealed.PREFIX + Fernet(Fernet.generate_key()).encrypt(b"x").decode()
     with pytest.raises(ValueError, match="TOKEN"):
         sealed.unseal_env({"TOKEN": foreign, "PLAIN": "ok"})
+
+
+def test_retyping_the_same_secret_keeps_its_token(c, server):
+    """Same plaintext, same token: a fresh one would change config_hash and restart the
+    server for nothing. Retyping still counts as re-entering it."""
+    before = _row(server)
+    r = _patch(c, server, env={"API_KEY": "s3cret", "REGION": "eu"})
+    assert r.status_code == 200, r.text
+    after = _row(server)
+    assert after.env == before.env and after.config_hash == before.config_hash
+    r = _patch(c, server, command="/usr/bin/env", env={"API_KEY": "s3cret", "REGION": "eu"})
+    assert r.status_code == 200, r.text

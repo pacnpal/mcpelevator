@@ -121,21 +121,27 @@ _YamlLoader.yaml_implicit_resolvers = {
 }
 
 
-def _expanded_size(node: Any, sizes: dict[int, int], active: set[int]) -> int:
-    """About how many bytes ``node`` would take as JSON, with every YAML alias written out
-    in full. That's what each later reader of the document pays (FastMCP's models, a
-    str() in an error or the preview), so it has to fit the same limit as a JSON document
-    does. Memoized per shared object, so measuring a billion-laughs graph stays cheap."""
-    if not isinstance(node, (dict, list)):
-        return len(node) + 2 if isinstance(node, str) else 8
+def _expanded_size(node: yaml.Node, sizes: dict[int, int], active: set[int]) -> int:
+    """About how many bytes ``node`` would take as JSON once every alias and ``<<`` merge
+    is written out in full. That's what constructing the document and every later reader
+    pays (FastMCP's models, a str() in an error or the preview), so it has to fit the same
+    limit as a JSON document. Measured on the composed node graph, before PyYAML builds
+    anything: there an alias is the same node object, so memoizing per node keeps the
+    measurement cheap even for a billion-laughs document."""
+    if isinstance(node, yaml.ScalarNode):
+        return len(node.value) + 2
     key = id(node)
     if key in sizes:
         return sizes[key]
     if key in active:
         raise DocumentError("OpenAPI document has a recursive YAML alias")
     active.add(key)
-    pairs = node.items() if isinstance(node, dict) else (("", value) for value in node)
-    total = 2 + sum(len(str(k)) + 4 + _expanded_size(v, sizes, active) for k, v in pairs)
+    children = (
+        [part for pair in node.value for part in pair]
+        if isinstance(node, yaml.MappingNode)
+        else node.value
+    )
+    total = 2 + sum(2 + _expanded_size(child, sizes, active) for child in children)
     active.discard(key)
     sizes[key] = total
     return total
@@ -172,12 +178,17 @@ def parse_document(raw: bytes) -> dict[str, Any]:
         doc = json.loads(text)
     except ValueError:
         try:
-            loaded = yaml.load(text, Loader=_YamlLoader)
-            if _expanded_size(loaded, {}, set()) > MAX_DOCUMENT_BYTES:
-                raise DocumentError(
-                    "OpenAPI document's YAML aliases expand past "
-                    f"{MAX_DOCUMENT_BYTES // (1024 * 1024)} MiB"
-                )
+            loader = _YamlLoader(text)
+            try:
+                node = loader.get_single_node()
+                if node is not None and _expanded_size(node, {}, set()) > MAX_DOCUMENT_BYTES:
+                    raise DocumentError(
+                        "OpenAPI document's YAML aliases and merges expand past "
+                        f"{MAX_DOCUMENT_BYTES // (1024 * 1024)} MiB"
+                    )
+                loaded = loader.construct_document(node) if node is not None else None
+            finally:
+                loader.dispose()
             doc = _json_shaped(loaded)
         except yaml.YAMLError as exc:
             raise DocumentError(f"OpenAPI document is neither JSON nor YAML: {exc}") from None

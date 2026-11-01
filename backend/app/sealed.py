@@ -50,6 +50,14 @@ def seal(value: str) -> str:
     return PREFIX + _fernet().encrypt(value.encode()).decode()
 
 
+def _opened(token: str) -> str | None:
+    """A sealed value's plaintext, or None when the key can't decrypt it."""
+    try:
+        return _fernet().decrypt(token[len(PREFIX):].encode()).decode()
+    except InvalidToken:
+        return None
+
+
 def unseal_env(env: dict[str, str]) -> dict[str, str]:
     """``env`` with every sealed value decrypted. Raises ``ValueError`` naming the keys
     that can't be decrypted (the key file is missing or was replaced)."""
@@ -57,9 +65,8 @@ def unseal_env(env: dict[str, str]) -> dict[str, str]:
     lost: list[str] = []
     for key, value in env.items():
         if is_sealed(value):
-            try:
-                value = _fernet().decrypt(value[len(PREFIX):].encode()).decode()
-            except InvalidToken:
+            value = _opened(value)
+            if value is None:
                 lost.append(key)
                 continue
         out[key] = value
@@ -119,6 +126,11 @@ def resolve(
             raise ValueError(f"env {key}: no hidden value is stored for it, enter the value")
         if is_sealed(value):
             raise ValueError(f"env {key}: a value can't start with {PREFIX!r}")
+        if is_secret and is_sealed(old) and _opened(old) == value:
+            # Typed in again unchanged: that's a re-entry, but keep the stored token, or a
+            # fresh one would change config_hash and restart the server for nothing.
+            out[key] = old
+            continue
         changed = changed or is_sealed(old) or value != old
         out[key] = seal(value) if is_secret else value
     # Removing a key changes what runs as well: code that falls back to a default when

@@ -215,6 +215,12 @@ def test_parse_yaml_keeps_aliases_shared():
         # No nesting needed: one big string, aliased many times.
         ("x-s: &s '" + "y" * 100_000 + "'\nx-b: [" + ", ".join(["*s"] * 400) + "]\n", "expand past"),
         ("x-r: &r [*r]\n", "recursive YAML alias"),
+        # `<<` merges copy entries while PyYAML builds the mapping, so they're measured
+        # on the node graph before anything is built.
+        ("x-m:\n  m0: &m0 {a: 1}\n" + "".join(
+            f"  m{i}: &m{i} {{" + ", ".join(f"k{j}: {{<<: *m{i-1}}}" for j in range(8)) + "}\n"
+            for i in range(1, 12)
+        ), "expand past"),
     ],
 )
 def test_parse_refuses_yaml_that_expands_past_the_size_limit(bomb, message):
@@ -542,3 +548,11 @@ def test_server_variables_fill_in_one_pass():
     long = {"servers": [{"url": "https://e.com/" + "{v}" * 100, "variables": {"v": {"default": "x" * 100}}}]}
     with pytest.raises(openapi.DocumentError, match="too long"):
         openapi.resolve_base_url(long, "", None)
+
+
+def test_yaml_merge_keys_still_work():
+    doc = openapi.parse_document(
+        b"openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths: {}\n"
+        b"x-base: &base {a: 1}\nx-child: {<<: *base, b: 2}\n"
+    )
+    assert doc["x-child"] == {"a": 1, "b": 2}

@@ -437,10 +437,9 @@
 				? openapiDocument.trim() && { command: '', document: openapiDocument }
 				: isValidRemoteUrl(command) && { command: command.trim(), document: '' };
 		const seq = ++previewSeq;
-		if (!source) {
-			specPreview = null;
-			return;
-		}
+		// Cleared on every change, so the form never describes a document it isn't saving.
+		specPreview = null;
+		if (!source) return;
 		const timer = setTimeout(() => {
 			previewOpenapi(source.command, source.document)
 				.then((result) => {
