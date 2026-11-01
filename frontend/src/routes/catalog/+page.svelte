@@ -6,12 +6,12 @@
 		getCatalogVersions,
 		listCatalog,
 		listCatalogSources
-	} from '$lib/api';
-	import { pendingFromDraft, safeUrl, setPendingInstall } from '$lib/catalogInstall';
-	import { canonicalRemoteTransport } from '$lib/remote';
-	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
-	import { flashToast } from '$lib/toast.svelte';
-	import type { CatalogServer, CatalogSource } from '$lib/types';
+	} from '#lib/api.js';
+	import { pendingFromDraft, safeUrl, setPendingInstall } from '#lib/catalogInstall.js';
+	import { canonicalRemoteTransport } from '#lib/remote.js';
+	import RunnerBadge from '#lib/components/RunnerBadge.svelte';
+	import { flashToast } from '#lib/toast.svelte.js';
+	import type { CatalogServer, CatalogSource } from '#lib/types.js';
 
 	// ---- Sources --------------------------------------------------------------
 	let sources = $state<CatalogSource[]>([]);

@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 
-	import { cloneServer, deleteServer, errorMessage } from '$lib/api';
-	import { formatCountdown, formatElapsed, startupPhaseLabel } from '$lib/startup';
-	import type { ServerSummary } from '$lib/types';
+	import { cloneServer, deleteServer, errorMessage } from '#lib/api.js';
+	import { formatCountdown, formatElapsed, startupPhaseLabel } from '#lib/startup.js';
+	import type { ServerSummary } from '#lib/types.js';
 	import CopyMenu from './CopyMenu.svelte';
 	import RestartButton from './RestartButton.svelte';
 	import ServerActionButton from './ServerActionButton.svelte';

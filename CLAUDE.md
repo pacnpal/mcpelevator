@@ -171,7 +171,7 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
 
 - Route order matters: `/api` and `/s` routers are registered before the SPA catch-all mount so
   they win over the client-side router (`backend/app/main.py`). Keep new API/proxy routes above it.
-- Svelte runes mode is forced everywhere via `compilerOptions.runes` (`frontend/svelte.config.js`)
+- Svelte runes mode is forced everywhere via `compilerOptions.runes` (the `sveltekit()` plugin in `frontend/vite.config.ts`; SvelteKit 3 dropped `svelte.config.js`)
   — the codebase is Svelte 5; write runes, not legacy reactive syntax.
 - Backend dependencies are lockfile-driven: change `pyproject.toml`, then run `uv lock` so the
   committed `uv.lock` stays in sync for reproducible installs (the Docker build prefers `--frozen`,

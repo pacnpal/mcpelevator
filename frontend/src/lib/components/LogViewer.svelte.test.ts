@@ -1,12 +1,12 @@
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { StartupStatus } from '$lib/types';
+import type { StartupStatus } from '#lib/types.js';
 import LogViewer from './LogViewer.svelte';
 
 const api = vi.hoisted(() => ({ streamLogs: vi.fn() }));
 
-vi.mock('$lib/api', () => ({
+vi.mock('#lib/api.js', () => ({
 	streamLogs: api.streamLogs,
 	ApiError: class ApiError extends Error {
 		constructor(readonly status: number) {

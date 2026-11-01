@@ -9,8 +9,8 @@
 	//
 	// Hours are the READER's local hours: the API reports UTC precisely because
 	// only the browser knows the timezone to bucket them into.
-	import type { UsageHour } from '$lib/types';
-	import { HEATMAP_DAYS, heatLevel, heatmap } from '$lib/usage';
+	import type { UsageHour } from '#lib/types.js';
+	import { HEATMAP_DAYS, heatLevel, heatmap } from '#lib/usage.js';
 
 	let { hourly }: { hourly: UsageHour[] } = $props();
 

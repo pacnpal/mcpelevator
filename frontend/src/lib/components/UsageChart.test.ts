@@ -1,7 +1,7 @@
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { UsagePoint } from '$lib/types';
+import type { UsagePoint } from '#lib/types.js';
 import UsageChart from './UsageChart.svelte';
 
 // The chart itself is LayerChart's; what this file guards is that we hand it the

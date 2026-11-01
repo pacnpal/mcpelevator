@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Runner } from '$lib/types';
+	import type { Runner } from '#lib/types.js';
 
 	let { runner }: { runner: Runner } = $props();
 

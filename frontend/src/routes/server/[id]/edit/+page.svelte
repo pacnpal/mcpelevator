@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { errorMessage, getAuthStatus, getServer, listUsers, updateServer } from '$lib/api';
-	import type { ServerCreate, ServerDetail, ServerUpdate, UserInfo } from '$lib/types';
-	import ServerForm from '$lib/components/ServerForm.svelte';
+	import { errorMessage, getAuthStatus, getServer, listUsers, updateServer } from '#lib/api.js';
+	import type { ServerCreate, ServerDetail, ServerUpdate, UserInfo } from '#lib/types.js';
+	import ServerForm from '#lib/components/ServerForm.svelte';
 
 	type LoadState = 'loading' | 'ready' | 'error';
 
