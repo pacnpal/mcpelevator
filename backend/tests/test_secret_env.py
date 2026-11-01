@@ -81,6 +81,8 @@ def test_other_env_changes_on_a_local_server_need_secrets_again(c, server):
     r = _patch(c, server, env=attack)
     assert r.status_code == 400 and "API_KEY" in r.json()["detail"]
     assert _patch(c, server, env={"API_KEY": HIDDEN, "REGION": "us"}).status_code == 400
+    # Removing a key counts too: code falling back to a default would get the secret.
+    assert _patch(c, server, env={"API_KEY": HIDDEN}).status_code == 400
     # Re-entering the secret allows it, and an omitted secret_env keeps it secret.
     r = _patch(c, server, env={"API_KEY": "s3cret", "REGION": "us", "NEW": "x"})
     assert r.status_code == 200, r.text

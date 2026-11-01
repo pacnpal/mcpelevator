@@ -97,8 +97,8 @@ def resolve(
     is in ``secret`` (``None``: each key stays as secret as it already was). A kept hidden
     value is refused when the save makes it visible, or ``retargeted`` the server (changed
     what it runs), so it can't be carried somewhere that reads it back out. When
-    ``env_runs_code`` (a local process reads this env at startup), adding or changing any
-    other value counts as retargeting too: ``NODE_OPTIONS``, ``PYTHONSTARTUP``,
+    ``env_runs_code`` (a local process reads this env at startup), adding, changing or
+    removing any other value counts as retargeting too: ``NODE_OPTIONS``, ``PYTHONSTARTUP``,
     ``LD_PRELOAD`` and their many cousins change what runs as surely as the command does,
     and no list of such names would be complete.
     """
@@ -121,6 +121,9 @@ def resolve(
             raise ValueError(f"env {key}: a value can't start with {PREFIX!r}")
         changed = changed or is_sealed(old) or value != old
         out[key] = seal(value) if is_secret else value
+    # Removing a key changes what runs as well: code that falls back to a default when
+    # API_URL is unset would carry the kept secret to that default.
+    changed = changed or bool(stored.keys() - incoming.keys())
     if shown:
         raise ValueError(
             f"re-enter {', '.join(shown)}: making a secret env value visible needs it "

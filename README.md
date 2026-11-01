@@ -584,7 +584,7 @@ to replace it. Changing what the server runs (runner, command, args, image optio
 working directory, setup script, repository, OpenAPI document) needs the secret values
 typed in again, and so does unlocking one, so nobody with edit rights can point a server
 at `printenv` or their own URL and read the values back. On a local server that includes
-adding or changing any other env value, since something like `NODE_OPTIONS` changes what
+adding, changing or removing any other env value, since something like `NODE_OPTIONS` changes what
 runs just as much as the command does. Headers on remote and openapi servers only go to
 the upstream, so those can change freely. Back up `env.key` with the
 database: without it the secret values can't be decrypted, and the server's start error

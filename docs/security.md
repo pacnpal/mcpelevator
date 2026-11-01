@@ -129,7 +129,7 @@ bridge needs the plaintext, so the control plane decrypts them into the bridge's
 spec. Anyone who can edit a server could point it at `printenv` or at a URL they control
 and capture its env, so a save that changes what a server runs, or makes a secret
 visible, has to supply those secret values again (`app.sealed.resolve`). For a local
-server any added or changed env value counts as changing what it runs: `NODE_OPTIONS`,
+server any added, changed or removed env value counts as changing what it runs: `NODE_OPTIONS`,
 `PYTHONSTARTUP`, `LD_PRELOAD` and similar variables execute code, and a list of them
 would never be complete. Headers on remote and openapi servers are exempt.
 The one exception is data-plane and admin **bearer tokens**, which are SHA-256-hashed and
