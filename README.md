@@ -586,7 +586,7 @@ typed in again, and so does unlocking one, so nobody with edit rights can point 
 at `printenv` or their own URL and read the values back. On a local server that includes
 adding, changing or removing any other env value, since something like `NODE_OPTIONS` changes what
 runs just as much as the command does. Headers on remote and openapi servers only go to
-the upstream, so those can change freely. Back up `env.key` with the
+the upstream, so those can change freely, except `Host`, which picks where they go. Back up `env.key` with the
 database: without it the secret values can't be decrypted, and the server's start error
 names the ones to re-enter.
 

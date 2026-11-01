@@ -131,7 +131,8 @@ and capture its env, so a save that changes what a server runs, or makes a secre
 visible, has to supply those secret values again (`app.sealed.resolve`). For a local
 server any added, changed or removed env value counts as changing what it runs: `NODE_OPTIONS`,
 `PYTHONSTARTUP`, `LD_PRELOAD` and similar variables execute code, and a list of them
-would never be complete. Headers on remote and openapi servers are exempt.
+would never be complete. Headers on remote and openapi servers are exempt, except `Host`,
+which picks the virtual host the credentials reach behind the same URL.
 The one exception is data-plane and admin **bearer tokens**, which are SHA-256-hashed and
 never stored in the clear (§ Data plane). Consequently, anyone who can read the data
 directory — host root, a compromised control-plane process, an unprotected volume mount,

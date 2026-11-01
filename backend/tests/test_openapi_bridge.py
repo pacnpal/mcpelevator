@@ -556,3 +556,39 @@ def test_yaml_merge_keys_still_work():
         b"x-base: &base {a: 1}\nx-child: {<<: *base, b: 2}\n"
     )
     assert doc["x-child"] == {"a": 1, "b": 2}
+
+
+def test_base_url_resolution_edge_cases():
+    def resolve(server):
+        return openapi.resolve_base_url({"servers": [server]}, "", None)
+
+    # A numeric default (YAML's unquoted `2`) fills in; null and bools don't.
+    assert resolve({"url": "https://e.com/v{n}", "variables": {"n": {"default": 2}}}) == (
+        "https://e.com/v2"
+    )
+    assert resolve({"url": "https://e.com/{b}", "variables": {"b": {"default": True}}}) == (
+        "https://e.com/{b}"
+    )
+    # Placeholders count at their resolved length, so short defaults never trip the cap.
+    many = "".join(f"{{long_variable_name_{i}}}" for i in range(400))
+    variables = {f"long_variable_name_{i}": {"default": "x"} for i in range(400)}
+    assert resolve({"url": "https://e.com/" + many, "variables": variables}).endswith("x" * 400)
+    with pytest.raises(openapi.DocumentError, match="list of objects"):
+        openapi.resolve_base_url({"servers": ["https://e.com"]}, "", None)
+
+
+def test_parse_refuses_a_boolean_title():
+    with pytest.raises(openapi.DocumentError, match="title must be a string"):
+        openapi.parse_document(b"openapi: 3.1.0\ninfo: {title: true, version: '1'}\npaths: {}\n")
+
+
+def test_preview_refuses_an_oversized_pasted_document(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from conftest import LOOPBACK
+    from app.main import app
+
+    monkeypatch.setattr(openapi, "MAX_DOCUMENT_BYTES", 100)
+    with TestClient(app) as c:
+        r = c.post("/api/openapi/preview", json={"openapi_document": "x" * 200}, headers=LOOPBACK)
+    assert r.status_code == 200 and "larger than" in r.json()["error"]

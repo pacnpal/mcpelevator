@@ -129,7 +129,7 @@ def _expanded_size(node: yaml.Node, sizes: dict[int, int], active: set[int]) -> 
     anything: there an alias is the same node object, so memoizing per node keeps the
     measurement cheap even for a billion-laughs document."""
     if isinstance(node, yaml.ScalarNode):
-        return len(node.value) + 2
+        return len(node.value.encode()) + 2
     key = id(node)
     if key in sizes:
         return sizes[key]
@@ -202,7 +202,7 @@ def parse_document(raw: bytes) -> dict[str, Any]:
     info = doc.get("info")
     if isinstance(info, dict):
         for field in ("version", "title"):
-            if isinstance(info.get(field), (int, float)):
+            if isinstance(info.get(field), (int, float)) and not isinstance(info[field], bool):
                 info[field] = str(info[field])
         # A string in OpenAPI, and only a string gets printed: str() or %r on a YAML
         # alias graph would expand every shared copy into one giant title.
@@ -246,21 +246,30 @@ def resolve_base_url(doc: dict[str, Any], document_url: str, override: str | Non
     if override:
         return override
     servers = doc.get("servers") or [{"url": "/"}]
-    first = servers[0] if isinstance(servers, list) and servers else {}
-    url = first.get("url") if isinstance(first, dict) else None
+    if not isinstance(servers, list) or not isinstance(servers[0], dict):
+        raise DocumentError("the document's `servers` must be a list of objects")
+    first = servers[0]
+    url = first.get("url")
     if not isinstance(url, str):
         url = "/"
-    variables = first.get("variables") if isinstance(first, dict) else None
-    defaults = {
-        name: variable["default"]
-        for name, variable in (variables if isinstance(variables, dict) else {}).items()
-        if isinstance(variable, dict) and isinstance(variable.get("default"), str)
-    }
+    variables = first.get("variables")
+    defaults: dict[str, str] = {}
+    for name, variable in (variables if isinstance(variables, dict) else {}).items():
+        default = variable.get("default") if isinstance(variable, dict) else None
+        # A number is fine (YAML reads an unquoted `2` as one); null or a bool would become
+        # "None" or "True", so those leave the placeholder visible instead.
+        if isinstance(default, (int, float)) and not isinstance(default, bool):
+            default = str(default)
+        if isinstance(default, str):
+            defaults[name] = default
     # One pass, as OpenAPI means it: a default that names another variable isn't expanded
     # again (chained ones would double the URL per step), and the result is sized before
     # it's built, since even one pass can repeat a long default many times.
-    names = _SERVER_VARIABLE.findall(url)
-    if len(url) + sum(len(defaults.get(name, "")) for name in names) > MAX_BASE_URL:
+    resolved = len(url) + sum(
+        len(defaults[name]) - len(name) - 2 for name in _SERVER_VARIABLE.findall(url)
+        if name in defaults
+    )
+    if resolved > MAX_BASE_URL:
         raise DocumentError(
             "the document's server URL is too long once its variables are filled in"
         )

@@ -109,6 +109,11 @@ def resolve(
     ``LD_PRELOAD`` and their many cousins change what runs as surely as the command does,
     and no list of such names would be complete.
     """
+    unknown = sorted((secret or set()) - incoming.keys())
+    if unknown:
+        # Silently storing the value plaintext would be worse: "authorization" for an
+        # "Authorization" header would look secret to the caller and be readable.
+        raise ValueError(f"secret_env names keys that aren't in env: {', '.join(unknown)}")
     out: dict[str, str] = {}
     kept: list[str] = []
     shown: list[str] = []

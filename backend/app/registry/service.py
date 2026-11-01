@@ -2016,7 +2016,12 @@ _RETARGET_FIELDS = (
     "repo_ref",
     "post_clone_script",
     "openapi_document",
+    "pin_mcp1",
 )
+
+
+def _host_header(env: dict[str, str]) -> str | None:
+    return next((value for key, value in env.items() if key.lower() == "host"), None)
 
 
 _MUTABLE_FIELDS = {
@@ -2251,6 +2256,13 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
             (getattr(server, key) or None) != (target_before[key] or None)
             for key in _RETARGET_FIELDS
         )
+        # A Host header picks the virtual host behind the same URL, so changing it points
+        # the headers somewhere else as surely as changing the URL does.
+        host_before, host_after = _host_header(env_before), _host_header(server.env or {})
+        if host_after != host_before and not (
+            host_after == sealed.HIDDEN and sealed.is_sealed(host_before)
+        ):
+            retargeted = True
         secret = changes.get("secret_env")
         server.env = sealed.resolve(
             env_before,

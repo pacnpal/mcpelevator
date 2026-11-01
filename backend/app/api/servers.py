@@ -828,6 +828,11 @@ def _openapi_preview(command: str, document: str) -> OpenapiPreview:
     try:
         if document.strip():
             raw, served_from = document.encode(), ""
+            if len(raw) > bridge_openapi.MAX_DOCUMENT_BYTES:
+                raise bridge_openapi.DocumentError(
+                    f"OpenAPI document is larger than "
+                    f"{bridge_openapi.MAX_DOCUMENT_BYTES // (1024 * 1024)} MiB"
+                )
         else:
             # No headers: the preview never sends the API's credentials anywhere, so a
             # document behind the API's own auth can't be previewed (the bridge can).

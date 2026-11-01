@@ -185,3 +185,49 @@ def test_retyping_the_same_secret_keeps_its_token(c, server):
     assert after.env == before.env and after.config_hash == before.config_hash
     r = _patch(c, server, command="/usr/bin/env", env={"API_KEY": "s3cret", "REGION": "eu"})
     assert r.status_code == 200, r.text
+
+
+def test_secret_env_must_name_env_keys(c, server):
+    """`authorization` for an `Authorization` header would otherwise stay plaintext."""
+    r = _patch(c, server, secret_env=["api_key"])
+    assert r.status_code == 400 and "api_key" in r.json()["detail"]
+
+
+def test_changing_the_host_header_needs_secrets_again(c):
+    server_id = _create(
+        c,
+        runner="remote",
+        command="https://up.example/mcp",
+        args=["streamable-http"],
+        env={"Authorization": "Bearer t0ken", "Host": "a.example"},
+        secret_env=["Authorization"],
+    )
+    try:
+        r = _patch(c, server_id, env={"Authorization": HIDDEN, "Host": "evil.example"})
+        assert r.status_code == 400 and "Authorization" in r.json()["detail"]
+        r = _patch(c, server_id, env={"Authorization": HIDDEN, "host": "a.example"})
+        assert r.status_code == 200, r.text  # same value, any case: not a change
+    finally:
+        c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_secret_file_keeps_an_existing_key(tmp_path, monkeypatch):
+    """Only a missing file is created; one another process wrote first wins, and an
+    unreadable one is never overwritten (that would orphan every sealed value)."""
+    import os
+
+    from app.util import secret_file
+
+    path = tmp_path / "env.key"
+    assert secret_file(path, lambda: b"first", bool) == b"first"
+    assert secret_file(path, lambda: b"second", bool) == b"first"
+
+    other = tmp_path / "raced.key"
+    real_link = os.link
+
+    def racing_link(src, dst):
+        other.write_bytes(b"theirs")
+        return real_link(src, dst)
+
+    monkeypatch.setattr(os, "link", racing_link)
+    assert secret_file(other, lambda: b"mine", bool) == b"theirs"
