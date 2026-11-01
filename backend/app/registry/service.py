@@ -1955,7 +1955,9 @@ def create_server(
     disabled_tools = normalize_disabled_tools(disabled_tools)
     tool_overrides = normalize_tool_overrides(tool_overrides, disabled_tools)
     # Last, after docker normalization may have moved `-e K=V` values out of the args.
-    env = sealed.resolve({}, dict(env or {}), secret=set(secret_env or []), retargeted=False)
+    env = sealed.resolve(
+        {}, dict(env or {}), secret=set(secret_env or []), retargeted=False, env_runs_code=False
+    )
 
     server = Server(
         id=new_id(),
@@ -2255,6 +2257,9 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
             dict(server.env or {}),
             secret=set(secret) if secret is not None else None,
             retargeted=retargeted,
+            # Headers (remote/openapi) only travel to the upstream; a local process's env
+            # can change what it runs (NODE_OPTIONS and friends).
+            env_runs_code=server.runner not in ("remote", "openapi"),
         )
         _require_launchable_spec(server)
     except ValueError:

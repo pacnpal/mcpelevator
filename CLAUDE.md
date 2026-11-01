@@ -59,7 +59,8 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   `<data_dir>/env.key`, so a value is secret exactly when it's sealed (no flag column). The
   API masks it as `<hidden>` and takes `<hidden>` back to keep it; `runners.build_spec` is
   the ONE place it's decrypted. `sealed.resolve` refuses to carry a kept secret through a
-  change of what the server runs (`service._RETARGET_FIELDS`) or through making it visible.
+  change of what the server runs (`service._RETARGET_FIELDS`, plus, for a local runner, any
+  other env edit: `NODE_OPTIONS` and friends execute code) or through making it visible.
   `.mcpb` exports turn secrets into sensitive `user_config` prompts, and every manifest is
   validated against the vendored official MCPB 0.2 schema before it's served.
 - **Source repositories** (`runners/repo.py`, `catalog/repository.py`): a local-runner server

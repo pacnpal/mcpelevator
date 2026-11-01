@@ -87,6 +87,7 @@ def resolve(
     *,
     secret: set[str] | None,
     retargeted: bool,
+    env_runs_code: bool,
 ) -> dict[str, str]:
     """The env to store after a save.
 
@@ -95,11 +96,16 @@ def resolve(
     all) keeps that key's sealed value. Everything else is plaintext, sealed when its key
     is in ``secret`` (``None``: each key stays as secret as it already was). A kept hidden
     value is refused when the save makes it visible, or ``retargeted`` the server (changed
-    what it runs), so it can't be carried somewhere that reads it back out.
+    what it runs), so it can't be carried somewhere that reads it back out. When
+    ``env_runs_code`` (a local process reads this env at startup), adding or changing any
+    other value counts as retargeting too: ``NODE_OPTIONS``, ``PYTHONSTARTUP``,
+    ``LD_PRELOAD`` and their many cousins change what runs as surely as the command does,
+    and no list of such names would be complete.
     """
     out: dict[str, str] = {}
     kept: list[str] = []
     shown: list[str] = []
+    changed = False
     for key, value in incoming.items():
         old = stored.get(key)
         is_secret = key in secret if secret is not None else is_sealed(old)
@@ -113,15 +119,16 @@ def resolve(
             raise ValueError(f"env {key}: no hidden value is stored for it, enter the value")
         if is_sealed(value):
             raise ValueError(f"env {key}: a value can't start with {PREFIX!r}")
+        changed = changed or is_sealed(old) or value != old
         out[key] = seal(value) if is_secret else value
     if shown:
         raise ValueError(
             f"re-enter {', '.join(shown)}: making a secret env value visible needs it "
             "typed in again"
         )
-    if kept and retargeted:
+    if kept and (retargeted or (env_runs_code and changed)):
         raise ValueError(
             f"re-enter the secret env values {', '.join(kept)}: changing what this server "
-            "runs needs them typed in again"
+            "runs, including any other env value it starts with, needs them typed in again"
         )
     return out

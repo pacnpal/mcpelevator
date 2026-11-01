@@ -223,8 +223,8 @@ def build(app: FastAPI) -> "_Gate":
         "<hidden>" keeps it and any other value replaces it. ``secret_env`` lists the
         secret keys (omit it to leave each key as it is). Making a secret visible, or
         changing what the server runs (runner, command, args, run_args, cwd,
-        setup_script, the repo fields, openapi_document), needs those secret values sent
-        in full in the same call."""
+        setup_script, the repo fields, openapi_document, and for a local server any other
+        env value), needs those secret values sent in full in the same call."""
         if changes.model_fields_set & _RESTARTING_FIELDS:
             _refuse_self(server_id, "change its exposure or tool policy")
         return await api(

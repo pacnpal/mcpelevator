@@ -1586,8 +1586,8 @@
 					The lock marks a value secret: it's stored encrypted and never shown again, in this
 					form, the API, or a .mcpb export.
 					{#if envRows.some((r) => r.hidden)}
-						Changing what this server runs, or unlocking a secret, needs its value typed in
-						again.
+						Changing what this server runs (for a local server, that includes any other env
+						value), or unlocking a secret, needs the secret values typed in again.
 					{/if}
 				</p>
 			{/if}
