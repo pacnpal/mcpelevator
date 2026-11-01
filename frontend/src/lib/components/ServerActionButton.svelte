@@ -3,9 +3,9 @@
 	// is decided in exactly one place (`primaryServerAction`), and what pressing it does
 	// — the endpoint, the in-flight state, the wording — lives here, so the dashboard
 	// card, the server page header, and a group's member rows can't drift apart.
-	import { disableServer, enableServer, errorMessage, retryServer } from '$lib/api';
-	import { primaryServerAction } from '$lib/startup';
-	import type { ServerSummary } from '$lib/types';
+	import { disableServer, enableServer, errorMessage, retryServer } from '#lib/api.js';
+	import { primaryServerAction } from '#lib/startup.js';
+	import type { ServerSummary } from '#lib/types.js';
 
 	let {
 		server,

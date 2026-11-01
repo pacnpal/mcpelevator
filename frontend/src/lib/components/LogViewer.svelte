@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { ApiError, streamLogs } from '$lib/api';
-	import type { ServerState, StartupStatus } from '$lib/types';
+	import { ApiError, streamLogs } from '#lib/api.js';
+	import type { ServerState, StartupStatus } from '#lib/types.js';
 
 	let {
 		serverId,

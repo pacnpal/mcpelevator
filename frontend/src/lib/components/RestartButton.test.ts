@@ -1,7 +1,7 @@
 import { flushSync, mount, unmount, type ComponentProps } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { ServerSummary } from '$lib/types';
+import type { ServerSummary } from '#lib/types.js';
 import RestartButton from './RestartButton.svelte';
 
 const api = vi.hoisted(() => ({
@@ -11,8 +11,8 @@ const api = vi.hoisted(() => ({
 }));
 const toast = vi.hoisted(() => ({ flashToast: vi.fn() }));
 
-vi.mock('$lib/api', () => api);
-vi.mock('$lib/toast.svelte', () => toast);
+vi.mock('#lib/api.js', () => api);
+vi.mock('#lib/toast.svelte.js', () => toast);
 
 const summary = {
 	id: 'srv-1',

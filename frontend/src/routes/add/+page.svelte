@@ -7,17 +7,17 @@
 		getAuthStatus,
 		getRepositoryDraft,
 		importServers
-	} from '$lib/api';
-	import { pendingFromDraft, setPendingInstall } from '$lib/catalogInstall';
-	import { canonicalRemoteTransport } from '$lib/remote';
+	} from '#lib/api.js';
+	import { pendingFromDraft, setPendingInstall } from '#lib/catalogInstall.js';
+	import { canonicalRemoteTransport } from '#lib/remote.js';
 	import type {
 		ImportResult,
 		ImportWarning,
 		McpServerEntry,
 		ServerCreate
-	} from '$lib/types';
-	import ServerForm from '$lib/components/ServerForm.svelte';
-	import { flashToast } from '$lib/toast.svelte';
+	} from '#lib/types.js';
+	import ServerForm from '#lib/components/ServerForm.svelte';
+	import { flashToast } from '#lib/toast.svelte.js';
 
 	type Tab = 'manual' | 'import' | 'repo';
 	let tab = $state<Tab>('manual');

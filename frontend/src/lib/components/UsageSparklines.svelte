@@ -13,8 +13,8 @@
 	// with three calls look as busy as one with three hundred.
 	import { BarChart } from 'layerchart';
 
-	import type { UsageBand, UsagePoint } from '$lib/types';
-	import { facetPeak, tickLabel, toFacetPoints } from '$lib/usage';
+	import type { UsageBand, UsagePoint } from '#lib/types.js';
+	import { facetPeak, tickLabel, toFacetPoints } from '#lib/usage.js';
 
 	let {
 		series,
