@@ -925,7 +925,7 @@
 			     OpenAPI document. command = document URL, args = [] or [base URL override],
 			     env = headers sent to the API. No local process. -->
 			<div class="flex flex-col gap-2">
-				<span class="text-sm font-medium text-[var(--color-ink)]">OpenAPI document</span>
+				<span class="text-sm font-medium text-[var(--color-ink)]">OpenAPI document <span class="text-xs font-normal text-[var(--color-ink-dim)]">(OpenAPI 3, JSON or YAML)</span></span>
 				<div class="grid grid-cols-2 gap-2">
 					{#each [{ pasted: false, title: 'URL', hint: 'Fetched on every start' }, { pasted: true, title: 'Paste or upload', hint: 'Stored with the server' }] as opt (opt.title)}
 						<label
@@ -982,6 +982,12 @@
 						</p>
 					{/if}
 				{/if}
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					Authenticate with the API's own credential under <span class="font-medium">Headers</span> below,
+					as its <span class="font-mono">securitySchemes</span> asks (e.g.
+					<span class="font-mono">Authorization: Bearer &lt;token&gt;</span>). It is sent on every API
+					call; your clients' headers never are.
+				</p>
 				<label for="srv-base-url" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
 					API base URL <span class="text-[var(--color-ink-dim)]">(optional)</span>
 				</label>

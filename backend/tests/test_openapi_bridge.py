@@ -181,6 +181,18 @@ def test_rest_mirror_serves_translated_tools(monkeypatch):
 # --- document parsing -----------------------------------------------------------------
 
 
+def test_parse_yaml_coerces_to_json_shapes():
+    """Hand-written YAML: unquoted status codes, version numbers and dates stay JSON-shaped."""
+    doc = openapi.parse_document(
+        b"openapi: 3.0\ninfo: {title: t, version: 1.0}\npaths:\n  /a:\n    get:\n"
+        b"      responses:\n        200: {description: ok}\n"
+        b"      x-since: 2024-01-01\n"
+    )
+    assert doc["openapi"] == "3.0" and doc["info"]["version"] == "1.0"
+    get = doc["paths"]["/a"]["get"]
+    assert list(get["responses"]) == ["200"] and get["x-since"] == "2024-01-01"
+
+
 def test_parse_accepts_json_and_yaml():
     doc = {"openapi": "3.0.3", "info": {"title": "t", "version": "1"}, "paths": {}}
     assert openapi.parse_document(json.dumps(doc).encode()) == doc

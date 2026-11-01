@@ -110,6 +110,25 @@ def fetch_document(
             return _read_capped(response), url
 
 
+class _YamlLoader(yaml.SafeLoader):
+    """YAML 1.1 reads ``2024-01-01`` as a date; JSON has no dates, so keep it a string."""
+
+
+_YamlLoader.yaml_implicit_resolvers = {
+    first: [r for r in resolvers if r[0] != "tag:yaml.org,2002:timestamp"]
+    for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+
+def _json_shaped(node: Any) -> Any:
+    """String every mapping key, as JSON would: YAML loads an unquoted ``200:`` as an int."""
+    if isinstance(node, dict):
+        return {str(k): _json_shaped(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_json_shaped(v) for v in node]
+    return node
+
+
 def parse_document(raw: bytes) -> dict[str, Any]:
     """Parse a JSON or YAML OpenAPI document, refusing what FastMCP can't translate."""
     try:
@@ -120,11 +139,17 @@ def parse_document(raw: bytes) -> dict[str, Any]:
         doc = json.loads(text)
     except ValueError:
         try:
-            doc = yaml.safe_load(text)
+            doc = _json_shaped(yaml.load(text, Loader=_YamlLoader))
         except yaml.YAMLError as exc:
             raise DocumentError(f"OpenAPI document is neither JSON nor YAML: {exc}") from None
     if not isinstance(doc, dict):
         raise DocumentError("OpenAPI document must be a JSON/YAML object")
+    # Unquoted `openapi: 3.0` / `version: 1.0` load as floats; both are strings in OpenAPI.
+    if isinstance(doc.get("openapi"), (int, float)):
+        doc["openapi"] = str(doc["openapi"])
+    info = doc.get("info")
+    if isinstance(info, dict) and isinstance(info.get("version"), (int, float)):
+        info["version"] = str(info["version"])
     if "swagger" in doc:
         raise DocumentError(
             f"Swagger {doc.get('swagger')} documents aren't supported; convert it to "
