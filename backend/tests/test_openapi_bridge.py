@@ -204,6 +204,20 @@ def test_parse_yaml_keeps_aliases_shared():
     assert bomb["l12"][0] is bomb["l12"][1] is bomb["l11"]
 
 
+def test_parse_refuses_a_non_string_title():
+    """info.title gets printed (the preview, the bridge's log line); an alias graph there
+    would expand into one giant string, so only a string (or a number) is accepted."""
+    levels = "".join(f"  l{i}: &l{i} [{', '.join([f'*l{i-1}'] * 8)}]\n" for i in range(1, 7))
+    raw = (
+        "openapi: 3.1.0\nx-bomb:\n  l0: &l0 [x]\n" + levels
+        + "info: {title: *l6, version: '1'}\npaths: {}\n"
+    ).encode()
+    with pytest.raises(openapi.DocumentError, match="title must be a string"):
+        openapi.parse_document(raw)
+    numeric = openapi.parse_document(b"openapi: 3.1.0\ninfo: {title: 42, version: '1'}\npaths: {}\n")
+    assert numeric["info"]["title"] == "42"
+
+
 def test_parse_accepts_json_and_yaml():
     doc = {"openapi": "3.0.3", "info": {"title": "t", "version": "1"}, "paths": {}}
     assert openapi.parse_document(json.dumps(doc).encode()) == doc

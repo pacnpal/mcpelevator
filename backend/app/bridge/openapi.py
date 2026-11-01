@@ -160,8 +160,14 @@ def parse_document(raw: bytes) -> dict[str, Any]:
     if isinstance(doc.get("openapi"), (int, float)):
         doc["openapi"] = str(doc["openapi"])
     info = doc.get("info")
-    if isinstance(info, dict) and isinstance(info.get("version"), (int, float)):
-        info["version"] = str(info["version"])
+    if isinstance(info, dict):
+        for field in ("version", "title"):
+            if isinstance(info.get(field), (int, float)):
+                info[field] = str(info[field])
+        # A string in OpenAPI, and only a string gets printed: str() or %r on a YAML
+        # alias graph would expand every shared copy into one giant title.
+        if "title" in info and not isinstance(info["title"], str):
+            raise DocumentError("OpenAPI document's info.title must be a string")
     if "swagger" in doc:
         raise DocumentError(
             f"Swagger {doc.get('swagger')} documents aren't supported; convert it to "
