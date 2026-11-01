@@ -21,7 +21,7 @@
 		"@sveltejs/kit": "^3.0.0",
 		"@sveltejs/vite-plugin-svelte": "^7.2.0",
 		"@tailwindcss/vite": "^4.3.2",
-		"@types/node": "^26.1.1",
+		"@types/node": "^26.6.6",
 		"jsdom": "^30.0.0",
 		"layerchart": "^2.3.1",
 		"svelte": "^5.56.1",
@@ -29,7 +29,7 @@
 		"tailwindcss": "^4.3.2",
 		"typescript": "^6.0.3",
 		"vite": "^8.1.4",
-		"vitest": "^4.1.11"
+		"vitest": "^5.0.5"
 	},
 	"imports": {
 		"#lib/*": "./src/lib/*"
