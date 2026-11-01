@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { createServer, errorMessage } from '$lib/api';
-	import { safeUrl, takePendingInstall, type PendingInstall } from '$lib/catalogInstall';
-	import ServerForm from '$lib/components/ServerForm.svelte';
-	import type { ServerCreate } from '$lib/types';
+	import { createServer, errorMessage } from '#lib/api.js';
+	import { safeUrl, takePendingInstall, type PendingInstall } from '#lib/catalogInstall.js';
+	import ServerForm from '#lib/components/ServerForm.svelte';
+	import type { ServerCreate } from '#lib/types.js';
 
 	// Single-use hand-off from /catalog. On a hard refresh (or direct nav) there's no
 	// pending install, so bounce back to the browser rather than render an empty form.

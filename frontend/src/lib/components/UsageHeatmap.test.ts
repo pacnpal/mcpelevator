@@ -1,8 +1,8 @@
 import { mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { UsageHour } from '$lib/types';
-import { HEATMAP_DAYS } from '$lib/usage';
+import type { UsageHour } from '#lib/types.js';
+import { HEATMAP_DAYS } from '#lib/usage.js';
 import UsageHeatmap from './UsageHeatmap.svelte';
 
 let host: HTMLElement | null = null;

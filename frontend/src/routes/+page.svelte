@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { listServers } from '$lib/api';
-	import { hasActiveStartup, pollingInterval } from '$lib/startup';
-	import type { ServerSummary } from '$lib/types';
-	import ServerCard from '$lib/components/ServerCard.svelte';
-	import { flashToast } from '$lib/toast.svelte';
+	import { listServers } from '#lib/api.js';
+	import { hasActiveStartup, pollingInterval } from '#lib/startup.js';
+	import type { ServerSummary } from '#lib/types.js';
+	import ServerCard from '#lib/components/ServerCard.svelte';
+	import { flashToast } from '#lib/toast.svelte.js';
 
 	type LoadState = 'loading' | 'ready' | 'error';
 
@@ -87,7 +87,7 @@
 		if (page.url.searchParams.get('oauth') !== 'error') return;
 		const reason = page.url.searchParams.get('reason');
 		flashToast(reason ? `OAuth failed: ${reason}` : 'OAuth sign-in failed.');
-		void goto('/', { replaceState: true, noScroll: true, keepFocus: true });
+		void goto('/', { replaceState: true, reset: false });
 	});
 </script>
 

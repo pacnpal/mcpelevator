@@ -11,29 +11,29 @@
 		getServerUsage,
 		startOauth,
 		updateServer
-	} from '$lib/api';
-	import { listenForOauthResult, openOauthPopup, popupCanRelay } from '$lib/oauthPopup';
+	} from '#lib/api.js';
+	import { listenForOauthResult, openOauthPopup, popupCanRelay } from '#lib/oauthPopup.js';
 	import {
 		formatCountdown,
 		formatElapsed,
 		hasActiveStartup,
 		pollingInterval,
 		startupPhaseLabel
-	} from '$lib/startup';
-	import { HIDDEN_ENV } from '$lib/types';
-	import type { ServerDetail, ServerTool, ServerUsage, ToolOverride } from '$lib/types';
-	import { effectiveWindowDays, toolBadge } from '$lib/usage';
-	import CopyButton from '$lib/components/CopyButton.svelte';
-	import LogViewer from '$lib/components/LogViewer.svelte';
-	import RestartButton from '$lib/components/RestartButton.svelte';
-	import RunnerBadge from '$lib/components/RunnerBadge.svelte';
-	import ServerActionButton from '$lib/components/ServerActionButton.svelte';
-	import StatePill from '$lib/components/StatePill.svelte';
-	import ToolLabelModal from '$lib/components/ToolLabelModal.svelte';
-	import ToolRunner from '$lib/components/ToolRunner.svelte';
-	import UsageChart from '$lib/components/UsageChart.svelte';
-	import { flashToast } from '$lib/toast.svelte';
-	import { quoteIfNeeded, withPin } from '$lib/uvxPin';
+	} from '#lib/startup.js';
+	import { HIDDEN_ENV } from '#lib/types.js';
+	import type { ServerDetail, ServerTool, ServerUsage, ToolOverride } from '#lib/types.js';
+	import { effectiveWindowDays, toolBadge } from '#lib/usage.js';
+	import CopyButton from '#lib/components/CopyButton.svelte';
+	import LogViewer from '#lib/components/LogViewer.svelte';
+	import RestartButton from '#lib/components/RestartButton.svelte';
+	import RunnerBadge from '#lib/components/RunnerBadge.svelte';
+	import ServerActionButton from '#lib/components/ServerActionButton.svelte';
+	import StatePill from '#lib/components/StatePill.svelte';
+	import ToolLabelModal from '#lib/components/ToolLabelModal.svelte';
+	import ToolRunner from '#lib/components/ToolRunner.svelte';
+	import UsageChart from '#lib/components/UsageChart.svelte';
+	import { flashToast } from '#lib/toast.svelte.js';
+	import { quoteIfNeeded, withPin } from '#lib/uvxPin.js';
 
 	type LoadState = 'loading' | 'ready' | 'error';
 
@@ -546,7 +546,7 @@
 			const reason = page.url.searchParams.get('reason');
 			flashToast(reason ? `OAuth failed: ${reason}` : 'OAuth sign-in failed.');
 		}
-		void goto(`/server/${id}`, { replaceState: true, noScroll: true, keepFocus: true });
+		void goto(`/server/${id}`, { replaceState: true, reset: false });
 	}
 
 	async function doDelete() {
@@ -625,7 +625,7 @@
 	// (hardening flags elided as […], env passed by NAME only, run options before
 	// `--` + image). For a uvx server with the mcp<2 compatibility pin on, the
 	// runner injects the pin at launch without touching stored args — mirror that
-	// too (shared $lib/uvxPin logic) so the card never shows an unpinned command
+	// too (shared #lib/uvxPin logic) so the card never shows an unpinned command
 	// that would reproduce the failure the pin fixes.
 	const commandLine = $derived.by(() => {
 		// The built-in server has no stored launch line: its upstream is this instance.

@@ -12,8 +12,8 @@
 	// make. `bars` stacks them per bucket; `area` reads a long window as a shape.
 	import { AreaChart, BarChart } from 'layerchart';
 
-	import type { UsagePoint } from '$lib/types';
-	import { tickLabel, toChartPoints } from '$lib/usage';
+	import type { UsagePoint } from '#lib/types.js';
+	import { tickLabel, toChartPoints } from '#lib/usage.js';
 
 	let {
 		series,

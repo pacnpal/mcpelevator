@@ -1,7 +1,7 @@
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { UsageBand, UsagePoint } from '$lib/types';
+import type { UsageBand, UsagePoint } from '#lib/types.js';
 import UsageSparklines from './UsageSparklines.svelte';
 
 // The per-facet chart is LayerChart's; what this file guards is the faceting —

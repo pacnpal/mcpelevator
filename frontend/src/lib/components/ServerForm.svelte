@@ -1,17 +1,17 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
-	import { getAuthStatus, getSettings, previewOpenapi } from '$lib/api';
-	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '$lib/remote';
-	import { quoteIfNeeded, withPin } from '$lib/uvxPin';
-	import { HIDDEN_ENV } from '$lib/types';
+	import { getAuthStatus, getSettings, previewOpenapi } from '#lib/api.js';
+	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '#lib/remote.js';
+	import { quoteIfNeeded, withPin } from '#lib/uvxPin.js';
+	import { HIDDEN_ENV } from '#lib/types.js';
 	import type {
 		OpenapiPreview,
 		Runner,
 		ServerAuthProvider,
 		ServerCreate,
 		ServerOauthClientMode
-	} from '$lib/types';
+	} from '#lib/types.js';
 
 	type Mode = 'create' | 'edit';
 
@@ -336,7 +336,7 @@
 	const resolvedArgs = $derived(splitLines(argsText));
 
 	// The pin is injected by the backend at launch, not stored in args — mirror
-	// that here (shared $lib/uvxPin logic) so "Will run" shows the real argv.
+	// that here (shared #lib/uvxPin logic) so "Will run" shows the real argv.
 	const previewArgs = $derived(withPin(command, resolvedArgs, runner === 'uvx' && pinMcp1));
 	const previewCommand = $derived(
 		[command, ...previewArgs].filter((p) => p.length > 0).map(quoteIfNeeded).join(' ')

@@ -2,14 +2,14 @@
 	import '../app.css';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { getAuthStatus } from '$lib/api';
-	import { clearToken } from '$lib/auth';
-	import { completeOauthPopup } from '$lib/oauthPopup';
-	import favicon from '$lib/assets/favicon.svg';
-	import HealthDot from '$lib/components/HealthDot.svelte';
-	import Logo from '$lib/components/Logo.svelte';
-	import Toast from '$lib/components/Toast.svelte';
-	import { toast, dismissToast } from '$lib/toast.svelte';
+	import { getAuthStatus } from '#lib/api.js';
+	import { clearToken } from '#lib/auth.js';
+	import { completeOauthPopup } from '#lib/oauthPopup.js';
+	import favicon from '#lib/assets/favicon.svg';
+	import HealthDot from '#lib/components/HealthDot.svelte';
+	import Logo from '#lib/components/Logo.svelte';
+	import Toast from '#lib/components/Toast.svelte';
+	import { toast, dismissToast } from '#lib/toast.svelte.js';
 
 	let { children } = $props();
 

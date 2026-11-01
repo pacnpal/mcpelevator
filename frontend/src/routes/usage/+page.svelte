@@ -5,9 +5,9 @@
 	// One fetch per window (`GET /api/usage`) returns the totals, the series and both
 	// breakdowns whole; the toolbar then filters and sorts in the browser, so typing
 	// in the search box costs nothing and clearing it costs no refetch. The view
-	// rules themselves live in `$lib/usage` — pure, and unit-tested there.
-	import { errorMessage, getInstanceUsage } from '$lib/api';
-	import type { InstanceUsage } from '$lib/types';
+	// rules themselves live in `#lib/usage.js` — pure, and unit-tested there.
+	import { errorMessage, getInstanceUsage } from '#lib/api.js';
+	import type { InstanceUsage } from '#lib/types.js';
 	import {
 		DEFAULT_VIEW,
 		USAGE_SORTS,
@@ -18,11 +18,11 @@
 		toolRows,
 		type UsageSort,
 		type UsageView
-	} from '$lib/usage';
-	import UsageChart from '$lib/components/UsageChart.svelte';
-	import UsageHeatmap from '$lib/components/UsageHeatmap.svelte';
-	import UsageRows from '$lib/components/UsageRows.svelte';
-	import UsageSparklines from '$lib/components/UsageSparklines.svelte';
+	} from '#lib/usage.js';
+	import UsageChart from '#lib/components/UsageChart.svelte';
+	import UsageHeatmap from '#lib/components/UsageHeatmap.svelte';
+	import UsageRows from '#lib/components/UsageRows.svelte';
+	import UsageSparklines from '#lib/components/UsageSparklines.svelte';
 
 	const RANGES = [
 		{ days: 1, label: '24h' },

@@ -125,7 +125,7 @@ export function listenForOauthResult(onResult: (result: OauthResult) => void): (
  * `?oauth=…` in the URL), broadcast the result to the opener tab and close. Regular
  * tabs never carry the marker, so their normal `?oauth=…` toast handling runs
  * untouched — and they are never closed out from under the operator. */
-export function completeOauthPopup(url: URL): void {
+export function completeOauthPopup(url: { searchParams: Pick<URLSearchParams, 'get'> }): void {
 	const result = url.searchParams.get('oauth');
 	if (result !== 'connected' && result !== 'error') return;
 	let nonce: string | null;
