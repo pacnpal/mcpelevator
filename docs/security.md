@@ -120,6 +120,15 @@ contain OAuth client secrets**, not just data-plane config — and, once a sign-
 that secret is also copied into the client registration in the JSON file. mcpelevator does
 **not** encrypt any of these at rest — it relies on operating-system file permissions and
 control of the data directory.
+Env values and headers the operator marks **secret** are the partial exception: they're
+Fernet-encrypted in the `server` row with a key in `<data_dir>/env.key` (`0600`), so a
+database backup without that file doesn't expose them, and no API, form, or `.mcpb` export
+returns them. That protects against a leaked database or a shoulder-surfed screen, not
+against someone who can read the whole data directory, since the key sits beside it. The
+bridge needs the plaintext, so the control plane decrypts them into the bridge's launch
+spec. Anyone who can edit a server could point it at `printenv` or at a URL they control
+and capture its env, so a save that changes what a server runs, or makes a secret
+visible, has to supply those secret values again (`app.sealed.resolve`).
 The one exception is data-plane and admin **bearer tokens**, which are SHA-256-hashed and
 never stored in the clear (§ Data plane). Consequently, anyone who can read the data
 directory — host root, a compromised control-plane process, an unprotected volume mount,

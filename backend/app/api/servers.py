@@ -26,6 +26,8 @@ from app.api.schemas import (
     ImportSkipped,
     ImportWarning,
     OAuthStatus,
+    OpenapiPreview,
+    OpenapiPreviewRequest,
     ServerClone,
     ServerCreate,
     ServerDetail,
@@ -38,7 +40,7 @@ from app.api.schemas import (
     Transports,
     Urls,
 )
-from app import mcpb, usage
+from app import mcpb, sealed, usage
 from app.api.util import base_url, oauth_public_base, resync_groups
 from app.auth import cf_access, oauth_flow, policy
 from app.auth import principal as principal_mod
@@ -144,6 +146,8 @@ def _row_launch_value(row: Server, key: str):
         return getattr(row, key) or []
     if key == "pin_mcp1":
         return bool(getattr(row, key))
+    if key == "env":  # as the form got it: a kept hidden value comes back "<hidden>"
+        return sealed.masked(row.env or {})
     if key in ("repo_url", "repo_ref", "post_clone_script", "openapi_document"):
         return getattr(row, key) or ""
     return getattr(row, key)
@@ -282,7 +286,8 @@ def _detail(
         command=server.command,
         args=server.args,
         run_args=server.run_args or [],
-        env=server.env,
+        env=sealed.masked(server.env or {}),
+        secret_env=sealed.secret_keys(server.env or {}),
         cwd=server.cwd,
         setup_script=server.setup_script or "",
         repo_url=server.repo_url or "",
@@ -702,8 +707,9 @@ async def download_mcpb(
     Generated per request from the row — the DB stays the single source of
     truth. 400 for a remote server (nothing to run locally)."""
     server = _visible(principal, session, server_id)
+    runtime = repo.get_runtime(session, server.id)
     try:
-        data = mcpb.bundle(server)
+        data = mcpb.bundle(server, runtime.tools if runtime is not None else None)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return Response(
@@ -807,6 +813,57 @@ async def disconnect_oauth(
     if server.enabled:
         sup.request_activation(server_id)
     return _detail(server, sup, session, base_url(request))
+
+
+_HTTP_METHODS = {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
+
+
+def _openapi_preview(command: str, document: str) -> OpenapiPreview:
+    # Lazy, like the registry: importing the bridge module patches FastMCP's OpenAPI tool,
+    # which only the bridge serves. The control plane just borrows the fetch and parser.
+    import httpx
+
+    from app.bridge import openapi as bridge_openapi
+
+    try:
+        if document.strip():
+            raw, served_from = document.encode(), ""
+        else:
+            # No headers: the preview never sends the API's credentials anywhere, so a
+            # document behind the API's own auth can't be previewed (the bridge can).
+            raw, served_from = bridge_openapi.fetch_document(command.strip(), {})
+        doc = bridge_openapi.parse_document(raw)
+        info = doc.get("info") if isinstance(doc.get("info"), dict) else {}
+        operations = sum(
+            1
+            for item in (doc.get("paths") or {}).values()
+            if isinstance(item, dict)
+            for method in item
+            if method in _HTTP_METHODS
+        )
+    except (httpx.HTTPError, ValueError) as exc:  # DocumentError is a ValueError
+        return OpenapiPreview(error=str(exc)[:300])
+    preview = OpenapiPreview(title=str(info.get("title") or ""), operations=operations)
+    try:
+        preview.base_url = bridge_openapi.resolve_base_url(doc, served_from, None)
+    except ValueError as exc:  # e.g. a relative entry in a pasted document
+        preview.error = str(exc)
+    return preview
+
+
+@router.post("/openapi/preview", response_model=OpenapiPreview)
+async def preview_openapi(
+    payload: OpenapiPreviewRequest,
+    principal: Principal = Depends(current_principal),
+):
+    """What an openapi server would call before it's saved: the base URL its document
+    names, so the form can show it (and the operator can see it isn't their own host)."""
+    policy.require_runner_allowed(principal, "openapi")
+    if not payload.openapi_document.strip() and not payload.command.strip().startswith(
+        ("http://", "https://")
+    ):
+        raise HTTPException(status_code=400, detail="give the document's http(s) URL or the document")
+    return await run_in_threadpool(_openapi_preview, payload.command, payload.openapi_document)
 
 
 @router.post("/servers/{server_id}/clone", response_model=ServerSummary, status_code=201)

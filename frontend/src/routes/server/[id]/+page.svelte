@@ -20,6 +20,7 @@
 		pollingInterval,
 		startupPhaseLabel
 	} from '$lib/startup';
+	import { HIDDEN_ENV } from '$lib/types';
 	import type { ServerDetail, ServerTool, ServerUsage, ToolOverride } from '$lib/types';
 	import { effectiveWindowDays, toolBadge } from '$lib/usage';
 	import CopyButton from '$lib/components/CopyButton.svelte';
@@ -1273,7 +1274,11 @@
 						{#each envEntries as [k, v] (k)}
 							<div class="flex gap-2 font-mono text-xs">
 								<dt class="shrink-0 text-[var(--color-accent)]">{k}</dt>
-								<dd class="truncate text-[var(--color-ink-muted)]">{v}</dd>
+								{#if v === HIDDEN_ENV}
+									<dd class="text-[var(--color-ink-dim)]">•••••• secret</dd>
+								{:else}
+									<dd class="truncate text-[var(--color-ink-muted)]">{v}</dd>
+								{/if}
 							</div>
 						{/each}
 					</dl>

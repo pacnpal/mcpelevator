@@ -254,7 +254,10 @@ class ServerDetail(ServerSummary):
     # docker runner only: extra `docker run` options placed before the image
     # (e.g. --name, --shm-size=1g). Always [] for other runners.
     run_args: list[str] = []
+    # A secret value (app.sealed) reads "<hidden>"; send "<hidden>" back to keep it.
     env: dict[str, str] = {}
+    # The env keys (or headers, for remote/openapi) whose values are secret.
+    secret_env: list[str] = []
     cwd: Optional[str] = None
     setup_script: str = ""
     # Local runners: launch from a git checkout mcpelevator manages (app.runners.repo).
@@ -308,6 +311,8 @@ class ServerCreate(BaseModel):
     # is a 400; the value is forced [] for non-docker runners server-side.
     run_args: list[str] = []
     env: dict[str, str] = {}
+    # Keys of ``env`` whose values are secret: stored encrypted, never returned (app.sealed).
+    secret_env: list[StrictStr] = []
     cwd: Optional[str] = None
     setup_script: str = ""
     # Local runners only (npx/uvx/command): launch from a git checkout of this repository,
@@ -368,7 +373,11 @@ class ServerUpdate(BaseModel):
     command: Optional[str] = None
     args: Optional[list[str]] = None
     run_args: Optional[list[str]] = None
+    # A secret value of "<hidden>" keeps the stored one; anything else replaces it.
     env: Optional[dict[str, str]] = None
+    # The secret keys of ``env``. Omitted (null) = each key keeps its current secrecy.
+    # Making a secret visible, or changing what the server runs, needs its value sent again.
+    secret_env: Optional[list[StrictStr]] = None
     cwd: Optional[str] = None
     setup_script: Optional[str] = None
     # Omitted (null) = unchanged; send repo_url "" to drop the checkout.
@@ -424,6 +433,22 @@ class ImportWarning(BaseModel):
     # e.g. a docker `run` option the hardened runner dropped (mount, --network none, --env-file).
     name: str
     warnings: list[str]
+
+
+class OpenapiPreviewRequest(BaseModel):
+    # The document's http(s) URL, or blank with the document itself (JSON/YAML) pasted.
+    command: str = ""
+    openapi_document: str = ""
+
+
+class OpenapiPreview(BaseModel):
+    # Where calls go when the server has no base URL override: the document's first
+    # `servers` entry, resolved against the document's URL. None when it can't be read,
+    # with `error` saying why.
+    base_url: Optional[str] = None
+    title: str = ""
+    operations: int = 0
+    error: Optional[str] = None
 
 
 class ImportResult(BaseModel):

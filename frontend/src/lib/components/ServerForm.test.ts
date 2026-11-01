@@ -6,6 +6,12 @@ import ServerForm from './ServerForm.svelte';
 
 const api = vi.hoisted(() => ({
 	getSettings: vi.fn().mockResolvedValue({ docker_runner: true }),
+	previewOpenapi: vi.fn().mockResolvedValue({
+		base_url: 'https://app.coolify.io/api/v1',
+		title: 'Coolify',
+		operations: 301,
+		error: null
+	}),
 	// Full-permission principal so the form offers every runner (the multi-user
 	// restriction path is exercised by the backend tests).
 	getAuthStatus: vi.fn().mockResolvedValue({
@@ -257,5 +263,64 @@ describe('ServerForm source repository', () => {
 		expect(onsubmit).toHaveBeenCalledWith(
 			expect.objectContaining({ repo_url: '', repo_ref: '', post_clone_script: '' })
 		);
+	});
+});
+
+describe('ServerForm secret env', () => {
+	it('keeps a hidden secret blank and sends it back as hidden', () => {
+		const onsubmit = vi.fn();
+		const target = render({
+			mode: 'edit',
+			initial: {
+				name: 'api',
+				runner: 'command',
+				command: '/usr/bin/server',
+				args: [],
+				env: { API_KEY: '<hidden>', REGION: 'eu' },
+				secret_env: ['API_KEY']
+			},
+			onsubmit
+		});
+
+		const values = target.querySelectorAll<HTMLInputElement>(
+			'input[aria-label="Environment variable value"]'
+		);
+		expect(values[0].type).toBe('password');
+		expect(values[0].value).toBe('');
+		expect(values[1].type).toBe('text');
+		target.querySelector('form')?.dispatchEvent(
+			new SubmitEvent('submit', { bubbles: true, cancelable: true })
+		);
+
+		expect(onsubmit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				env: { API_KEY: '<hidden>', REGION: 'eu' },
+				secret_env: ['API_KEY']
+			})
+		);
+	});
+});
+
+describe('ServerForm OpenAPI base URL preview', () => {
+	it("shows the document's own base URL while the override is blank", async () => {
+		vi.useFakeTimers();
+		try {
+			const target = render({
+				mode: 'create',
+				initial: {
+					name: 'coolify',
+					runner: 'openapi',
+					command: 'https://example.com/openapi.yaml',
+					args: []
+				},
+				onsubmit: vi.fn()
+			});
+			await vi.advanceTimersByTimeAsync(700);
+			flushSync();
+			expect(api.previewOpenapi).toHaveBeenCalledWith('https://example.com/openapi.yaml', '');
+			expect(target.textContent).toContain('https://app.coolify.io/api/v1');
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

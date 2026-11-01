@@ -61,6 +61,7 @@
 					post_clone_script: server.post_clone_script,
 					openapi_document: server.openapi_document,
 					env: server.env,
+					secret_env: server.secret_env,
 					cwd: server.cwd,
 					pin_mcp1: server.pin_mcp1,
 					mcp_http: server.transports.mcp_http,

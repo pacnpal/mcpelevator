@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import zipfile
-from pathlib import Path
 
 import jsonschema
 import pytest
@@ -13,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from conftest import LOOPBACK
 
-from app import __version__, mcpb
+from app import __version__, mcpb, sealed
 from app.db.models import Server
 from app.main import app
 from app.runners.docker import server_label
@@ -21,7 +20,7 @@ from app.runners.docker import server_label
 # The official manifest schema, verbatim from @anthropic-ai/mcpb 2.1.2 (MIT):
 # dist/mcpb-manifest-v0.2.schema.json — the same zod shape Claude Desktop applies
 # (strictly: unknown keys reject the install) before it will install a bundle.
-OFFICIAL_SCHEMA = Path(__file__).parent / "fixtures" / "mcpb-manifest-v0.2.schema.json"
+OFFICIAL_SCHEMA = mcpb.SCHEMA_PATH
 
 
 def _manifest_from(body: bytes) -> dict:
@@ -207,7 +206,56 @@ def test_mcpb_manifest_matches_official_schema():
         _row("uvx", "uvx", args=["mcp-server-fetch"], pin_mcp1=True),
         _row("command", "/usr/local/bin/server"),
         _row("docker", "ghcr.io/x/y:1", env={"TOKEN": "t"}),
+        _row("npx", "npx", args=["-y", "pkg"], env={"KEY": sealed.seal("v"), "MODE": "fast"}),
     ]
     for row in rows:
         errors = list(validator.iter_errors(mcpb.manifest(row)))
         assert not errors, (row.runner, [e.message for e in errors])
+
+
+def test_mcpb_secret_env_becomes_sensitive_prompts():
+    """A secret value isn't readable on the detail route, so the bundle doesn't carry
+    it either: it's a required, sensitive install-time prompt. Plain values stay."""
+    row = _row("npx", "npx", args=["-y", "pkg"],
+               env={"API_KEY": sealed.seal("s3cret"), "MODE": "fast"})
+    out = mcpb.manifest(row)
+    assert "s3cret" not in json.dumps(out)
+    assert out["server"]["mcp_config"]["env"] == {
+        "API_KEY": "${user_config.env_0}",
+        "MODE": "fast",
+    }
+    prompt = out["user_config"]["env_0"]
+    assert prompt["title"] == "API_KEY" and prompt["sensitive"] and prompt["required"]
+
+
+def test_mcpb_lists_cached_tools_under_upstream_names():
+    """Renamed tools appear under their upstream name (the bundle runs the upstream
+    without mcpelevator's renames), and an operator's description override stays out."""
+    row = _row("npx", "npx", args=["-y", "pkg"],
+               tool_overrides={"search": {"name": "find", "description": "mine"}})
+    tools = [
+        {"name": "find", "upstream_name": "search", "description": "mine"},
+        {"name": "fetch", "description": "Fetch a URL"},
+    ]
+    out = mcpb.manifest(row, tools)
+    assert out["tools"] == [{"name": "search"}, {"name": "fetch", "description": "Fetch a URL"}]
+    assert out["tools_generated"] is True
+
+
+def test_mcpb_absolute_command_pins_its_platform():
+    assert mcpb.manifest(_row("command", "/usr/local/bin/s"))["compatibility"] == {
+        "platforms": ["darwin", "linux"]
+    }
+    assert mcpb.manifest(_row("command", "C:\\tools\\s.exe"))["compatibility"] == {
+        "platforms": ["win32"]
+    }
+    assert "compatibility" not in mcpb.manifest(_row("npx", "npx", args=["-y", "pkg"]))
+
+
+def test_mcpb_refuses_a_manifest_the_schema_rejects(monkeypatch):
+    """Validated on every export: a manifest the official schema rejects is never served."""
+    monkeypatch.setattr(mcpb, "MANIFEST_VERSION", "9.9")
+    row = _row("npx", "npx", args=["-y", "pkg"])
+    with pytest.raises(ValueError, match="manifest_version"):
+        mcpb.manifest(row)
+    assert not mcpb.exportable(row)

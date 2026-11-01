@@ -42,6 +42,7 @@ from mcp.client.auth import OAuthClientProvider, OAuthRegistrationError, TokenSt
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 from pydantic import AnyHttpUrl
 
+from app import sealed
 from app.auth.oauth_client import SingleChannelOAuthClientProvider
 from app.auth.oauth_store import ServerTokenStorage
 from app.runners.remote import DEFAULT_TRANSPORT, canonical_transport
@@ -980,7 +981,7 @@ def _probe_headers(server) -> dict[str, str]:
     Headers auth to OAuth, a leftover token header would make the upstream answer 200
     instead of the 401 that drives the OAuth flow, hanging begin() into a timeout."""
     headers = dict(_INIT_HEADERS)
-    for key, value in (server.env or {}).items():
+    for key, value in sealed.unseal_env(server.env or {}).items():
         if key.strip().lower() == "authorization":
             continue
         headers[key] = value

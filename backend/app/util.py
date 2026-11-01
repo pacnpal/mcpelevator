@@ -4,11 +4,38 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
+import tempfile
 import uuid
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+
+def secret_file(path: Path, make: Callable[[], bytes], valid: Callable[[bytes], bool]) -> bytes:
+    """Read a per-install secret from ``path``, creating it with ``make()`` when it's
+    missing or fails ``valid``. Written atomically and 0600 from birth (mkstemp): secret
+    material lives off the DB, in the data dir."""
+    try:
+        data = path.read_bytes()
+        if valid(data):
+            return data
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = make()
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+    except BaseException:
+        os.unlink(tmp_name)
+        raise
+    os.replace(tmp_name, path)
+    return data
 
 
 def new_id() -> str:

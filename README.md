@@ -453,7 +453,7 @@ curl -X POST http://127.0.0.1:8080/s/memory/rest/create_entities \
   tool list (request schemas included), ready to feed to GPT Actions or any OpenAPI
   tooling. `GET /s/<slug>/rest` lists the tools.
 
-**Prefer to run it locally after all?** Every local (stdio) server offers a **Download `.mcpb`** button on its detail page (`GET /api/servers/<id>/mcpb`): a generated [MCPB bundle](https://github.com/anthropics/mcpb) of the server's exact launch config (command, args, env), ready to install in Claude Desktop. It's built on the fly from the same runner spec the bridge launches, so it never drifts from what the elevator runs. Remote servers have nothing to run locally and don't offer one.
+**Prefer to run it locally after all?** Every local (stdio) server offers a **Download `.mcpb`** button on its detail page (`GET /api/servers/<id>/mcpb`): a generated [MCPB bundle](https://github.com/anthropics/mcpb) of the server's exact launch config (command, args, env), ready to install in Claude Desktop. It's built on the fly from the same runner spec the bridge launches, so it never drifts from what the elevator runs. Secret env values aren't in it: each one becomes a sensitive prompt the client asks for at install. The bundle also lists the tools the server served last time it ran, under their upstream names. Every manifest is checked against the official MCPB 0.2 schema before it's served, and one that fails is refused instead of handed to a client that would reject it. Remote servers have nothing to run locally and don't offer one.
 
 **Already remote?** Use the `remote` runner to proxy an existing Streamable-HTTP/SSE MCP URL — no local process. The launch spec reuses the same fields: `command` is the upstream URL, `args[0]` is the transport (`streamable-http` or `sse`), and `env` is the upstream HTTP headers.
 
@@ -565,7 +565,7 @@ never in the database, so authenticating never restarts the bridge on its own.
 
 > **⚠️ Stored unencrypted at rest.** OAuth access/refresh tokens live in
 > `<data_dir>/oauth/<server-id>.json`; a static `oauth_client_secret` you supply is stored
-> in the **SQLite database** (the `server` row, like any `env`/header secret) and, after a
+> in the **SQLite database** (the `server` row, like any `env` value or header not marked secret) and, after a
 > successful sign-in, is also copied into the client registration in that same JSON file.
 > All of it is stored **in the clear** — protected by file permissions and control of the
 > data directory, **not** encryption, because the bridge subprocess has to read and refresh
@@ -574,6 +574,18 @@ never in the database, so authenticating never restarts the bridge on its own.
 > the SQLite file, and any backups on encrypted, access-controlled storage, and revoke a
 > leaked grant at the provider (or via **Disconnect**) rather than relying on on-disk
 > secrecy. Full rationale: [docs/security.md](docs/security.md) § *Credentials at rest*.
+
+**Secret env values and headers.** Click the lock next to any env var (or header, for
+`remote` and `openapi` servers) to make it secret. A secret value is encrypted in the
+database with a key in `<data_dir>/env.key` (`0600`) and never shown again: the form, the
+API and the control MCP all read `<hidden>`, and a `.mcpb` export asks for it at install
+instead of carrying it. Leave the field blank to keep the stored value, or type a new one
+to replace it. Changing what the server runs (runner, command, args, image options,
+working directory, setup script, repository, OpenAPI document) needs the secret values
+typed in again, and so does unlocking one, so nobody with edit rights can point a server
+at `printenv` or their own URL and read the values back. Back up `env.key` with the
+database: without it the secret values can't be decrypted, and the server's start error
+names the ones to re-enter.
 
 ## Manage mcpelevator from an agent (the built-in MCP server)
 

@@ -458,3 +458,41 @@ def test_fetch_caps_document_size(monkeypatch):
     transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b"x" * 11))
     with pytest.raises(ValueError, match="larger than"):
         openapi.fetch_document(DOC_URL, {}, transport=transport)
+
+
+def test_preview_reports_the_documents_base_url(monkeypatch):
+    """The form's base URL preview: the document's own servers entry, fetched with no
+    credentials, plus a relative entry in a pasted document reported as an error."""
+    from fastapi.testclient import TestClient
+
+    from conftest import LOOPBACK
+    from app.main import app
+
+    seen = {}
+
+    def fake_fetch(url, headers, **_):
+        seen["headers"] = headers
+        return (
+            b"openapi: 3.0.3\ninfo: {title: Coolify, version: '1'}\n"
+            b"servers: [{url: 'https://app.coolify.io/api/v1'}]\n"
+            b"paths:\n  /a: {get: {responses: {'200': {description: ok}}}, post: {}}\n",
+            url,
+        )
+
+    monkeypatch.setattr(openapi, "fetch_document", fake_fetch)
+    with TestClient(app) as c:
+        r = c.post("/api/openapi/preview", json={"command": "https://x/openapi.yaml"},
+                   headers=LOOPBACK)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"base_url": "https://app.coolify.io/api/v1", "title": "Coolify",
+                            "operations": 2, "error": None}
+        assert seen["headers"] == {}
+        pasted = c.post(
+            "/api/openapi/preview",
+            json={"openapi_document": "openapi: 3.1.0\ninfo: {title: t, version: '1'}\n"
+                                      "servers: [{url: /v1}]\npaths: {}\n"},
+            headers=LOOPBACK,
+        ).json()
+        assert pasted["base_url"] is None and "base URL override" in pasted["error"]
+        assert c.post("/api/openapi/preview", json={"command": "ftp://x"},
+                      headers=LOOPBACK).status_code == 400

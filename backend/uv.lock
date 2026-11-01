@@ -903,9 +903,11 @@ name = "mcpelevator"
 version = "1.6.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "fastmcp" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "pydantic-settings" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "python-multipart" },
@@ -917,18 +919,18 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "httpx2" },
-    { name = "jsonschema" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fastmcp", specifier = ">=3.0,<4" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx2", marker = "extra == 'dev'", specifier = ">=2.7" },
-    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4" },
+    { name = "jsonschema", specifier = ">=4" },
     { name = "pydantic-settings", specifier = ">=2.4" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },

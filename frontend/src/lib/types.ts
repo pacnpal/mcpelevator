@@ -229,7 +229,10 @@ export interface ServerDetail extends ServerSummary {
 	/** openapi runner only: the pasted/uploaded document. Only present with
 	 * `getServer(id, true)`; a blank `command` means one is stored. */
 	openapi_document: string;
+	/** A secret value reads `HIDDEN_ENV`; send that back to keep it. */
 	env: Record<string, string>;
+	/** The env keys (headers, for remote/openapi) whose values are secret. */
+	secret_env: string[];
 	cwd: string | null;
 	/** uvx runner only: the mcp<2 SDK compatibility pin. Always false elsewhere. */
 	pin_mcp1: boolean;
@@ -304,6 +307,8 @@ export interface ServerCreate {
 	/** openapi runner only: the document itself (JSON/YAML), with `command` ''. */
 	openapi_document?: string;
 	env: Record<string, string>;
+	/** Keys of `env` stored encrypted and never returned. Omitted on a PATCH = unchanged. */
+	secret_env?: string[];
 	cwd?: string | null;
 	/** uvx runner only: launch with the Python mcp SDK pinned below 2.0
 	 * (`uvx --with "mcp<2" …`) for servers not yet compatible with the 2.x line.
@@ -616,3 +621,15 @@ export interface TokenInfo {
  * carries the full plaintext `token` — returned exactly once, on creation.
  */
 export type TokenCreated = TokenInfo & { token: string };
+
+/** What a secret env value (or header) reads as. Sent back, it keeps the stored value. */
+export const HIDDEN_ENV = '<hidden>';
+
+/** POST /api/openapi/preview: what an openapi server would call, before it's saved. */
+export interface OpenapiPreview {
+	/** The document's first `servers` entry, resolved. Null when it can't be read. */
+	base_url: string | null;
+	title: string;
+	operations: number;
+	error: string | null;
+}

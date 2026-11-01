@@ -10,11 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import secrets
 import shlex
-import tempfile
 import threading
 from contextlib import contextmanager
 from functools import lru_cache, wraps
@@ -23,6 +21,7 @@ from urllib.parse import urlsplit
 
 from sqlmodel import Session, select
 
+from app import sealed
 from app.bridge.spec import BRIDGE_SPEC_MAX_BYTES, bridge_payload, oversize, serialize
 from app.config import get_settings
 from app.db import repo
@@ -39,7 +38,7 @@ from app.runners.docker import (
     run_args_error,
 )
 from app.runners.remote import canonical_transport
-from app.util import config_hash, config_hash_tag, new_id, slugify
+from app.util import config_hash, config_hash_tag, new_id, secret_file, slugify
 
 logger = logging.getLogger(__name__)
 
@@ -1341,25 +1340,11 @@ def _config_hash_salt() -> bytes:
     (like the OAuth token store: secret material lives off the DB). Without this file a
     leaked anchor can't be dictionary-attacked for config secrets at all. Losing the
     file is harmless — the boot backfill just rehashes every row once under a fresh salt."""
-    path = get_settings().data_dir / "config_hash.salt"
-    try:
-        salt = path.read_bytes()
-        if len(salt) >= 16:
-            return salt
-    except OSError:
-        pass
-    path.parent.mkdir(parents=True, exist_ok=True)
-    salt = secrets.token_bytes(32)
-    # Atomic + 0600 from birth (mkstemp), same idiom as the OAuth token store.
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix="config_hash.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(salt)
-    except BaseException:
-        os.unlink(tmp_name)
-        raise
-    os.replace(tmp_name, path)
-    return salt
+    return secret_file(
+        get_settings().data_dir / "config_hash.salt",
+        lambda: secrets.token_bytes(32),
+        lambda salt: len(salt) >= 16,
+    )
 
 
 def _hash_payload(server: Server) -> dict[str, Any]:
@@ -1887,6 +1872,7 @@ def create_server(
     args: Optional[list[str]] = None,
     run_args: Optional[list[str]] = None,
     env: Optional[dict[str, str]] = None,
+    secret_env: Optional[list[str]] = None,
     cwd: Optional[str] = None,
     setup_script: str = "",
     repo_url: str = "",
@@ -1968,6 +1954,8 @@ def create_server(
     idle_timeout_s = normalize_idle_timeout(idle_timeout_s)
     disabled_tools = normalize_disabled_tools(disabled_tools)
     tool_overrides = normalize_tool_overrides(tool_overrides, disabled_tools)
+    # Last, after docker normalization may have moved `-e K=V` values out of the args.
+    env = sealed.resolve({}, dict(env or {}), secret=set(secret_env or []), retargeted=False)
 
     server = Server(
         id=new_id(),
@@ -1977,7 +1965,7 @@ def create_server(
         command=command.strip(),
         args=list(args or []),
         run_args=run_args,
-        env=dict(env or {}),
+        env=env,
         cwd=cwd,
         setup_script=setup_script,
         repo_url=repo_url,
@@ -2010,6 +1998,23 @@ def create_server(
     # refused here rather than deterministically failing activation later.
     _require_launchable_spec(server)
     return repo.create_server(session, server)
+
+
+# What a server runs, or where it sends its env. Changing any of these on a locked server
+# needs its hidden env values typed in again (app.sealed.resolve): otherwise an editor
+# could point it at `printenv`, or at a URL they control, and read the values back out.
+_RETARGET_FIELDS = (
+    "runner",
+    "command",
+    "args",
+    "run_args",
+    "cwd",
+    "setup_script",
+    "repo_url",
+    "repo_ref",
+    "post_clone_script",
+    "openapi_document",
+)
 
 
 _MUTABLE_FIELDS = {
@@ -2123,6 +2128,10 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     # was ALREADY docker is not gated (so a broken image/env can be fixed while the runner is
     # off). Captured before the mutation/reclassify below changes server.runner.
     was_docker = server.runner == "docker"
+    # Baselines for the locked-env rule (app.sealed.resolve): what's stored, and what the
+    # server runs, before this change touches either.
+    env_before = dict(server.env or {})
+    target_before = {key: getattr(server, key) for key in _RETARGET_FIELDS}
     # slug is identity/routing, not launch config: validated separately and excluded
     # from config_hash, so a rename re-routes the proxy without bouncing the bridge.
     if "slug" in changes:
@@ -2234,6 +2243,19 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         server.tool_overrides = normalize_tool_overrides(
             server.tool_overrides, server.disabled_tools or []
         )
+        # Compared after normalization, so the form resending the same config doesn't
+        # count as pointing the server somewhere new.
+        retargeted = any(
+            (getattr(server, key) or None) != (target_before[key] or None)
+            for key in _RETARGET_FIELDS
+        )
+        secret = changes.get("secret_env")
+        server.env = sealed.resolve(
+            env_before,
+            dict(server.env or {}),
+            secret=set(secret) if secret is not None else None,
+            retargeted=retargeted,
+        )
         _require_launchable_spec(server)
     except ValueError:
         session.rollback()
@@ -2272,7 +2294,10 @@ def clone_server(
         # types these non-optional, but the DB can still hold null).
         args=list(src.args or []),
         run_args=list(src.run_args or []),
-        env=dict(src.env or {}),
+        # Decrypted and sealed again by create_server: the copy keeps the same secret
+        # keys, and the values never leave the service.
+        env=sealed.unseal_env(dict(src.env or {})),
+        secret_env=sealed.secret_keys(dict(src.env or {})),
         cwd=src.cwd,
         setup_script=src.setup_script or "",
         # The copy gets its own checkout (keyed by its own id), built on its first start.

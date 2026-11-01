@@ -22,6 +22,7 @@ import type {
 	HealthResponse,
 	ImportResult,
 	InstanceUsage,
+	OpenapiPreview,
 	ServerCreate,
 	ServerDetail,
 	ServerSummary,
@@ -171,6 +172,14 @@ export function getInstanceUsage(days = 7): Promise<InstanceUsage> {
 
 export function createServer(body: ServerCreate): Promise<ServerSummary> {
 	return jsonRequest<ServerSummary>('/servers', 'POST', body);
+}
+
+/** The base URL an openapi document names, fetched without credentials. */
+export function previewOpenapi(command: string, openapiDocument: string): Promise<OpenapiPreview> {
+	return jsonRequest<OpenapiPreview>('/openapi/preview', 'POST', {
+		command,
+		openapi_document: openapiDocument
+	});
 }
 
 /**

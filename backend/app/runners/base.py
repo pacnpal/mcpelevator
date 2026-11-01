@@ -1,7 +1,8 @@
 """Runner seam — turns a Server row into a literal process spec.
 
 A Runner is a pure function ``Server -> ProcessSpec`` (no I/O, no globals): same
-row always yields the same argv (Determinism). The bridge host then launches that
+row always yields the same argv (Determinism). ``build_spec`` alone reads the env key
+file, to decrypt a locked server's env (app.sealed). The bridge host then launches that
 argv as a stdio MCP server via FastMCP's ``StdioTransport``. Adding a new runner
 type is one small module that registers a builder — callers never change.
 
@@ -13,8 +14,9 @@ default builder is near-passthrough; per-runner modules add only what differs
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
+from app import sealed
 from app.db.models import Server
 
 
@@ -93,7 +95,13 @@ def build_spec(server: Server) -> ProcessSpec:
     builder = _BUILDERS.get(server.runner)
     if builder is None:
         raise ValueError(f"no runner builder registered for {server.runner!r}")
-    return builder(server)
+    spec = builder(server)
+    # A locked server's env is sealed at rest (app.sealed). Decrypting here, once, keeps
+    # every builder unaware of it; no builder puts an env value in argv, so the env dict
+    # is the only place one lands.
+    if any(sealed.is_sealed(value) for value in spec.env.values()):
+        spec = replace(spec, env=sealed.unseal_env(spec.env))
+    return spec
 
 
 def passthrough(server: Server) -> ProcessSpec:

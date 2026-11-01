@@ -54,6 +54,14 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   declined, logs to the bridge log); the per-server `serialize_client_requests` flag runs one
   proxied request at a time (`_SerializeClientRequests` middleware) and fills the slot, so the
   child can only be asking that caller (issue #143). Progress is bound per call by its token.
+- **Secret env** (`sealed.py`): a per-key choice, for env vars and remote/openapi headers
+  alike. A secret value is stored in `env` as a Fernet token (`PREFIX`), keyed by
+  `<data_dir>/env.key`, so a value is secret exactly when it's sealed (no flag column). The
+  API masks it as `<hidden>` and takes `<hidden>` back to keep it; `runners.build_spec` is
+  the ONE place it's decrypted. `sealed.resolve` refuses to carry a kept secret through a
+  change of what the server runs (`service._RETARGET_FIELDS`) or through making it visible.
+  `.mcpb` exports turn secrets into sensitive `user_config` prompts, and every manifest is
+  validated against the vendored official MCPB 0.2 schema before it's served.
 - **Source repositories** (`runners/repo.py`, `catalog/repository.py`): a local-runner server
   can launch from a git checkout mcpelevator owns (`repo_url`/`repo_ref`/`post_clone_script`,
   all in `config_hash`). The unit runs a generated checkout script as its own `checkout`
