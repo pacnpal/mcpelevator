@@ -121,7 +121,7 @@ class ToolCallRequest(BaseModel):
 
 class ToolCallResult(BaseModel):
     """MCP semantics mirrored over the control plane: ``is_error`` carries a tool's
-    own failure (the transport succeeded), matching CallToolResult.isError."""
+    own failure (the transport succeeded), matching CallToolResult.is_error."""
 
     is_error: bool = False
     # Raw MCP content blocks (model_dump of TextContent / ImageContent / …) so the

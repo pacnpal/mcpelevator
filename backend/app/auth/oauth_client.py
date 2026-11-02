@@ -35,13 +35,13 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from urllib.parse import parse_qsl, urlencode
 
-import httpx
+import httpx2
 from mcp.client.auth import OAuthClientProvider
 
 _FORM = "application/x-www-form-urlencoded"
 
 
-def strip_duplicate_client_id(request: httpx.Request) -> httpx.Request:
+def strip_duplicate_client_id(request: httpx2.Request) -> httpx2.Request:
     """``request`` with ``client_id`` removed from the form body when the request is
     ALSO authenticating with an ``Authorization: Basic`` header. Anything else — no Basic
     header, a non-form body, no ``client_id`` in it — is returned untouched, so this can
@@ -57,7 +57,7 @@ def strip_duplicate_client_id(request: httpx.Request) -> httpx.Request:
         return request  # nothing duplicated
     headers = dict(request.headers)
     headers.pop("content-length", None)  # httpx recomputes it for the new body
-    return httpx.Request(
+    return httpx2.Request(
         request.method, request.url, headers=headers, content=urlencode(kept)
     )
 
@@ -77,10 +77,10 @@ class SingleChannelAuthMixin:
     owning every decision about what to send and what to make of the answer."""
 
     async def async_auth_flow(
-        self, request: httpx.Request
-    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        self, request: httpx2.Request
+    ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
         flow = super().async_auth_flow(request)  # type: ignore[misc]
-        response: httpx.Response | None = None
+        response: httpx2.Response | None = None
         try:
             while True:
                 try:

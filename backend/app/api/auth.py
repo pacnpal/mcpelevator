@@ -15,7 +15,7 @@ import contextlib
 import logging
 import traceback
 
-import httpx
+import httpx2
 from fastapi import APIRouter, Depends
 from mcp.client.auth import OAuthTokenError
 from starlette.requests import Request
@@ -158,6 +158,7 @@ async def oauth_callback(
     session: Session = Depends(get_session),
     code: str | None = None,
     state: str | None = None,
+    iss: str | None = None,
     error: str | None = None,
     error_description: str | None = None,
 ):
@@ -243,7 +244,7 @@ async def oauth_callback(
         stopped = True
 
     try:
-        server_id = await oauth_flow.complete_authorization(state, code)
+        server_id = await oauth_flow.complete_authorization(state, code, iss=iss)
     except KeyError:
         # INFO for the same reason as the branches above — an unmatched state is
         # indistinguishable from noise. The operator whose own flow expired is not left
@@ -291,7 +292,7 @@ async def oauth_callback(
         if stopped:
             sup.nudge()
         return _oauth_error(_REASON_EXCHANGE_FAILED)
-    except (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException) as exc:
+    except (TimeoutError, asyncio.TimeoutError, httpx2.TimeoutException) as exc:
         # httpx raises its OWN timeout hierarchy (ReadTimeout/ConnectTimeout/…), which is
         # not a builtin TimeoutError — the flow's client has a 30s budget, so an upstream
         # that stalls is a ROUTINE timeout and must read as one instead of falling through

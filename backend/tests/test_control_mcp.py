@@ -666,18 +666,16 @@ def test_groups_naming_the_builtin_open_to_admin_control_credentials(client):
 
 
 def test_hub_forwards_headers_to_the_builtin_member_only():
-    from app.groups.hub import GroupHub, _default_transport
+    from app.groups.hub import GroupHub
 
-    captured = []
-
-    def factory(url: str):
-        captured.append(_default_transport(url))
-        return captured[-1]
-
-    hub = GroupHub(transport_factory=factory)
-    hub._make_proxy("mcpelevator", "http://127.0.0.1:1/mcp", forward=True)
-    hub._make_proxy("other", "http://127.0.0.1:2/mcp")
-    assert [t.forward_incoming_headers for t in captured] == [True, False]
+    hub = GroupHub()
+    proxies = [
+        hub._make_proxy("mcpelevator", "http://127.0.0.1:1/mcp", forward=True),
+        hub._make_proxy("other", "http://127.0.0.1:2/mcp"),
+    ]
+    # The per-request client each proxy actually connects with.
+    forwards = [p.client_factory()._transport_options.forward_incoming_headers for p in proxies]
+    assert forwards == [True, False]
 
 
 @pytest.fixture

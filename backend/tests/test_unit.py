@@ -387,19 +387,19 @@ def test_tool_summary_lifts_the_upstream_name_out_of_meta():
     renamed = SimpleNamespace(
         name="run_report",
         description="Runs it.",
-        inputSchema={},
-        outputSchema=None,
+        input_schema={},
+        output_schema=None,
         meta={UPSTREAM_META_KEY: {"name": "do_thing"}},
     )
     plain = SimpleNamespace(
-        name="echo", description="", inputSchema={}, outputSchema=None, meta=None
+        name="echo", description="", input_schema={}, output_schema=None, meta=None
     )
 
     assert tool_summary(renamed)["upstream_name"] == "do_thing"
     assert "upstream_name" not in tool_summary(plain)
     # A malformed marker (a foreign server setting the same key) is ignored, not trusted.
     bogus = SimpleNamespace(
-        name="x", description="", inputSchema={}, outputSchema=None,
+        name="x", description="", input_schema={}, output_schema=None,
         meta={UPSTREAM_META_KEY: "not-an-object"},
     )
     assert "upstream_name" not in tool_summary(bogus)

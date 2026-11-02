@@ -596,20 +596,14 @@ def test_internal_hop_never_forwards_authorization():
 
     from app.groups.hub import _default_transport
 
-    # premise: fastmcp's ProxyClient turns caller-credential forwarding ON for HTTP
-    # transports — if this ever changes, the override below is dead code to revisit
+    # premise: fastmcp's ProxyClient turns caller-credential forwarding ON by default —
+    # if this ever changes, the override in _make_proxy is dead code to revisit
     plain = ProxyClient(_default_transport("http://127.0.0.1:1/mcp"))
-    assert plain.transport.forward_incoming_headers is True
+    assert plain._transport_options.forward_incoming_headers is True
 
-    captured = []
-
-    def factory(url: str):
-        transport = _default_transport(url)
-        captured.append(transport)
-        return transport
-
-    GroupHub(transport_factory=factory)._make_proxy("s", "http://127.0.0.1:1/mcp")
-    assert captured[0].forward_incoming_headers is False
+    proxy = GroupHub()._make_proxy("s", "http://127.0.0.1:1/mcp")
+    # The per-request client the proxy actually connects with.
+    assert proxy.client_factory()._transport_options.forward_incoming_headers is False
 
 
 # --- /g/<name> route ----------------------------------------------------------- #

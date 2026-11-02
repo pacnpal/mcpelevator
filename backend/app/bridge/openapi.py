@@ -21,10 +21,11 @@ from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 import httpx
+import httpx2
 import yaml
 from fastmcp import FastMCP
 from fastmcp.server.providers.openapi import components as _openapi_components
-from fastmcp.tools.tool import Tool
+from fastmcp.tools import Tool
 from fastmcp.utilities.openapi import HTTPRoute
 
 logger = logging.getLogger(__name__)
@@ -72,8 +73,9 @@ def _read_capped(response: httpx.Response) -> bytes:
     return bytes(body)
 
 
-def _origin(url: str | httpx.URL) -> tuple[str, str, int | None]:
-    url = httpx.URL(url)
+def _origin(url) -> tuple[str, str, int | None]:
+    """Scheme, host and port of ``url`` (a string, or an httpx or httpx2 URL)."""
+    url = httpx2.URL(str(url))
     return url.scheme, url.host, url.port
 
 
@@ -314,7 +316,7 @@ def _configured_header_hider(headers: dict[str, str]):
 
 
 def _guard_api_requests(base_url: str, headers: dict[str, str]):
-    """An httpx request hook every API call passes through before it's sent.
+    """An httpx2 request hook every API call passes through before it's sent.
 
     It refuses a request bound for any origin but the API's: the document decides each
     operation's URL, and the tool has already attached the configured credentials by the
@@ -324,12 +326,12 @@ def _guard_api_requests(base_url: str, headers: dict[str, str]):
     headers on the request: the tool only fills a header the request doesn't already carry,
     so a header parameter in the arguments would otherwise win over the configured
     credential."""
-    api = httpx.URL(base_url)
+    api = httpx2.URL(base_url)
 
-    async def guard(request: httpx.Request) -> None:
+    async def guard(request: httpx2.Request) -> None:
         url = request.url
         if _origin(url) != _origin(api):
-            raise httpx.RequestError(
+            raise httpx2.RequestError(
                 f"refusing to call {url.scheme}://{url.netloc.decode()} — "
                 f"not the API at {api.scheme}://{api.netloc.decode()}",
                 request=request,
@@ -342,8 +344,10 @@ def _guard_api_requests(base_url: str, headers: dict[str, str]):
 def build_server(spec: dict, *, transport=None, api_transport=None) -> FastMCP:
     """A FastMCP server whose tools are the API's operations, from a bridge spec.
 
-    ``transport`` / ``api_transport`` are httpx transports for the document fetch and the
-    API calls respectively — test seams only; the bridge always uses the network.
+    ``transport`` / ``api_transport`` are httpx / httpx2 transports for the document fetch
+    and the API calls respectively — test seams only; the bridge always uses the network.
+    The API client is httpx2 because FastMCP 4's ``OpenAPIProvider`` is built on it (an
+    httpx client still works but is deprecated there).
     """
     url = spec.get("command") or ""
     headers = dict(spec.get("env") or {})
@@ -364,7 +368,7 @@ def build_server(spec: dict, *, transport=None, api_transport=None) -> FastMCP:
     info = doc.get("info") if isinstance(doc.get("info"), dict) else {}
     title = info.get("title")
     logger.info("serving OpenAPI document %r against %s", title or url or "(stored document)", base_url)
-    client = httpx.AsyncClient(
+    client = httpx2.AsyncClient(
         base_url=base_url,
         headers=headers,
         timeout=TIMEOUT_S,

@@ -55,7 +55,12 @@ from fastmcp.client.elicitation import create_elicitation_callback
 from fastmcp.client.sampling import create_sampling_callback
 from fastmcp.server import create_proxy
 from fastmcp.server.context import Context, _current_context
-from fastmcp.server.dependencies import _current_server, get_context
+from fastmcp.server.dependencies import (
+    FastMCPRequestContext,
+    _current_server,
+    fastmcp_request_ctx,
+    get_context,
+)
 from fastmcp.server.middleware import Middleware
 from fastmcp.server.providers.proxy import (
     ProxyClient,
@@ -63,18 +68,15 @@ from fastmcp.server.providers.proxy import (
     default_proxy_sampling_handler,
 )
 from fastmcp.server.transforms import ToolTransform
-from fastmcp.tools.tool import Tool
+from fastmcp.tools import Tool
 from fastmcp.tools.tool_transform import ToolTransformConfig
 from fastmcp.utilities.timeout import normalize_timeout_to_seconds
 from mcp import ClientSession
-from mcp.server.lowlevel.server import request_ctx
-from mcp.shared.context import RequestContext
 from mcp.types import (
     INVALID_REQUEST,
     ClientCapabilities,
     ElicitationCapability,
     ErrorData,
-    InitializeResult,
     ListRootsResult,
     Root,
     RootsCapability,
@@ -101,7 +103,10 @@ async def _caller_roots(ctx) -> list[Root]:
             ClientCapabilities(roots=RootsCapability())
         ):
             return []
-        return await ctx.list_roots()
+        # ``Context.list_roots`` is gone in FastMCP 4 (server-initiated requests left the
+        # modern protocol); the handshake-era relay goes through the session, as FastMCP's
+        # own ``default_proxy_roots_handler`` does.
+        return (await ctx.session.list_roots()).roots
     except Exception:
         # Client advertised roots but failed to deliver them — don't surface the
         # failure to the upstream server as an internal error.
@@ -128,7 +133,7 @@ async def _forward_roots(context) -> list[Root]:
 # RequestContext plus a weakref to the server. Never a live ``Context`` — its properties
 # read ContextVars, which hold someone else's values in the session's receive loop (the
 # same reason FastMCP's ``StatefulProxyClient`` stashes this tuple).
-_Caller = tuple[RequestContext, "weakref.ref[FastMCP]"]
+_Caller = tuple[FastMCPRequestContext, "weakref.ref[FastMCP]"]
 
 # The caller whose turn the current task is running (set by _SerializeClientRequests), so
 # code below the middleware can tell its own turn from somebody else's.
@@ -173,7 +178,7 @@ def _acting_as(caller: _Caller) -> Iterator[Context | None]:
         return
     ctx = Context(server)
     tokens = (
-        request_ctx.set(request_context),
+        fastmcp_request_ctx.set(request_context),
         _current_context.set(ctx),
         _current_server.set(server_ref),
     )
@@ -182,7 +187,7 @@ def _acting_as(caller: _Caller) -> Iterator[Context | None]:
     finally:
         _current_server.reset(tokens[2])
         _current_context.reset(tokens[1])
-        request_ctx.reset(tokens[0])
+        fastmcp_request_ctx.reset(tokens[0])
 
 
 def _progress_to(caller: _Caller | None):
@@ -361,45 +366,31 @@ class _SerializeClientRequests(Middleware):
 
 
 class _SharedStdioTransport(StdioTransport):
-    """A ``StdioTransport`` whose connect is safe to race, and whose session routes what
-    the child sends back through :class:`_StdioRouting`.
+    """A ``StdioTransport`` whose session routes what the child sends back through
+    :class:`_StdioRouting`.
 
-    The kept-alive child is one connection shared by every per-request client, and
-    FastMCP's ``connect`` returns early for a second caller once the spawn has STARTED
-    rather than finished — so concurrent first requests on a cold child (a client's
-    burst of tools/prompts/resources lists, a wake from idle) got no session and failed
-    with "Client is not connected". Serializing connect makes the later callers wait for
-    the spawn and then attach to the session it produced.
-
-    The session's callbacks are whatever the FIRST connecting copy passed, so they're
-    replaced here with the routing's — the one set every copy shares.
+    The kept-alive child is one connection shared by every per-request client, and its
+    session's callbacks are whatever the FIRST connecting copy passed, so they're
+    replaced here with the routing's — the one set every copy shares. (Concurrent first
+    connects on a cold child are safe without help: FastMCP 4's ``connect`` serializes
+    on its own ``_connect_lock`` and later callers attach to the session it produced.)
     """
 
     def __init__(self, *args, serialize_client_requests: bool = False, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._connect_lock = asyncio.Lock()
         self.routing = _StdioRouting(serialize_client_requests)
 
     async def connect(self, **session_kwargs):
-        async with self._connect_lock:
-            callbacks = self.routing.session_callbacks()
-            return await super().connect(**{**session_kwargs, **callbacks})
-
-
-class _Handshake:
-    """One upstream ``ClientSession``'s handshake: its cached result, plus the lock
-    that keeps concurrent first requests from racing two ``initialize`` calls."""
-
-    def __init__(self) -> None:
-        self.lock = asyncio.Lock()
-        self.result: InitializeResult | None = None
+        return await super().connect(**{**session_kwargs, **self.routing.session_callbacks()})
 
 
 # How long a serialized child stays reserved for a call its caller cancelled (see
 # _HandshakeOnceProxyClient._await_with_session_monitoring).
 _CANCELLED_CALL_DRAIN_S = 10.0
 
-_HANDSHAKES: weakref.WeakKeyDictionary[ClientSession, _Handshake] = weakref.WeakKeyDictionary()
+# One lock per upstream ``ClientSession``, keeping concurrent first requests from racing
+# two ``initialize`` calls on it.
+_HANDSHAKES: weakref.WeakKeyDictionary[ClientSession, asyncio.Lock] = weakref.WeakKeyDictionary()
 
 
 class _HandshakeOnceProxyClient(ProxyClient):
@@ -415,28 +406,27 @@ class _HandshakeOnceProxyClient(ProxyClient):
     every list/call after the first fails (the proxy logs it as "Error during
     list_tools from provider ProxyProvider()" and serves an empty tool list).
 
-    So cache the result on the live session: the first copy on a session does the real
-    handshake, later copies reuse it. Keyed weakly by the session object, a respawned
-    child (a new session) handshakes afresh; a failed handshake caches nothing, so the
-    next request retries it. The init timeout covers the wait for the lock too, so a
-    request queued behind a hung handshake fails within its own deadline instead of
-    after every attempt ahead of it.
+    FastMCP 4's connect-time ``_negotiate`` already skips a session that has negotiated
+    (and adopts its cached ``InitializeResult``), so what's left is the race: concurrent
+    first requests on a cold session would each see it un-negotiated and both send
+    ``initialize``. A lock per live session (keyed weakly, so a respawned child
+    handshakes afresh) makes the later ones wait and then take the skip; a failed
+    handshake leaves the session un-negotiated, so the next request retries it. The init
+    timeout covers the wait for the lock too, so a request queued behind a hung
+    handshake fails within its own deadline instead of after every attempt ahead of it.
     """
 
-    async def initialize(self, timeout=None) -> InitializeResult:
-        if self.initialize_result is not None:
-            return self.initialize_result
+    async def _negotiate(self, timeout=None) -> None:
+        if self.session.protocol_version is not None:
+            return await super()._negotiate(timeout)
         timeout = self._init_timeout if timeout is None else normalize_timeout_to_seconds(timeout)
-        handshake = _HANDSHAKES.setdefault(self.session, _Handshake())
+        lock = _HANDSHAKES.setdefault(self.session, asyncio.Lock())
         try:
             with anyio.fail_after(timeout):
-                async with handshake.lock:
-                    if handshake.result is None:
-                        handshake.result = await super().initialize(timeout)
+                async with lock:
+                    await super()._negotiate(timeout)
         except TimeoutError as e:
             raise RuntimeError("Failed to initialize server session") from e
-        self._session_state.initialize_result = handshake.result
-        return handshake.result
 
     def _routing(self) -> _StdioRouting | None:
         transport = self.transport
@@ -1495,7 +1485,16 @@ def build_proxy(spec: dict) -> FastMCP:
     # handshake a shared stdio session only once (see _HandshakeOnceProxyClient).
     # Everything else — sampling, elicitation, logging, progress forwarding, and
     # the fresh-client-per-request isolation — keeps FastMCP's proxy defaults.
-    client = _HandshakeOnceProxyClient(transport, roots=_forward_roots)
+    # The outer proxy already authenticated the caller. Forwarding its headers from
+    # this bridge to a remote MCP server would disclose bearer/OAuth credentials to
+    # that upstream. Static headers and upstream OAuth live on the transport itself.
+    # The one exception is the built-in server, whose upstream is the control plane
+    # itself and must authorize each call as the caller (app.runners.builtin).
+    client = _HandshakeOnceProxyClient(
+        transport,
+        roots=_forward_roots,
+        forward_incoming_headers=bool(spec.get("forward_authorization")),
+    )
     # Only the built-in server carries instructions (app.runners.builtin).
     extra = {"instructions": spec["instructions"]} if spec.get("instructions") else {}
     proxy = create_proxy(client, name=spec.get("name") or "mcpelevator-proxy", **extra)
@@ -1508,13 +1507,6 @@ def build_proxy(spec: dict) -> FastMCP:
     proxy.add_transform(_tool_transform(spec))
     if isinstance(transport, _SharedStdioTransport) and transport.routing.serialize:
         proxy.add_middleware(_SerializeClientRequests(transport.routing))
-    # The outer proxy already authenticated the caller. Forwarding its headers from
-    # this bridge to a remote MCP server would disclose bearer/OAuth credentials to
-    # that upstream. Static headers and upstream OAuth live on the transport itself.
-    # The one exception is the built-in server, whose upstream is the control plane
-    # itself and must authorize each call as the caller (app.runners.builtin).
-    if hasattr(transport, "forward_incoming_headers"):
-        transport.forward_incoming_headers = bool(spec.get("forward_authorization"))
     return proxy
 
 
@@ -1555,7 +1547,7 @@ def _openapi_document(tools, name: str) -> dict:
                                 "is_error": {"type": "boolean"},
                                 "content": {"type": "array", "items": {"type": "object"}},
                                 "structured_content": {
-                                    **(tool.outputSchema or {}),
+                                    **(tool.output_schema or {}),
                                     "description": "Structured tool output (null unless the tool declares an outputSchema).",
                                 },
                             },
@@ -1573,7 +1565,7 @@ def _openapi_document(tools, name: str) -> dict:
                     "required": True,
                     "content": {
                         "application/json": {
-                            "schema": tool.inputSchema or {"type": "object"}
+                            "schema": tool.input_schema or {"type": "object"}
                         }
                     },
                 },
