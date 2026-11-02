@@ -3,11 +3,14 @@
 For each group in the registry, one FastMCP instance mounts a
 ``create_proxy(ProxyClient(StreamableHttpTransport))`` per running member,
 namespaced by slug (tools surface as ``<slug>_<tool>``, collision-safe because
-slugs are unique). An instance is REBUILT AND SWAPPED whenever that group's
-running membership or the relevant settings change — fastmcp has no ``unmount``,
-and a fresh build is trivially correct (no drift). ``sync()`` runs after every
-supervisor reconcile pass, so every group converges within one interval of any
-change. A group with no running members serves an EMPTY bundle (initialize
+slugs are unique). The members sit in one ``AggregateProvider`` per instance, and a
+change to the group's running membership or the relevant settings adds and removes
+just the members that changed, IN PLACE: the instance, and every client session on
+it, carries on, and every session sees the new membership at once (a member the
+anti-downgrade rule now excludes is gone for all of them). ``sync()`` runs after
+every supervisor reconcile pass, so every group converges within one interval of
+any change. An instance is rebuilt only after a teardown (an auth-affecting write,
+or a failed sync). A group with no running members serves an EMPTY bundle (initialize
 works, ``tools/list`` is ``[]``) — deterministic, documented behavior: existence
 is decided by the registry alone, membership by what's running.
 
@@ -20,8 +23,11 @@ when the group uses the same provider. ``bearer`` and ``oauth`` are separate
 credential systems, so neither can stand in for the other. An explicitly open
 member is safe behind any group provider.
 
-The Streamable-HTTP apps run stateless (a fresh transport per request), so
-swapping instances never strands client sessions. Starlette does NOT run a
+The Streamable-HTTP apps are stateful, so a handshake-era client gets a session and
+with it the back-channel a member's roots/sampling/elicitation requests are pushed
+on (a stateless request has nowhere for the client's reply to land). Since an
+instance outlives membership changes, those sessions survive them; only a teardown
+ends them, and the client then initializes a new one. Starlette does NOT run a
 mounted sub-app's lifespan, and anyio lifespans must exit in the task that
 entered them — so each instance's lifespan runs inside its own ``_AppRunner``
 task, which makes teardown safe from any caller task (reconciler hook, settings
@@ -39,6 +45,7 @@ from fastmcp import FastMCP
 from mcp.server.request_state import RequestStateSecurity
 from fastmcp.client.transports import ClientTransport, StreamableHttpTransport
 from fastmcp.server import create_proxy
+from fastmcp.server.providers.aggregate import AggregateProvider
 from sqlmodel import Session
 from starlette.types import ASGIApp
 
@@ -121,10 +128,10 @@ _DRAIN_S = 300.0
 
 
 class _Counting:
-    """A group's ASGI app, counting requests in flight. A swap routes new requests
-    to the new instance at once and closes the old one only when this reaches zero,
-    so a call that changes its own group (the built-in server's put_group through
-    /g, say) isn't cut off by the rebuild it caused."""
+    """A group's ASGI app, counting requests in flight. A teardown routes new
+    requests away at once and closes the instance only when this reaches zero, so a
+    call that changes its own group's auth (the built-in server through /g, say)
+    isn't cut off by the teardown it caused."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -150,9 +157,9 @@ class _Counting:
 
 
 class _Instance:
-    """One group's live (app, runner, topology-key) triple."""
+    """One group's live app, runner, topology key and mounted members."""
 
-    __slots__ = ("app", "runner", "key", "members")
+    __slots__ = ("app", "runner", "key", "members", "provider", "slots")
 
     def __init__(
         self,
@@ -160,10 +167,16 @@ class _Instance:
         runner: _AppRunner,
         key: frozenset,
         members: dict[str, str] | None = None,
+        provider: AggregateProvider | None = None,
     ) -> None:
         self.app = app
         self.runner = runner
         self.key = key
+        # The members' providers, one per mounted member, changed in place by _swap;
+        # ``slots`` maps each member's (server_id, slug, host, port, forward) to its
+        # provider in that list.
+        self.provider = provider if provider is not None else AggregateProvider()
+        self.slots: dict[tuple, object] = {}
         # slug -> server id for exactly the members mounted in this instance.
         # Captured at build time from the supervisor's running set, so a caller
         # that needs the id behind a namespace (usage attribution) reads it from
@@ -185,9 +198,10 @@ class GroupHub:
         self._retiring: set[_Instance] = set()  # replaced, finishing their requests
         self._lock = asyncio.Lock()
         # A modern caller's interactive request spans several round trips (bridge.host
-        # _Turn), and a swap can land between two of them. So every bundle seals its
-        # request_state under ONE key (each still binds its own group's name as the
-        # audience), and a group's parked turns outlive the instance that parked them.
+        # _Turn), and its group's instance can be torn down and rebuilt between two of
+        # them. Every bundle seals its request_state under ONE key (each still binds its
+        # own group's name as the audience), so the retry is still recognized and told
+        # its request has ended, instead of failing as a forged token.
         self._request_state = RequestStateSecurity.ephemeral()
         self._parked: dict[str, dict] = {}
 
@@ -323,38 +337,50 @@ class GroupHub:
         members: dict[str, str] | None = None,
         forward: set[str] | None = None,
     ) -> None:
-        bundle = FastMCP(f"mcpelevator-{name}", request_state_security=self._request_state)
+        """Bring group ``name`` to ``entries``: build its instance if there's none, then
+        add and remove just the members that changed, in place."""
         parked = self._parked.setdefault(name, {})
-        # A request parked on the old instance may resume on this one, but only if every
-        # member it reached is still in the group: a member that left, or is now excluded
-        # (the anti-downgrade rule, say), must not answer through it.
+        # A parked request may only resume if every member it reached is still in the
+        # group: a member that left, or is now excluded (the anti-downgrade rule, say),
+        # must not answer through it.
         mounted_ids = {server_id for server_id, *_ in entries}
         for turn in list(parked.values()):
             if not turn.members <= mounted_ids:
                 turn.end()
-        bundle.add_middleware(_ModernTurns(parked))
-        for server_id, slug, host, port in sorted(entries):
+        instance = self._instances.get(name)
+        if instance is None:
+            instance = await self._build(name, parked)
+            self._instances[name] = instance
+        wanted = {
+            (server_id, slug, host, port, server_id in (forward or ()))
+            for server_id, slug, host, port in entries
+        }
+        providers = instance.provider.providers
+        for slot in [slot for slot in instance.slots if slot not in wanted]:
+            providers.remove(instance.slots.pop(slot))  # in-flight calls on it finish
+        for slot in sorted(wanted - instance.slots.keys()):
+            server_id, slug, host, port, forwards = slot
             proxy = self._make_proxy(
-                slug,
-                f"http://{host}:{port}/mcp",
-                forward=server_id in (forward or ()),
-                server_id=server_id,
+                slug, f"http://{host}:{port}/mcp", forward=forwards, server_id=server_id
             )
-            bundle.mount(proxy, namespace=slug)
-        # stateless: a fresh upstream transport per request, so swapping instances never
-        # strands a session. Host/Origin protection stays OFF here — enforce() in the
-        # dispatcher is the single guard, identical to every other /s and /g route.
-        app = bundle.http_app(path="/mcp", stateless_http=True, host_origin_protection=False)
-        # The new instance starts first and takes new requests at once; the old one
-        # is retired (closed once its in-flight requests finish), so no request is
-        # cut off and there is no moment of emptiness. Each lifespan runs inside
-        # its own _AppRunner task.
+            instance.provider.add_provider(proxy, namespace=slug)
+            instance.slots[slot] = providers[-1]  # add_provider appends the wrapped one
+        instance.key = key
+        instance.members = members or {}
+
+    async def _build(self, name: str, parked: dict) -> _Instance:
+        bundle = FastMCP(f"mcpelevator-{name}", request_state_security=self._request_state)
+        bundle.add_middleware(_ModernTurns(parked))
+        provider = AggregateProvider()
+        bundle.add_provider(provider)
+        # Stateful, for the handshake-era back-channel (see the module docstring).
+        # Host/Origin protection stays OFF here — enforce() in the dispatcher is the
+        # single guard, identical to every other /s and /g route.
+        app = bundle.http_app(path="/mcp", stateless_http=False, host_origin_protection=False)
+        # Each lifespan runs inside its own _AppRunner task.
         runner = _AppRunner(app)
         await runner.start()
-        old = self._instances.get(name)
-        self._instances[name] = _Instance(_Counting(app), runner, key, members)
-        if old is not None:
-            self._retire(old)
+        return _Instance(_Counting(app), runner, frozenset(), provider=provider)
 
     async def _teardown(self, name: str) -> None:
         """Stop routing to ``name`` now; its instance closes once drained."""

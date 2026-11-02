@@ -55,10 +55,10 @@ async def test_forward_roots_skips_when_client_lacks_capability():
     """A client that never advertised roots is never asked — we just return []."""
     ctx = _ctx_with_session()
     ctx.session.check_client_capability.return_value = False
-    ctx.session.list_roots = AsyncMock(side_effect=AssertionError("must not forward"))
+    ctx.session.send_request = AsyncMock(side_effect=AssertionError("must not forward"))
     with patch.object(host, "get_context", return_value=ctx):
         assert await host._forward_roots(None) == []
-    ctx.session.list_roots.assert_not_called()
+    ctx.session.send_request.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -67,9 +67,15 @@ async def test_forward_roots_forwards_when_client_supports_it():
     roots = [Root(uri="file:///work")]
     ctx = _ctx_with_session()
     ctx.session.check_client_capability.return_value = True
-    ctx.session.list_roots = AsyncMock(return_value=ListRootsResult(roots=roots))
+    ctx.request_id = "7"
+    ctx.session.send_request = AsyncMock(return_value=ListRootsResult(roots=roots))
     with patch.object(host, "get_context", return_value=ctx):
         assert await host._forward_roots(None) == roots
+    # Sent as related to the caller's request, so it rides that request's own stream
+    # rather than needing the client to hold a standalone GET stream open.
+    (request, result_type), kwargs = ctx.session.send_request.call_args
+    assert request.method == "roots/list" and result_type is ListRootsResult
+    assert kwargs["metadata"].related_request_id == "7"
 
 
 @pytest.mark.asyncio
@@ -77,18 +83,18 @@ async def test_forward_roots_swallows_forwarding_errors():
     """Client claimed roots support but the call failed -> [], not -32603 upstream."""
     ctx = _ctx_with_session()
     ctx.session.check_client_capability.return_value = True
-    ctx.session.list_roots = AsyncMock(side_effect=Exception("boom"))
+    ctx.session.send_request = AsyncMock(side_effect=Exception("boom"))
     with patch.object(host, "get_context", return_value=ctx):
         assert await host._forward_roots(None) == []
 
 
 def test_session_exposes_check_client_capability():
     """Lock in the SDK contract the handler relies on: ServerSession provides
-    ``check_client_capability`` and ``list_roots`` (FastMCP 4 dropped
+    ``check_client_capability`` and ``send_request`` (FastMCP 4 dropped
     ``Context.list_roots``, so the relay goes through the session). Guards against
     regressions if the mcp dependency changes."""
     assert hasattr(ServerSession, "check_client_capability")
-    assert hasattr(ServerSession, "list_roots")
+    assert hasattr(ServerSession, "send_request")
 
 
 def test_build_proxy_installs_custom_roots_handler():

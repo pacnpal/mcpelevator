@@ -357,10 +357,10 @@ for tool calls, resource reads and prompts, on `remote` servers, stdio servers w
 **Client requests** on (below), and groups. A client that's asked something and doesn't
 come back within 10 minutes is treated like one that cancelled. At most 256 requests
 per server or group wait like this at once; past that, the server's request is refused
-and the call carries on without it. A group rebuild doesn't drop a waiting request,
-unless the member it reached is no longer in the group. Clients on the older
-handshake protocol get the requests pushed to them as before, except through a group:
-groups serve stateless HTTP, which has never been able to carry a client's reply back.
+and the call carries on without it. A membership change doesn't drop a waiting
+request, unless the member it reached is no longer in the group. Clients on the older
+handshake protocol get the requests pushed to them, through a group too: groups keep a
+session per client for this, and a member starting, stopping or idling doesn't end it.
 
 A stdio server (`npx`, `uvx`, `command`, `docker`) is different: its bridge runs **one**
 process for every connected client, and a request from that process doesn't say which

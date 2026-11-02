@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 
 import httpx
@@ -1189,19 +1190,41 @@ async def test_replaced_instance_finishes_its_requests_before_closing():
 # --- server-initiated requests through a group (issue #143) -------------------- #
 
 
-def _client_on(app, **kwargs):
-    """A fastmcp Client talking Streamable HTTP to the group's ASGI ``app`` in-process."""
-    import httpx2
+def _no_signals(self):
+    return nullcontext()
+
+
+@asynccontextmanager
+async def _client_on(app, **kwargs):
+    """A fastmcp Client on the group's ASGI ``app``, served over real HTTP. (httpx's
+    in-process ASGI transport only returns a response once it's complete, so a request
+    the bundle pushes mid-response could never reach the client through it.)"""
+    import socket
+
+    import uvicorn
     from fastmcp import Client
-    from fastmcp.client.transports import StreamableHttpTransport
 
-    def factory(**options):
-        return httpx2.AsyncClient(
-            transport=httpx2.ASGITransport(app=app), base_url="http://hub.test", **options
-        )
-
-    return Client(StreamableHttpTransport("http://hub.test/mcp", httpx_client_factory=factory),
-                  **kwargs)
+    # Served from the test's own thread, so uvicorn would install its signal handlers
+    # here. sse_starlette finds "the" uvicorn server through the SIGTERM handler, and
+    # once that server is stopping it ends every SSE stream in the process for good:
+    # stopping this one would cut off the shared upstream fixture's streams too.
+    _NoSignalsServer = type("_NoSignalsServer", (uvicorn.Server,), {"capture_signals": _no_signals})
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    server = _NoSignalsServer(
+        uvicorn.Config(app, host="127.0.0.1", port=port, lifespan="off", log_level="warning")
+    )
+    serving = asyncio.create_task(server.serve())
+    try:
+        while not server.started:
+            assert not serving.done(), "the group's test server didn't start"
+            await asyncio.sleep(0.02)
+        async with Client(f"http://127.0.0.1:{port}/mcp", **kwargs) as client:
+            yield client
+    finally:
+        server.should_exit = True
+        await serving
 
 
 def _http_hub(url: str) -> GroupHub:
@@ -1210,15 +1233,15 @@ def _http_hub(url: str) -> GroupHub:
     return GroupHub(transport_factory=lambda _: StreamableHttpTransport(url))
 
 
-async def test_group_member_requests_reach_a_modern_caller(clean_settings, pushing_upstream_url):
-    """A member's roots and elicitation requests reach a group caller on the 2026-07-28
-    protocol: the group returns them as an InputRequiredResult and relays the answers.
-
-    A handshake-era caller can't be reached through a group at all, and never could: the
-    group serves stateless HTTP, so the caller's reply to a pushed request arrives on a
-    request of its own that nothing ties back (fastmcp 3 timed out waiting for it; the
-    MCP SDK v2 refuses at once with "no back-channel")."""
-    mode = "auto"
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+async def test_group_member_requests_reach_the_caller_on_either_protocol(
+    clean_settings, pushing_upstream_url, mode
+):
+    """A member's roots and elicitation requests reach the group's caller on either
+    protocol: returned as an InputRequiredResult to a modern caller, pushed to a
+    handshake-era one on its session (the group serves stateful HTTP for exactly this:
+    a stateless request has nowhere for the caller's reply to land, which is why this
+    never worked through a group before)."""
     from unittest.mock import AsyncMock
 
     async def elicit(message, response_type, params, context):
@@ -1245,9 +1268,12 @@ async def test_group_member_requests_reach_a_modern_caller(clean_settings, pushi
             repo.delete_server(session, member.id)
 
 
-async def test_group_round_trip_survives_a_swap_between_legs(clean_settings, pushing_upstream_url):
-    """A modern caller's request spans several round trips, and a group can be rebuilt
-    between two of them: the retry still finds the parked request on the new instance."""
+async def test_group_round_trip_survives_a_membership_change_between_legs(
+    clean_settings, pushing_upstream_url
+):
+    """A modern caller's request spans several round trips, and the group's membership
+    can change between two of them. The change lands in place, on the same instance,
+    so the retry still finds the parked request."""
     from mcp.types import InputRequiredResult, ListRootsResult, Root
 
     with Session(get_engine()) as session:
@@ -1264,8 +1290,8 @@ async def test_group_round_trip_survives_a_swap_between_legs(clean_settings, pus
             )
             assert isinstance(first, InputRequiredResult)
             (key,) = first.input_requests
-            await hub.sync(_endpoints(member, other))  # a new member: the group is rebuilt
-            assert hub.app_for("all") is not before
+            await hub.sync(_endpoints(member, other))  # a new member joins
+            assert hub.app_for("all") is before  # in place: no new instance
         async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
             final = await asyncio.wait_for(
                 client.session.call_tool(
@@ -1340,10 +1366,10 @@ async def test_group_member_resource_and_prompt_requests_reach_a_modern_caller(
 
 
 async def test_group_round_trip_ends_when_its_member_leaves(clean_settings, pushing_upstream_url):
-    """A request parked on a member that a rebuild drops (it left the group, or the
-    anti-downgrade rule now excludes it) can't resume through the new instance; the
-    retry is told to send the request again, against the current membership. Deleting
-    the group ends what's still parked there too."""
+    """A request parked on a member the group then drops (it left, or the anti-downgrade
+    rule now excludes it) can't resume; the retry is told to send the request again,
+    against the current membership. Deleting the group ends what's still parked there
+    too."""
     from mcp.types import InputRequiredResult, ListRootsResult, Root
 
     with Session(get_engine()) as session:
@@ -1359,7 +1385,7 @@ async def test_group_round_trip_ends_when_its_member_leaves(clean_settings, push
             )
             assert isinstance(first, InputRequiredResult)
             (key,) = first.input_requests
-        await hub.sync(_endpoints(other))  # the member is gone from the rebuilt group
+        await hub.sync(_endpoints(other))  # the member leaves the group
         async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
             retry = await asyncio.wait_for(
                 client.session.call_tool(
@@ -1374,7 +1400,10 @@ async def test_group_round_trip_ends_when_its_member_leaves(clean_settings, push
         assert retry.is_error and "has ended" in retry.content[0].text
 
         async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
-            await client.session.call_tool("other_where", {}, allow_input_required=True)
+            parked = await client.session.call_tool(
+                "other_where", {}, allow_input_required=True
+            )
+            assert isinstance(parked, InputRequiredResult)
         assert hub._parked["all"]
         _write_groups({})
         await hub.sync(_endpoints(other))  # the group is deleted
@@ -1384,3 +1413,39 @@ async def test_group_round_trip_ends_when_its_member_leaves(clean_settings, push
         with Session(get_engine()) as session:
             repo.delete_server(session, member.id)
             repo.delete_server(session, other.id)
+
+
+async def test_group_session_survives_membership_changes(clean_settings, pushing_upstream_url):
+    """A handshake-era client's session outlives the group's membership changes (a
+    member starting, stopping or idling), and sees each one at once: a member that's
+    gone is gone for it, and its pushed requests still reach it afterwards."""
+    from fastmcp.exceptions import ToolError
+
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Pusher")
+        other = _mk_server(session, "Other")
+    _write_groups({"all": "*"})
+    hub = _http_hub(pushing_upstream_url)
+    try:
+        await hub.sync(_endpoints(member))
+        async with _client_on(
+            hub.app_for("all"), mode="legacy", roots=["file:///alice"]
+        ) as client:
+            session_id = client.transport.get_session_id()
+            assert session_id
+            await hub.sync(_endpoints(member, other))  # a member joins
+            assert "other_where" in {t.name for t in await client.list_tools()}
+            await hub.sync(_endpoints(other))  # and one leaves
+            names = {t.name for t in await client.list_tools()}
+            assert "other_where" in names and "pusher_where" not in names
+            with pytest.raises(ToolError):
+                await client.call_tool("pusher_where", {})
+            where = await asyncio.wait_for(client.call_tool("other_where", {}), 10)
+            assert json.loads(where.content[0].text) == ["file:///alice"]
+            assert client.transport.get_session_id() == session_id
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)
+            repo.delete_server(session, other.id)
+

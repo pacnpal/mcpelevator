@@ -222,10 +222,15 @@ class GroupDispatch:
         # keep an unrelated bridge awake and reset its idle clock for traffic it
         # never saw. Snapshotted ONCE so start and finish stay balanced even if a
         # reconcile swaps the instance mid-request.
+        #
+        # A GET is a session's standalone stream (the bundle is stateful): it stays open
+        # for as long as the client is connected and carries the bundle's own
+        # notifications, not a member's call, so it holds no member awake.
         mounted = self._hub.mounted_members(name)
         app = scope.get("app")
         supervisor = app.state.supervisor if app is not None else None
-        for member_id in mounted.values():
+        leased = {} if request.method == "GET" else mounted
+        for member_id in leased.values():
             if supervisor is not None:
                 supervisor.request_started(member_id)
         # Hold the instance from its selection, not from when delegation starts:
@@ -250,6 +255,6 @@ class GroupDispatch:
         finally:
             if held:
                 inner.release()
-            for member_id in mounted.values():
+            for member_id in leased.values():
                 if supervisor is not None:
                     supervisor.request_finished(member_id)

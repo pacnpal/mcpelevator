@@ -62,9 +62,9 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   the answer to the waiting request; logs and progress follow the live leg. On a serialized
   stdio child the turn fills the caller slot and owns the lock (`_SerializeClientRequests`);
   for a remote upstream and for groups (`_ModernTurns`), each request's own upstream session
-  finds its turn through `_CURRENT_TURN` (`_TurnAwareProxyClient`). Groups share one
-  request-state key and per-group parked turns across swaps; a swap ends the turns whose
-  members (`_Turn.members`) it no longer mounts. At most `_MAX_PARKED_TURNS` park at once. The upstream leg is pinned to the handshake era (`ProxyClient`
+  finds its turn through `_CURRENT_TURN` (`_TurnAwareProxyClient`). A group's parked turns
+  outlive its membership changes; a change ends the turns whose members (`_Turn.members`)
+  it no longer mounts. At most `_MAX_PARKED_TURNS` park at once. The upstream leg is pinned to the handshake era (`ProxyClient`
   defaults to `mode="legacy"`), and caller headers reach it only via
   `ProxyClient(forward_incoming_headers=...)`, which FastMCP 4 turns ON by default.
 - **Secret env** (`sealed.py`): a per-key choice, for env vars and remote/openapi headers
@@ -144,7 +144,13 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   mapping a group name to its members — either `"*"` (every registered server, present and
   future, except the built-in control MCP server) or an ordered list of server ids. Each group is served at `/g/<name>/mcp`: a
   control-plane-hosted FastMCP mounting a proxy per running member, tools namespaced by slug,
-  rebuilt-and-swapped per group after each reconcile via the supervisor's `on_converged` hook (the replaced instance drains its in-flight requests before closing, so a call that rebuilds its own group still returns)
+  kept current after each reconcile via the supervisor's `on_converged` hook. The members sit in
+  one `AggregateProvider` per group, and a membership change adds and removes just the members
+  that changed, in place, so the group's stateful sessions (the handshake-era back-channel for
+  pushed roots/sampling/elicitation) survive it and see it at once. An instance is rebuilt
+  only after a teardown (an auth-affecting write or a failed sync), and the torn-down one
+  drains its in-flight requests before closing, so a call that tears down its own group still returns;
+  standalone GET streams don't hold members awake
   (the hub owns each sub-app's lifespan; Starlette doesn't run mounted lifespans). There is no
   special-case name — `all` is just a conventional entry with members `"*"`. The registry is
   validated at write time and again at startup (`registry.validate_at_startup` fails the boot

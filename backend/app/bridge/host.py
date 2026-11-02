@@ -78,6 +78,7 @@ from fastmcp.tools.base import InputRequiredToolResult
 from fastmcp.tools.tool_transform import ToolTransformConfig
 from fastmcp.utilities.timeout import normalize_timeout_to_seconds
 from mcp import ClientSession
+from mcp.shared.message import ServerMessageMetadata
 from mcp.types import (
     INVALID_REQUEST,
     ClientCapabilities,
@@ -118,9 +119,16 @@ async def _caller_roots(ctx) -> list[Root]:
         ):
             return []
         # ``Context.list_roots`` is gone in FastMCP 4 (server-initiated requests left the
-        # modern protocol); the handshake-era relay goes through the session, as FastMCP's
-        # own ``default_proxy_roots_handler`` does.
-        return (await ctx.session.list_roots()).roots
+        # modern protocol); the handshake-era relay goes through the session. Sent as
+        # related to the caller's request, so it rides that request's open stream, the
+        # way FastMCP relays sampling and elicitation. Unrelated, it would need the
+        # session's standalone GET stream, which a client may not have open (yet).
+        result = await ctx.session.send_request(
+            ListRootsRequest(),
+            ListRootsResult,
+            metadata=ServerMessageMetadata(related_request_id=ctx.request_id),
+        )
+        return result.roots
     except Exception:
         # Client advertised roots but failed to deliver them — don't surface the
         # failure to the upstream server as an internal error.
