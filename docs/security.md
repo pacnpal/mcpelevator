@@ -4,7 +4,7 @@ This document is the reference threat model for mcpelevator: what it protects,
 who the attackers are, where the trust boundaries sit, and how findings should be
 triaged by severity. For hands-on hardening steps see the **Security** section of
 the [README](../README.md) and, for internet exposure,
-[docs/claude-web-exposure.md](claude-web-exposure.md).
+[./docs/claude-web-exposure.md](claude-web-exposure.md).
 
 ## 1. Overview
 
