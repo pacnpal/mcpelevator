@@ -67,6 +67,13 @@
       "matchPackageNames": ["typescript"],
       "matchUpdateTypes": ["major"],
       "enabled": false
+    },
+    {
+      "description": "Run Renovate's lockfile updates on npm 11, the major CI (setup-node 26) and the image build use. npm 12 defaults allow-remote=none, which refuses the registry tarball of any package declaring bundleDependencies (npm/cli#9800) — Tailwind 4's @tailwindcss/oxide-wasm32-wasi — so every package-lock.json update fails with EALLOWREMOTE. Lift once CI moves to npm 12 and the upstream fix has shipped.",
+      "matchManagers": ["npm"],
+      "constraints": {
+        "npm": "<12"
+      }
     }
   ]
 }
