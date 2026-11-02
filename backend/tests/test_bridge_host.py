@@ -1808,6 +1808,30 @@ async def test_remote_upstream_requests_reach_the_caller_on_either_protocol(
     assert elicited.await_count == 1
 
 
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+@pytest.mark.asyncio
+async def test_remote_upstream_progress_after_a_round_trip_reaches_the_caller(
+    mode, pushing_upstream_url
+):
+    """Progress a remote upstream reports after asking the caller something reaches the
+    caller's live leg on either protocol."""
+    proxy = host.build_proxy(
+        {"command": pushing_upstream_url, "name": "remote", "transport": "streamable-http"}
+    )
+    progress = []
+
+    async def on_progress(value, total, message):
+        progress.append((value, total))
+
+    async with Client(proxy, mode=mode, roots=["file:///alice"]) as client:
+        with anyio.fail_after(10):
+            result = await client.call_tool_mcp(
+                "roots_then_progress", {}, progress_handler=on_progress
+            )
+    assert json.loads(result.content[0].text) == ["file:///alice"]
+    assert progress == [(1, 2)]
+
+
 @pytest.mark.asyncio
 async def test_parked_turn_logs_go_to_the_bridge_log_not_nowhere(caplog):
     """While a modern caller's turn waits for its retry there's no leg to send the

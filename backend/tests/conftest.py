@@ -60,7 +60,8 @@ def create_server(client, *, name: str, auth: str | None = None) -> dict:
 def pushing_upstream_url():
     """An MCP server, served over real Streamable HTTP, whose tools push requests to the
     client mid-call the handshake-era way: ``where`` asks for roots and returns them as
-    JSON, ``confirm`` elicits a name and returns ``"<action>:<name>"``. It's what a remote
+    JSON, ``roots_then_progress`` does the same and then reports progress (so the progress
+comes after a round trip), ``confirm`` elicits a name and returns ``"<action>:<name>"``. It's what a remote
     runner or a group member reaches over the network. (FastMCP's in-memory transport
     can't stand in: a handshake-era push over it deadlocks in-process.)"""
     import json
@@ -76,6 +77,12 @@ def pushing_upstream_url():
     @upstream.tool
     async def where(ctx: Context) -> str:
         return json.dumps([str(r.uri) for r in (await ctx.session.list_roots()).roots])
+
+    @upstream.tool
+    async def roots_then_progress(ctx: Context) -> str:
+        roots = (await ctx.session.list_roots()).roots
+        await ctx.report_progress(1, 2)
+        return json.dumps([str(r.uri) for r in roots])
 
     @upstream.tool
     async def confirm(ctx: Context) -> str:

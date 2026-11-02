@@ -726,6 +726,16 @@ class _TurnAwareProxyClient(ProxyClient):
                 kwargs[key] = wrap(kwargs[key])
         return client
 
+    async def call_tool_mcp(self, name, arguments, progress_handler=None, timeout=None, meta=None):
+        # FastMCP's progress handler reports through get_context(), which inside a turn's
+        # task is still the FIRST leg; send it to whichever leg is live instead.
+        turn = _CURRENT_TURN.get()
+        if progress_handler is None and turn is not None:
+            progress_handler = turn.progress
+        return await super().call_tool_mcp(
+            name, arguments, progress_handler=progress_handler, timeout=timeout, meta=meta
+        )
+
 
 def _turn_roots(forward):
     async def callback(context):
@@ -803,12 +813,9 @@ class _HandshakeOnceProxyClient(_TurnAwareProxyClient):
 
     async def call_tool_mcp(self, name, arguments, progress_handler=None, timeout=None, meta=None):
         # The inherited progress handler resolves its caller with get_context(), which in a
-        # shared stdio session's receive loop is the FIRST caller — bind it to this one. A
-        # modern caller's turn sends it to whichever leg is live instead.
-        turn = _CURRENT_TURN.get()
-        if progress_handler is None and turn is not None:
-            progress_handler = turn.progress
-        elif progress_handler is None and self._routing() is not None:
+        # shared stdio session's receive loop is the FIRST caller — bind it to this one. (A
+        # modern caller's turn binds it to the live leg instead, in the base class.)
+        if progress_handler is None and _CURRENT_TURN.get() is None and self._routing() is not None:
             progress_handler = _progress_to(_current_caller())
         return await super().call_tool_mcp(
             name, arguments, progress_handler=progress_handler, timeout=timeout, meta=meta

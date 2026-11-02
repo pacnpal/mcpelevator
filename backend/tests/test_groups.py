@@ -1283,3 +1283,34 @@ async def test_group_round_trip_survives_a_swap_between_legs(clean_settings, pus
         with Session(get_engine()) as session:
             repo.delete_server(session, member.id)
             repo.delete_server(session, other.id)
+
+
+async def test_group_progress_after_a_round_trip_reaches_the_live_leg(
+    clean_settings, pushing_upstream_url
+):
+    """Progress a member reports after asking the caller something belongs to the leg
+    that's live then, not to the first one, which has already returned."""
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Pusher")
+    _write_groups({"all": "*"})
+    hub = _http_hub(pushing_upstream_url)
+    progress = []
+
+    async def on_progress(value, total, message):
+        progress.append((value, total))
+
+    try:
+        await hub.sync(_endpoints(member))
+        async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
+            result = await asyncio.wait_for(
+                client.call_tool_mcp(
+                    "pusher_roots_then_progress", {}, progress_handler=on_progress
+                ),
+                10,
+            )
+        assert json.loads(result.content[0].text) == ["file:///alice"]
+        assert progress == [(1, 2)]
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)
