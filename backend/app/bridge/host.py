@@ -396,6 +396,11 @@ _PARKED_TURN_TTL_S = 600.0
 # request is refused and the call carries on without the input.
 _MAX_PARKED_TURNS = 256
 
+# How many of the upstream's requests one turn holds at once. The SDK runs each inbound
+# request as its own task, so an upstream can send many before any is answered; past
+# this, a request is refused at once.
+_MAX_PENDING_PER_TURN = 16
+
 # Per kind of input request: the capability a caller must declare to be asked it, the
 # name used in a refusal, and the answers the client may send back.
 _INPUT_KINDS = {
@@ -502,6 +507,10 @@ class _Turn:
         if not capable:
             return ErrorData(
                 code=INVALID_REQUEST, message=f"the calling client does not support {what}"
+            )
+        if len(self.pending) >= _MAX_PENDING_PER_TURN:
+            return ErrorData(
+                code=INVALID_REQUEST, message="too many requests are waiting on this client"
             )
         key = f"{request.method}#{next(self._keys)}"
         future = asyncio.get_running_loop().create_future()

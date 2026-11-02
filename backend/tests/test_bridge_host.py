@@ -1907,6 +1907,28 @@ async def test_turn_past_the_parked_cap_refuses_the_request_and_carries_on():
         assert await asyncio.wait_for(leg, 1) == "the result"
 
 
+@pytest.mark.asyncio
+async def test_turn_refuses_requests_past_the_pending_cap():
+    """The SDK runs each of the upstream's requests as its own task, so one call can
+    send many before any is answered; past the cap, a request is refused at once
+    instead of piling up."""
+    from mcp.types import ErrorData, ListRootsRequest
+
+    done = asyncio.get_running_loop().create_future()
+    turn = host._Turn({}, None, lambda: done)
+    try:
+        with patch.object(host, "_MAX_PENDING_PER_TURN", 0), patch.object(
+            host, "_acting_as"
+        ) as acting:
+            acting.return_value.__enter__.return_value.session.check_client_capability.return_value = True
+            turn.caller = ("rc", None)
+            refusal = await asyncio.wait_for(turn.ask(ListRootsRequest()), 1)
+        assert isinstance(refusal, ErrorData) and "too many" in refusal.message
+        assert turn.pending == {}
+    finally:
+        turn.run.cancel()
+
+
 async def _cancel_server_side(client: Client, call) -> None:
     """Start ``call`` on ``client`` and return once the SERVER has cancelled it — the way
     a real client abandons a request (``notifications/cancelled``), not just a local

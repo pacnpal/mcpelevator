@@ -432,8 +432,15 @@ class GroupHub:
             yield
 
     async def close(self) -> None:
-        """Shutdown: stop every session manager cleanly (called from the app lifespan)."""
+        """Shutdown: stop every session manager cleanly (called from the app lifespan,
+        and after a sync failure, while the process keeps running)."""
         async with self._lock:
+            # Nothing serves any group after this, so nothing may resume what's parked:
+            # end it now, rather than holding upstream sessions open to the TTL.
+            for parked in self._parked.values():
+                for turn in list(parked.values()):
+                    turn.end()
+            self._parked.clear()
             # Invalidate the whole routing registry before awaiting any teardown. A
             # runner close can block or fail, but no stale group app may remain
             # reachable while shutdown is in progress (including fail-closed shutdown

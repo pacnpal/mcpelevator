@@ -1408,6 +1408,15 @@ async def test_group_round_trip_ends_when_its_member_leaves(clean_settings, push
         _write_groups({})
         await hub.sync(_endpoints(other))  # the group is deleted
         assert "all" not in hub._parked
+
+        # close() (shutdown, or after a failed sync) ends what's parked too.
+        _write_groups({"all": "*"})
+        await hub.sync(_endpoints(other))
+        async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
+            await client.session.call_tool("other_where", {}, allow_input_required=True)
+        (turn,) = hub._parked["all"].values()
+        await hub.close()
+        assert turn.closed and hub._parked == {}
     finally:
         await hub.close()
         with Session(get_engine()) as session:
