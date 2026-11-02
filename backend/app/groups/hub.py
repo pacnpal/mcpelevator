@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from typing import Callable, Optional
 
 from fastmcp import FastMCP
@@ -159,7 +159,7 @@ class _Counting:
 class _Instance:
     """One group's live app, runner, topology key and mounted members."""
 
-    __slots__ = ("app", "runner", "key", "members", "provider", "slots")
+    __slots__ = ("app", "runner", "key", "members", "bundle", "slot", "runtime")
 
     def __init__(
         self,
@@ -167,16 +167,18 @@ class _Instance:
         runner: _AppRunner,
         key: frozenset,
         members: dict[str, str] | None = None,
-        provider: AggregateProvider | None = None,
+        bundle: FastMCP | None = None,
     ) -> None:
         self.app = app
         self.runner = runner
         self.key = key
-        # The members' providers, one per mounted member, changed in place by _swap;
-        # ``slots`` maps each member's (server_id, slug, host, port, forward) to its
-        # provider in that list.
-        self.provider = provider if provider is not None else AggregateProvider()
-        self.slots: dict[tuple, object] = {}
+        # The members live in one AggregateProvider at ``bundle.providers[slot]``. A
+        # membership change builds a new one and swaps it in whole (see _install), so a
+        # request in flight keeps the snapshot it started with; ``runtime`` holds the
+        # live snapshot's extension-runtime contexts, closed when it's replaced.
+        self.bundle = bundle
+        self.slot: int | None = None
+        self.runtime: ExitStack | None = None
         # slug -> server id for exactly the members mounted in this instance.
         # Captured at build time from the supervisor's running set, so a caller
         # that needs the id behind a namespace (usage attribution) reads it from
@@ -338,11 +340,12 @@ class GroupHub:
         forward: set[str] | None = None,
     ) -> None:
         """Bring group ``name`` to ``entries``: build its instance if there's none, then
-        add and remove just the members that changed, in place."""
+        install the new membership in it, in place."""
         parked = self._parked.setdefault(name, {})
         # A parked request may only resume if every member it reached is still in the
         # group: a member that left, or is now excluded (the anti-downgrade rule, say),
-        # must not answer through it.
+        # must not answer through it. Ending those now frees their upstream sessions;
+        # the resume check in _ModernTurns covers a turn that parks after this.
         mounted_ids = {server_id for server_id, *_ in entries}
         for turn in list(parked.values()):
             if not turn.members <= mounted_ids:
@@ -351,28 +354,49 @@ class GroupHub:
         if instance is None:
             instance = await self._build(name, parked)
             self._instances[name] = instance
-        wanted = {
-            (server_id, slug, host, port, server_id in (forward or ()))
-            for server_id, slug, host, port in entries
-        }
-        providers = instance.provider.providers
-        for slot in [slot for slot in instance.slots if slot not in wanted]:
-            providers.remove(instance.slots.pop(slot))  # in-flight calls on it finish
-        for slot in sorted(wanted - instance.slots.keys()):
-            server_id, slug, host, port, forwards = slot
+        members_provider = AggregateProvider()  # built offline: nothing runs it yet
+        for server_id, slug, host, port in sorted(entries):
             proxy = self._make_proxy(
-                slug, f"http://{host}:{port}/mcp", forward=forwards, server_id=server_id
+                slug,
+                f"http://{host}:{port}/mcp",
+                forward=server_id in (forward or ()),
+                server_id=server_id,
             )
-            instance.provider.add_provider(proxy, namespace=slug)
-            instance.slots[slot] = providers[-1]  # add_provider appends the wrapped one
+            members_provider.add_provider(proxy, namespace=slug)
+        self._install(instance, members_provider)
         instance.key = key
         instance.members = members or {}
 
+    @staticmethod
+    def _install(instance: _Instance, members_provider: AggregateProvider) -> None:
+        """Make ``members_provider`` the instance's membership, atomically.
+
+        One list-item assignment: a request already in flight keeps iterating the
+        snapshot it started with (FastMCP's aggregate re-indexes its provider list after
+        awaiting, so shrinking a live one could raise), and every request after it sees
+        the new one. FastMCP enters each provider's extension runtime into its running
+        scopes when a provider is ADDED, with no way to leave it on removal; installing
+        by assignment skips that, and the snapshot's runtime is entered here instead, on
+        a stack of its own that's closed when the next snapshot replaces it."""
+        bundle = instance.bundle
+        runtime = ExitStack()
+        for scope in bundle._extension_scopes:
+            runtime.enter_context(
+                members_provider._extension_runtime(scope.available, root=scope.root)
+            )
+        bundle.providers[instance.slot] = members_provider
+        previous, instance.runtime = instance.runtime, runtime
+        if previous is not None:
+            previous.close()
+
     async def _build(self, name: str, parked: dict) -> _Instance:
         bundle = FastMCP(f"mcpelevator-{name}", request_state_security=self._request_state)
-        bundle.add_middleware(_ModernTurns(parked))
-        provider = AggregateProvider()
-        bundle.add_provider(provider)
+        bundle.add_middleware(
+            _ModernTurns(parked, members=lambda: set(self.mounted_members(name).values()))
+        )
+        # A placeholder for the membership _install swaps in: empty, so the runtime
+        # FastMCP keeps for it at startup holds nothing.
+        bundle.add_provider(AggregateProvider())
         # Stateful, for the handshake-era back-channel (see the module docstring).
         # Host/Origin protection stays OFF here — enforce() in the dispatcher is the
         # single guard, identical to every other /s and /g route.
@@ -380,7 +404,9 @@ class GroupHub:
         # Each lifespan runs inside its own _AppRunner task.
         runner = _AppRunner(app)
         await runner.start()
-        return _Instance(_Counting(app), runner, frozenset(), provider=provider)
+        instance = _Instance(_Counting(app), runner, frozenset(), bundle=bundle)
+        instance.slot = len(bundle.providers) - 1
+        return instance
 
     async def _teardown(self, name: str) -> None:
         """Stop routing to ``name`` now; its instance closes once drained."""
@@ -441,6 +467,11 @@ class GroupHub:
                 for turn in list(parked.values()):
                     turn.end()
             self._parked.clear()
+            for instance in [*self._instances.values(), *self._retiring]:
+                runtime = getattr(instance, "runtime", None)
+                if runtime is not None:
+                    runtime.close()
+                    instance.runtime = None
             # Invalidate the whole routing registry before awaiting any teardown. A
             # runner close can block or fail, but no stale group app may remain
             # reachable while shutdown is in progress (including fail-closed shutdown

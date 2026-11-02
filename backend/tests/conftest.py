@@ -62,7 +62,8 @@ def pushing_upstream_url():
     client mid-call the handshake-era way: ``where`` asks for roots and returns them as
     JSON, ``roots_then_progress`` does the same and then reports progress (so the progress
 comes after a round trip), the resource ``push://roots`` and the prompt ``roots_prompt``
-return the roots too, and ``confirm`` elicits a name and returns ``"<action>:<name>"``. It's what a remote
+return the roots too, ``slow_where`` waits ``delay`` seconds before it asks, and
+``confirm`` elicits a name and returns ``"<action>:<name>"``. It's what a remote
     runner or a group member reaches over the network. (FastMCP's in-memory transport
     can't stand in: a handshake-era push over it deadlocks in-process.)"""
     import json
@@ -91,6 +92,13 @@ return the roots too, and ``confirm`` elicits a name and returns ``"<action>:<na
 
     @upstream.prompt
     async def roots_prompt(ctx: Context) -> str:
+        return json.dumps([str(r.uri) for r in (await ctx.session.list_roots()).roots])
+
+    @upstream.tool
+    async def slow_where(ctx: Context, delay: float) -> str:
+        import asyncio
+
+        await asyncio.sleep(delay)
         return json.dumps([str(r.uri) for r in (await ctx.session.list_roots()).roots])
 
     @upstream.tool

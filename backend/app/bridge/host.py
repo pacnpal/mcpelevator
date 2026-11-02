@@ -644,12 +644,18 @@ class _Turn:
 _CURRENT_TURN: ContextVar[_Turn | None] = ContextVar("mcpe_bridge_modern_turn", default=None)
 
 
-async def _turn_leg(ctx: Context, method: str, run, parked: dict, routing=None):
+async def _turn_leg(ctx: Context, method: str, run, parked: dict, routing=None, members=None):
     """One leg of a modern caller's interactive request: start its turn, or resume the
-    parked one its ``request_state`` names (unsealed by FastMCP, so we minted it)."""
+    parked one its ``request_state`` names (unsealed by FastMCP, so we minted it).
+
+    ``members`` (groups only) returns the server ids mounted now: a turn resumes only
+    while every member it reached is still one of them."""
     wrap, error = _INTERACTIVE[method]
     if ctx.request_state is not None:
         turn = parked.get(ctx.request_state)
+        if turn is not None and members is not None and not turn.members <= members():
+            turn.end()  # a member it reached left, or is now excluded, since it parked
+            turn = None
         if turn is None:
             raise error("the request these answers are for has ended; send it again")
         turn.resume(_caller_of(ctx), ctx.input_responses)
@@ -669,13 +675,20 @@ class _ModernTurns(Middleware):
     """Runs each modern caller's interactive request as a :class:`_Turn`, for a proxy whose
     upstream sessions are per request (a remote upstream, or a group's members)."""
 
-    def __init__(self, parked: dict | None = None) -> None:
+    def __init__(self, parked: dict | None = None, members=None) -> None:
         self.parked: dict[str, _Turn] = {} if parked is None else parked
+        self.members = members  # groups: the server ids mounted now (see _turn_leg)
 
     async def on_request(self, context, call_next):
         ctx = context.fastmcp_context
         if context.method in _INTERACTIVE and _is_modern(ctx):
-            return await _turn_leg(ctx, context.method, lambda: call_next(context), self.parked)
+            return await _turn_leg(
+                ctx,
+                context.method,
+                lambda: call_next(context),
+                self.parked,
+                members=self.members,
+            )
         return await call_next(context)
 
 

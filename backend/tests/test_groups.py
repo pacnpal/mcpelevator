@@ -1458,3 +1458,116 @@ async def test_group_session_survives_membership_changes(clean_settings, pushing
             repo.delete_server(session, member.id)
             repo.delete_server(session, other.id)
 
+
+
+class _SlowFailingTransport(FastMCPTransport):
+    """A member whose listing takes a moment and then fails, like a bridge stopping."""
+
+    def __init__(self):
+        super().__init__(FastMCP("stopping"))
+
+    def connect_session(self, **kwargs):
+        @asynccontextmanager
+        async def session():
+            await asyncio.sleep(0.2)
+            raise ConnectionError("connection refused (bridge stopped)")
+            yield  # pragma: no cover
+
+        return session()
+
+
+async def test_membership_change_leaves_requests_in_flight_on_their_snapshot(clean_settings):
+    """A request already listing the group keeps the membership it started with. A
+    member removed meanwhile, whose listing then fails, is skipped as a failing member
+    always is, instead of failing the whole request (FastMCP's aggregate re-indexes
+    its provider list after awaiting, so shrinking a live one raised IndexError)."""
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Stopping")
+    _write_groups({"all": "*"})
+    hub = GroupHub(transport_factory=lambda _: _SlowFailingTransport())
+    try:
+        await hub.sync(_endpoints(member))
+        bundle = hub._instances["all"].bundle
+        listing = asyncio.create_task(bundle.list_tools())
+        await asyncio.sleep(0.05)  # the listing is now awaiting the member
+        await hub.sync(_endpoints())  # and the member is removed under it
+        assert await asyncio.wait_for(listing, 5) == []
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)
+
+
+async def test_membership_changes_release_what_they_replace(clean_settings):
+    """A long-running group whose members come and go must not accumulate them: each
+    membership change releases the one it replaces, so nothing grows with churn."""
+    import gc
+    import weakref
+
+    with Session(get_engine()) as session:
+        a = _mk_server(session, "Alpha")
+        b = _mk_server(session, "Beta")
+    _write_groups({"all": "*"})
+    hub = _hub_for({"up-alpha": _make_upstream("alpha", "hello"),
+                    "up-beta": _make_upstream("beta", "world")})
+    try:
+        await hub.sync(_endpoints(a))
+        instance = hub._instances["all"]
+        (scope,) = instance.bundle._extension_scopes
+        retained = len(scope.stack._exit_callbacks)
+        first = weakref.ref(instance.bundle.providers[instance.slot])
+        for _ in range(10):
+            await hub.sync(_endpoints(a, b))
+            await hub.sync(_endpoints(a))
+        gc.collect()
+        assert first() is None  # the replaced membership is gone
+        assert len(scope.stack._exit_callbacks) == retained  # and nothing piled up
+        assert await _list_tool_names(hub.app_for("all")) == ["alpha_hello"]
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, a.id)
+            repo.delete_server(session, b.id)
+
+
+async def test_turn_that_parks_after_its_member_left_cannot_resume(
+    clean_settings, pushing_upstream_url
+):
+    """A member removed while its tool is still running, before it asks the caller
+    anything, can't answer through the group either: when it then asks and the turn
+    parks, the retry is refused, since the group no longer mounts it."""
+    from mcp.types import InputRequiredResult, ListRootsResult, Root
+
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Pusher")
+    _write_groups({"all": "*"})
+    hub = _http_hub(pushing_upstream_url)
+    try:
+        await hub.sync(_endpoints(member))
+        async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
+            call = asyncio.create_task(
+                client.session.call_tool(
+                    "pusher_slow_where", {"delay": 0.5}, allow_input_required=True
+                )
+            )
+            await asyncio.sleep(0.2)  # running, not yet asking
+            await hub.sync(_endpoints())  # the member leaves
+            first = await asyncio.wait_for(call, 10)
+            assert isinstance(first, InputRequiredResult)  # it parked afterwards
+            (key,) = first.input_requests
+            retry = await asyncio.wait_for(
+                client.session.call_tool(
+                    "pusher_slow_where",
+                    {"delay": 0.5},
+                    allow_input_required=True,
+                    input_responses={key: ListRootsResult(roots=[Root(uri="file:///alice")])},
+                    request_state=first.request_state,
+                ),
+                10,
+            )
+        assert retry.is_error and "has ended" in retry.content[0].text
+        assert hub._parked["all"] == {}
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)

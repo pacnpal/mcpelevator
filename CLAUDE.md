@@ -145,9 +145,13 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   future, except the built-in control MCP server) or an ordered list of server ids. Each group is served at `/g/<name>/mcp`: a
   control-plane-hosted FastMCP mounting a proxy per running member, tools namespaced by slug,
   kept current after each reconcile via the supervisor's `on_converged` hook. The members sit in
-  one `AggregateProvider` per group, and a membership change adds and removes just the members
-  that changed, in place, so the group's stateful sessions (the handshake-era back-channel for
-  pushed roots/sampling/elicitation) survive it and see it at once. An instance is rebuilt
+  one `AggregateProvider` per group, and a membership change builds a new one and swaps it into
+  the bundle in one assignment (`GroupHub._install`), so the group's stateful sessions (the
+  handshake-era back-channel for pushed roots/sampling/elicitation) survive it and see it at
+  once, a request in flight keeps the snapshot it started with (never mutate a live provider
+  list: FastMCP re-indexes it after awaiting), and the replaced snapshot's extension runtime is
+  closed rather than left in the bundle's scope. A parked turn resumes only while every
+  member it reached is still mounted. An instance is rebuilt
   only after a teardown (an auth-affecting write or a failed sync), and the torn-down one
   drains its in-flight requests before closing, so a call that tears down its own group still returns;
   standalone GET streams don't hold members awake
