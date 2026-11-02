@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
 
-import httpx
+import httpx2
 import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -138,14 +138,14 @@ def _mock_app() -> Starlette:
 def mock_transport(monkeypatch):
     """Route every httpx client the flow builds at the in-process mock app."""
     app = _mock_app()
-    transport = httpx.ASGITransport(app=app)
-    real_client = httpx.AsyncClient
+    transport = httpx2.ASGITransport(app=app)
+    real_client = httpx2.AsyncClient
 
     def factory(*args, **kwargs):
         kwargs.setdefault("transport", transport)
         return real_client(*args, **kwargs)
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", factory)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", factory)
     _ISSUED_ACCESS.clear()
     _ISSUED_ACCESS.add("access-1")  # reset baseline; access-1 becomes valid after exchange
     _ISSUED_ACCESS.clear()  # start empty so /mcp 401s until the exchange issues access-1
@@ -175,7 +175,7 @@ async def test_full_oauth_handshake_and_refresh(mock_transport):
         state = qs["state"][0]
 
         # 2) "Browser": follow the auth URL, read the redirect back with code+state.
-        async with httpx.AsyncClient(transport=mock_transport) as browser:
+        async with httpx2.AsyncClient(transport=mock_transport) as browser:
             resp = await browser.get(auth_url, follow_redirects=False)
         assert resp.status_code == 302
         loc = parse_qs(urlparse(resp.headers["location"]).query)
@@ -201,7 +201,7 @@ async def test_full_oauth_handshake_and_refresh(mock_transport):
         provider = host._build_oauth_auth(
             {"server_id": _Srv.id, "url": MCP_URL, "scopes": "read"}
         )
-        async with httpx.AsyncClient(auth=provider, transport=mock_transport) as client:
+        async with httpx2.AsyncClient(auth=provider, transport=mock_transport) as client:
             r = await client.post(MCP_URL, json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
         assert r.status_code == 200, r.text
         refreshed = await store.get_tokens()

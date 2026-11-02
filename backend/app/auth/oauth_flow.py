@@ -37,9 +37,14 @@ import time
 from typing import Optional
 from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
-import httpx
+import httpx2
 from mcp.client.auth import OAuthClientProvider, OAuthRegistrationError, TokenStorage
-from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+from mcp.shared.auth import (
+    AuthorizationCodeResult,
+    OAuthClientInformationFull,
+    OAuthClientMetadata,
+    OAuthToken,
+)
 from pydantic import AnyHttpUrl
 
 from app import sealed
@@ -609,6 +614,7 @@ class _Pending:
         self.row_existed = row_existed
         self.state: Optional[str] = None  # OAuth ``state``, learned from the auth URL
         self.code: Optional[str] = None  # filled in by the callback
+        self.iss: Optional[str] = None  # RFC 9207 issuer from the callback, if sent
         self.url_future: asyncio.Future[str] = loop.create_future()
         self.done_future: asyncio.Future[None] = loop.create_future()
         self.callback_event = asyncio.Event()
@@ -788,7 +794,7 @@ _CIMD_PROBE_TIMEOUT = 8.0
 _CIMD_PROBE_MAX_BYTES = 65536
 
 
-async def _fetch_client_metadata(url: str) -> httpx.Response:
+async def _fetch_client_metadata(url: str) -> httpx2.Response:
     """One unauthenticated GET of our own client-metadata URL — no cookies, no bearer,
     no redirects — exactly the fetch a CIMD-supporting authorization server performs.
     Bounded twice over: ``asyncio.wait_for`` caps the WHOLE request wall-clock (httpx
@@ -804,10 +810,10 @@ async def _fetch_client_metadata(url: str) -> httpx.Response:
     response the caller treats as disqualifying."""
     got_headers = False
 
-    async def _get() -> httpx.Response:
+    async def _get() -> httpx2.Response:
         nonlocal got_headers
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(_CIMD_PROBE_TIMEOUT), follow_redirects=False
+        async with httpx2.AsyncClient(
+            timeout=httpx2.Timeout(_CIMD_PROBE_TIMEOUT), follow_redirects=False
         ) as client:
             # Accept-Encoding: identity + aiter_raw: the bound must hold on the bytes
             # actually allocated. aiter_bytes DECODES each raw chunk before yielding —
@@ -828,14 +834,14 @@ async def _fetch_client_metadata(url: str) -> httpx.Response:
                     body.extend(chunk[: _CIMD_PROBE_MAX_BYTES + 1 - len(body)])
                     if len(body) > _CIMD_PROBE_MAX_BYTES:
                         break
-                return httpx.Response(response.status_code, content=bytes(body))
+                return httpx2.Response(response.status_code, content=bytes(body))
 
     try:
         return await asyncio.wait_for(_get(), timeout=_CIMD_PROBE_TIMEOUT)
     except TimeoutError:
         if got_headers:
             raise
-        raise httpx.ConnectTimeout(
+        raise httpx2.ConnectTimeout(
             f"no response headers within {_CIMD_PROBE_TIMEOUT:.0f}s"
         ) from None
 
@@ -880,14 +886,14 @@ async def _reachable_client_metadata_url(url: str) -> Optional[str]:
         return cached[0]
     try:
         response = await _fetch_client_metadata(url)
-    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+    except (httpx2.ConnectError, httpx2.ConnectTimeout) as exc:
         # Couldn't even open a connection from inside the container — the classic
         # no-hairpin-route shape. Not evidence about the provider's path: offer.
         logger.debug(
             "CIMD self-probe of %s could not connect (%s); offering the URL anyway", url, exc
         )
         return url
-    except (TimeoutError, httpx.TimeoutException) as exc:
+    except (TimeoutError, httpx2.TimeoutException) as exc:
         # The connection was established (ConnectTimeout is excluded above) but the
         # document couldn't be delivered inside the provider-compatible budget — a
         # stalled read or a body trickling past the wall clock. A provider's fetch
@@ -1070,8 +1076,8 @@ async def _drive(
     inner_error: Optional[BaseException] = None
     final_status: Optional[int] = None
     try:
-        async with httpx.AsyncClient(
-            auth=provider, timeout=httpx.Timeout(30.0), follow_redirects=True
+        async with httpx2.AsyncClient(
+            auth=provider, timeout=httpx2.Timeout(30.0), follow_redirects=True
         ) as client:
             # STREAM (don't read the body): the OAuth handshake runs to completion before this
             # final response is returned, so the body is irrelevant — and an SSE upstream keeps
@@ -1324,14 +1330,15 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         if not pending.url_future.done():
             pending.url_future.set_result(authorization_url)
 
-    async def callback_handler() -> tuple[str, Optional[str]]:
+    async def callback_handler() -> AuthorizationCodeResult:
         try:
             await asyncio.wait_for(pending.callback_event.wait(), timeout=_FLOW_TIMEOUT)
         except asyncio.TimeoutError as exc:
             raise TimeoutError("timed out waiting for the operator to finish signing in") from exc
         if pending.code is None:
             raise RuntimeError("OAuth callback delivered no authorization code")
-        return pending.code, pending.state
+        # The SDK checks ``iss`` against the discovered issuer (RFC 9207).
+        return AuthorizationCodeResult(code=pending.code, state=pending.state, iss=pending.iss)
 
     try:
         provider = _ScopedOAuthClientProvider(
@@ -1340,7 +1347,6 @@ async def begin_authorization(server, *, callback_url: str) -> str:
             storage=mem,
             redirect_handler=redirect_handler,
             callback_handler=callback_handler,
-            timeout=_FLOW_TIMEOUT,
             operator_scopes=server.oauth_scopes or None,
             client_metadata_url=client_metadata_url,
         )
@@ -1372,8 +1378,8 @@ async def begin_authorization(server, *, callback_url: str) -> str:
         raise _classify_begin_error(exc) from exc
 
 
-async def complete_authorization(state: str, code: str) -> str:
-    """Feed the callback's ``(code, state)`` into the parked flow and wait for it to
+async def complete_authorization(state: str, code: str, iss: Optional[str] = None) -> str:
+    """Feed the callback's ``(code, state, iss)`` into the parked flow and wait for it to
     finish. Returns the server id on success. Raises ``KeyError`` for an unknown/expired
     state, or the underlying error if the token exchange fails."""
     _reap_stale()
@@ -1382,6 +1388,7 @@ async def complete_authorization(state: str, code: str) -> str:
     if pending is None:
         raise KeyError("unknown or expired OAuth state")
     pending.code = code
+    pending.iss = iss
     pending.callback_event.set()
     try:
         await asyncio.wait_for(asyncio.shield(pending.done_future), timeout=90.0)

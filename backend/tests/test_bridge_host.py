@@ -23,9 +23,9 @@ from fastmcp import Client, FastMCP
 from fastmcp.client.transports import FastMCPTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.server.providers.proxy import ProxyClient
-from fastmcp.tools.tool import Tool as FastMCPTool
+from fastmcp.tools import Tool as FastMCPTool
 from mcp.server.session import ServerSession
-from mcp.types import Root
+from mcp.types import ListRootsResult, Root
 
 from app.bridge import host
 
@@ -55,10 +55,10 @@ async def test_forward_roots_skips_when_client_lacks_capability():
     """A client that never advertised roots is never asked — we just return []."""
     ctx = _ctx_with_session()
     ctx.session.check_client_capability.return_value = False
-    ctx.list_roots = AsyncMock(side_effect=AssertionError("must not forward"))
+    ctx.session.list_roots = AsyncMock(side_effect=AssertionError("must not forward"))
     with patch.object(host, "get_context", return_value=ctx):
         assert await host._forward_roots(None) == []
-    ctx.list_roots.assert_not_called()
+    ctx.session.list_roots.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -67,7 +67,7 @@ async def test_forward_roots_forwards_when_client_supports_it():
     roots = [Root(uri="file:///work")]
     ctx = _ctx_with_session()
     ctx.session.check_client_capability.return_value = True
-    ctx.list_roots = AsyncMock(return_value=roots)
+    ctx.session.list_roots = AsyncMock(return_value=ListRootsResult(roots=roots))
     with patch.object(host, "get_context", return_value=ctx):
         assert await host._forward_roots(None) == roots
 
@@ -77,17 +77,18 @@ async def test_forward_roots_swallows_forwarding_errors():
     """Client claimed roots support but the call failed -> [], not -32603 upstream."""
     ctx = _ctx_with_session()
     ctx.session.check_client_capability.return_value = True
-    ctx.list_roots = AsyncMock(side_effect=Exception("boom"))
+    ctx.session.list_roots = AsyncMock(side_effect=Exception("boom"))
     with patch.object(host, "get_context", return_value=ctx):
         assert await host._forward_roots(None) == []
 
 
 def test_session_exposes_check_client_capability():
     """Lock in the SDK contract the handler relies on: ServerSession provides
-    ``check_client_capability`` (and does NOT expose a ``client_capabilities``
-    attribute). Guards against regressions if the mcp dependency changes."""
+    ``check_client_capability`` and ``list_roots`` (FastMCP 4 dropped
+    ``Context.list_roots``, so the relay goes through the session). Guards against
+    regressions if the mcp dependency changes."""
     assert hasattr(ServerSession, "check_client_capability")
-    assert not hasattr(ServerSession, "client_capabilities")
+    assert hasattr(ServerSession, "list_roots")
 
 
 def test_build_proxy_installs_custom_roots_handler():
@@ -141,8 +142,8 @@ async def test_proxy_preserves_tool_output_schema():
     async with Client(proxy) as client:
         tools = {t.name: t for t in await client.list_tools()}
 
-    assert tools["structured"].outputSchema == answer_schema
-    assert tools["unstructured"].outputSchema is None
+    assert tools["structured"].output_schema == answer_schema
+    assert tools["unstructured"].output_schema is None
 
 
 _STRICT_STDIO_FIXTURE = str(Path(__file__).with_name("strict_stdio_server_fixture.py"))
@@ -289,11 +290,18 @@ def test_bridge_never_forwards_caller_headers_to_remote_upstream():
     """The outer proxy has already authenticated the caller, so a bridge must not
     pass that credential through to an operator-configured remote MCP server."""
     transport = host.StreamableHttpTransport(url="https://up.example/mcp")
-    assert transport.forward_incoming_headers is False
-    # ProxyClient/create_proxy turn forwarding on; build_proxy must override them last.
-    with patch.object(host, "_build_transport", return_value=transport):
-        host.build_proxy({"name": "remote"})
-    assert transport.forward_incoming_headers is False
+    # premise: FastMCP 4's ProxyClient forwards caller headers unless told otherwise.
+    assert host.ProxyClient(transport)._transport_options.forward_incoming_headers is True
+
+    def forwards(spec: dict) -> bool:
+        with patch.object(host, "_build_transport", return_value=transport):
+            proxy = host.build_proxy(spec)
+        # The per-request client the proxy actually connects with.
+        return proxy.client_factory()._transport_options.forward_incoming_headers
+
+    assert forwards({"name": "remote"}) is False
+    # Only the built-in server's bridge forwards (its upstream is this control plane).
+    assert forwards({"name": "builtin", "forward_authorization": True}) is True
 
 
 # --- per-tool policy: hiding (issue #105) + overrides (issue #112) ------------
@@ -406,7 +414,7 @@ async def test_tool_override_renames_and_redescribes():
         assert set(tools) == {"sum_numbers", "secret", "echo"}
         assert tools["sum_numbers"].description == "Adds two numbers."
         # The input schema still comes from upstream — only the labels change.
-        assert set(tools["sum_numbers"].inputSchema["properties"]) == {"a", "b"}
+        assert set(tools["sum_numbers"].input_schema["properties"]) == {"a", "b"}
         result = await client.call_tool("sum_numbers", {"a": 2, "b": 3})
     assert result.data == 5
 
@@ -536,11 +544,13 @@ async def test_override_preserves_upstream_meta_and_execution():
             proxy = host.build_proxy(
                 {"command": "x", "name": "t", "tool_overrides": {"tasky": policy}}
             )
-        async with Client(proxy) as client:
+        # `execution` (task support) is a handshake-era field: the sessionless protocol
+        # moved tasks into an extension, so only a legacy connection is ever shown it.
+        async with Client(proxy, mode="legacy") as client:
             served = (await client.list_tools())[0]
 
         assert served.meta["vendor"] == {"hint": "keep-me"}, policy
-        assert served.execution.taskSupport == "required", policy
+        assert served.execution.task_support == "required", policy
 
 
 @pytest.mark.asyncio
@@ -698,7 +708,7 @@ async def test_override_preserves_an_open_ended_input_schema():
             )
         async with Client(proxy) as client:
             served = (await client.list_tools())[0]
-        assert served.inputSchema == open_ended, policy
+        assert served.input_schema == open_ended, policy
 
 
 @pytest.mark.asyncio
@@ -762,7 +772,7 @@ async def test_normalize_schema_dialect_off_by_default_leaves_draft07_untouched(
     bridge must not silently rewrite what the upstream literally declared."""
     tool = _tool_with_schemas(
         parameters={"type": "object", "properties": {"x": {"type": "integer"}}, "$schema": _DRAFT_07},
-        output_schema={"type": "integer", "$schema": _DRAFT_07},
+        output_schema={"type": "object", "properties": {"r": {"type": "integer"}}, "$schema": _DRAFT_07},
     )
     with patch.object(
         host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
@@ -770,8 +780,8 @@ async def test_normalize_schema_dialect_off_by_default_leaves_draft07_untouched(
         proxy = host.build_proxy({"command": "x", "name": "t"})
     async with Client(proxy) as client:
         served = (await client.list_tools())[0]
-    assert served.inputSchema["$schema"] == _DRAFT_07
-    assert served.outputSchema["$schema"] == _DRAFT_07
+    assert served.input_schema["$schema"] == _DRAFT_07
+    assert served.output_schema["$schema"] == _DRAFT_07
 
 
 @pytest.mark.asyncio
@@ -780,7 +790,7 @@ async def test_normalize_schema_dialect_rewrites_input_and_output_schema():
     else about the schema (its actual keywords) moves."""
     tool = _tool_with_schemas(
         parameters={"type": "object", "properties": {"x": {"type": "integer"}}, "$schema": _DRAFT_07},
-        output_schema={"type": "integer", "$schema": _DRAFT_07},
+        output_schema={"type": "object", "properties": {"r": {"type": "integer"}}, "$schema": _DRAFT_07},
     )
     with patch.object(
         host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
@@ -788,10 +798,10 @@ async def test_normalize_schema_dialect_rewrites_input_and_output_schema():
         proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
     async with Client(proxy) as client:
         served = (await client.list_tools())[0]
-    assert served.inputSchema["$schema"] == _DIALECT_2020_12
-    assert served.inputSchema["properties"] == {"x": {"type": "integer"}}
-    assert served.outputSchema["$schema"] == _DIALECT_2020_12
-    assert served.outputSchema["type"] == "integer"
+    assert served.input_schema["$schema"] == _DIALECT_2020_12
+    assert served.input_schema["properties"] == {"x": {"type": "integer"}}
+    assert served.output_schema["$schema"] == _DIALECT_2020_12
+    assert served.output_schema["properties"] == {"r": {"type": "integer"}}
 
 
 @pytest.mark.asyncio
@@ -805,7 +815,7 @@ async def test_normalize_schema_dialect_does_not_invent_a_dialect():
         proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
     async with Client(proxy) as client:
         served = (await client.list_tools())[0]
-    assert "$schema" not in served.inputSchema
+    assert "$schema" not in served.input_schema
 
 
 @pytest.mark.asyncio
@@ -820,7 +830,7 @@ async def test_normalize_schema_dialect_leaves_2020_12_alone():
         proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
     async with Client(proxy) as client:
         served = (await client.list_tools())[0]
-    assert served.inputSchema["$schema"] == _DIALECT_2020_12
+    assert served.input_schema["$schema"] == _DIALECT_2020_12
 
 
 @pytest.mark.asyncio
@@ -836,7 +846,7 @@ async def test_normalize_schema_dialect_applies_without_any_hide_or_rename_polic
         proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
     async with Client(proxy) as client:
         served = (await client.list_tools())[0]
-    assert served.inputSchema["$schema"] == _DIALECT_2020_12
+    assert served.input_schema["$schema"] == _DIALECT_2020_12
 
 
 @pytest.mark.asyncio
@@ -859,7 +869,7 @@ async def test_normalize_schema_dialect_combines_with_rename():
     async with Client(proxy) as client:
         served = (await client.list_tools())[0]
     assert served.name == "renamed"
-    assert served.inputSchema["$schema"] == _DIALECT_2020_12
+    assert served.input_schema["$schema"] == _DIALECT_2020_12
 
 
 def test_tool_transform_reads_normalize_schema_dialect_from_spec():
@@ -880,21 +890,15 @@ async def test_normalize_schema_dialect_skips_tuple_typed_items():
     """An array-valued `items` is draft-07 positional TUPLE validation — not a valid
     `items` shape in 2020-12 (tuples moved to `prefixItems`). Left as draft-07 rather
     than mislabeled as 2020-12 while still speaking draft-07's tuple syntax."""
-    tool = _tool_with_schemas(
-        parameters={
-            "type": "array",
-            "items": [{"type": "string"}, {"type": "integer"}],
-            "$schema": _DRAFT_07,
-        }
-    )
-    with patch.object(
-        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
-    ):
-        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
-    async with Client(proxy) as client:
-        served = (await client.list_tools())[0]
-    assert served.inputSchema["$schema"] == _DRAFT_07
-    assert served.inputSchema["items"] == [{"type": "string"}, {"type": "integer"}]
+    # Checked on the transform directly: MCP SDK v2 refuses to serve a tool whose input
+    # schema isn't an object, so a top-level tuple can't reach a proxy any more (the
+    # nested case, which can, is covered below).
+    schema = {
+        "type": "array",
+        "items": [{"type": "string"}, {"type": "integer"}],
+        "$schema": _DRAFT_07,
+    }
+    assert host._ToolTransform._normalized_schema(schema) is schema
 
 
 @pytest.mark.asyncio
@@ -916,8 +920,8 @@ async def test_normalize_schema_dialect_skips_dependencies_keyword():
         proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
     async with Client(proxy) as client:
         served = (await client.list_tools())[0]
-    assert served.inputSchema["$schema"] == _DRAFT_07
-    assert served.inputSchema["dependencies"] == {"a": ["b"]}
+    assert served.input_schema["$schema"] == _DRAFT_07
+    assert served.input_schema["dependencies"] == {"a": ["b"]}
 
 
 @pytest.mark.asyncio
@@ -925,17 +929,10 @@ async def test_normalize_schema_dialect_skips_ref_with_assertion_sibling():
     """draft-07 ignores every sibling of `$ref`; 2020-12 evaluates them. Relabeling would
     make the schema STRICTER — an argument the upstream tool previously accepted (the
     sibling `required` was silently ignored) could start failing validation post-proxy."""
-    tool = _tool_with_schemas(
-        parameters={"$ref": "#/$defs/Thing", "required": ["name"], "$schema": _DRAFT_07}
-    )
-    with patch.object(
-        host, "_build_transport", return_value=FastMCPTransport(_upstream_with_tool(tool))
-    ):
-        proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
-    async with Client(proxy) as client:
-        served = (await client.list_tools())[0]
-    assert served.inputSchema["$schema"] == _DRAFT_07
-    assert served.inputSchema["required"] == ["name"]
+    # Checked on the transform directly: a top-level schema with no `"type": "object"`
+    # isn't a servable input schema under MCP SDK v2.
+    schema = {"$ref": "#/$defs/Thing", "required": ["name"], "$schema": _DRAFT_07}
+    assert host._ToolTransform._normalized_schema(schema) is schema
 
 
 @pytest.mark.asyncio
@@ -958,7 +955,7 @@ async def test_normalize_schema_dialect_skips_nested_tuple_items():
         proxy = host.build_proxy({"command": "x", "name": "t", "normalize_schema_dialect": True})
     async with Client(proxy) as client:
         served = (await client.list_tools())[0]
-    assert served.inputSchema["$schema"] == _DRAFT_07
+    assert served.input_schema["$schema"] == _DRAFT_07
 
 
 # (schema, expected, id) — one row per behaviour, so a regression names the exact case and
@@ -1560,9 +1557,9 @@ async def test_serialized_stdio_routes_each_server_request_to_its_caller():
     proxy, transport = _asker_proxy(serialize=True)
     try:
         async with (
-            Client(proxy, roots=["file:///alice"]) as alice,
-            Client(proxy, roots=["file:///bob"]) as bob,
-            Client(proxy) as nobody,
+            Client(proxy, mode="legacy", roots=["file:///alice"]) as alice,
+            Client(proxy, mode="legacy", roots=["file:///bob"]) as bob,
+            Client(proxy, mode="legacy") as nobody,
         ):
             calls = [c for _ in range(3) for c in (alice, bob, nobody)]
             outcomes = await asyncio.gather(*(_ask(c, "roots/list") for c in calls))
@@ -1583,8 +1580,8 @@ async def test_serialized_stdio_forwards_sampling_only_to_a_capable_caller():
     proxy, transport = _asker_proxy(serialize=True)
     try:
         async with (
-            Client(proxy, sampling_handler=sampled, elicitation_handler=elicited) as capable,
-            Client(proxy) as plain,
+            Client(proxy, mode="legacy", sampling_handler=sampled, elicitation_handler=elicited) as capable,
+            Client(proxy, mode="legacy") as plain,
         ):
             with anyio.fail_after(10):
                 sampling = await _ask(capable, "sampling/createMessage")
@@ -1609,7 +1606,7 @@ async def test_serialized_stdio_refuses_unsolicited_server_requests():
     sampled = AsyncMock(side_effect=_sample_reply)
     proxy, transport = _asker_proxy(serialize=True)
     try:
-        async with Client(proxy, roots=["file:///alice"], sampling_handler=sampled) as alice:
+        async with Client(proxy, mode="legacy", roots=["file:///alice"], sampling_handler=sampled) as alice:
             await alice.call_tool_mcp("arm", {"method": "roots/list", "delay": 0.2})
             await alice.call_tool_mcp("arm", {"method": "sampling/createMessage", "delay": 0.2})
             with anyio.fail_after(10):
@@ -1623,13 +1620,32 @@ async def test_serialized_stdio_refuses_unsolicited_server_requests():
     sampled.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_serialized_stdio_modern_front_degrades_roots_to_empty():
+    """The tests above connect handshake-era clients (``mode="legacy"``), the only era
+    with a back-channel. A client on the sessionless 2026-07-28 protocol (FastMCP 4's
+    default) can't be asked anything mid-request, so the child's ``roots/list`` answers
+    ``[]`` — no roots, rather than an error the child would log as -32603."""
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        async with Client(proxy, roots=["file:///alice"]) as alice:
+            with anyio.fail_after(5):
+                assert _root_uris(await _ask(alice, "roots/list")) == []
+    finally:
+        await transport.disconnect()
+
+
 async def _cancel_server_side(client: Client, call) -> None:
     """Start ``call`` on ``client`` and return once the SERVER has cancelled it — the way
     a real client abandons a request (``notifications/cancelled``), not just a local
     cancel that leaves the bridge still working on it."""
-    request_id = client.session._request_id  # the id the next request will carry
+    # MCP SDK v2 mints ids in the session's dispatcher; the call's id is the one that
+    # appears in its pending table once the call is on the wire.
+    pending = client.session._dispatcher._pending
+    before = set(pending)
     task = asyncio.create_task(call)
     await asyncio.sleep(0.15)
+    (request_id,) = set(pending) - before
     await client.cancel(request_id)
     with anyio.move_on_after(5):
         with pytest.raises(Exception):
@@ -1644,9 +1660,9 @@ async def test_serialized_stdio_request_cancelled_in_the_queue_frees_its_place()
     proxy, transport = _asker_proxy(serialize=True)
     try:
         async with (
-            Client(proxy, roots=["file:///alice"]) as alice,
-            Client(proxy, roots=["file:///bob"]) as bob,
-            Client(proxy, roots=["file:///carol"]) as carol,
+            Client(proxy, mode="legacy", roots=["file:///alice"]) as alice,
+            Client(proxy, mode="legacy", roots=["file:///bob"]) as bob,
+            Client(proxy, mode="legacy", roots=["file:///carol"]) as carol,
         ):
             first = asyncio.create_task(_ask(alice, "roots/list", delay=0.6))
             await asyncio.sleep(0.05)
@@ -1671,8 +1687,8 @@ async def test_serialized_stdio_request_cancelled_mid_call_reaches_no_one():
     proxy, transport = _asker_proxy(serialize=True)
     try:
         async with (
-            Client(proxy, roots=["file:///alice"]) as alice,
-            Client(proxy, roots=["file:///bob"]) as bob,
+            Client(proxy, mode="legacy", roots=["file:///alice"]) as alice,
+            Client(proxy, mode="legacy", roots=["file:///bob"]) as bob,
         ):
             await _history(alice)  # alice connects the child first
             await _cancel_server_side(
@@ -1696,8 +1712,8 @@ async def test_serialized_stdio_call_abandoned_past_the_drain_bound_frees_the_ch
     try:
         with patch.object(host, "_CANCELLED_CALL_DRAIN_S", 0.2):
             async with (
-                Client(proxy, roots=["file:///alice"]) as alice,
-                Client(proxy, roots=["file:///bob"]) as bob,
+                Client(proxy, mode="legacy", roots=["file:///alice"]) as alice,
+                Client(proxy, mode="legacy", roots=["file:///bob"]) as bob,
             ):
                 await _history(alice)  # alice connects the child first
                 # The child asks for alice's call at ~0.8s — after her cancel (~0.15s) and the

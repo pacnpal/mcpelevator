@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 from mcp.shared.auth import OAuthToken
@@ -175,7 +175,7 @@ def test_config_hash_excludes_client_secret():
 
 
 class _FakeAsyncClient:
-    """Stands in for httpx.AsyncClient: instead of talking to a real upstream, it
+    """Stands in for httpx2.AsyncClient: instead of talking to a real upstream, it
     drives the provider's own redirect/callback handlers and stores tokens — exactly
     what a successful OAuth handshake would do."""
 
@@ -195,13 +195,15 @@ class _FakeAsyncClient:
         # 1) provider hands us the authorization URL -> control plane returns it to the browser
         await ctx.redirect_handler(f"https://auth.example/authorize?state={self.STATE}&code_challenge=x")
         # 2) provider parks until the browser callback delivers the code
-        code, state = await ctx.callback_handler()
+        result = await ctx.callback_handler()
+        code, state = result.code, result.state
         assert state == self.STATE
+        self.__class__.last_iss = result.iss
         # 3) the exchange stores tokens (what the real provider does on a 200)
         await ctx.storage.set_tokens(
             OAuthToken(access_token=f"AT-{code}", token_type="Bearer", refresh_token="RT", expires_in=3600)
         )
-        return httpx.Response(200)
+        return httpx2.Response(200)
 
     def stream(self, _method, _url, **_kwargs):
         # _drive uses client.stream(...) as an async context manager; drive the handshake
@@ -219,7 +221,7 @@ class _FakeAsyncClient:
 
 
 async def test_flow_begin_and_complete(monkeypatch):
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
 
     class _Srv:
         id = "srv-flow-1"
@@ -246,6 +248,33 @@ async def test_flow_begin_and_complete(monkeypatch):
         store.clear()
 
 
+async def test_flow_hands_the_callback_iss_to_the_sdk(monkeypatch):
+    """MCP SDK v2 validates RFC 9207's ``iss`` against the discovered issuer, and refuses
+    a response WITHOUT it from a server that advertises support, so the callback's
+    ``iss`` must reach the provider rather than stop at the route."""
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
+
+    class _Srv:
+        id = "srv-flow-iss"
+        command = "https://up.example/mcp"
+        args = ["streamable-http"]
+        env: dict = {}
+        oauth_client_id = None
+        oauth_client_secret = None
+        oauth_scopes = ""
+
+    store = ServerTokenStorage(_Srv.id)
+    store.clear()
+    try:
+        await oauth_flow.begin_authorization(_Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback")
+        await oauth_flow.complete_authorization(
+            _FakeAsyncClient.STATE, code="c", iss="https://auth.example"
+        )
+        assert _FakeAsyncClient.last_iss == "https://auth.example"
+    finally:
+        store.clear()
+
+
 async def test_flow_complete_unknown_state_raises():
     with pytest.raises(KeyError):
         await oauth_flow.complete_authorization("nope-not-a-real-state", code="x")
@@ -254,7 +283,7 @@ async def test_flow_complete_unknown_state_raises():
 async def test_reauth_preserves_tokens_until_success(monkeypatch):
     # Re-authenticating must not destroy the existing working token up front: the shared
     # store keeps the old credential until the new grant actually succeeds.
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
 
     class _Srv:
         id = "srv-reauth-1"
@@ -291,13 +320,13 @@ async def test_flow_rejects_grant_the_endpoint_still_refuses(monkeypatch):
         async def _handshake(self):
             ctx = self._provider.context
             await ctx.redirect_handler(f"https://auth.example/authorize?state={self.STATE}")
-            code, _state = await ctx.callback_handler()
+            code = (await ctx.callback_handler()).code
             await ctx.storage.set_tokens(
                 OAuthToken(access_token=f"AT-{code}", token_type="Bearer", refresh_token="RT", expires_in=3600)
             )
-            return httpx.Response(401)
+            return httpx2.Response(401)
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _Reject401)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _Reject401)
 
     class _Srv:
         id = "srv-flow-reject"
@@ -339,7 +368,7 @@ async def test_registration_rate_limit_surfaces_clean_429(monkeypatch):
 
             return _Ctx()
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _RateLimited)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _RateLimited)
 
     class _Srv:
         id = "srv-ratelimit-1"
@@ -380,7 +409,7 @@ async def test_begin_offers_cimd_url_only_for_https_callback(monkeypatch):
     # The provider is handed the derived client-metadata URL (https base) or None (http
     # base). Either way the flow itself is unchanged — the SDK only consumes the URL when
     # the authorization server advertises CIMD support.
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
     captured: dict = {}
     real_provider = oauth_flow._ScopedOAuthClientProvider
 
@@ -444,10 +473,10 @@ async def test_begin_skips_cimd_url_when_document_gated(monkeypatch):
     # The self-probe sees that same 401 and the flow falls back to DCR (no URL offered).
     # A 200 whose body isn't this instance's document (wrong client_id — a login page or a
     # misconfigured base) is just as definitive.
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
     captured = _spy_provider(monkeypatch)
     oauth_flow._PROBE_CACHE.clear()
-    probe = {"response": httpx.Response(401)}
+    probe = {"response": httpx2.Response(401)}
 
     async def _probe(_url):
         return probe["response"]
@@ -474,7 +503,7 @@ async def test_begin_skips_cimd_url_when_document_gated(monkeypatch):
 
         captured.clear()
         oauth_flow._PROBE_CACHE.clear()  # exercise the mismatched-document branch, not the cache
-        probe["response"] = httpx.Response(200, json={"client_id": "https://elsewhere.example"})
+        probe["response"] = httpx2.Response(200, json={"client_id": "https://elsewhere.example"})
         await oauth_flow.begin_authorization(
             _Srv, callback_url="https://mcp.example/api/oauth/callback"
         )
@@ -489,11 +518,11 @@ async def test_begin_offers_cimd_url_on_probe_success_or_transport_error(monkeyp
     # A 200 with this instance's own document keeps the offer. So does a TRANSPORT error:
     # a container that can't hairpin its own public hostname proves nothing about what the
     # provider can reach, so the probe only withholds on a definitive bad HTTP answer.
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
     captured = _spy_provider(monkeypatch)
     oauth_flow._PROBE_CACHE.clear()
     url = "https://mcp.example/api/oauth/client-metadata.json"
-    probe = {"response": httpx.Response(200, json={"client_id": url})}
+    probe = {"response": httpx2.Response(200, json={"client_id": url})}
 
     async def _probe(_url):
         if isinstance(probe["response"], Exception):
@@ -522,7 +551,7 @@ async def test_begin_offers_cimd_url_on_probe_success_or_transport_error(monkeyp
 
         captured.clear()
         oauth_flow._PROBE_CACHE.clear()  # exercise the transport-error branch, not the cache
-        probe["response"] = httpx.ConnectError("no hairpin route to own public host")
+        probe["response"] = httpx2.ConnectError("no hairpin route to own public host")
         await oauth_flow.begin_authorization(
             _Srv, callback_url="https://mcp.example/api/oauth/callback"
         )
@@ -533,7 +562,7 @@ async def test_begin_offers_cimd_url_on_probe_success_or_transport_error(monkeyp
         # so a definitive answer on the next sign-in is honoured immediately.
         captured.clear()
         oauth_flow._PROBE_CACHE.clear()
-        probe["response"] = httpx.Response(503)
+        probe["response"] = httpx2.Response(503)
         await oauth_flow.begin_authorization(
             _Srv, callback_url="https://mcp.example/api/oauth/callback"
         )
@@ -541,7 +570,7 @@ async def test_begin_offers_cimd_url_on_probe_success_or_transport_error(monkeyp
         await oauth_flow.complete_authorization(_FakeAsyncClient.STATE, code="c3")
 
         captured.clear()
-        probe["response"] = httpx.Response(401)  # no cache clear: the 503 must not have cached
+        probe["response"] = httpx2.Response(401)  # no cache clear: the 503 must not have cached
         await oauth_flow.begin_authorization(
             _Srv, callback_url="https://mcp.example/api/oauth/callback"
         )
@@ -553,7 +582,7 @@ async def test_begin_offers_cimd_url_on_probe_success_or_transport_error(monkeyp
         # budget, so a provider's own fetch would fail the same way — withhold (uncached).
         captured.clear()
         oauth_flow._PROBE_CACHE.clear()
-        probe["response"] = httpx.ReadTimeout("body stalled")
+        probe["response"] = httpx2.ReadTimeout("body stalled")
         await oauth_flow.begin_authorization(
             _Srv, callback_url="https://mcp.example/api/oauth/callback"
         )
@@ -562,7 +591,7 @@ async def test_begin_offers_cimd_url_on_probe_success_or_transport_error(monkeyp
 
         # ...while a CONNECT timeout keeps the hairpin benefit of the doubt.
         captured.clear()
-        probe["response"] = httpx.ConnectTimeout("no route from in here")
+        probe["response"] = httpx2.ConnectTimeout("no route from in here")
         await oauth_flow.begin_authorization(
             _Srv, callback_url="https://mcp.example/api/oauth/callback"
         )
@@ -577,13 +606,13 @@ async def test_begin_skips_cimd_probe_for_static_client(monkeypatch):
     # A static (pre-registered) client bypasses CIMD entirely in the SDK, so the flow must
     # not spend a self-probe round-trip on it — the raw derived URL is passed through
     # unprobed, preserving prior behavior.
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
     captured = _spy_provider(monkeypatch)
     probed = {"count": 0}
 
     async def _probe(_url):
         probed["count"] += 1
-        return httpx.Response(401)
+        return httpx2.Response(401)
 
     monkeypatch.setattr(oauth_flow, "_fetch_client_metadata", _probe)
 
@@ -621,7 +650,7 @@ async def test_second_begin_supersedes_first_parked_in_probe(monkeypatch):
     # the first begin refuses to start _drive when it wakes up superseded.
     import asyncio
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
     oauth_flow._PROBE_CACHE.clear()
     release = asyncio.Event()
     calls = {"n": 0}
@@ -630,7 +659,7 @@ async def test_second_begin_supersedes_first_parked_in_probe(monkeypatch):
         calls["n"] += 1
         if calls["n"] == 1:
             await release.wait()  # park the FIRST begin inside its probe
-        return httpx.Response(401)
+        return httpx2.Response(401)
 
     monkeypatch.setattr(oauth_flow, "_fetch_client_metadata", _probe)
 
@@ -708,7 +737,7 @@ async def test_fetch_client_metadata_bounds_body_and_wall_clock(monkeypatch):
 
             return _Ctx()
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _Streaming)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _Streaming)
     url = "https://mcp.example/api/oauth/client-metadata.json"
 
     async def _oversized():
@@ -755,8 +784,8 @@ async def test_fetch_client_metadata_bounds_body_and_wall_clock(monkeypatch):
 
             return _Ctx()
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _NeverConnects)
-    with pytest.raises(httpx.ConnectTimeout):
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _NeverConnects)
+    with pytest.raises(httpx2.ConnectTimeout):
         await oauth_flow._fetch_client_metadata(url)
 
 
@@ -770,14 +799,14 @@ async def test_stored_cimd_identity_is_not_reused_as_seed(monkeypatch):
     # probe (proving nothing was seeded) and fall back to DCR.
     from mcp.shared.auth import OAuthClientInformationFull
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
     captured = _spy_provider(monkeypatch)
     oauth_flow._PROBE_CACHE.clear()
     probed = {"count": 0}
 
     async def _probe(_url):
         probed["count"] += 1
-        return httpx.Response(401)
+        return httpx2.Response(401)
 
     monkeypatch.setattr(oauth_flow, "_fetch_client_metadata", _probe)
 
@@ -828,7 +857,7 @@ def test_basic_auth_token_request_sends_the_client_id_once():
     basic = "Basic " + "not-a-real-credential"
     bearer = "Bearer " + "not-a-real-credential"
 
-    duplicated = httpx.Request(
+    duplicated = httpx2.Request(
         "POST",
         "https://as.example/token",
         headers={
@@ -859,28 +888,28 @@ def test_single_channel_rule_leaves_every_other_request_alone():
     bearer = "Bearer " + "not-a-real-credential"
     untouched = [
         # client_secret_post: credentials in the body, no Basic header — one channel already.
-        httpx.Request(
+        httpx2.Request(
             "POST",
             "https://as.example/token",
             headers={"Content-Type": form},
             content="grant_type=refresh_token&client_id=c&client_secret=s",
         ),
         # Bearer is a RESOURCE credential, not client authentication.
-        httpx.Request(
+        httpx2.Request(
             "POST",
             "https://as.example/token",
             headers={"Authorization": bearer, "Content-Type": form},
             content="grant_type=refresh_token&client_id=c",
         ),
         # Basic, but a JSON body (registration) — not a form to rewrite.
-        httpx.Request(
+        httpx2.Request(
             "POST",
             "https://as.example/register",
             headers={"Authorization": basic, "Content-Type": "application/json"},
             content=b'{"client_id": "c"}',
         ),
         # Basic with nothing duplicated.
-        httpx.Request(
+        httpx2.Request(
             "POST",
             "https://as.example/token",
             headers={"Authorization": basic, "Content-Type": form},
@@ -915,14 +944,14 @@ async def test_aborted_request_does_not_strand_the_sdk_lock():
         pass
 
     provider = _Wrapped()
-    flow = provider.async_auth_flow(httpx.Request("GET", "https://up.example/mcp"))
+    flow = provider.async_auth_flow(httpx2.Request("GET", "https://up.example/mcp"))
     await anext(flow)  # first request is out with httpx
     assert provider.lock.locked()
     await flow.aclose()  # ...which then aborts
     assert not provider.lock.locked()
 
     # The ordinary path still runs to completion and releases just the same.
-    flow = provider.async_auth_flow(httpx.Request("GET", "https://up.example/mcp"))
+    flow = provider.async_auth_flow(httpx2.Request("GET", "https://up.example/mcp"))
     async for _ in flow:
         pass
     assert not provider.lock.locked()
@@ -937,7 +966,7 @@ async def test_a_basic_auth_registration_is_still_reused(monkeypatch):
     # instance through a needless re-registration.
     from mcp.shared.auth import OAuthClientInformationFull
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
     callback = "http://127.0.0.1:8080/api/oauth/callback"
     seeds: list = []
     real_store = oauth_flow._MemoryTokenStorage
@@ -980,7 +1009,7 @@ async def test_probe_verdict_is_cached_across_sign_ins(monkeypatch):
     # Every server on an instance shares ONE metadata URL, so consecutive sign-ins
     # (several servers, or a re-auth) reuse the conclusive verdict instead of
     # re-paying the probe round-trip.
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
     captured = _spy_provider(monkeypatch)
     oauth_flow._PROBE_CACHE.clear()
     url = "https://mcp.example/api/oauth/client-metadata.json"
@@ -988,7 +1017,7 @@ async def test_probe_verdict_is_cached_across_sign_ins(monkeypatch):
 
     async def _probe(_url):
         probed["count"] += 1
-        return httpx.Response(200, json={"client_id": url})
+        return httpx2.Response(200, json={"client_id": url})
 
     monkeypatch.setattr(oauth_flow, "_fetch_client_metadata", _probe)
 
@@ -1025,14 +1054,14 @@ async def test_upstream_oauth_client_mode_overrides_probe(monkeypatch):
 
     from app.db import get_engine
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
     captured = _spy_provider(monkeypatch)
     oauth_flow._PROBE_CACHE.clear()
     probed = {"count": 0}
 
     async def _probe(_url):
         probed["count"] += 1
-        return httpx.Response(401)  # would withhold the URL if 'cimd' ever probed
+        return httpx2.Response(401)  # would withhold the URL if 'cimd' ever probed
 
     monkeypatch.setattr(oauth_flow, "_fetch_client_metadata", _probe)
 
@@ -1087,14 +1116,14 @@ async def test_per_server_client_mode_overrides_global(monkeypatch):
     # client is seeded, so seeding would silently keep the DCR identity forever.
     from mcp.shared.auth import OAuthClientInformationFull
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
     captured = _spy_provider(monkeypatch)
     oauth_flow._PROBE_CACHE.clear()
     probed = {"count": 0}
 
     async def _probe(_url):
         probed["count"] += 1
-        return httpx.Response(401)
+        return httpx2.Response(401)
 
     monkeypatch.setattr(oauth_flow, "_fetch_client_metadata", _probe)
     url = "https://mcp.example/api/oauth/client-metadata.json"
@@ -1173,7 +1202,7 @@ async def test_drive_cancels_done_future_on_pre_url_failure(monkeypatch):
 
             return _Ctx()
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _Boom)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _Boom)
 
     class _Srv:
         id = "srv-drive-preurl"
@@ -1212,7 +1241,7 @@ async def test_drive_cancels_done_future_when_callback_never_arrives(monkeypatch
 
             return _Ctx()
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _Boom)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _Boom)
 
     class _Srv:
         id = "srv-drive-nocb"
@@ -1401,7 +1430,9 @@ def _make_scoped_provider(operator_scopes):
         return None
 
     async def _callback():
-        return ("code", None)
+        from mcp.shared.auth import AuthorizationCodeResult
+
+        return AuthorizationCodeResult(code="code")
 
     return oauth_flow._ScopedOAuthClientProvider(
         server_url="https://up.example/mcp",
@@ -1414,7 +1445,6 @@ def _make_scoped_provider(operator_scopes):
         storage=oauth_flow._MemoryTokenStorage(),
         redirect_handler=_redirect,
         callback_handler=_callback,
-        timeout=600.0,
         operator_scopes=operator_scopes,
     )
 
@@ -1852,21 +1882,21 @@ def test_callback_maps_each_flow_failure_to_its_own_reason(monkeypatch):
         (TimeoutError("exchange overran"), "timed_out"),
         # httpx has its OWN timeout hierarchy, which is not a builtin TimeoutError; an
         # upstream that stalls is routine and must not read as "unexpected_error".
-        (httpx.ReadTimeout("token endpoint stalled"), "timed_out"),
-        (httpx.ConnectTimeout("token endpoint unreachable"), "timed_out"),
+        (httpx2.ReadTimeout("token endpoint stalled"), "timed_out"),
+        (httpx2.ConnectTimeout("token endpoint unreachable"), "timed_out"),
         # A persistence failure or a plain bug must NOT borrow a phase-specific code.
         (OSError("token store is read-only"), "unexpected_error"),
     ]
     with TestClient(app) as c:
         for exc, reason in cases:
 
-            async def _boom(_state, _code, _exc=exc):
+            async def _boom(_state, _code, _exc=exc, iss=None):
                 raise _exc
 
             monkeypatch.setattr(oauth_flow, "complete_authorization", _boom)
             r = c.get(
                 "/api/oauth/callback",
-                params={"code": "cd", "state": "st"},
+                params={"code": "cd", "state": "st", "iss": "https://auth.example"},
                 headers=LOOPBACK,
                 follow_redirects=False,
             )
@@ -1883,7 +1913,7 @@ async def test_unexpected_callback_failure_does_not_log_a_raw_traceback(monkeypa
 
     leaked = "TRACEBACK-LEAKED-SECRET"
 
-    async def _boom(_state, _code):
+    async def _boom(_state, _code, iss=None):
         raise OSError(f'token store failed: {{"client_secret": "{leaked}"}}')
 
     monkeypatch.setattr(oauth_flow, "complete_authorization", _boom)
@@ -2034,7 +2064,7 @@ async def test_correlated_callback_without_a_code_is_an_operator_failure(monkeyp
     # second, misleading timeout while its state remains replayable.
     import logging
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
 
     class _Srv:
         id = "srv-no-code-correlated-1"
@@ -2052,7 +2082,7 @@ async def test_correlated_callback_without_a_code_is_an_operator_failure(monkeyp
             _Srv, callback_url="http://127.0.0.1:8080/api/oauth/callback"
         )
         state = _FakeAsyncClient.STATE
-        monkeypatch.undo()  # the app lifespan needs a real httpx.AsyncClient
+        monkeypatch.undo()  # the app lifespan needs a real httpx2.AsyncClient
         with TestClient(app) as c, caplog.at_level(logging.INFO, logger="app.api.auth"):
             r = c.get(
                 "/api/oauth/callback",
@@ -2074,7 +2104,7 @@ async def test_provider_denial_retires_the_pending_flow(monkeypatch):
     # A denial ends the sign-in, so the flow must not stay parked: otherwise its task sits
     # out the full browser window and logs a second, misleading timeout, and the still-live
     # state can be replayed to re-emit operator-level records.
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _FakeAsyncClient)
 
     class _Srv:
         id = "srv-denial-retires-1"
@@ -2095,7 +2125,7 @@ async def test_provider_denial_retires_the_pending_flow(monkeypatch):
         assert oauth_flow.pending_server_id(state) == _Srv.id
 
         # Drop the fake client before the app starts: its lifespan builds a real
-        # httpx.AsyncClient, and the stand-in has no aclose().
+        # httpx2.AsyncClient, and the stand-in has no aclose().
         monkeypatch.undo()
         with TestClient(app) as c:
             r = c.get(
@@ -2115,7 +2145,7 @@ async def test_provider_denial_retires_the_pending_flow(monkeypatch):
 def test_callback_for_vanished_server_redirects_with_server_deleted(monkeypatch):
     # The grant completed but the row is gone (deleted between promotion and this read):
     # its own code, and no crash on the missing server.
-    async def _completed_for_ghost(_state, _code):
+    async def _completed_for_ghost(_state, _code, iss=None):
         return "srv-does-not-exist"
 
     monkeypatch.setattr(oauth_flow, "complete_authorization", _completed_for_ghost)
@@ -2293,14 +2323,14 @@ async def test_upstream_rejection_overrides_a_stream_close_error(monkeypatch):
             class _Ctx:
                 async def __aenter__(_self):
                     await handshake()  # grant completes; tokens land
-                    return httpx.Response(401)  # ...and the resource refuses the token
+                    return httpx2.Response(401)  # ...and the resource refuses the token
 
                 async def __aexit__(_self, *exc):
-                    raise httpx.ReadError("connection reset while closing the stream")
+                    raise httpx2.ReadError("connection reset while closing the stream")
 
             return _Ctx()
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _RejectedThenCloseFails)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _RejectedThenCloseFails)
 
     class _Srv:
         id = "srv-rejection-wins-1"
@@ -2337,14 +2367,14 @@ async def test_promotion_block_overrides_an_incidental_retry_error(monkeypatch):
             class _Ctx:
                 async def __aenter__(_self):
                     await handshake()  # the grant completes; tokens are in the ephemeral store
-                    raise httpx.ConnectError("connection dropped on the retried request")
+                    raise httpx2.ConnectError("connection dropped on the retried request")
 
                 async def __aexit__(_self, *exc):
                     return False
 
             return _Ctx()
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _TokensThenRetryFails)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _TokensThenRetryFails)
     monkeypatch.setattr(
         oauth_flow,
         "_promotion_blocked",
@@ -2544,7 +2574,7 @@ async def test_drive_warning_cannot_emit_a_client_secret(monkeypatch, caplog):
 
             return _Ctx()
 
-    monkeypatch.setattr(oauth_flow.httpx, "AsyncClient", _RegistrationEchoesSecret)
+    monkeypatch.setattr(oauth_flow.httpx2, "AsyncClient", _RegistrationEchoesSecret)
 
     class _Srv:
         id = "srv-secret-never-logged-1"
@@ -2658,7 +2688,7 @@ def test_oauth_failure_reasons_log_at_warning(monkeypatch, caplog):
     # flow this instance started, the failure IS the operator's, so it must be WARNING.
     import logging
 
-    async def _boom(_state, _code):
+    async def _boom(_state, _code, iss=None):
         raise OSError("the token store is read-only")
 
     monkeypatch.setattr(oauth_flow, "complete_authorization", _boom)
@@ -2702,15 +2732,15 @@ def test_callback_success_redirects_to_server(monkeypatch):
     with TestClient(app) as c:
         sid = _create_oauth_server(c)
 
-        async def _fake_complete(state, code):
-            assert (state, code) == ("st", "cd")
+        async def _fake_complete(state, code, iss=None):
+            assert (state, code, iss) == ("st", "cd", "https://auth.example")
             return sid
 
         monkeypatch.setattr(oauth_flow, "complete_authorization", _fake_complete)
         try:
             r = c.get(
                 "/api/oauth/callback",
-                params={"code": "cd", "state": "st"},
+                params={"code": "cd", "state": "st", "iss": "https://auth.example"},
                 headers=LOOPBACK,
                 follow_redirects=False,
             )

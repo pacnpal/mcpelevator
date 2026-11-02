@@ -293,22 +293,18 @@ class GroupHub:
                     await self._teardown(name)
 
     def _make_proxy(self, slug: str, url: str, forward: bool = False) -> FastMCP:
-        transport = self._transport_factory(url)
-        client = ProxyClient(transport, roots=_forward_roots)
-        proxy = create_proxy(client, name=slug)
-        # Both ProxyClient.__init__ and create_proxy turn ON forwarding of the
-        # caller's Authorization header for HTTP transports (caller-credential
-        # propagation), so this override must come LAST. On this INTERNAL hop that
-        # forwarding would send the group's bearer token — which authorizes the whole
-        # bundle — to every bridge, and a remote-runner bridge would forward it once
-        # more to its upstream. Never propagate it; bridges are unauthenticated
-        # loopback and the group's auth was already enforced at the dispatcher.
-        # The one exception is the built-in mcpelevator server (``forward``): its
-        # bridge only talks to this process's /api/mcp, which authorizes every call
+        # ProxyClient forwards the caller's inbound headers (Authorization included) by
+        # default. On this INTERNAL hop that would send the group's bearer token — which
+        # authorizes the whole bundle — to every bridge, and a remote-runner bridge would
+        # forward it once more to its upstream. Never propagate it; bridges are
+        # unauthenticated loopback and the group's auth was already enforced at the
+        # dispatcher. The one exception is the built-in mcpelevator server (``forward``):
+        # its bridge only talks to this process's /api/mcp, which authorizes every call
         # as the caller and so needs the caller's own credential.
-        if hasattr(transport, "forward_incoming_headers"):
-            transport.forward_incoming_headers = forward
-        return proxy
+        client = ProxyClient(
+            self._transport_factory(url), roots=_forward_roots, forward_incoming_headers=forward
+        )
+        return create_proxy(client, name=slug)
 
     async def _swap(
         self,

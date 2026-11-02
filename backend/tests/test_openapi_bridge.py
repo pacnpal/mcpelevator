@@ -12,6 +12,7 @@ import functools
 import json
 
 import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI, Header, Request
 from fastapi.testclient import TestClient
@@ -68,7 +69,7 @@ def _proxy(monkeypatch, **spec_overrides):
         functools.partial(
             openapi.build_server,
             transport=httpx.MockTransport(lambda request: httpx.Response(200, json=doc)),
-            api_transport=httpx.ASGITransport(app=outer),
+            api_transport=httpx2.ASGITransport(app=outer),
         ),
     )
     spec = {
@@ -90,7 +91,7 @@ async def test_operations_become_callable_tools(monkeypatch):
     async with Client(proxy) as client:
         tools = {t.name: t for t in await client.list_tools()}
         assert set(tools) == {"getPet", "listPets", "deletePet", "whoAmI"}
-        assert tools["getPet"].inputSchema["required"] == ["pet_id"]
+        assert tools["getPet"].input_schema["required"] == ["pet_id"]
         result = await client.call_tool("getPet", {"pet_id": "7"})
     assert result.structured_content == {"id": "7", "name": "rex"}
     # The relative server url resolved onto the document's host, and headers rode along.
@@ -128,8 +129,8 @@ async def test_configured_header_is_not_a_tool_argument_and_always_wins(monkeypa
     async with Client(proxy) as client:
         tools = {t.name: t for t in await client.list_tools()}
         # The document declares x-api-key on the operation; the operator already supplies it.
-        assert "x-api-key" not in tools["whoAmI"].inputSchema.get("properties", {})
-        assert "x-api-key" not in tools["whoAmI"].inputSchema.get("required", [])
+        assert "x-api-key" not in tools["whoAmI"].input_schema.get("properties", {})
+        assert "x-api-key" not in tools["whoAmI"].input_schema.get("required", [])
         result = await client.call_tool("whoAmI", {"x-api-key": "model-guess"})
     assert result.structured_content == {"key": "operator-key"}
 
@@ -138,7 +139,7 @@ async def test_unconfigured_header_parameter_stays_a_tool_argument(monkeypatch):
     proxy, _, _, _ = _proxy(monkeypatch, env={})
     async with Client(proxy) as client:
         tools = {t.name: t for t in await client.list_tools()}
-        assert "x-api-key" in tools["whoAmI"].inputSchema["required"]
+        assert "x-api-key" in tools["whoAmI"].input_schema["required"]
         result = await client.call_tool("whoAmI", {"x-api-key": "caller-supplied"})
     assert result.structured_content == {"key": "caller-supplied"}
 
@@ -402,7 +403,7 @@ async def test_stored_document_is_served_without_a_fetch():
     server = openapi.build_server(
         {"command": "", "document": json.dumps(doc).encode(), "env": {"X-Api-Key": "k1"}},
         transport=httpx.MockTransport(no_fetch),
-        api_transport=httpx.ASGITransport(app=outer),
+        api_transport=httpx2.ASGITransport(app=outer),
     )
     async with Client(server) as client:
         result = await client.call_tool("getPet", {"pet_id": "3"})
@@ -452,12 +453,12 @@ async def test_relative_servers_resolve_against_the_redirected_document():
 
     def api(request):
         called.append(str(request.url))
-        return httpx.Response(200, json={"pets": []})
+        return httpx2.Response(200, json={"pets": []})
 
     server = openapi.build_server(
         {"command": "https://entry.example/spec"},
         transport=httpx.MockTransport(serve_document),
-        api_transport=httpx.MockTransport(api),
+        api_transport=httpx2.MockTransport(api),
     )
     async with Client(server) as client:
         await client.call_tool("listPets", {})
@@ -478,19 +479,24 @@ async def test_requests_off_the_api_origin_are_never_sent(monkeypatch):
 
     def api(request):
         sent.append(str(request.url))
-        return httpx.Response(200, json={})
+        return httpx2.Response(200, json={})
 
     server = openapi.build_server(
         {"command": DOC_URL, "args": ["https://api.example/v1"],
          "env": {"Authorization": "Bearer SECRET"}},
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json=doc)),
-        api_transport=httpx.MockTransport(api),
+        api_transport=httpx2.MockTransport(api),
     )
     async with Client(server) as client:
-        result = await client.call_tool("steal", {}, raise_on_error=False)
-    assert result.is_error
-    assert "refusing to call https://attacker.example" in result.content[0].text
-    assert sent == []
+        await client.call_tool("steal", {}, raise_on_error=False)
+    # FastMCP 4's request builder already pins every operation to the API's base URL, so
+    # the absolute path lands on the API (a 404 there) instead of the attacker's host.
+    assert all(url.startswith("https://api.example/") for url in sent), sent
+
+    # The guard behind it still refuses anything off the API's origin, whatever builds it.
+    guard = openapi._guard_api_requests("https://api.example/v1", {"Authorization": "Bearer SECRET"})
+    with pytest.raises(httpx2.RequestError, match="refusing to call https://attacker.example"):
+        await guard(httpx2.Request("GET", "https://attacker.example/steal"))
 
 
 def test_fetch_caps_document_size(monkeypatch):

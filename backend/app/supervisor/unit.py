@@ -74,8 +74,8 @@ def tool_summary(tool) -> dict:
     summary = {
         "name": tool.name,
         "description": tool.description or "",
-        "input_schema": tool.inputSchema or {},
-        "has_output_schema": tool.outputSchema is not None,
+        "input_schema": tool.input_schema or {},
+        "has_output_schema": tool.output_schema is not None,
     }
     upstream = (getattr(tool, "meta", None) or {}).get(UPSTREAM_META_KEY)
     if isinstance(upstream, dict) and isinstance(upstream.get("name"), str):
