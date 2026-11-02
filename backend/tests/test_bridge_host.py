@@ -55,10 +55,10 @@ async def test_forward_roots_skips_when_client_lacks_capability():
     """A client that never advertised roots is never asked — we just return []."""
     ctx = _ctx_with_session()
     ctx.session.check_client_capability.return_value = False
-    ctx.session.list_roots = AsyncMock(side_effect=AssertionError("must not forward"))
+    ctx.session.send_request = AsyncMock(side_effect=AssertionError("must not forward"))
     with patch.object(host, "get_context", return_value=ctx):
         assert await host._forward_roots(None) == []
-    ctx.session.list_roots.assert_not_called()
+    ctx.session.send_request.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -67,9 +67,15 @@ async def test_forward_roots_forwards_when_client_supports_it():
     roots = [Root(uri="file:///work")]
     ctx = _ctx_with_session()
     ctx.session.check_client_capability.return_value = True
-    ctx.session.list_roots = AsyncMock(return_value=ListRootsResult(roots=roots))
+    ctx.request_id = "7"
+    ctx.session.send_request = AsyncMock(return_value=ListRootsResult(roots=roots))
     with patch.object(host, "get_context", return_value=ctx):
         assert await host._forward_roots(None) == roots
+    # Sent as related to the caller's request, so it rides that request's own stream
+    # rather than needing the client to hold a standalone GET stream open.
+    (request, result_type), kwargs = ctx.session.send_request.call_args
+    assert request.method == "roots/list" and result_type is ListRootsResult
+    assert kwargs["metadata"].related_request_id == "7"
 
 
 @pytest.mark.asyncio
@@ -77,18 +83,18 @@ async def test_forward_roots_swallows_forwarding_errors():
     """Client claimed roots support but the call failed -> [], not -32603 upstream."""
     ctx = _ctx_with_session()
     ctx.session.check_client_capability.return_value = True
-    ctx.session.list_roots = AsyncMock(side_effect=Exception("boom"))
+    ctx.session.send_request = AsyncMock(side_effect=Exception("boom"))
     with patch.object(host, "get_context", return_value=ctx):
         assert await host._forward_roots(None) == []
 
 
 def test_session_exposes_check_client_capability():
     """Lock in the SDK contract the handler relies on: ServerSession provides
-    ``check_client_capability`` and ``list_roots`` (FastMCP 4 dropped
+    ``check_client_capability`` and ``send_request`` (FastMCP 4 dropped
     ``Context.list_roots``, so the relay goes through the session). Guards against
     regressions if the mcp dependency changes."""
     assert hasattr(ServerSession, "check_client_capability")
-    assert hasattr(ServerSession, "list_roots")
+    assert hasattr(ServerSession, "send_request")
 
 
 def test_build_proxy_installs_custom_roots_handler():
@@ -1742,6 +1748,185 @@ async def test_modern_answer_of_the_wrong_kind_is_not_handed_to_the_child():
         await transport.disconnect()
     assert "no valid answer to elicitation/create" in outcome["error"]["message"]
     assert stale.is_error and "has ended" in stale.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_serialized_stdio_reaches_a_modern_caller_from_resources_and_prompts():
+    """Reading a resource or getting a prompt can make the child ask too, and a modern
+    caller is asked for those the same way as for a tool call."""
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        async with Client(proxy, roots=["file:///alice"]) as alice:
+            with anyio.fail_after(10):
+                resource = await alice.read_resource("ask://roots")
+                prompt = await alice.get_prompt("ask")
+    finally:
+        await transport.disconnect()
+    assert _root_uris(json.loads(resource[0].text)) == ["file:///alice"]
+    assert _root_uris(json.loads(prompt.messages[0].content.text)) == ["file:///alice"]
+
+
+@pytest.mark.asyncio
+async def test_stdio_progress_and_logs_reach_a_modern_caller():
+    """Progress and log lines from the child reach the modern caller's call, the same as
+    for a handshake-era caller."""
+    progress, logs = [], []
+
+    async def on_progress(value, total, message):
+        progress.append((value, total))
+
+    async def on_log(message):
+        logs.append(message.data)
+
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        async with Client(proxy, roots=["file:///alice"], log_handler=on_log) as alice:
+            with anyio.fail_after(10):
+                await alice.call_tool_mcp(
+                    "ask", {"method": "roots/list"}, progress_handler=on_progress
+                )
+    finally:
+        await transport.disconnect()
+    assert progress == [(1, 2)]
+    assert any("asking roots/list" in str(data) for data in logs)
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+@pytest.mark.asyncio
+async def test_remote_upstream_requests_reach_the_caller_on_either_protocol(
+    mode, pushing_upstream_url
+):
+    """A remote upstream's roots and elicitation requests reach the caller whichever
+    protocol it speaks: pushed on to a handshake-era caller, returned to a modern one."""
+    proxy = host.build_proxy(
+        {"command": pushing_upstream_url, "name": "remote", "transport": "streamable-http"}
+    )
+    elicited = AsyncMock(side_effect=_elicit_reply)
+    async with Client(
+        proxy, mode=mode, roots=["file:///alice"], elicitation_handler=elicited
+    ) as client:
+        assert (client.protocol_version in host.MODERN_PROTOCOL_VERSIONS) is (mode == "auto")
+        with anyio.fail_after(10):
+            where = await client.call_tool("where", {})
+            confirm = await client.call_tool("confirm", {})
+    assert json.loads(where.content[0].text) == ["file:///alice"]
+    assert confirm.content[0].text == "accept:alice"
+    assert elicited.await_count == 1
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+@pytest.mark.asyncio
+async def test_remote_upstream_progress_after_a_round_trip_reaches_the_caller(
+    mode, pushing_upstream_url
+):
+    """Progress a remote upstream reports after asking the caller something reaches the
+    caller's live leg on either protocol."""
+    proxy = host.build_proxy(
+        {"command": pushing_upstream_url, "name": "remote", "transport": "streamable-http"}
+    )
+    progress = []
+
+    async def on_progress(value, total, message):
+        progress.append((value, total))
+
+    async with Client(proxy, mode=mode, roots=["file:///alice"]) as client:
+        with anyio.fail_after(10):
+            result = await client.call_tool_mcp(
+                "roots_then_progress", {}, progress_handler=on_progress
+            )
+    assert json.loads(result.content[0].text) == ["file:///alice"]
+    assert progress == [(1, 2)]
+
+
+@pytest.mark.asyncio
+async def test_parked_turn_logs_go_to_the_bridge_log_not_nowhere(caplog):
+    """While a modern caller's turn waits for its retry there's no leg to send the
+    upstream's log lines to, so they land in the server's log instead of being dropped."""
+    from mcp.types import LoggingMessageNotificationParams
+
+    turn = host._Turn({}, None, lambda: asyncio.sleep(10))
+    try:
+        turn.state = "parked"
+        caplog.set_level("INFO", logger="mcpelevator.bridge.upstream")
+        await turn.log(LoggingMessageNotificationParams(level="info", logger="up", data="hello"))
+    finally:
+        turn.run.cancel()
+    assert "[up] hello" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_remote_upstream_resource_and_prompt_requests_reach_a_modern_caller(
+    pushing_upstream_url,
+):
+    """A remote upstream that asks for roots while a resource is read or a prompt is
+    rendered reaches a modern caller too, not only from a tool call."""
+    proxy = host.build_proxy(
+        {"command": pushing_upstream_url, "name": "remote", "transport": "streamable-http"}
+    )
+    async with Client(proxy, roots=["file:///alice"]) as client:
+        with anyio.fail_after(10):
+            resource = await client.read_resource("push://roots")
+            prompt = await client.get_prompt("roots_prompt")
+    assert json.loads(resource[0].text) == ["file:///alice"]
+    assert json.loads(prompt.messages[0].content.text) == ["file:///alice"]
+
+
+@pytest.mark.asyncio
+async def test_turn_leg_waits_through_a_wakeup_whose_request_was_withdrawn():
+    """The upstream can withdraw a request (cancel it) after it woke the leg. Nothing is
+    left to ask then, so the leg keeps waiting instead of returning an
+    InputRequiredResult that asks for nothing."""
+    done = asyncio.get_running_loop().create_future()
+    turn = host._Turn({}, None, lambda: done)
+    turn.asked.set()  # woken, with no request left pending
+    leg = asyncio.ensure_future(turn.leg(lambda result: result))
+    await asyncio.sleep(0.05)
+    assert not leg.done()
+    done.set_result("the result")
+    assert await asyncio.wait_for(leg, 1) == "the result"
+
+
+@pytest.mark.asyncio
+async def test_turn_past_the_parked_cap_refuses_the_request_and_carries_on():
+    """A parked turn outlives its connection, so their number is capped: past it, the
+    upstream's request is refused and the call goes on without the input."""
+    from mcp.types import ErrorData, ListRootsRequest
+
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+    turn = host._Turn({}, None, lambda: done)
+    answer = loop.create_future()
+    turn.pending["roots/list#0"] = (ListRootsRequest(), answer)
+    turn.asked.set()
+    with patch.object(host, "_MAX_PARKED_TURNS", 0):
+        leg = asyncio.ensure_future(turn.leg(lambda result: result))
+        refusal = await asyncio.wait_for(answer, 1)
+        assert isinstance(refusal, ErrorData) and "too many" in refusal.message
+        assert not leg.done() and turn.parked == {}
+        done.set_result("the result")
+        assert await asyncio.wait_for(leg, 1) == "the result"
+
+
+@pytest.mark.asyncio
+async def test_turn_refuses_requests_past_the_pending_cap():
+    """The SDK runs each of the upstream's requests as its own task, so one call can
+    send many before any is answered; past the cap, a request is refused at once
+    instead of piling up."""
+    from mcp.types import ErrorData, ListRootsRequest
+
+    done = asyncio.get_running_loop().create_future()
+    turn = host._Turn({}, None, lambda: done)
+    try:
+        with patch.object(host, "_MAX_PENDING_PER_TURN", 0), patch.object(
+            host, "_acting_as"
+        ) as acting:
+            acting.return_value.__enter__.return_value.session.check_client_capability.return_value = True
+            turn.caller = ("rc", None)
+            refusal = await asyncio.wait_for(turn.ask(ListRootsRequest()), 1)
+        assert isinstance(refusal, ErrorData) and "too many" in refusal.message
+        assert turn.pending == {}
+    finally:
+        turn.run.cancel()
 
 
 async def _cancel_server_side(client: Client, call) -> None:

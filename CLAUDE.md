@@ -54,12 +54,20 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   declined, logs to the bridge log); the per-server `serialize_client_requests` flag runs one
   proxied request at a time (`_SerializeClientRequests` middleware) and fills the slot, so the
   child can only be asking that caller (issue #143). Progress is bound per call by its token.
-  Forwarding needs a back-channel, which only handshake-era client connections have. A
-  serialized `tools/call` from a client on the sessionless `2026-07-28` protocol (FastMCP 4's
-  default) runs as a `_Turn` instead: the upstream call runs as its own task holding the lock,
-  the child's request comes back to the caller as an `InputRequiredResult`, and the retry
-  (matched by the `request_state` FastMCP seals) feeds the answer to the waiting request. Any
-  other modern-era request reads as roots `[]` with sampling/elicitation refused. The upstream leg is pinned to the handshake era (`ProxyClient`
+  Pushing needs a back-channel, which only handshake-era client connections have. An
+  interactive request (`tools/call`, `resources/read`, `prompts/get`) from a client on the
+  sessionless `2026-07-28` protocol (FastMCP 4's default) runs as a `_Turn` instead: the
+  proxied request runs as its own task, the upstream's request comes back to the caller as an
+  `InputRequiredResult`, and the retry (matched by the `request_state` FastMCP seals) feeds
+  the answer to the waiting request; logs and progress follow the live leg. On a serialized
+  stdio child the turn fills the caller slot and owns the lock (`_SerializeClientRequests`);
+  for a remote upstream and for groups (`_ModernTurns`), each request's own upstream session
+  finds its turn through `_CURRENT_TURN` (`_TurnAwareProxyClient`). A group's parked turns
+  outlive its membership changes; a change ends the turns whose members (`_Turn.members`)
+  it no longer mounts, and a parked turn holds the members it reached in flight
+  (`GroupHub._hold`) so the idle sweep can't stop one under it; on `/s` the control plane
+  can't see a park, so an idle timeout under `_PARKED_TURN_TTL_S` can still lose one
+  (documented). At most `_MAX_PARKED_TURNS` park at once. The upstream leg is pinned to the handshake era (`ProxyClient`
   defaults to `mode="legacy"`), and caller headers reach it only via
   `ProxyClient(forward_incoming_headers=...)`, which FastMCP 4 turns ON by default.
 - **Secret env** (`sealed.py`): a per-key choice, for env vars and remote/openapi headers
@@ -139,7 +147,21 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   mapping a group name to its members — either `"*"` (every registered server, present and
   future, except the built-in control MCP server) or an ordered list of server ids. Each group is served at `/g/<name>/mcp`: a
   control-plane-hosted FastMCP mounting a proxy per running member, tools namespaced by slug,
-  rebuilt-and-swapped per group after each reconcile via the supervisor's `on_converged` hook (the replaced instance drains its in-flight requests before closing, so a call that rebuilds its own group still returns)
+  kept current after each reconcile via the supervisor's `on_converged` hook. The members sit in
+  one `AggregateProvider` per group, and a membership change builds a new one and swaps it into
+  the bundle in one assignment (`GroupHub._install`), so the group's stateful sessions (the
+  handshake-era back-channel for pushed roots/sampling/elicitation) survive it and see it at
+  once, a request in flight keeps the snapshot it started with (never mutate a live provider
+  list: FastMCP re-indexes it after awaiting), and the replaced snapshot's extension runtime is
+  closed rather than left in the bundle's scope. A parked turn resumes only while every
+  member it reached is still mounted. Every membership change is announced as
+  `list_changed` (`GroupHub._announce`): to the handshake-era connections `_Sessions` remembers (the
+  SDK `Connection`, never the per-request `ServerSession` facade), on their standalone stream, and on a `2026-07-28` caller's `subscriptions/listen` stream (the
+  bundle serves it with the SDK's `ListenHandler`, which is also what makes it advertise
+  `listChanged` to those callers). An instance is rebuilt
+  only after a teardown (an auth-affecting write or a failed sync), and the torn-down one
+  drains its in-flight requests before closing, so a call that tears down its own group still returns;
+  standalone GET streams and `subscriptions/listen` POSTs (by `Mcp-Method`, trusted only on a non-handshake `MCP-Protocol-Version`, where the SDK checks it) don't hold members awake; a turn that would park after a teardown detached its table (`_ParkedTurns.closed`) has its input request refused instead
   (the hub owns each sub-app's lifespan; Starlette doesn't run mounted lifespans). There is no
   special-case name — `all` is just a conventional entry with members `"*"`. The registry is
   validated at write time and again at startup (`registry.validate_at_startup` fails the boot

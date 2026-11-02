@@ -29,6 +29,7 @@ makes the group's inner app (built with ``path="/mcp"``) resolve the route to
 from __future__ import annotations
 
 from fastapi import HTTPException
+from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS
 from sqlmodel import Session
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -222,10 +223,25 @@ class GroupDispatch:
         # keep an unrelated bridge awake and reset its idle clock for traffic it
         # never saw. Snapshotted ONCE so start and finish stay balanced even if a
         # reconcile swaps the instance mid-request.
+        #
+        # A GET is a session's standalone stream (the bundle is stateful), and a
+        # subscriptions/listen POST is a 2026-07-28 caller's equivalent: each stays open
+        # for as long as the client is connected and carries the bundle's own
+        # notifications, not a member's call, so it holds no member awake. Mcp-Method is
+        # trusted only where the SDK checks it against the body: on a request its
+        # MCP-Protocol-Version routes down the modern path (any version that isn't a
+        # handshake one, the same test the SDK's session manager applies).
         mounted = self._hub.mounted_members(name)
         app = scope.get("app")
         supervisor = app.state.supervisor if app is not None else None
-        for member_id in mounted.values():
+        version = request.headers.get("mcp-protocol-version")
+        stream = request.method == "GET" or (
+            version is not None
+            and version not in HANDSHAKE_PROTOCOL_VERSIONS
+            and request.headers.get("mcp-method") == "subscriptions/listen"
+        )
+        leased = {} if stream else mounted
+        for member_id in leased.values():
             if supervisor is not None:
                 supervisor.request_started(member_id)
         # Hold the instance from its selection, not from when delegation starts:
@@ -250,6 +266,6 @@ class GroupDispatch:
         finally:
             if held:
                 inner.release()
-            for member_id in mounted.values():
+            for member_id in leased.values():
                 if supervisor is not None:
                     supervisor.request_finished(member_id)

@@ -390,7 +390,8 @@ def test_group_request_counts_members_in_flight():
 
             client.app.state.groups.app_for = lambda name: inner
             client.app.state.groups.mounted_members = lambda name: {srv["slug"]: sid}
-            r = client.get(f"/g/{group}/mcp", headers=LOOPBACK)
+            body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+            r = client.post(f"/g/{group}/mcp", json=body, headers=LOOPBACK)
             assert r.status_code == 200, r.text
             assert observed["during"] == 1          # held while the inner app ran
             assert sup._in_flight.get(sid, 0) == 0  # released afterwards
@@ -398,6 +399,24 @@ def test_group_request_counts_members_in_flight():
             # untouched — holding it would keep a bridge alive on traffic it never saw.
             assert observed["absent_during"] == 0
             assert sup._in_flight.get(absent_id, 0) == 0
+            # A GET is a session's standalone stream, open for as long as the client is
+            # connected and carrying the bundle's own notifications, not a member's
+            # call, so it holds no member awake.
+            r = client.get(f"/g/{group}/mcp", headers=LOOPBACK)
+            assert r.status_code == 200, r.text
+            assert observed["during"] == 0
+            # A 2026-07-28 caller's subscriptions/listen stream is the same thing.
+            listen = {"jsonrpc": "2.0", "id": 2, "method": "subscriptions/listen"}
+            modern = {"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "subscriptions/listen"}
+            r = client.post(f"/g/{group}/mcp", json=listen, headers={**LOOPBACK, **modern})
+            assert r.status_code == 200, r.text
+            assert observed["during"] == 0
+            # Only there does the SDK check Mcp-Method against the body: a handshake-era
+            # request claiming to be a listen stream is still leased.
+            legacy = {"MCP-Protocol-Version": "2025-06-18", "Mcp-Method": "subscriptions/listen"}
+            r = client.post(f"/g/{group}/mcp", json=body, headers={**LOOPBACK, **legacy})
+            assert r.status_code == 200, r.text
+            assert observed["during"] == 1
         finally:
             client.delete(f"/api/groups/{group}", headers=LOOPBACK)
             client.delete(f"/api/servers/{sid}", headers=LOOPBACK)

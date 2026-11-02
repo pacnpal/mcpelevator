@@ -3,11 +3,16 @@
 For each group in the registry, one FastMCP instance mounts a
 ``create_proxy(ProxyClient(StreamableHttpTransport))`` per running member,
 namespaced by slug (tools surface as ``<slug>_<tool>``, collision-safe because
-slugs are unique). An instance is REBUILT AND SWAPPED whenever that group's
-running membership or the relevant settings change — fastmcp has no ``unmount``,
-and a fresh build is trivially correct (no drift). ``sync()`` runs after every
-supervisor reconcile pass, so every group converges within one interval of any
-change. A group with no running members serves an EMPTY bundle (initialize
+slugs are unique). The members sit in one ``AggregateProvider`` per instance, and a
+change to the group's running membership or the relevant settings adds and removes
+just the members that changed, IN PLACE: the instance, and every client session on
+it, carries on, and every session sees the new membership at once (a member the
+anti-downgrade rule now excludes is gone for all of them). ``sync()`` runs after
+every supervisor reconcile pass, so every group converges within one interval of
+any change, and each change is announced to the group's clients as a
+``list_changed`` (handshake-era sessions on their standalone stream, 2026-07-28 callers
+on ``subscriptions/listen``). An instance is rebuilt only after a teardown (an auth-affecting write,
+or a failed sync). A group with no running members serves an EMPTY bundle (initialize
 works, ``tools/list`` is ``[]``) — deterministic, documented behavior: existence
 is decided by the registry alone, membership by what's running.
 
@@ -20,8 +25,11 @@ when the group uses the same provider. ``bearer`` and ``oauth`` are separate
 credential systems, so neither can stand in for the other. An explicitly open
 member is safe behind any group provider.
 
-The Streamable-HTTP apps run stateless (a fresh transport per request), so
-swapping instances never strands client sessions. Starlette does NOT run a
+The Streamable-HTTP apps are stateful, so a handshake-era client gets a session and
+with it the back-channel a member's roots/sampling/elicitation requests are pushed
+on (a stateless request has nowhere for the client's reply to land). Since an
+instance outlives membership changes, those sessions survive them; only a teardown
+ends them, and the client then initializes a new one. Starlette does NOT run a
 mounted sub-app's lifespan, and anyio lifespans must exit in the task that
 entered them — so each instance's lifespan runs inside its own ``_AppRunner``
 task, which makes teardown safe from any caller task (reconciler hook, settings
@@ -32,26 +40,44 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+import weakref
+from contextlib import ExitStack, asynccontextmanager
 from typing import Callable, Optional
 
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
+from mcp.server.request_state import RequestStateSecurity
+from mcp.server.subscriptions import (
+    InMemorySubscriptionBus,
+    ListenHandler,
+    PromptsListChanged,
+    ResourcesListChanged,
+    ToolsListChanged,
+)
+from mcp_types import SubscriptionsListenRequestParams
 from fastmcp.client.transports import ClientTransport, StreamableHttpTransport
 from fastmcp.server import create_proxy
-from fastmcp.server.providers.proxy import ProxyClient
+from fastmcp.server.providers.aggregate import AggregateProvider
 from sqlmodel import Session
 from starlette.types import ASGIApp
 
 # Reuse the bridge's tolerant roots handler: an upstream may ask its client (here,
 # the group bundle) to list filesystem roots, and clients without roots support
 # must get [] instead of a noisy -32603 (see app.bridge.host._forward_roots).
-from app.bridge.host import _forward_roots
+from app.bridge.host import _forward_roots, _is_modern, _ModernTurns, _TurnAwareProxyClient
 from app.db import get_engine, repo
 from app.db.models import BUILTIN_RUNNER, Server
 from app.groups import registry
 from app.registry import settings as runtime_settings
 
 logger = logging.getLogger(__name__)
+
+_LIST_CHANGED = (
+    "notifications/tools/list_changed",
+    "notifications/resources/list_changed",
+    "notifications/prompts/list_changed",
+)
+_ANNOUNCE_S = 5.0  # how long a membership change waits on its clients' list_changed
 
 
 def group_server(name: str) -> Server:
@@ -121,10 +147,10 @@ _DRAIN_S = 300.0
 
 
 class _Counting:
-    """A group's ASGI app, counting requests in flight. A swap routes new requests
-    to the new instance at once and closes the old one only when this reaches zero,
-    so a call that changes its own group (the built-in server's put_group through
-    /g, say) isn't cut off by the rebuild it caused."""
+    """A group's ASGI app, counting requests in flight. A teardown routes new
+    requests away at once and closes the instance only when this reaches zero, so a
+    call that changes its own group's auth (the built-in server through /g, say)
+    isn't cut off by the teardown it caused."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -149,10 +175,42 @@ class _Counting:
             self.release()
 
 
-class _Instance:
-    """One group's live (app, runner, topology-key) triple."""
+class _ParkedTurns(dict):
+    """A group's parked turns. ``closed`` once a teardown detaches the table: a request
+    still running on the retired instance then can't park in it, since no retry would
+    ever find it there (``_Turn.leg`` refuses its input request instead)."""
 
-    __slots__ = ("app", "runner", "key", "members")
+    closed = False
+
+
+class _Sessions(Middleware):
+    """Remembers the group's handshake-era connections, so a membership change can tell
+    each one its lists changed (see :meth:`GroupHub._announce`).
+
+    The SDK's ``ServerSession`` is a facade built per request; the ``Connection`` behind
+    it lives as long as the client's session does, and its ``outbound`` is the
+    standalone stream. No public accessor reaches it from a request yet, hence
+    ``_connection``."""
+
+    def __init__(self) -> None:
+        self.connections: weakref.WeakSet = weakref.WeakSet()
+
+    async def on_request(self, context, call_next):
+        ctx = context.fastmcp_context
+        if ctx is not None and ctx.request_context is not None and not _is_modern(ctx):
+            connection = getattr(ctx.session, "_connection", None)
+            if connection is not None:
+                self.connections.add(connection)
+        return await call_next(context)
+
+
+class _Instance:
+    """One group's live app, runner, topology key and mounted members."""
+
+    __slots__ = (
+        "app", "runner", "key", "members", "bundle", "slot", "runtime", "sessions", "bus",
+        "listen",
+    )
 
     def __init__(
         self,
@@ -160,10 +218,23 @@ class _Instance:
         runner: _AppRunner,
         key: frozenset,
         members: dict[str, str] | None = None,
+        bundle: FastMCP | None = None,
     ) -> None:
         self.app = app
         self.runner = runner
         self.key = key
+        # The members live in one AggregateProvider at ``bundle.providers[slot]``. A
+        # membership change builds a new one and swaps it in whole (see _install), so a
+        # request in flight keeps the snapshot it started with; ``runtime`` holds the
+        # live snapshot's extension-runtime contexts, closed when it's replaced.
+        self.bundle = bundle
+        self.slot: int | None = None
+        self.runtime: ExitStack | None = None
+        # Where a membership change is announced: the handshake-era sessions, and the
+        # subscriptions/listen streams of 2026-07-28 callers (set by GroupHub._build).
+        self.sessions: _Sessions | None = None
+        self.bus: InMemorySubscriptionBus | None = None
+        self.listen: ListenHandler | None = None
         # slug -> server id for exactly the members mounted in this instance.
         # Captured at build time from the supervisor's running set, so a caller
         # that needs the id behind a namespace (usage attribution) reads it from
@@ -184,6 +255,14 @@ class GroupHub:
         self._instances: dict[str, _Instance] = {}
         self._retiring: set[_Instance] = set()  # replaced, finishing their requests
         self._lock = asyncio.Lock()
+        # A modern caller's interactive request spans several round trips (bridge.host
+        # _Turn), and its group's instance can be torn down and rebuilt between two of
+        # them. Every bundle seals its request_state under ONE key (each still binds its
+        # own group's name as the audience), so the retry is still recognized and told
+        # its request has ended, instead of failing as a forged token.
+        self._request_state = RequestStateSecurity.ephemeral()
+        self._parked: dict[str, dict] = {}
+        self._supervisor = None  # set by sync(); holds a parked turn's members awake
 
     def app_for(self, name: str) -> Optional[ASGIApp]:
         """The group's current Streamable-HTTP ASGI app, or ``None`` (not yet built —
@@ -215,6 +294,7 @@ class GroupHub:
         """Converge every group's mounted set to (registry x running units). Called
         after every reconcile pass; serialized so overlapping syncs can't race a
         swap."""
+        self._supervisor = supervisor
         async with self._lock:
             with Session(get_engine()) as session:
                 groups = {
@@ -292,7 +372,9 @@ class GroupHub:
                     logger.exception("group %r sync error", name)
                     await self._teardown(name)
 
-    def _make_proxy(self, slug: str, url: str, forward: bool = False) -> FastMCP:
+    def _make_proxy(
+        self, slug: str, url: str, forward: bool = False, server_id: str | None = None
+    ) -> FastMCP:
         # ProxyClient forwards the caller's inbound headers (Authorization included) by
         # default. On this INTERNAL hop that would send the group's bearer token — which
         # authorizes the whole bundle — to every bridge, and a remote-runner bridge would
@@ -301,9 +383,10 @@ class GroupHub:
         # dispatcher. The one exception is the built-in mcpelevator server (``forward``):
         # its bridge only talks to this process's /api/mcp, which authorizes every call
         # as the caller and so needs the caller's own credential.
-        client = ProxyClient(
+        client = _TurnAwareProxyClient(
             self._transport_factory(url), roots=_forward_roots, forward_incoming_headers=forward
         )
+        client.member = server_id
         return create_proxy(client, name=slug)
 
     async def _swap(
@@ -314,29 +397,137 @@ class GroupHub:
         members: dict[str, str] | None = None,
         forward: set[str] | None = None,
     ) -> None:
-        bundle = FastMCP(f"mcpelevator-{name}")
+        """Bring group ``name`` to ``entries``: build its instance if there's none, then
+        install the new membership in it, in place."""
+        parked = self._parked.setdefault(name, _ParkedTurns())
+        # A parked request may only resume if every member it reached is still in the
+        # group: a member that left, or is now excluded (the anti-downgrade rule, say),
+        # must not answer through it. Ending those now frees their upstream sessions;
+        # the resume check in _ModernTurns covers a turn that parks after this.
+        mounted_ids = {server_id for server_id, *_ in entries}
+        for turn in list(parked.values()):
+            if not turn.members <= mounted_ids:
+                turn.end()
+        instance = self._instances.get(name)
+        fresh = instance is None
+        if fresh:
+            instance = await self._build(name, parked)
+            self._instances[name] = instance
+        members_provider = AggregateProvider()  # built offline: nothing runs it yet
         for server_id, slug, host, port in sorted(entries):
             proxy = self._make_proxy(
-                slug, f"http://{host}:{port}/mcp", forward=server_id in (forward or ())
+                slug,
+                f"http://{host}:{port}/mcp",
+                forward=server_id in (forward or ()),
+                server_id=server_id,
             )
-            bundle.mount(proxy, namespace=slug)
-        # stateless: a fresh upstream transport per request, so swapping instances never
-        # strands a session. Host/Origin protection stays OFF here — enforce() in the
-        # dispatcher is the single guard, identical to every other /s and /g route.
-        app = bundle.http_app(path="/mcp", stateless_http=True, host_origin_protection=False)
-        # The new instance starts first and takes new requests at once; the old one
-        # is retired (closed once its in-flight requests finish), so no request is
-        # cut off and there is no moment of emptiness. Each lifespan runs inside
-        # its own _AppRunner task.
+            members_provider.add_provider(proxy, namespace=slug)
+        self._install(instance, members_provider)
+        instance.key = key
+        instance.members = members or {}
+        if not fresh:
+            await self._announce(instance)
+
+    def _hold(self, members: set[str]) -> Callable[[], None]:
+        """Keep ``members`` in flight while a turn that reached them is parked, so the
+        idle sweep can't stop one under it; returns the call that lets them go."""
+        supervisor = self._supervisor
+        if supervisor is None or not members:
+            return lambda: None
+        for member_id in members:
+            supervisor.request_started(member_id)
+
+        def release() -> None:
+            for member_id in members:
+                supervisor.request_finished(member_id)
+
+        return release
+
+    @staticmethod
+    async def _announce(instance: _Instance) -> None:
+        """Tell the group's clients its tools, resources and prompts changed: each
+        handshake-era session on its standalone stream, and each 2026-07-28 caller on
+        its ``subscriptions/listen`` stream. A session that's gone is skipped."""
+        for event in (ToolsListChanged(), ResourcesListChanged(), PromptsListChanged()):
+            await instance.bus.publish(event)
+
+        async def tell(connection) -> None:
+            try:
+                for method in _LIST_CHANGED:
+                    await connection.outbound.notify(method, None)
+            except Exception:
+                logger.debug("a group session closed before its list_changed", exc_info=True)
+
+        # All at once, under one deadline: this runs under sync's lock, and a client
+        # that stopped reading must not hold every group's convergence up behind it.
+        sends = [asyncio.ensure_future(tell(c)) for c in list(instance.sessions.connections)]
+        if sends:
+            _, stuck = await asyncio.wait(sends, timeout=_ANNOUNCE_S)
+            for send in stuck:
+                send.cancel()
+
+    @staticmethod
+    def _install(instance: _Instance, members_provider: AggregateProvider) -> None:
+        """Make ``members_provider`` the instance's membership, atomically.
+
+        One list-item assignment: a request already in flight keeps iterating the
+        snapshot it started with (FastMCP's aggregate re-indexes its provider list after
+        awaiting, so shrinking a live one could raise), and every request after it sees
+        the new one. FastMCP enters each provider's extension runtime into its running
+        scopes when a provider is ADDED, with no way to leave it on removal; installing
+        by assignment skips that, and the snapshot's runtime is entered here instead, on
+        a stack of its own that's closed when the next snapshot replaces it."""
+        bundle = instance.bundle
+        runtime = ExitStack()
+        for scope in bundle._extension_scopes:
+            runtime.enter_context(
+                members_provider._extension_runtime(scope.available, root=scope.root)
+            )
+        bundle.providers[instance.slot] = members_provider
+        previous, instance.runtime = instance.runtime, runtime
+        if previous is not None:
+            previous.close()
+
+    async def _build(self, name: str, parked: dict) -> _Instance:
+        bundle = FastMCP(f"mcpelevator-{name}", request_state_security=self._request_state)
+        sessions = _Sessions()
+        bundle.add_middleware(sessions)
+        bundle.add_middleware(
+            _ModernTurns(
+                parked,
+                members=lambda: set(self.mounted_members(name).values()),
+                hold=self._hold,
+            )
+        )
+        # 2026-07-28 callers have no standing stream; they hear about membership
+        # changes by listening. Serving the method also makes the bundle advertise
+        # listChanged to them.
+        bus = InMemorySubscriptionBus()
+        listen = ListenHandler(bus)
+        bundle._mcp_server.add_request_handler(
+            "subscriptions/listen", SubscriptionsListenRequestParams, listen
+        )
+        # A placeholder for the membership _install swaps in: empty, so the runtime
+        # FastMCP keeps for it at startup holds nothing.
+        bundle.add_provider(AggregateProvider())
+        # Stateful, for the handshake-era back-channel (see the module docstring).
+        # Host/Origin protection stays OFF here — enforce() in the dispatcher is the
+        # single guard, identical to every other /s and /g route.
+        app = bundle.http_app(path="/mcp", stateless_http=False, host_origin_protection=False)
+        # Each lifespan runs inside its own _AppRunner task.
         runner = _AppRunner(app)
         await runner.start()
-        old = self._instances.get(name)
-        self._instances[name] = _Instance(_Counting(app), runner, key, members)
-        if old is not None:
-            self._retire(old)
+        instance = _Instance(_Counting(app), runner, frozenset(), bundle=bundle)
+        instance.slot = len(bundle.providers) - 1
+        instance.sessions, instance.bus, instance.listen = sessions, bus, listen
+        return instance
 
     async def _teardown(self, name: str) -> None:
         """Stop routing to ``name`` now; its instance closes once drained."""
+        parked = self._parked.pop(name, _ParkedTurns())
+        parked.closed = True
+        for turn in list(parked.values()):
+            turn.end()  # nothing serves this group now, so nothing may resume these
         old = self._instances.pop(name, None)
         if old is not None:
             self._retire(old)
@@ -346,6 +537,9 @@ class GroupHub:
         # instance (a control-plane call that rebuilt its own group), so waiting
         # for the drain here would deadlock.
         self._retiring.add(instance)
+        listen = getattr(instance, "listen", None)
+        if listen is not None:
+            listen.close()  # end listen streams now; the drain shouldn't wait on them
 
         async def drain() -> None:
             try:
@@ -383,8 +577,21 @@ class GroupHub:
             yield
 
     async def close(self) -> None:
-        """Shutdown: stop every session manager cleanly (called from the app lifespan)."""
+        """Shutdown: stop every session manager cleanly (called from the app lifespan,
+        and after a sync failure, while the process keeps running)."""
         async with self._lock:
+            # Nothing serves any group after this, so nothing may resume what's parked:
+            # end it now, rather than holding upstream sessions open to the TTL.
+            for parked in self._parked.values():
+                parked.closed = True
+                for turn in list(parked.values()):
+                    turn.end()
+            self._parked.clear()
+            for instance in [*self._instances.values(), *self._retiring]:
+                runtime = getattr(instance, "runtime", None)
+                if runtime is not None:
+                    runtime.close()
+                    instance.runtime = None
             # Invalidate the whole routing registry before awaiting any teardown. A
             # runner close can block or fail, but no stale group app may remain
             # reachable while shutdown is in progress (including fail-closed shutdown

@@ -601,7 +601,8 @@ def _config() -> dict[str, Any]:
 def _versions() -> dict[str, str]:
     out = {"mcpelevator": __version__, "python": platform.python_version(),
            "platform": platform.platform()}
-    for package in ("fastmcp", "mcp", "fastapi", "starlette", "uvicorn", "httpx", "pyjwt"):
+    for package in ("fastmcp", "mcp", "mcp-types", "fastapi", "starlette", "uvicorn", "httpx",
+                    "httpx2", "pyjwt"):
         try:
             out[package] = metadata.version(package)
         except metadata.PackageNotFoundError:

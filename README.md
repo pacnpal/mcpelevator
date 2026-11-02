@@ -286,6 +286,11 @@ and override it per server in the server form (blank = inherit, `0` = pin the se
 always-on). Idle servers report a passing `/api/health/{slug}` status (`"idle"`) so
 load balancers don't eject a deliberately-sleeping endpoint. Group (`/g`) traffic
 counts as activity for the group's members, but doesn't wake already-idle ones.
+A request waiting on a client's answer (see below) keeps the group members it reached
+running until it resumes or ends. Through `/s`, the control plane can't see a server
+waiting like this, so a server whose idle timeout is shorter than its client takes to
+answer can stop under the request, and the client is told to send it again. An idle
+timeout of 10 minutes or more never hits this, since a waiting request ends by then.
 
 ### Try a tool from the dashboard (playground)
 
@@ -347,6 +352,25 @@ An MCP server can send requests back to its client: `roots/list` (which director
 the client is working in), `sampling/createMessage` (ask the client's model to generate
 text), and `elicitation/create` (ask the user for input). A `remote` server's bridge
 opens a separate upstream session for each request, so these reach the right client.
+
+Clients on the newer sessionless MCP protocol (`2026-07-28`, the default for FastMCP 4
+and MCP SDK v2 clients) can't be sent a request in the middle of a call. For one of
+those, the bridge returns the server's request to the client as an
+`InputRequiredResult`, the client answers and sends its request again, and the bridge
+hands the answer back to the server, which has been waiting the whole time. This works
+for tool calls, resource reads and prompts, on `remote` servers, stdio servers with
+**Client requests** on (below), and groups. A client that's asked something and doesn't
+come back within 10 minutes is treated like one that cancelled. At most 256 requests
+per server or group wait like this at once; past that, the server's request is refused
+and the call carries on without it. A membership change doesn't drop a waiting
+request, unless the member it reached is no longer in the group. Clients on the older
+handshake protocol get the requests pushed to them, through a group too: groups keep a
+session per client for this, and a member starting, stopping or idling doesn't end it.
+
+When a group's members change, its clients are told the tool, resource and prompt
+lists changed: a handshake-era client on its session's stream, and a `2026-07-28`
+client on its `subscriptions/listen` stream if it opened one.
+
 A stdio server (`npx`, `uvx`, `command`, `docker`) is different: its bridge runs **one**
 process for every connected client, and a request from that process doesn't say which
 client it's for.
@@ -379,15 +403,8 @@ client it's for.
     requests are refused for everyone. A call the server never finishes leaves them
     refused until the server is restarted.
 
-  Clients on the newer sessionless MCP protocol (`2026-07-28`, the default for FastMCP 4
-  and MCP SDK v2 clients) can't be sent a request mid-call. For a tool call from one of
-  those, the bridge returns the server's request to the client as an
-  `InputRequiredResult`, the client answers and calls again, and the bridge hands the
-  answer back to the server, which has been waiting the whole time. The server stays
-  reserved for that client between rounds. A client that's asked something and doesn't
-  come back within 10 minutes gets treated like a cancelled call: the server's request
-  is refused and the queue moves on. This covers tool calls; a request the server sends
-  while reading a resource or prompt for a client on the new protocol is refused.
+  A client on the sessionless protocol gets the server's requests returned to it, as
+  described above, and the server stays reserved for that client between rounds.
 
 Over the API: `PATCH /api/servers/<id>` with `{"serialize_client_requests": true}`.
 Changing it restarts the server's bridge.
