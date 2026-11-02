@@ -379,6 +379,16 @@ client it's for.
     requests are refused for everyone. A call the server never finishes leaves them
     refused until the server is restarted.
 
+  Clients on the newer sessionless MCP protocol (`2026-07-28`, the default for FastMCP 4
+  and MCP SDK v2 clients) can't be sent a request mid-call. For a tool call from one of
+  those, the bridge returns the server's request to the client as an
+  `InputRequiredResult`, the client answers and calls again, and the bridge hands the
+  answer back to the server, which has been waiting the whole time. The server stays
+  reserved for that client between rounds. A client that's asked something and doesn't
+  come back within 10 minutes gets treated like a cancelled call: the server's request
+  is refused and the queue moves on. This covers tool calls; a request the server sends
+  while reading a resource or prompt for a client on the new protocol is refused.
+
 Over the API: `PATCH /api/servers/<id>` with `{"serialize_client_requests": true}`.
 Changing it restarts the server's bridge.
 

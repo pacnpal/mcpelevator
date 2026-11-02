@@ -54,9 +54,12 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   declined, logs to the bridge log); the per-server `serialize_client_requests` flag runs one
   proxied request at a time (`_SerializeClientRequests` middleware) and fills the slot, so the
   child can only be asking that caller (issue #143). Progress is bound per call by its token.
-  Forwarding needs a back-channel, which only handshake-era client connections have: a client
-  on the sessionless `2026-07-28` protocol (FastMCP 4's default) reads as roots `[]` and has
-  sampling/elicitation refused. The upstream leg is pinned to the handshake era (`ProxyClient`
+  Forwarding needs a back-channel, which only handshake-era client connections have. A
+  serialized `tools/call` from a client on the sessionless `2026-07-28` protocol (FastMCP 4's
+  default) runs as a `_Turn` instead: the upstream call runs as its own task holding the lock,
+  the child's request comes back to the caller as an `InputRequiredResult`, and the retry
+  (matched by the `request_state` FastMCP seals) feeds the answer to the waiting request. Any
+  other modern-era request reads as roots `[]` with sampling/elicitation refused. The upstream leg is pinned to the handshake era (`ProxyClient`
   defaults to `mode="legacy"`), and caller headers reach it only via
   `ProxyClient(forward_incoming_headers=...)`, which FastMCP 4 turns ON by default.
 - **Secret env** (`sealed.py`): a per-key choice, for env vars and remote/openapi headers
