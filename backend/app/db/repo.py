@@ -169,6 +169,7 @@ def reset_all_runtime(session: Session) -> None:
             restart_count=0,
             last_health=None,
             tools=[],
+            tools_config_hash="",
             updated_at=utcnow(),
         )
     )

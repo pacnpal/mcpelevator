@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import zipfile
@@ -9,13 +10,16 @@ import zipfile
 import jsonschema
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import Session
 
 from conftest import LOOPBACK
 
 from app import __version__, mcpb, sealed
+from app.db import get_engine, repo
 from app.db.models import Server
 from app.main import app
 from app.runners.docker import server_label
+from app.supervisor.supervisor import Supervisor
 
 # The official manifest schema, verbatim from @anthropic-ai/mcpb 2.1.2 (MIT):
 # dist/mcpb-manifest-v0.2.schema.json — the same zod shape Claude Desktop applies
@@ -259,3 +263,48 @@ def test_mcpb_refuses_a_manifest_the_schema_rejects(monkeypatch):
     with pytest.raises(ValueError, match="manifest_version"):
         mcpb.manifest(row)
     assert not mcpb.exportable(row)
+
+
+def test_mcpb_tools_only_from_current_launch_spec(monkeypatch):
+    """The cached tool list ships only while it was probed under the row's current
+    config_hash: after a command edit it describes the old executable (#206)."""
+
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    tools = [{"name": "echo", "description": "Echo back", "has_output_schema": False}]
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={"name": "Tools", "runner": "command", "command": "/bin/true"},
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server = created.json()
+        url = f"/api/servers/{server['id']}/mcpb"
+
+        def stamp() -> None:
+            """Cache ``tools`` as probed under the row's current config_hash."""
+            with Session(get_engine()) as session:
+                row = repo.get_server(session, server["id"])
+                repo.upsert_runtime(
+                    session, row.id, tools=tools, tools_config_hash=row.config_hash
+                )
+
+        try:
+            stamp()
+            assert _manifest_from(c.get(url, headers=LOOPBACK).content)["tools"] == [
+                {"name": "echo", "description": "Echo back"}
+            ]
+            edited = c.patch(
+                f"/api/servers/{server['id']}",
+                json={"command": "/bin/false"},
+                headers=LOOPBACK,
+            )
+            assert edited.status_code == 200, edited.text
+            assert "tools" not in _manifest_from(c.get(url, headers=LOOPBACK).content)
+            stamp()
+            assert _manifest_from(c.get(url, headers=LOOPBACK).content)["tools"]
+        finally:
+            c.delete(f"/api/servers/{server['id']}", headers=LOOPBACK)
