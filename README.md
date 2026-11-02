@@ -355,7 +355,10 @@ those, the bridge returns the server's request to the client as an
 hands the answer back to the server, which has been waiting the whole time. This works
 for tool calls, resource reads and prompts, on `remote` servers, stdio servers with
 **Client requests** on (below), and groups. A client that's asked something and doesn't
-come back within 10 minutes is treated like one that cancelled. Clients on the older
+come back within 10 minutes is treated like one that cancelled. At most 256 requests
+per server or group wait like this at once; past that, the server's request is refused
+and the call carries on without it. A group rebuild doesn't drop a waiting request,
+unless the member it reached is no longer in the group. Clients on the older
 handshake protocol get the requests pushed to them as before, except through a group:
 groups serve stateless HTTP, which has never been able to carry a client's reply back.
 

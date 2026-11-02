@@ -63,7 +63,8 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   stdio child the turn fills the caller slot and owns the lock (`_SerializeClientRequests`);
   for a remote upstream and for groups (`_ModernTurns`), each request's own upstream session
   finds its turn through `_CURRENT_TURN` (`_TurnAwareProxyClient`). Groups share one
-  request-state key and per-group parked turns across swaps. The upstream leg is pinned to the handshake era (`ProxyClient`
+  request-state key and per-group parked turns across swaps; a swap ends the turns whose
+  members (`_Turn.members`) it no longer mounts. At most `_MAX_PARKED_TURNS` park at once. The upstream leg is pinned to the handshake era (`ProxyClient`
   defaults to `mode="legacy"`), and caller headers reach it only via
   `ProxyClient(forward_incoming_headers=...)`, which FastMCP 4 turns ON by default.
 - **Secret env** (`sealed.py`): a per-key choice, for env vars and remote/openapi headers

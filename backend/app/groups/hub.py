@@ -298,7 +298,9 @@ class GroupHub:
                     logger.exception("group %r sync error", name)
                     await self._teardown(name)
 
-    def _make_proxy(self, slug: str, url: str, forward: bool = False) -> FastMCP:
+    def _make_proxy(
+        self, slug: str, url: str, forward: bool = False, server_id: str | None = None
+    ) -> FastMCP:
         # ProxyClient forwards the caller's inbound headers (Authorization included) by
         # default. On this INTERNAL hop that would send the group's bearer token — which
         # authorizes the whole bundle — to every bridge, and a remote-runner bridge would
@@ -310,6 +312,7 @@ class GroupHub:
         client = _TurnAwareProxyClient(
             self._transport_factory(url), roots=_forward_roots, forward_incoming_headers=forward
         )
+        client.member = server_id
         return create_proxy(client, name=slug)
 
     async def _swap(
@@ -321,10 +324,21 @@ class GroupHub:
         forward: set[str] | None = None,
     ) -> None:
         bundle = FastMCP(f"mcpelevator-{name}", request_state_security=self._request_state)
-        bundle.add_middleware(_ModernTurns(self._parked.setdefault(name, {})))
+        parked = self._parked.setdefault(name, {})
+        # A request parked on the old instance may resume on this one, but only if every
+        # member it reached is still in the group: a member that left, or is now excluded
+        # (the anti-downgrade rule, say), must not answer through it.
+        mounted_ids = {server_id for server_id, *_ in entries}
+        for turn in list(parked.values()):
+            if not turn.members <= mounted_ids:
+                turn.end()
+        bundle.add_middleware(_ModernTurns(parked))
         for server_id, slug, host, port in sorted(entries):
             proxy = self._make_proxy(
-                slug, f"http://{host}:{port}/mcp", forward=server_id in (forward or ())
+                slug,
+                f"http://{host}:{port}/mcp",
+                forward=server_id in (forward or ()),
+                server_id=server_id,
             )
             bundle.mount(proxy, namespace=slug)
         # stateless: a fresh upstream transport per request, so swapping instances never
@@ -344,6 +358,8 @@ class GroupHub:
 
     async def _teardown(self, name: str) -> None:
         """Stop routing to ``name`` now; its instance closes once drained."""
+        for turn in list(self._parked.pop(name, {}).values()):
+            turn.end()  # nothing serves this group now, so nothing may resume these
         old = self._instances.pop(name, None)
         if old is not None:
             self._retire(old)

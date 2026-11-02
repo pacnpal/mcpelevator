@@ -383,6 +383,11 @@ class _StdioRouting:
 # with an ephemeral key whose tokens expire after this long anyway.
 _PARKED_TURN_TTL_S = 600.0
 
+# How many turns one proxy (or group) keeps parked at once. A parked turn outlives the
+# connection that parked it, so nothing else bounds them; past this, the upstream's
+# request is refused and the call carries on without the input.
+_MAX_PARKED_TURNS = 256
+
 # Per kind of input request: the capability a caller must declare to be asked it, the
 # name used in a refusal, and the answers the client may send back.
 _INPUT_KINDS = {
@@ -464,6 +469,7 @@ class _Turn:
         self.asked = asyncio.Event()
         self.closed = False
         self.state: str | None = None  # set while parked, waiting on the caller's retry
+        self.members: set[str] = set()  # the group members this request reached (groups only)
         self._expiry: asyncio.TimerHandle | None = None
         self._released = False
         self._keys = itertools.count()
@@ -513,18 +519,34 @@ class _Turn:
     async def leg(self, wrap):
         """Serve one leg: the result, or an ``InputRequiredResult`` (wrapped for the
         middleware chain by ``wrap``) asking for input."""
-        asked = asyncio.ensure_future(self.asked.wait())
-        try:
-            await asyncio.wait({self.run, asked}, return_when=asyncio.FIRST_COMPLETED)
-        except asyncio.CancelledError:
-            self.end()
-            raise
-        finally:
-            asked.cancel()
-        if self.run.done():
-            return self.run.result()
-        self.asked.clear()
-        requests = {k: request for k, (request, _) in self.pending.items() if k not in self.sent}
+        while True:
+            asked = asyncio.ensure_future(self.asked.wait())
+            try:
+                await asyncio.wait({self.run, asked}, return_when=asyncio.FIRST_COMPLETED)
+            except asyncio.CancelledError:
+                self.end()
+                raise
+            finally:
+                asked.cancel()
+            if self.run.done():
+                return self.run.result()
+            self.asked.clear()
+            requests = {
+                k: request for k, (request, _) in self.pending.items() if k not in self.sent
+            }
+            if not requests:
+                continue  # the upstream withdrew what woke us: keep waiting
+            if len(self.parked) < _MAX_PARKED_TURNS:
+                break
+            _UPSTREAM_LOG.warning(
+                "%d requests are already waiting on their clients; refusing this one's "
+                "server-initiated request",
+                len(self.parked),
+            )
+            for key in requests:
+                self.pending[key][1].set_result(
+                    ErrorData(code=INVALID_REQUEST, message="too many requests are waiting on input")
+                )
         self.sent.update(requests)
         self.state = secrets.token_urlsafe(16)
         self.parked[self.state] = self
@@ -718,12 +740,19 @@ class _TurnAwareProxyClient(ProxyClient):
     A stdio child's shared session ignores these: its routing installs its own callbacks.
     """
 
+    # The group member this client reaches, if it's a group's (set by the hub), so a turn
+    # knows which members it depends on (see _Turn.members).
+    member: str | None = None
+
     def new(self):
         client = super().new()
         kwargs = client._session_kwargs
         for key, wrap in _TURN_CALLBACKS.items():
             if kwargs.get(key) is not None:
                 kwargs[key] = wrap(kwargs[key])
+        turn = _CURRENT_TURN.get()  # new() runs in the request's own task, so its turn's
+        if turn is not None and self.member is not None:
+            turn.members.add(self.member)
         return client
 
     async def call_tool_mcp(self, name, arguments, progress_handler=None, timeout=None, meta=None):

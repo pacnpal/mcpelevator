@@ -1314,3 +1314,73 @@ async def test_group_progress_after_a_round_trip_reaches_the_live_leg(
         await hub.close()
         with Session(get_engine()) as session:
             repo.delete_server(session, member.id)
+
+
+async def test_group_member_resource_and_prompt_requests_reach_a_modern_caller(
+    clean_settings, pushing_upstream_url
+):
+    """A member that asks for roots while a resource is read or a prompt is rendered
+    reaches the group's modern caller too."""
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Pusher")
+    _write_groups({"all": "*"})
+    hub = _http_hub(pushing_upstream_url)
+    try:
+        await hub.sync(_endpoints(member))
+        async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
+            (resource,) = await client.list_resources()
+            contents = await asyncio.wait_for(client.read_resource(resource.uri), 10)
+            prompt = await asyncio.wait_for(client.get_prompt("pusher_roots_prompt"), 10)
+        assert json.loads(contents[0].text) == ["file:///alice"]
+        assert json.loads(prompt.messages[0].content.text) == ["file:///alice"]
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)
+
+
+async def test_group_round_trip_ends_when_its_member_leaves(clean_settings, pushing_upstream_url):
+    """A request parked on a member that a rebuild drops (it left the group, or the
+    anti-downgrade rule now excludes it) can't resume through the new instance; the
+    retry is told to send the request again, against the current membership. Deleting
+    the group ends what's still parked there too."""
+    from mcp.types import InputRequiredResult, ListRootsResult, Root
+
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Pusher")
+        other = _mk_server(session, "Other")
+    _write_groups({"all": "*"})
+    hub = _http_hub(pushing_upstream_url)
+    try:
+        await hub.sync(_endpoints(member))
+        async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
+            first = await client.session.call_tool(
+                "pusher_where", {}, allow_input_required=True
+            )
+            assert isinstance(first, InputRequiredResult)
+            (key,) = first.input_requests
+        await hub.sync(_endpoints(other))  # the member is gone from the rebuilt group
+        async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
+            retry = await asyncio.wait_for(
+                client.session.call_tool(
+                    "pusher_where",
+                    {},
+                    allow_input_required=True,
+                    input_responses={key: ListRootsResult(roots=[Root(uri="file:///alice")])},
+                    request_state=first.request_state,
+                ),
+                10,
+            )
+        assert retry.is_error and "has ended" in retry.content[0].text
+
+        async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
+            await client.session.call_tool("other_where", {}, allow_input_required=True)
+        assert hub._parked["all"]
+        _write_groups({})
+        await hub.sync(_endpoints(other))  # the group is deleted
+        assert "all" not in hub._parked
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)
+            repo.delete_server(session, other.id)

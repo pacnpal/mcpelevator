@@ -1848,6 +1848,59 @@ async def test_parked_turn_logs_go_to_the_bridge_log_not_nowhere(caplog):
     assert "[up] hello" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_remote_upstream_resource_and_prompt_requests_reach_a_modern_caller(
+    pushing_upstream_url,
+):
+    """A remote upstream that asks for roots while a resource is read or a prompt is
+    rendered reaches a modern caller too, not only from a tool call."""
+    proxy = host.build_proxy(
+        {"command": pushing_upstream_url, "name": "remote", "transport": "streamable-http"}
+    )
+    async with Client(proxy, roots=["file:///alice"]) as client:
+        with anyio.fail_after(10):
+            resource = await client.read_resource("push://roots")
+            prompt = await client.get_prompt("roots_prompt")
+    assert json.loads(resource[0].text) == ["file:///alice"]
+    assert json.loads(prompt.messages[0].content.text) == ["file:///alice"]
+
+
+@pytest.mark.asyncio
+async def test_turn_leg_waits_through_a_wakeup_whose_request_was_withdrawn():
+    """The upstream can withdraw a request (cancel it) after it woke the leg. Nothing is
+    left to ask then, so the leg keeps waiting instead of returning an
+    InputRequiredResult that asks for nothing."""
+    done = asyncio.get_running_loop().create_future()
+    turn = host._Turn({}, None, lambda: done)
+    turn.asked.set()  # woken, with no request left pending
+    leg = asyncio.ensure_future(turn.leg(lambda result: result))
+    await asyncio.sleep(0.05)
+    assert not leg.done()
+    done.set_result("the result")
+    assert await asyncio.wait_for(leg, 1) == "the result"
+
+
+@pytest.mark.asyncio
+async def test_turn_past_the_parked_cap_refuses_the_request_and_carries_on():
+    """A parked turn outlives its connection, so their number is capped: past it, the
+    upstream's request is refused and the call goes on without the input."""
+    from mcp.types import ErrorData, ListRootsRequest
+
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+    turn = host._Turn({}, None, lambda: done)
+    answer = loop.create_future()
+    turn.pending["roots/list#0"] = (ListRootsRequest(), answer)
+    turn.asked.set()
+    with patch.object(host, "_MAX_PARKED_TURNS", 0):
+        leg = asyncio.ensure_future(turn.leg(lambda result: result))
+        refusal = await asyncio.wait_for(answer, 1)
+        assert isinstance(refusal, ErrorData) and "too many" in refusal.message
+        assert not leg.done() and turn.parked == {}
+        done.set_result("the result")
+        assert await asyncio.wait_for(leg, 1) == "the result"
+
+
 async def _cancel_server_side(client: Client, call) -> None:
     """Start ``call`` on ``client`` and return once the SERVER has cancelled it — the way
     a real client abandons a request (``notifications/cancelled``), not just a local
