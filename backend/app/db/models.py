@@ -79,6 +79,8 @@ class Server(SQLModel, table=True):
     args: list = Field(sa_column=Column(JSON))
     # JSON object; always set by service. For runner="remote"/"openapi" this is the
     # upstream HTTP headers (e.g. {"Authorization": "Bearer …"}), not process env.
+    # A secret value (app.sealed) is stored here encrypted and the API returns it as
+    # "<hidden>". Being in ``env`` itself, the sealed values are covered by config_hash.
     env: dict = Field(sa_column=Column(JSON))
     # runner="openapi" only: the OpenAPI document itself, pasted or uploaded, for an API
     # whose spec isn't published at a URL. Set = ``command`` is blank and the bridge reads

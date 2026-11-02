@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -110,6 +111,63 @@ def fetch_document(
             return _read_capped(response), url
 
 
+class _YamlLoader(yaml.SafeLoader):
+    """YAML 1.1 reads ``2024-01-01`` as a date; JSON has no dates, so keep it a string."""
+
+
+_YamlLoader.yaml_implicit_resolvers = {
+    first: [r for r in resolvers if r[0] != "tag:yaml.org,2002:timestamp"]
+    for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+
+def _expanded_size(node: yaml.Node, sizes: dict[int, int], active: set[int]) -> int:
+    """About how many bytes ``node`` would take as JSON once every alias and ``<<`` merge
+    is written out in full. That's what constructing the document and every later reader
+    pays (FastMCP's models, a str() in an error or the preview), so it has to fit the same
+    limit as a JSON document. Measured on the composed node graph, before PyYAML builds
+    anything: there an alias is the same node object, so memoizing per node keeps the
+    measurement cheap even for a billion-laughs document."""
+    if isinstance(node, yaml.ScalarNode):
+        return len(node.value.encode()) + 2
+    key = id(node)
+    if key in sizes:
+        return sizes[key]
+    if key in active:
+        raise DocumentError("OpenAPI document has a recursive YAML alias")
+    active.add(key)
+    children = (
+        [part for pair in node.value for part in pair]
+        if isinstance(node, yaml.MappingNode)
+        else node.value
+    )
+    total = 2 + sum(2 + _expanded_size(child, sizes, active) for child in children)
+    active.discard(key)
+    sizes[key] = total
+    return total
+
+
+def _json_shaped(node: Any, seen: dict[int, Any] | None = None) -> Any:
+    """String every mapping key, as JSON would: YAML loads an unquoted ``200:`` as an int.
+
+    ``seen`` keeps YAML aliases shared, so this pass doesn't expand them either; the
+    document's expanded size was already checked (``_expanded_size``).
+    """
+    seen = {} if seen is None else seen
+    if id(node) in seen:
+        return seen[id(node)]
+    if isinstance(node, dict):
+        out: dict[str, Any] = seen.setdefault(id(node), {})
+        for k, v in node.items():
+            out[str(k)] = _json_shaped(v, seen)
+        return out
+    if isinstance(node, list):
+        items: list[Any] = seen.setdefault(id(node), [])
+        items.extend(_json_shaped(v, seen) for v in node)
+        return items
+    return node
+
+
 def parse_document(raw: bytes) -> dict[str, Any]:
     """Parse a JSON or YAML OpenAPI document, refusing what FastMCP can't translate."""
     try:
@@ -120,11 +178,36 @@ def parse_document(raw: bytes) -> dict[str, Any]:
         doc = json.loads(text)
     except ValueError:
         try:
-            doc = yaml.safe_load(text)
+            loader = _YamlLoader(text)
+            try:
+                node = loader.get_single_node()
+                if node is not None and _expanded_size(node, {}, set()) > MAX_DOCUMENT_BYTES:
+                    raise DocumentError(
+                        "OpenAPI document's YAML aliases and merges expand past "
+                        f"{MAX_DOCUMENT_BYTES // (1024 * 1024)} MiB"
+                    )
+                loaded = loader.construct_document(node) if node is not None else None
+            finally:
+                loader.dispose()
+            doc = _json_shaped(loaded)
         except yaml.YAMLError as exc:
             raise DocumentError(f"OpenAPI document is neither JSON nor YAML: {exc}") from None
+        except RecursionError:
+            raise DocumentError("OpenAPI document is nested too deeply") from None
     if not isinstance(doc, dict):
         raise DocumentError("OpenAPI document must be a JSON/YAML object")
+    # Unquoted `openapi: 3.0` / `version: 1.0` load as floats; both are strings in OpenAPI.
+    if isinstance(doc.get("openapi"), (int, float)):
+        doc["openapi"] = str(doc["openapi"])
+    info = doc.get("info")
+    if isinstance(info, dict):
+        for field in ("version", "title"):
+            if isinstance(info.get(field), (int, float)) and not isinstance(info[field], bool):
+                info[field] = str(info[field])
+        # A string in OpenAPI, and only a string gets printed: str() or %r on a YAML
+        # alias graph would expand every shared copy into one giant title.
+        if "title" in info and not isinstance(info["title"], str):
+            raise DocumentError("OpenAPI document's info.title must be a string")
     if "swagger" in doc:
         raise DocumentError(
             f"Swagger {doc.get('swagger')} documents aren't supported; convert it to "
@@ -147,6 +230,11 @@ def parse_document(raw: bytes) -> dict[str, Any]:
     return doc
 
 
+_SERVER_VARIABLE = re.compile(r"\{([^{}]*)\}")
+# Longer than any real API's base URL; past it, a server URL is an attack, not an address.
+MAX_BASE_URL = 8192
+
+
 def resolve_base_url(doc: dict[str, Any], document_url: str, override: str | None) -> str:
     """The URL API calls are made against.
 
@@ -158,12 +246,34 @@ def resolve_base_url(doc: dict[str, Any], document_url: str, override: str | Non
     if override:
         return override
     servers = doc.get("servers") or [{"url": "/"}]
-    first = servers[0] if isinstance(servers, list) and servers else {}
-    url = str(first.get("url") or "/") if isinstance(first, dict) else "/"
-    variables = first.get("variables") if isinstance(first, dict) else None
-    for name, variable in (variables or {}).items():
-        default = variable.get("default", "") if isinstance(variable, dict) else ""
-        url = url.replace(f"{{{name}}}", str(default))
+    if not isinstance(servers, list) or not isinstance(servers[0], dict):
+        raise DocumentError("the document's `servers` must be a list of objects")
+    first = servers[0]
+    url = first.get("url")
+    if not isinstance(url, str):
+        url = "/"
+    variables = first.get("variables")
+    defaults: dict[str, str] = {}
+    for name, variable in (variables if isinstance(variables, dict) else {}).items():
+        default = variable.get("default") if isinstance(variable, dict) else None
+        # A number is fine (YAML reads an unquoted `2` as one); null or a bool would become
+        # "None" or "True", so those leave the placeholder visible instead.
+        if isinstance(default, (int, float)) and not isinstance(default, bool):
+            default = str(default)
+        if isinstance(default, str):
+            defaults[name] = default
+    # One pass, as OpenAPI means it: a default that names another variable isn't expanded
+    # again (chained ones would double the URL per step), and the result is sized before
+    # it's built, since even one pass can repeat a long default many times.
+    resolved = len(url) + sum(
+        len(defaults[name]) - len(name) - 2 for name in _SERVER_VARIABLE.findall(url)
+        if name in defaults
+    )
+    if resolved > MAX_BASE_URL:
+        raise DocumentError(
+            "the document's server URL is too long once its variables are filled in"
+        )
+    url = _SERVER_VARIABLE.sub(lambda m: defaults.get(m[1], m[0]), url)
     base = urljoin(document_url, url)
     # A host too: "https://" or an empty `{host}` default would otherwise start fine and
     # then fail every call, with nowhere to connect.

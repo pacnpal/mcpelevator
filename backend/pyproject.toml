@@ -20,6 +20,11 @@ dependencies = [
     "pyjwt[crypto]>=2.10",
     # YAML OpenAPI documents for the openapi runner (app.bridge.openapi).
     "pyyaml>=6",
+    # Encrypts secret env values at rest (app.sealed). Already pulled in by pyjwt[crypto].
+    "cryptography>=42",
+    # Every .mcpb manifest is checked against the official schema before it's served
+    # (app.mcpb). Already pulled in by the mcp SDK.
+    "jsonschema>=4",
 ]
 
 [project.optional-dependencies]
@@ -30,10 +35,6 @@ dev = [
     # falls back to httpx. The app's runtime HTTP client stays on `httpx` above; only the test
     # client needs httpx2, so it lives here.
     "httpx2>=2.7",
-    # The MCPB manifest tests validate generated bundles against the official JSON schema.
-    # jsonschema already arrives transitively via the mcp SDK; pinning it here keeps that
-    # oracle from silently vanishing if the SDK ever drops the dependency.
-    "jsonschema>=4",
 ]
 
 [tool.uv]

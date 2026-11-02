@@ -71,6 +71,11 @@ Typical flows:
   servers start disabled. Review them, then enable_server and wait_for_server.
 - Hide or relabel a server's tools: update_server with disabled_tools or
   tool_overrides.
+- Keep secrets write-only: list the env keys (or headers) in secret_env on
+  create_server or update_server. Their values are encrypted and read "<hidden>"
+  from then on; send "<hidden>" back to keep one. Making one visible, or changing
+  what the server runs (on a local server, any other env value too), needs the
+  secret values sent in full.
 - Try a tool: call_server_tool on a running server (not counted as usage).
 - Reach a server from a client: mint a token with create_token (scope "all", a
   server id, or "group:<name>"). The plaintext is returned once.

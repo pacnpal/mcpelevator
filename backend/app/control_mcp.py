@@ -204,7 +204,9 @@ def build(app: FastAPI) -> "_Gate":
         is the HTTP headers sent to the API). Created
         disabled unless ``enabled`` is true. A local runner can launch from a git checkout:
         ``repo_url`` (+ optional ``repo_ref``) is cloned, ``post_clone_script`` runs in it
-        when the commit or script changes, and the command runs inside it."""
+        when the commit or script changes, and the command runs inside it.
+        ``secret_env`` names the ``env`` keys (headers too, for remote and openapi) whose
+        values are stored encrypted and never returned: each reads "<hidden>"."""
         return await api("POST", "/api/servers", json=spec.model_dump(exclude_unset=True))
 
     @mcp.tool(annotations=_WRITE)
@@ -217,7 +219,12 @@ def build(app: FastAPI) -> "_Gate":
         override and API headers; its document is re-read on every start, so
         restart_server picks up a changed API. A pasted document lives in
         ``openapi_document`` (with ``command`` ""); switching between the two sends both
-        fields, the unused one blank."""
+        fields, the unused one blank. A secret ``env`` value reads "<hidden>"; sending
+        "<hidden>" keeps it and any other value replaces it. ``secret_env`` lists the
+        secret keys (omit it to leave each key as it is). Making a secret visible, or
+        changing what the server runs (runner, command, args, run_args, cwd,
+        setup_script, the repo fields, openapi_document, and for a local server any other
+        env value), needs those secret values sent in full in the same call."""
         if changes.model_fields_set & _RESTARTING_FIELDS:
             _refuse_self(server_id, "change its exposure or tool policy")
         return await api(

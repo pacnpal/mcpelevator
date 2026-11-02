@@ -181,6 +181,69 @@ def test_rest_mirror_serves_translated_tools(monkeypatch):
 # --- document parsing -----------------------------------------------------------------
 
 
+def test_parse_yaml_coerces_to_json_shapes():
+    """Hand-written YAML: unquoted status codes, version numbers and dates stay JSON-shaped."""
+    doc = openapi.parse_document(
+        b"openapi: 3.0\ninfo: {title: t, version: 1.0}\npaths:\n  /a:\n    get:\n"
+        b"      responses:\n        200: {description: ok}\n"
+        b"      x-since: 2024-01-01\n"
+    )
+    assert doc["openapi"] == "3.0" and doc["info"]["version"] == "1.0"
+    get = doc["paths"]["/a"]["get"]
+    assert list(get["responses"]) == ["200"] and get["x-since"] == "2024-01-01"
+
+
+def _alias_levels(depth: int) -> str:
+    return "".join(f"  l{i}: &l{i} [{', '.join([f'*l{i-1}'] * 8)}]\n" for i in range(1, depth + 1))
+
+
+def test_parse_yaml_keeps_aliases_shared():
+    """Aliases stay shared objects, so normalizing them doesn't expand them."""
+    raw = (
+        "openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths: {}\n"
+        "x-shared:\n  l0: &l0 [x]\n" + _alias_levels(3)
+    ).encode()
+    shared = openapi.parse_document(raw)["x-shared"]
+    assert shared["l3"][0] is shared["l3"][1] is shared["l2"]
+
+
+@pytest.mark.parametrize(
+    "bomb, message",
+    [
+        # Nested aliases: 8**12 leaves once written out, wherever they're used.
+        ("x-b:\n  l0: &l0 [x]\n" + _alias_levels(12) + "servers: [{url: *l12}]\n", "expand past"),
+        # No nesting needed: one big string, aliased many times.
+        ("x-s: &s '" + "y" * 100_000 + "'\nx-b: [" + ", ".join(["*s"] * 400) + "]\n", "expand past"),
+        ("x-r: &r [*r]\n", "recursive YAML alias"),
+        # `<<` merges copy entries while PyYAML builds the mapping, so they're measured
+        # on the node graph before anything is built.
+        ("x-m:\n  m0: &m0 {a: 1}\n" + "".join(
+            f"  m{i}: &m{i} {{" + ", ".join(f"k{j}: {{<<: *m{i-1}}}" for j in range(8)) + "}\n"
+            for i in range(1, 12)
+        ), "expand past"),
+    ],
+)
+def test_parse_refuses_yaml_that_expands_past_the_size_limit(bomb, message):
+    """Every reader of the document (FastMCP, an error message, the preview) pays the
+    expanded size, so it's held to the same limit as a JSON document."""
+    raw = ("openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths: {}\n" + bomb).encode()
+    with pytest.raises(openapi.DocumentError, match=message):
+        openapi.parse_document(raw)
+
+
+def test_parse_refuses_a_non_string_title():
+    """info.title gets printed (the preview, the bridge's log line); an alias graph there
+    would expand into one giant string, so only a string (or a number) is accepted."""
+    raw = (
+        "openapi: 3.1.0\nx-bomb:\n  l0: &l0 [x]\n" + _alias_levels(6)
+        + "info: {title: *l6, version: '1'}\npaths: {}\n"
+    ).encode()
+    with pytest.raises(openapi.DocumentError, match="title must be a string"):
+        openapi.parse_document(raw)
+    numeric = openapi.parse_document(b"openapi: 3.1.0\ninfo: {title: 42, version: '1'}\npaths: {}\n")
+    assert numeric["info"]["title"] == "42"
+
+
 def test_parse_accepts_json_and_yaml():
     doc = {"openapi": "3.0.3", "info": {"title": "t", "version": "1"}, "paths": {}}
     assert openapi.parse_document(json.dumps(doc).encode()) == doc
@@ -435,3 +498,97 @@ def test_fetch_caps_document_size(monkeypatch):
     transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b"x" * 11))
     with pytest.raises(ValueError, match="larger than"):
         openapi.fetch_document(DOC_URL, {}, transport=transport)
+
+
+def test_preview_reports_the_documents_base_url(monkeypatch):
+    """The form's base URL preview: the document's own servers entry, fetched with no
+    credentials, plus a relative entry in a pasted document reported as an error."""
+    from fastapi.testclient import TestClient
+
+    from conftest import LOOPBACK
+    from app.main import app
+
+    seen = {}
+
+    def fake_fetch(url, headers, **_):
+        seen["headers"] = headers
+        return (
+            b"openapi: 3.0.3\ninfo: {title: Coolify, version: '1'}\n"
+            b"servers: [{url: 'https://app.coolify.io/api/v1'}]\n"
+            b"paths:\n  /a: {get: {responses: {'200': {description: ok}}}, post: {}}\n",
+            url,
+        )
+
+    monkeypatch.setattr(openapi, "fetch_document", fake_fetch)
+    with TestClient(app) as c:
+        r = c.post("/api/openapi/preview", json={"command": "https://x/openapi.yaml"},
+                   headers=LOOPBACK)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"base_url": "https://app.coolify.io/api/v1", "title": "Coolify",
+                            "operations": 2, "error": None}
+        assert seen["headers"] == {}
+        pasted = c.post(
+            "/api/openapi/preview",
+            json={"openapi_document": "openapi: 3.1.0\ninfo: {title: t, version: '1'}\n"
+                                      "servers: [{url: /v1}]\npaths: {}\n"},
+            headers=LOOPBACK,
+        ).json()
+        assert pasted["base_url"] is None and "base URL override" in pasted["error"]
+        assert c.post("/api/openapi/preview", json={"command": "ftp://x"},
+                      headers=LOOPBACK).status_code == 400
+
+
+def test_server_variables_fill_in_one_pass():
+    """A default naming another variable isn't expanded again: chained, they would
+    double the URL per variable."""
+    variables = {f"v{i}": {"default": f"{{v{i + 1}}}{{v{i + 1}}}"} for i in range(40)}
+    variables["v40"] = {"default": "a"}
+    doc = {"servers": [{"url": "https://example.com/{v0}", "variables": variables}]}
+    assert openapi.resolve_base_url(doc, "", None) == "https://example.com/{v1}{v1}"
+    long = {"servers": [{"url": "https://e.com/" + "{v}" * 100, "variables": {"v": {"default": "x" * 100}}}]}
+    with pytest.raises(openapi.DocumentError, match="too long"):
+        openapi.resolve_base_url(long, "", None)
+
+
+def test_yaml_merge_keys_still_work():
+    doc = openapi.parse_document(
+        b"openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths: {}\n"
+        b"x-base: &base {a: 1}\nx-child: {<<: *base, b: 2}\n"
+    )
+    assert doc["x-child"] == {"a": 1, "b": 2}
+
+
+def test_base_url_resolution_edge_cases():
+    def resolve(server):
+        return openapi.resolve_base_url({"servers": [server]}, "", None)
+
+    # A numeric default (YAML's unquoted `2`) fills in; null and bools don't.
+    assert resolve({"url": "https://e.com/v{n}", "variables": {"n": {"default": 2}}}) == (
+        "https://e.com/v2"
+    )
+    assert resolve({"url": "https://e.com/{b}", "variables": {"b": {"default": True}}}) == (
+        "https://e.com/{b}"
+    )
+    # Placeholders count at their resolved length, so short defaults never trip the cap.
+    many = "".join(f"{{long_variable_name_{i}}}" for i in range(400))
+    variables = {f"long_variable_name_{i}": {"default": "x"} for i in range(400)}
+    assert resolve({"url": "https://e.com/" + many, "variables": variables}).endswith("x" * 400)
+    with pytest.raises(openapi.DocumentError, match="list of objects"):
+        openapi.resolve_base_url({"servers": ["https://e.com"]}, "", None)
+
+
+def test_parse_refuses_a_boolean_title():
+    with pytest.raises(openapi.DocumentError, match="title must be a string"):
+        openapi.parse_document(b"openapi: 3.1.0\ninfo: {title: true, version: '1'}\npaths: {}\n")
+
+
+def test_preview_refuses_an_oversized_pasted_document(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from conftest import LOOPBACK
+    from app.main import app
+
+    monkeypatch.setattr(openapi, "MAX_DOCUMENT_BYTES", 100)
+    with TestClient(app) as c:
+        r = c.post("/api/openapi/preview", json={"openapi_document": "x" * 200}, headers=LOOPBACK)
+    assert r.status_code == 200 and "larger than" in r.json()["error"]

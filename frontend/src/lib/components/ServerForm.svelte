@@ -1,14 +1,24 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
-	import { getAuthStatus, getSettings } from '#lib/api.js';
+	import { getAuthStatus, getSettings, previewOpenapi } from '#lib/api.js';
 	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '#lib/remote.js';
 	import { quoteIfNeeded, withPin } from '#lib/uvxPin.js';
-	import type { Runner, ServerAuthProvider, ServerCreate, ServerOauthClientMode } from '#lib/types.js';
+	import { HIDDEN_ENV } from '#lib/types.js';
+	import type {
+		OpenapiPreview,
+		Runner,
+		ServerAuthProvider,
+		ServerCreate,
+		ServerOauthClientMode
+	} from '#lib/types.js';
 
 	type Mode = 'create' | 'edit';
 
-	type EnvRow = { id: number; key: string; value: string };
+	// `secret`: stored encrypted, never shown again. `hidden`: a stored secret the API
+	// returned as HIDDEN_ENV; while its field stays blank the save sends HIDDEN_ENV
+	// back, which keeps the stored value.
+	type EnvRow = { id: number; key: string; value: string; secret: boolean; hidden: boolean };
 
 	// Per-server auth options. `inherit` defers to the global default set on
 	// the Settings page.
@@ -111,12 +121,17 @@
 	// in progress). We snapshot the seed in `untrack` so reading `initial` here
 	// doesn't register a reactive dependency.
 
-	function envToRows(env?: Record<string, string> | null): EnvRow[] {
-		return Object.entries(env ?? {}).map(([key, value], i) => ({
-			id: i,
-			key,
-			value
-		}));
+	function envToRows(env?: Record<string, string> | null, secrets?: string[]): EnvRow[] {
+		return Object.entries(env ?? {}).map(([key, value], i) => {
+			const hidden = value === HIDDEN_ENV;
+			return {
+				id: i,
+				key,
+				value: hidden ? '' : value,
+				secret: hidden || (secrets ?? []).includes(key),
+				hidden
+			};
+		});
 	}
 
 	// Reverse-engineer the friendly `pkg` + extra-args fields from a stored raw
@@ -179,7 +194,7 @@
 			oauthClientId: init.oauth_client_id ?? '',
 			oauthClientSecret: init.oauth_client_secret ?? '',
 			oauthClientMode: init.oauth_client_mode ?? 'inherit',
-			envRows: envToRows(init.env)
+			envRows: envToRows(init.env, init.secret_env)
 		};
 	});
 
@@ -309,7 +324,7 @@
 	}
 
 	function addEnvRow() {
-		envRows = [...envRows, { id: envSeq++, key: '', value: '' }];
+		envRows = [...envRows, { id: envSeq++, key: '', value: '', secret: false, hidden: false }];
 	}
 
 	function removeEnvRow(id: number) {
@@ -410,6 +425,33 @@
 	);
 	const baseUrlValid = $derived(!isOpenapi || !baseUrl.trim() || isValidRemoteUrl(baseUrl));
 
+	// What the document itself says to call, shown under the base URL field so an operator
+	// sees (say) Coolify Cloud's URL before saving a server meant for their own instance.
+	// Debounced; a stale answer (the field changed meanwhile) is dropped.
+	let specPreview = $state<OpenapiPreview | null>(null);
+	let previewSeq = 0;
+	$effect(() => {
+		const source = !isOpenapi
+			? null
+			: specPasted
+				? openapiDocument.trim() && { command: '', document: openapiDocument }
+				: isValidRemoteUrl(command) && { command: command.trim(), document: '' };
+		const seq = ++previewSeq;
+		// Cleared on every change, so the form never describes a document it isn't saving.
+		specPreview = null;
+		if (!source) return;
+		const timer = setTimeout(() => {
+			previewOpenapi(source.command, source.document)
+				.then((result) => {
+					if (seq === previewSeq) specPreview = result;
+				})
+				.catch(() => {
+					if (seq === previewSeq) specPreview = null;
+				});
+		}, 600);
+		return () => clearTimeout(timer);
+	});
+
 	// Mirror the backend's slugify so the operator sees the value that will actually
 	// be stored (lowercased, non-alphanumerics collapsed to single dashes).
 	function slugify(value: string): string {
@@ -440,7 +482,7 @@
 		const out: Record<string, string> = {};
 		for (const row of envRows) {
 			const k = row.key.trim();
-			if (k) out[k] = row.value;
+			if (k) out[k] = row.hidden && row.value === '' ? HIDDEN_ENV : row.value;
 		}
 		return out;
 	}
@@ -499,6 +541,7 @@
 			post_clone_script:
 				repoAllowed && repoUrl.trim() && postCloneScript.trim() ? postCloneScript : '',
 			env: buildEnv(),
+			secret_env: envRows.filter((r) => r.secret && r.key.trim()).map((r) => r.key.trim()),
 			cwd: isHttpUpstream || isDocker ? null : cwd.trim() ? cwd.trim() : null,
 			// uvx only; the backend forces it off elsewhere, but keep the payload
 			// honest so a runner switch clears it client-side too.
@@ -925,7 +968,7 @@
 			     OpenAPI document. command = document URL, args = [] or [base URL override],
 			     env = headers sent to the API. No local process. -->
 			<div class="flex flex-col gap-2">
-				<span class="text-sm font-medium text-[var(--color-ink)]">OpenAPI document</span>
+				<span class="text-sm font-medium text-[var(--color-ink)]">OpenAPI document <span class="text-xs font-normal text-[var(--color-ink-dim)]">(OpenAPI 3, JSON or YAML)</span></span>
 				<div class="grid grid-cols-2 gap-2">
 					{#each [{ pasted: false, title: 'URL', hint: 'Fetched on every start' }, { pasted: true, title: 'Paste or upload', hint: 'Stored with the server' }] as opt (opt.title)}
 						<label
@@ -982,6 +1025,12 @@
 						</p>
 					{/if}
 				{/if}
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					Authenticate with the API's own credential under <span class="font-medium">Headers</span> below,
+					as its <span class="font-mono">securitySchemes</span> asks (e.g.
+					<span class="font-mono">Authorization: Bearer &lt;token&gt;</span>). It is sent on every API
+					call; your clients' headers never are.
+				</p>
 				<label for="srv-base-url" class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]">
 					API base URL <span class="text-[var(--color-ink-dim)]">(optional)</span>
 				</label>
@@ -992,13 +1041,28 @@
 					bind:value={baseUrl}
 					autocomplete="off"
 					spellcheck="false"
-					placeholder="From the document's servers entry"
+					placeholder={specPreview?.base_url ?? "From the document's servers entry"}
 					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 				/>
 				{#if baseUrl.trim() && !baseUrlValid}
 					<p class="text-xs text-[var(--color-state-failed)]">
 						Enter an http(s):// URL, or leave blank to use the document's own.
 					</p>
+				{/if}
+				{#if specPreview && !baseUrl.trim()}
+					{#if specPreview.base_url}
+						<p class="text-xs text-[var(--color-ink-muted)]">
+							Left blank, calls go to
+							<code class="font-mono text-[var(--color-ink)]">{specPreview.base_url}</code>
+							{#if specPreview.title}({specPreview.title}, {specPreview.operations}
+								{specPreview.operations === 1 ? 'operation' : 'operations'}){/if}. Set a base
+							URL if that isn't your instance.
+						</p>
+					{:else if specPreview.error}
+						<p class="text-xs text-[var(--color-ink-dim)]">
+							Couldn't read the base URL from the document: {specPreview.error}
+						</p>
+					{/if}
 				{/if}
 				<p class="text-xs text-[var(--color-ink-dim)]">
 					{#if specPasted}
@@ -1455,14 +1519,47 @@
 								class="w-2/5 rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 							/>
 							<input
-								type="text"
+								type={row.secret ? 'password' : 'text'}
 								bind:value={row.value}
-								autocomplete="off"
+								autocomplete={row.secret ? 'new-password' : 'off'}
 								spellcheck="false"
-								placeholder="value"
+								placeholder={row.hidden
+									? row.secret
+										? 'Hidden. Type to replace'
+										: 'Type the value to make it visible'
+									: 'value'}
 								aria-label="Environment variable value"
 								class="min-w-0 flex-1 rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 							/>
+							<button
+								type="button"
+								onclick={() => (row.secret = !row.secret)}
+								aria-pressed={row.secret}
+								aria-label={row.secret ? 'Secret: stored encrypted, never shown again' : 'Make secret'}
+								title={row.secret ? 'Secret: stored encrypted, never shown again' : 'Make secret'}
+								class="shrink-0 rounded-md border p-1.5 transition"
+								style={row.secret
+									? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); color: var(--color-accent);'
+									: 'border-color: var(--color-line); color: var(--color-ink-dim);'}
+							>
+								<svg
+									class="size-3.5"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									aria-hidden="true"
+								>
+									<rect x="5" y="11" width="14" height="10" rx="2" />
+									{#if row.secret}
+										<path d="M8 11V7a4 4 0 0 1 8 0v4" />
+									{:else}
+										<path d="M8 11V7a4 4 0 0 1 7.5-2" />
+									{/if}
+								</svg>
+							</button>
 							<button
 								type="button"
 								onclick={() => removeEnvRow(row.id)}
@@ -1484,6 +1581,14 @@
 						</div>
 					{/each}
 				</div>
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					The lock marks a value secret: it's stored encrypted and never shown again, in this
+					form, the API, or a .mcpb export.
+					{#if envRows.some((r) => r.hidden)}
+						Changing what this server runs (for a local server, that includes any other env
+						value), or unlocking a secret, needs the secret values typed in again.
+					{/if}
+				</p>
 			{/if}
 		</fieldset>
 

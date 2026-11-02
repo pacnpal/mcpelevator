@@ -2,13 +2,54 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
 import re
 import secrets
+import tempfile
 import uuid
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+
+def secret_file(path: Path, make: Callable[[], bytes], valid: Callable[[bytes], bool]) -> bytes:
+    """Read a per-install secret from ``path``, creating it with ``make()`` when it's
+    missing or fails ``valid``. Written atomically and 0600 from birth (mkstemp): secret
+    material lives off the DB, in the data dir.
+
+    Only a missing or invalid file is replaced: any other read error propagates, since
+    regenerating the env key would orphan every value sealed with it. A missing file is
+    created with ``os.link``, which fails if another process created it first, and then
+    that process's secret is used instead of overwriting it."""
+    try:
+        existing: bytes | None = path.read_bytes()
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and valid(existing):
+        return existing
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = make()
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        if existing is None:
+            try:
+                os.link(tmp_name, path)
+            except FileExistsError:
+                data = path.read_bytes()
+                if not valid(data):
+                    raise
+        else:
+            os.replace(tmp_name, path)  # an invalid file: nothing usable to keep
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_name)
+    return data
 
 
 def new_id() -> str:

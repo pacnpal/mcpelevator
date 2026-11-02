@@ -15,11 +15,34 @@ import io
 import json
 import re
 import zipfile
+from functools import lru_cache
+from pathlib import Path
+
+import jsonschema
 
 from app import __version__
+from app import sealed
 from app.db.models import Server
 from app.runners import build_spec
 from app.runners.docker import server_label
+
+
+# The manifest version every export declares. The official toolchain
+# (@anthropic-ai/mcpb 2.1.2) knows up to 0.4 but still defaults new bundles to 0.2,
+# the version every bundle-aware client accepts; nothing an export carries needs more.
+MANIFEST_VERSION = "0.2"
+# That version's official JSON schema, vendored verbatim from @anthropic-ai/mcpb 2.1.2
+# (schemas/mcpb-manifest-v0.2.schema.json). Every manifest is checked against it before
+# it leaves (see ``manifest``), so a bundle that a client would refuse is never served.
+SCHEMA_PATH = Path(__file__).with_name("mcpb-manifest-v0.2.schema.json")
+
+
+@lru_cache
+def _validator() -> jsonschema.Draft7Validator:
+    schema = json.loads(SCHEMA_PATH.read_text())
+    # format_checker: the schema marks URLs as "format": "uri", which Draft 7 only
+    # annotates unless asked to check.
+    return jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker())
 
 
 # One SemVer prerelease identifier (semver.org grammar): a numeric one can't have
@@ -54,14 +77,21 @@ def _semver(raw: str) -> str:
     return f"{core}-{pre.group(1)}" if pre else core
 
 
-def manifest(server: Server) -> dict:
+def manifest(server: Server, tools: list[dict] | None = None) -> dict:
     """The MCPB ``manifest.json`` for a local stdio server.
+
+    ``tools`` is the server's cached tool list (``tool_summary`` entries), listed in
+    the manifest under their upstream names. Every manifest is validated against the
+    official schema before it's returned; one that fails raises ``ValueError`` rather
+    than reaching a client that would refuse it.
 
     Raises ``ValueError`` for a non-stdio (remote) server, and for a spec that
     depends on launch context a bundle can't carry (``cwd``/``setup_script``/a repository) —
     exporting those would hand out a bundle that can't reproduce the server.
     ``env`` is embedded verbatim — the download is control-plane-gated, and the
-    same principal already reads those values on the server detail endpoint.
+    same principal already reads those values on the server detail endpoint. A
+    secret value (app.sealed) isn't readable there, so it isn't embedded either: it
+    becomes a sensitive ``user_config`` prompt the client asks for at install.
     The per-tool policy (``disabled_tools``, ``tool_overrides``) is deliberately
     NOT carried: it shapes the elevator's exposed surfaces, and the downloader is
     the operator who set that policy — a local run is their own machine, talking
@@ -110,12 +140,22 @@ def manifest(server: Server) -> dict:
                 del args[i : i + 2]
                 break
     mcp_config: dict = {"command": spec.command, "args": args}
+    user_config: dict = {}
     if spec.env:
-        mcp_config["env"] = dict(spec.env)
-    return {
-        # 0.2 is the MCPB baseline every bundle-aware client accepts; nothing
-        # here needs a newer manifest feature.
-        "manifest_version": "0.2",
+        env = dict(spec.env)
+        for i, key in enumerate(sealed.secret_keys(server.env or {})):
+            if key in env:
+                user_config[f"env_{i}"] = {
+                    "type": "string",
+                    "title": key,
+                    "description": f"{key} (hidden in mcpelevator, so enter it here)",
+                    "sensitive": True,
+                    "required": True,
+                }
+                env[key] = f"${{user_config.env_{i}}}"
+        mcp_config["env"] = env
+    out: dict = {
+        "manifest_version": MANIFEST_VERSION,
         # Package identity = the immutable server id: a slug rename or a
         # same-slug server on another instance must not fork/collide the
         # installed extension. The human-facing name lives in display_name
@@ -125,6 +165,7 @@ def manifest(server: Server) -> dict:
         "version": version,
         "description": f"{server.name} ({server.runner}: {server.command}) — exported from mcpelevator",
         "author": {"name": "mcpelevator"},
+        "keywords": ["mcpelevator", server.runner],
         "server": {
             # "binary": the bundle ships no code — mcp_config invokes the
             # host's own npx/uvx/docker/executable, same argv as the bridge.
@@ -132,13 +173,53 @@ def manifest(server: Server) -> dict:
             # bare command against the user's login-shell PATH (probing
             # .exe/.bat/.cmd/.ps1 on Windows and wrapping a .cmd shim in
             # ``cmd.exe /C`` itself) and merges ``env`` into the child's
-            # environment — so no ``platform_overrides``/``npx.cmd`` shims,
-            # ``user_config`` indirection, or newer manifest_version is needed.
+            # environment — so no ``platform_overrides``/``npx.cmd`` shims are needed.
             "type": "binary",
             "entry_point": spec.command,
             "mcp_config": mcp_config,
         },
     }
+    if user_config:
+        out["user_config"] = user_config
+    listed = _listed_tools(server, tools or [])
+    if listed:
+        out["tools"] = listed
+        # The list is a snapshot from the last start, without the tools the operator
+        # hid (the bundle doesn't carry that policy): the server can serve more.
+        out["tools_generated"] = True
+    # An absolute command path only exists on its own OS family.
+    if is_absolute:
+        out["compatibility"] = {
+            "platforms": ["darwin", "linux"] if cmd.startswith("/") else ["win32"]
+        }
+    errors = sorted(_validator().iter_errors(out), key=lambda e: list(e.absolute_path))
+    if errors:
+        where = "/".join(map(str, errors[0].absolute_path)) or "the manifest"
+        raise ValueError(
+            f"the generated .mcpb manifest breaks the MCPB {MANIFEST_VERSION} schema "
+            f"at {where}: {errors[0].message}"
+        )
+    return out
+
+
+def _listed_tools(server: Server, tools: list[dict]) -> list[dict]:
+    """The manifest's ``tools``: each cached tool under its upstream name (the bundle
+    runs the upstream directly, without mcpelevator's renames), with its description
+    unless that is the operator's override rather than the upstream's own."""
+    overrides = server.tool_overrides or {}
+    listed = []
+    for tool in tools:
+        name = tool.get("upstream_name") or tool.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        entry = {"name": name}
+        description = tool.get("description")
+        if isinstance(description, str) and description and not (
+            overrides.get(name) or {}
+        ).get("description"):
+            entry["description"] = description
+        listed.append(entry)
+    return listed
 
 
 def exportable(server: Server) -> bool:
@@ -151,13 +232,13 @@ def exportable(server: Server) -> bool:
         return False
 
 
-def bundle(server: Server) -> bytes:
+def bundle(server: Server, tools: list[dict] | None = None) -> bytes:
     """The ``.mcpb`` file bytes: a zip containing only ``manifest.json``."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         # Fixed ZipInfo timestamp (the 1980 zip epoch): same row, byte-identical bundle.
         zf.writestr(
             zipfile.ZipInfo("manifest.json"),
-            json.dumps(manifest(server), indent=2) + "\n",
+            json.dumps(manifest(server, tools), indent=2) + "\n",
         )
     return buf.getvalue()
