@@ -421,7 +421,7 @@ class Supervisor:
                 await self._stop_quietly(sv.id)
             self._write_runtime(
                 sv.id, state="failed", pid=None, port=None,
-                last_error=reason, restart_count=0, last_health=None, tools=[],
+                last_error=reason, restart_count=0, last_health=None, tools=[], tools_config_hash="",
             )
 
         # stop anything running that is no longer desired
@@ -442,7 +442,7 @@ class Supervisor:
                     continue
                 self._write_runtime(
                     server_id, state="stopped", pid=None, port=None,
-                    last_error=None, restart_count=0, last_health=None, tools=[],
+                    last_error=None, restart_count=0, last_health=None, tools=[], tools_config_hash="",
                 )
                 stopped_runtime.add(server_id)
 
@@ -463,7 +463,7 @@ class Supervisor:
                     last_error=None,
                     restart_count=0,
                     last_health=None,
-                    tools=[],
+                    tools=[], tools_config_hash="",
                 )
 
         # Forget queued activations for ids that have no row at all. Reconcile only
@@ -527,7 +527,7 @@ class Supervisor:
             ):
                 last = self._last_activity.get(server_id)
                 if last is not None and (now - last).total_seconds() >= timeout:
-                    tools = unit.tools
+                    tools, tools_hash = unit.tools, unit.config_hash
                     # A failed quiesce must not read as "idle" — an idle server is one
                     # the proxy may wake, and waking a unit whose process never died
                     # would start a second one. Leave it quarantined and try next pass.
@@ -536,6 +536,7 @@ class Supervisor:
                         self._write_runtime(
                             server_id, state="idle", pid=None, port=None,
                             last_error=None, restart_count=0, last_health=None, tools=tools,
+                            tools_config_hash=tools_hash,
                         )
                     continue
 
@@ -577,6 +578,7 @@ class Supervisor:
                     server_id,
                     state=unit.state, pid=unit.pid, port=unit.port,
                     last_error=unit.last_error, tools=unit.tools,
+                    tools_config_hash=unit.config_hash,
                     restart_count=getattr(unit, "restart_count", 0),
                     last_health=getattr(unit, "last_health", None),
                 )
@@ -587,7 +589,7 @@ class Supervisor:
                 # failed server never advertises a pid/port it no longer owns.
                 self._write_runtime(
                     server_id, state="failed", pid=None, port=None,
-                    last_error=start_error, restart_count=0, last_health=None, tools=[],
+                    last_error=start_error, restart_count=0, last_health=None, tools=[], tools_config_hash="",
                 )
 
     def _write_runtime(self, server_id: str, **fields) -> None:

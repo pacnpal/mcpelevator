@@ -217,6 +217,9 @@ class ServerRuntime(SQLModel, table=True):
     last_health: Optional[datetime] = None
     # cached [{name, description, has_output_schema}] for the UI (see unit.tool_summary)
     tools: list = Field(sa_column=Column(JSON))
+    # config_hash of the unit ``tools`` was probed from ("" when empty), so a reader
+    # can tell a list that still describes the old launch spec after an edit (#206).
+    tools_config_hash: str = ""
     updated_at: datetime = Field(default_factory=utcnow)
 
 

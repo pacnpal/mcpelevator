@@ -708,8 +708,11 @@ async def download_mcpb(
     truth. 400 for a remote server (nothing to run locally)."""
     server = _visible(principal, session, server_id)
     runtime = repo.get_runtime(session, server.id)
+    # Only a list probed from THIS launch spec: right after an edit the cache still
+    # describes the old command until the reconciler replaces the unit (#206).
+    fresh = runtime is not None and runtime.tools_config_hash == server.config_hash
     try:
-        data = mcpb.bundle(server, runtime.tools if runtime is not None else None)
+        data = mcpb.bundle(server, runtime.tools if fresh else None)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return Response(
