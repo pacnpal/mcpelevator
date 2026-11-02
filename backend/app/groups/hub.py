@@ -36,16 +36,16 @@ from contextlib import asynccontextmanager
 from typing import Callable, Optional
 
 from fastmcp import FastMCP
+from mcp.server.request_state import RequestStateSecurity
 from fastmcp.client.transports import ClientTransport, StreamableHttpTransport
 from fastmcp.server import create_proxy
-from fastmcp.server.providers.proxy import ProxyClient
 from sqlmodel import Session
 from starlette.types import ASGIApp
 
 # Reuse the bridge's tolerant roots handler: an upstream may ask its client (here,
 # the group bundle) to list filesystem roots, and clients without roots support
 # must get [] instead of a noisy -32603 (see app.bridge.host._forward_roots).
-from app.bridge.host import _forward_roots
+from app.bridge.host import _forward_roots, _ModernTurns, _TurnAwareProxyClient
 from app.db import get_engine, repo
 from app.db.models import BUILTIN_RUNNER, Server
 from app.groups import registry
@@ -184,6 +184,12 @@ class GroupHub:
         self._instances: dict[str, _Instance] = {}
         self._retiring: set[_Instance] = set()  # replaced, finishing their requests
         self._lock = asyncio.Lock()
+        # A modern caller's interactive request spans several round trips (bridge.host
+        # _Turn), and a swap can land between two of them. So every bundle seals its
+        # request_state under ONE key (each still binds its own group's name as the
+        # audience), and a group's parked turns outlive the instance that parked them.
+        self._request_state = RequestStateSecurity.ephemeral()
+        self._parked: dict[str, dict] = {}
 
     def app_for(self, name: str) -> Optional[ASGIApp]:
         """The group's current Streamable-HTTP ASGI app, or ``None`` (not yet built —
@@ -301,7 +307,7 @@ class GroupHub:
         # dispatcher. The one exception is the built-in mcpelevator server (``forward``):
         # its bridge only talks to this process's /api/mcp, which authorizes every call
         # as the caller and so needs the caller's own credential.
-        client = ProxyClient(
+        client = _TurnAwareProxyClient(
             self._transport_factory(url), roots=_forward_roots, forward_incoming_headers=forward
         )
         return create_proxy(client, name=slug)
@@ -314,7 +320,8 @@ class GroupHub:
         members: dict[str, str] | None = None,
         forward: set[str] | None = None,
     ) -> None:
-        bundle = FastMCP(f"mcpelevator-{name}")
+        bundle = FastMCP(f"mcpelevator-{name}", request_state_security=self._request_state)
+        bundle.add_middleware(_ModernTurns(self._parked.setdefault(name, {})))
         for server_id, slug, host, port in sorted(entries):
             proxy = self._make_proxy(
                 slug, f"http://{host}:{port}/mcp", forward=server_id in (forward or ())

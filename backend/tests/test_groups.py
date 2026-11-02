@@ -1184,3 +1184,102 @@ async def test_replaced_instance_finishes_its_requests_before_closing():
     release.set()
     await request
     await asyncio.wait_for(closed.wait(), 2)
+
+
+# --- server-initiated requests through a group (issue #143) -------------------- #
+
+
+def _client_on(app, **kwargs):
+    """A fastmcp Client talking Streamable HTTP to the group's ASGI ``app`` in-process."""
+    import httpx2
+    from fastmcp import Client
+    from fastmcp.client.transports import StreamableHttpTransport
+
+    def factory(**options):
+        return httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url="http://hub.test", **options
+        )
+
+    return Client(StreamableHttpTransport("http://hub.test/mcp", httpx_client_factory=factory),
+                  **kwargs)
+
+
+def _http_hub(url: str) -> GroupHub:
+    from fastmcp.client.transports import StreamableHttpTransport
+
+    return GroupHub(transport_factory=lambda _: StreamableHttpTransport(url))
+
+
+async def test_group_member_requests_reach_a_modern_caller(clean_settings, pushing_upstream_url):
+    """A member's roots and elicitation requests reach a group caller on the 2026-07-28
+    protocol: the group returns them as an InputRequiredResult and relays the answers.
+
+    A handshake-era caller can't be reached through a group at all, and never could: the
+    group serves stateless HTTP, so the caller's reply to a pushed request arrives on a
+    request of its own that nothing ties back (fastmcp 3 timed out waiting for it; the
+    MCP SDK v2 refuses at once with "no back-channel")."""
+    mode = "auto"
+    from unittest.mock import AsyncMock
+
+    async def elicit(message, response_type, params, context):
+        return {"name": "alice"}
+
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Pusher")
+    _write_groups({"all": "*"})
+    hub = _http_hub(pushing_upstream_url)
+    try:
+        await hub.sync(_endpoints(member))
+        elicited = AsyncMock(side_effect=elicit)
+        async with _client_on(
+            hub.app_for("all"), mode=mode, roots=["file:///alice"], elicitation_handler=elicited
+        ) as client:
+            where = await asyncio.wait_for(client.call_tool("pusher_where", {}), 10)
+            confirm = await asyncio.wait_for(client.call_tool("pusher_confirm", {}), 10)
+        assert json.loads(where.content[0].text) == ["file:///alice"]
+        assert confirm.content[0].text == "accept:alice"
+        assert elicited.await_count == 1
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)
+
+
+async def test_group_round_trip_survives_a_swap_between_legs(clean_settings, pushing_upstream_url):
+    """A modern caller's request spans several round trips, and a group can be rebuilt
+    between two of them: the retry still finds the parked request on the new instance."""
+    from mcp.types import InputRequiredResult, ListRootsResult, Root
+
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Pusher")
+        other = _mk_server(session, "Other")
+    _write_groups({"all": "*"})
+    hub = _http_hub(pushing_upstream_url)
+    try:
+        await hub.sync(_endpoints(member))
+        before = hub.app_for("all")
+        async with _client_on(before, roots=["file:///alice"]) as client:
+            first = await client.session.call_tool(
+                "pusher_where", {}, allow_input_required=True
+            )
+            assert isinstance(first, InputRequiredResult)
+            (key,) = first.input_requests
+            await hub.sync(_endpoints(member, other))  # a new member: the group is rebuilt
+            assert hub.app_for("all") is not before
+        async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
+            final = await asyncio.wait_for(
+                client.session.call_tool(
+                    "pusher_where",
+                    {},
+                    allow_input_required=True,
+                    input_responses={key: ListRootsResult(roots=[Root(uri="file:///alice")])},
+                    request_state=first.request_state,
+                ),
+                10,
+            )
+        assert json.loads(final.content[0].text) == ["file:///alice"]
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)
+            repo.delete_server(session, other.id)

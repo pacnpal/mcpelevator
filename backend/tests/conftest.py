@@ -54,3 +54,50 @@ def create_server(client, *, name: str, auth: str | None = None) -> dict:
     r = client.post("/api/servers", json=payload, headers=LOOPBACK)
     assert r.status_code == 201, r.text
     return r.json()
+
+
+@pytest.fixture(scope="session")
+def pushing_upstream_url():
+    """An MCP server, served over real Streamable HTTP, whose tools push requests to the
+    client mid-call the handshake-era way: ``where`` asks for roots and returns them as
+    JSON, ``confirm`` elicits a name and returns ``"<action>:<name>"``. It's what a remote
+    runner or a group member reaches over the network. (FastMCP's in-memory transport
+    can't stand in: a handshake-era push over it deadlocks in-process.)"""
+    import json
+    import socket
+    import threading
+    import time
+
+    import uvicorn
+    from fastmcp import Context, FastMCP
+
+    upstream = FastMCP("pushing")
+
+    @upstream.tool
+    async def where(ctx: Context) -> str:
+        return json.dumps([str(r.uri) for r in (await ctx.session.list_roots()).roots])
+
+    @upstream.tool
+    async def confirm(ctx: Context) -> str:
+        answer = await ctx.session.elicit(
+            message="who are you?",
+            requested_schema={"type": "object", "properties": {"name": {"type": "string"}}},
+        )
+        return f"{answer.action}:{(answer.content or {}).get('name')}"
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(upstream.http_app(path="/mcp"), host="127.0.0.1", port=port,
+                       log_level="warning")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started:
+        assert time.monotonic() < deadline, "upstream never started"
+        time.sleep(0.05)
+    yield f"http://127.0.0.1:{port}/mcp"
+    server.should_exit = True
+    thread.join(5)

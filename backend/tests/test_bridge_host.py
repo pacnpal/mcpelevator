@@ -1744,6 +1744,86 @@ async def test_modern_answer_of_the_wrong_kind_is_not_handed_to_the_child():
     assert stale.is_error and "has ended" in stale.content[0].text
 
 
+@pytest.mark.asyncio
+async def test_serialized_stdio_reaches_a_modern_caller_from_resources_and_prompts():
+    """Reading a resource or getting a prompt can make the child ask too, and a modern
+    caller is asked for those the same way as for a tool call."""
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        async with Client(proxy, roots=["file:///alice"]) as alice:
+            with anyio.fail_after(10):
+                resource = await alice.read_resource("ask://roots")
+                prompt = await alice.get_prompt("ask")
+    finally:
+        await transport.disconnect()
+    assert _root_uris(json.loads(resource[0].text)) == ["file:///alice"]
+    assert _root_uris(json.loads(prompt.messages[0].content.text)) == ["file:///alice"]
+
+
+@pytest.mark.asyncio
+async def test_stdio_progress_and_logs_reach_a_modern_caller():
+    """Progress and log lines from the child reach the modern caller's call, the same as
+    for a handshake-era caller."""
+    progress, logs = [], []
+
+    async def on_progress(value, total, message):
+        progress.append((value, total))
+
+    async def on_log(message):
+        logs.append(message.data)
+
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        async with Client(proxy, roots=["file:///alice"], log_handler=on_log) as alice:
+            with anyio.fail_after(10):
+                await alice.call_tool_mcp(
+                    "ask", {"method": "roots/list"}, progress_handler=on_progress
+                )
+    finally:
+        await transport.disconnect()
+    assert progress == [(1, 2)]
+    assert any("asking roots/list" in str(data) for data in logs)
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+@pytest.mark.asyncio
+async def test_remote_upstream_requests_reach_the_caller_on_either_protocol(
+    mode, pushing_upstream_url
+):
+    """A remote upstream's roots and elicitation requests reach the caller whichever
+    protocol it speaks: pushed on to a handshake-era caller, returned to a modern one."""
+    proxy = host.build_proxy(
+        {"command": pushing_upstream_url, "name": "remote", "transport": "streamable-http"}
+    )
+    elicited = AsyncMock(side_effect=_elicit_reply)
+    async with Client(
+        proxy, mode=mode, roots=["file:///alice"], elicitation_handler=elicited
+    ) as client:
+        assert (client.protocol_version in host.MODERN_PROTOCOL_VERSIONS) is (mode == "auto")
+        with anyio.fail_after(10):
+            where = await client.call_tool("where", {})
+            confirm = await client.call_tool("confirm", {})
+    assert json.loads(where.content[0].text) == ["file:///alice"]
+    assert confirm.content[0].text == "accept:alice"
+    assert elicited.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_parked_turn_logs_go_to_the_bridge_log_not_nowhere(caplog):
+    """While a modern caller's turn waits for its retry there's no leg to send the
+    upstream's log lines to, so they land in the server's log instead of being dropped."""
+    from mcp.types import LoggingMessageNotificationParams
+
+    turn = host._Turn({}, None, lambda: asyncio.sleep(10))
+    try:
+        turn.state = "parked"
+        caplog.set_level("INFO", logger="mcpelevator.bridge.upstream")
+        await turn.log(LoggingMessageNotificationParams(level="info", logger="up", data="hello"))
+    finally:
+        turn.run.cancel()
+    assert "[up] hello" in caplog.text
+
+
 async def _cancel_server_side(client: Client, call) -> None:
     """Start ``call`` on ``client`` and return once the SERVER has cancelled it — the way
     a real client abandons a request (``notifications/cancelled``), not just a local

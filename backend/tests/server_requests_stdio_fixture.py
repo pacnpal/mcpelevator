@@ -15,6 +15,10 @@ front-end client, so a request the child sends (``roots/list``,
 * ``max_inflight``: the most tool calls this child ever had in flight at once.
 * ``client_capabilities``: the capabilities the client declared in ``initialize``.
 
+The resource ``ask://roots`` and the prompt ``ask`` do what ``ask`` does for
+``roots/list``, so requests made while reading a resource or getting a prompt are
+covered too.
+
 Requests are answered out of order (a pending map, plus timer threads for delays), so
 concurrent calls really are concurrent unless the bridge serializes them.
 """
@@ -27,7 +31,7 @@ import threading
 
 _write_lock = threading.Lock()
 _state_lock = threading.Lock()
-_pending: dict[str, tuple] = {}  # server-request id -> (kind, tool-call id | None)
+_pending: dict[str, tuple] = {}  # server-request id -> (kind, request id | None, reply shape)
 _history: list[dict] = []
 _inflight = 0
 _max_inflight = 0
@@ -57,29 +61,36 @@ def _text(rid, text: str) -> None:
     _send({"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": text}]}})
 
 
-def _finish_call(rid, text: str) -> None:
+def _finish_call(rid, text: str, shape: str = "tool") -> None:
     global _inflight
     with _state_lock:
         _inflight -= 1
-    _text(rid, text)
+    if shape == "resource":
+        contents = [{"uri": "ask://roots", "mimeType": "application/json", "text": text}]
+        _send({"jsonrpc": "2.0", "id": rid, "result": {"contents": contents}})
+    elif shape == "prompt":
+        message = {"role": "user", "content": {"type": "text", "text": text}}
+        _send({"jsonrpc": "2.0", "id": rid, "result": {"messages": [message]}})
+    else:
+        _text(rid, text)
 
 
-def _ask_client(method: str, kind: str, call_id) -> None:
+def _ask_client(method: str, kind: str, call_id, shape: str = "tool") -> None:
     global _next_id
     with _state_lock:
         _next_id += 1
         sid = f"srv-{_next_id}"
-        _pending[sid] = (kind, call_id)
+        _pending[sid] = (kind, call_id, shape)
     _send({"jsonrpc": "2.0", "id": sid, "method": method, "params": _PARAMS[method]})
 
 
 def _on_reply(msg: dict) -> None:
     with _state_lock:
-        kind, call_id = _pending.pop(msg["id"])
+        kind, call_id, shape = _pending.pop(msg["id"])
         outcome = {"result": msg["result"]} if "result" in msg else {"error": msg.get("error")}
         _history.append({"kind": kind, **outcome})
     if call_id is not None:
-        _finish_call(call_id, json.dumps(outcome))
+        _finish_call(call_id, json.dumps(outcome), shape)
 
 
 def _start_call() -> None:
@@ -168,7 +179,7 @@ for line in sys.stdin:
                 "id": rid,
                 "result": {
                     "protocolVersion": msg["params"]["protocolVersion"],
-                    "capabilities": {"tools": {}, "logging": {}},
+                    "capabilities": {"tools": {}, "logging": {}, "resources": {}, "prompts": {}},
                     "serverInfo": {"name": "asker", "version": "0"},
                 },
             }
@@ -177,6 +188,17 @@ for line in sys.stdin:
         _send({"jsonrpc": "2.0", "id": rid, "result": {"tools": _TOOLS}})
     elif method == "tools/call":
         _handle_call(rid, msg.get("params") or {})
+    elif method == "resources/list":
+        resources = [{"uri": "ask://roots", "name": "roots", "mimeType": "application/json"}]
+        _send({"jsonrpc": "2.0", "id": rid, "result": {"resources": resources}})
+    elif method == "resources/templates/list":
+        _send({"jsonrpc": "2.0", "id": rid, "result": {"resourceTemplates": []}})
+    elif method == "prompts/list":
+        _send({"jsonrpc": "2.0", "id": rid, "result": {"prompts": [{"name": "ask"}]}})
+    elif method in ("resources/read", "prompts/get"):
+        _start_call()
+        shape = "resource" if method == "resources/read" else "prompt"
+        _ask_client("roots/list", "solicited", rid, shape)
     elif method == "ping":
         _send({"jsonrpc": "2.0", "id": rid, "result": {}})
     else:
