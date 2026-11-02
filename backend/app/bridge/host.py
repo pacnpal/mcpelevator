@@ -565,17 +565,21 @@ class _Turn:
             }
             if not requests:
                 continue  # the upstream withdrew what woke us: keep waiting
-            if len(self.parked) < _MAX_PARKED_TURNS:
+            if getattr(self.parked, "closed", False):
+                # its group was torn down while this ran: nothing will look it up to
+                # resume it, so it can't wait on the caller (see _ParkedTurns)
+                reason = "the group serving this request was rebuilt"
+            elif len(self.parked) < _MAX_PARKED_TURNS:
                 break
-            _UPSTREAM_LOG.warning(
-                "%d requests are already waiting on their clients; refusing this one's "
-                "server-initiated request",
-                len(self.parked),
-            )
-            for key in requests:
-                self.pending[key][1].set_result(
-                    ErrorData(code=INVALID_REQUEST, message="too many requests are waiting on input")
+            else:
+                _UPSTREAM_LOG.warning(
+                    "%d requests are already waiting on their clients; refusing this one's "
+                    "server-initiated request",
+                    len(self.parked),
                 )
+                reason = "too many requests are waiting on input"
+            for key in requests:
+                self.pending[key][1].set_result(ErrorData(code=INVALID_REQUEST, message=reason))
         self.sent.update(requests)
         self.state = secrets.token_urlsafe(16)
         self.parked[self.state] = self

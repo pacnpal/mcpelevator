@@ -54,12 +54,7 @@ from mcp.server.subscriptions import (
     ResourcesListChanged,
     ToolsListChanged,
 )
-from mcp_types import (
-    PromptListChangedNotification,
-    ResourceListChangedNotification,
-    SubscriptionsListenRequestParams,
-    ToolListChangedNotification,
-)
+from mcp_types import SubscriptionsListenRequestParams
 from fastmcp.client.transports import ClientTransport, StreamableHttpTransport
 from fastmcp.server import create_proxy
 from fastmcp.server.providers.aggregate import AggregateProvider
@@ -76,6 +71,13 @@ from app.groups import registry
 from app.registry import settings as runtime_settings
 
 logger = logging.getLogger(__name__)
+
+_LIST_CHANGED = (
+    "notifications/tools/list_changed",
+    "notifications/resources/list_changed",
+    "notifications/prompts/list_changed",
+)
+_ANNOUNCE_S = 5.0  # how long a membership change waits on its clients' list_changed
 
 
 def group_server(name: str) -> Server:
@@ -173,17 +175,32 @@ class _Counting:
             self.release()
 
 
+class _ParkedTurns(dict):
+    """A group's parked turns. ``closed`` once a teardown detaches the table: a request
+    still running on the retired instance then can't park in it, since no retry would
+    ever find it there (``_Turn.leg`` refuses its input request instead)."""
+
+    closed = False
+
+
 class _Sessions(Middleware):
-    """Remembers the group's handshake-era sessions, so a membership change can tell
-    each one its lists changed (see :meth:`GroupHub._announce`)."""
+    """Remembers the group's handshake-era connections, so a membership change can tell
+    each one its lists changed (see :meth:`GroupHub._announce`).
+
+    The SDK's ``ServerSession`` is a facade built per request; the ``Connection`` behind
+    it lives as long as the client's session does, and its ``outbound`` is the
+    standalone stream. No public accessor reaches it from a request yet, hence
+    ``_connection``."""
 
     def __init__(self) -> None:
-        self.sessions: weakref.WeakSet = weakref.WeakSet()
+        self.connections: weakref.WeakSet = weakref.WeakSet()
 
     async def on_request(self, context, call_next):
         ctx = context.fastmcp_context
         if ctx is not None and ctx.request_context is not None and not _is_modern(ctx):
-            self.sessions.add(ctx.session)
+            connection = getattr(ctx.session, "_connection", None)
+            if connection is not None:
+                self.connections.add(connection)
         return await call_next(context)
 
 
@@ -382,7 +399,7 @@ class GroupHub:
     ) -> None:
         """Bring group ``name`` to ``entries``: build its instance if there's none, then
         install the new membership in it, in place."""
-        parked = self._parked.setdefault(name, {})
+        parked = self._parked.setdefault(name, _ParkedTurns())
         # A parked request may only resume if every member it reached is still in the
         # group: a member that left, or is now excluded (the anti-downgrade rule, say),
         # must not answer through it. Ending those now frees their upstream sessions;
@@ -433,19 +450,21 @@ class GroupHub:
         its ``subscriptions/listen`` stream. A session that's gone is skipped."""
         for event in (ToolsListChanged(), ResourcesListChanged(), PromptsListChanged()):
             await instance.bus.publish(event)
-        for session in list(instance.sessions.sessions):
-            for notification in (
-                ToolListChangedNotification(),
-                ResourceListChangedNotification(),
-                PromptListChangedNotification(),
-            ):
-                try:
-                    # bounded: this runs under sync's lock, and a stuck session must
-                    # not hold every other group's convergence up behind it
-                    await asyncio.wait_for(session.send_notification(notification), 5)
-                except Exception:
-                    logger.debug("a group session closed before its list_changed", exc_info=True)
-                    break
+
+        async def tell(connection) -> None:
+            try:
+                for method in _LIST_CHANGED:
+                    await connection.outbound.notify(method, None)
+            except Exception:
+                logger.debug("a group session closed before its list_changed", exc_info=True)
+
+        # All at once, under one deadline: this runs under sync's lock, and a client
+        # that stopped reading must not hold every group's convergence up behind it.
+        sends = [asyncio.ensure_future(tell(c)) for c in list(instance.sessions.connections)]
+        if sends:
+            _, stuck = await asyncio.wait(sends, timeout=_ANNOUNCE_S)
+            for send in stuck:
+                send.cancel()
 
     @staticmethod
     def _install(instance: _Instance, members_provider: AggregateProvider) -> None:
@@ -505,7 +524,9 @@ class GroupHub:
 
     async def _teardown(self, name: str) -> None:
         """Stop routing to ``name`` now; its instance closes once drained."""
-        for turn in list(self._parked.pop(name, {}).values()):
+        parked = self._parked.pop(name, _ParkedTurns())
+        parked.closed = True
+        for turn in list(parked.values()):
             turn.end()  # nothing serves this group now, so nothing may resume these
         old = self._instances.pop(name, None)
         if old is not None:
@@ -562,6 +583,7 @@ class GroupHub:
             # Nothing serves any group after this, so nothing may resume what's parked:
             # end it now, rather than holding upstream sessions open to the TTL.
             for parked in self._parked.values():
+                parked.closed = True
                 for turn in list(parked.values()):
                     turn.end()
             self._parked.clear()

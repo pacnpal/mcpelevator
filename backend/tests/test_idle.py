@@ -407,13 +407,16 @@ def test_group_request_counts_members_in_flight():
             assert observed["during"] == 0
             # A 2026-07-28 caller's subscriptions/listen stream is the same thing.
             listen = {"jsonrpc": "2.0", "id": 2, "method": "subscriptions/listen"}
-            r = client.post(
-                f"/g/{group}/mcp",
-                json=listen,
-                headers={**LOOPBACK, "Mcp-Method": "subscriptions/listen"},
-            )
+            modern = {"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "subscriptions/listen"}
+            r = client.post(f"/g/{group}/mcp", json=listen, headers={**LOOPBACK, **modern})
             assert r.status_code == 200, r.text
             assert observed["during"] == 0
+            # Only there does the SDK check Mcp-Method against the body: a handshake-era
+            # request claiming to be a listen stream is still leased.
+            legacy = {"MCP-Protocol-Version": "2025-06-18", "Mcp-Method": "subscriptions/listen"}
+            r = client.post(f"/g/{group}/mcp", json=body, headers={**LOOPBACK, **legacy})
+            assert r.status_code == 200, r.text
+            assert observed["during"] == 1
         finally:
             client.delete(f"/api/groups/{group}", headers=LOOPBACK)
             client.delete(f"/api/servers/{sid}", headers=LOOPBACK)

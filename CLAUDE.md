@@ -155,13 +155,13 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   list: FastMCP re-indexes it after awaiting), and the replaced snapshot's extension runtime is
   closed rather than left in the bundle's scope. A parked turn resumes only while every
   member it reached is still mounted. Every membership change is announced as
-  `list_changed` (`GroupHub._announce`): to the handshake-era sessions `_Sessions` remembers,
-  on their standalone stream, and on a `2026-07-28` caller's `subscriptions/listen` stream (the
+  `list_changed` (`GroupHub._announce`): to the handshake-era connections `_Sessions` remembers (the
+  SDK `Connection`, never the per-request `ServerSession` facade), on their standalone stream, and on a `2026-07-28` caller's `subscriptions/listen` stream (the
   bundle serves it with the SDK's `ListenHandler`, which is also what makes it advertise
   `listChanged` to those callers). An instance is rebuilt
   only after a teardown (an auth-affecting write or a failed sync), and the torn-down one
   drains its in-flight requests before closing, so a call that tears down its own group still returns;
-  standalone GET streams and `subscriptions/listen` POSTs (by their `Mcp-Method` header) don't hold members awake
+  standalone GET streams and `subscriptions/listen` POSTs (by `Mcp-Method`, trusted only on a non-handshake `MCP-Protocol-Version`, where the SDK checks it) don't hold members awake; a turn that would park after a teardown detached its table (`_ParkedTurns.closed`) has its input request refused instead
   (the hub owns each sub-app's lifespan; Starlette doesn't run mounted lifespans). There is no
   special-case name — `all` is just a conventional entry with members `"*"`. The registry is
   validated at write time and again at startup (`registry.validate_at_startup` fails the boot

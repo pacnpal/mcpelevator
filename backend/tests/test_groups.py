@@ -11,6 +11,7 @@ No subprocess is ever spawned. Route tests reuse the ``test_proxy`` patterns
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
@@ -1685,6 +1686,15 @@ async def test_membership_change_announces_list_changed_to_handshake_sessions(
             assert caps.tools.list_changed
             await client.list_tools()
             await asyncio.sleep(0.2)  # the standalone stream is open
+            # The SDK's ServerSession is a facade per request, so the hub must hold the
+            # Connection behind it. (Here a context variable copied into a long-lived
+            # task happens to keep the last facade alive, which is why this is checked
+            # directly rather than left to the announcement below.)
+            from mcp.server.connection import Connection
+
+            gc.collect()
+            (tracked,) = hub._instances["all"].sessions.connections
+            assert isinstance(tracked, Connection)
             await hub.sync(_endpoints(member, other))
             await asyncio.wait_for(changed.wait(), 10)
         assert sorted(heard) == [
@@ -1723,3 +1733,41 @@ async def test_membership_change_reaches_modern_listeners(clean_settings, pushin
         with Session(get_engine()) as session:
             repo.delete_server(session, member.id)
             repo.delete_server(session, other.id)
+
+
+async def test_turn_that_parks_after_its_group_was_torn_down_does_not_wait(
+    clean_settings, pushing_upstream_url
+):
+    """A request still running on an instance a teardown retired can't park: no retry
+    would find it in the detached table. Its input request is refused instead, so the
+    call finishes, and nothing is held awake for it."""
+    from mcp.types import InputRequiredResult
+
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Pusher")
+    _write_groups({"all": "*"})
+    hub = _http_hub(pushing_upstream_url)
+    supervisor = _Supervisor(member)
+    try:
+        await hub.sync(supervisor)
+
+        async def current(scope, receive, send):  # routes like GroupDispatch does
+            await hub.app_for("all")(scope, receive, send)
+
+        async with _client_on(current, roots=["file:///alice"]) as client:
+            call = asyncio.create_task(
+                client.session.call_tool(
+                    "pusher_slow_where", {"delay": 0.5}, allow_input_required=True
+                )
+            )
+            await asyncio.sleep(0.2)  # running, not yet asking
+            async with hub._lock:
+                await hub._teardown("all")
+            await hub.sync(supervisor)  # rebuilt, for whatever the client sends next
+            result = await asyncio.wait_for(call, 10)
+        assert not isinstance(result, InputRequiredResult)
+        assert supervisor.in_flight == {}  # never parked, so never held
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)
