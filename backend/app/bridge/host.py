@@ -39,10 +39,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import json
 import logging
 import os
 import re
+import secrets
 import sys
 import weakref
 from collections.abc import Callable, Iterator, Sequence
@@ -53,6 +55,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
 from fastmcp.client.elicitation import create_elicitation_callback
 from fastmcp.client.sampling import create_sampling_callback
+from fastmcp.exceptions import ToolError
 from fastmcp.server import create_proxy
 from fastmcp.server.context import Context, _current_context
 from fastmcp.server.dependencies import (
@@ -69,19 +72,28 @@ from fastmcp.server.providers.proxy import (
 )
 from fastmcp.server.transforms import ToolTransform
 from fastmcp.tools import Tool
+from fastmcp.tools.base import InputRequiredToolResult
 from fastmcp.tools.tool_transform import ToolTransformConfig
 from fastmcp.utilities.timeout import normalize_timeout_to_seconds
 from mcp import ClientSession
 from mcp.types import (
     INVALID_REQUEST,
     ClientCapabilities,
+    CreateMessageRequest,
+    CreateMessageResult,
+    CreateMessageResultWithTools,
     ElicitationCapability,
+    ElicitRequest,
+    ElicitResult,
     ErrorData,
+    InputRequiredResult,
+    ListRootsRequest,
     ListRootsResult,
     Root,
     RootsCapability,
     SamplingCapability,
 )
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 
 async def _caller_roots(ctx) -> list[Root]:
@@ -203,8 +215,10 @@ def _progress_to(caller: _Caller | None):
         if caller is None:
             return
         with _acting_as(caller) as ctx:
+            # A modern caller's leg may already have ended (see _Turn): drop it then.
             if ctx is not None:
-                await ctx.report_progress(progress, total, message)
+                with contextlib.suppress(Exception):
+                    await ctx.report_progress(progress, total, message)
 
     return report
 
@@ -235,6 +249,11 @@ class _StdioRouting:
       call its caller abandoned is still running upstream (``abandoned``, see
       :meth:`_HandshakeOnceProxyClient._await_with_session_monitoring`).
 
+      A caller on the sessionless 2026-07-28 protocol has no back-channel to push on, so
+      its ``tools/call`` runs as a :class:`_Turn` instead (``turn``): what the child asks
+      is handed back to the caller as an ``InputRequiredResult``, and its answers on the
+      retry go to the child's waiting request.
+
     Progress is the exception: it's tied to its request by token (see :func:`_progress_to`).
     """
 
@@ -242,6 +261,10 @@ class _StdioRouting:
         self.serialize = serialize
         self.lock = asyncio.Lock()
         self.caller: _Caller | None = None
+        # The modern-era turn filling the slot, if the caller is on 2026-07-28 (``_Turn``),
+        # and the turns waiting on their caller's retry, by the request_state they handed out.
+        self.turn: _Turn | None = None
+        self.parked: dict[str, _Turn] = {}
         # Upstream calls whose caller gave up while the child was still working on them.
         # The child may still ask something for one, and nothing says which, so while any
         # is outstanding no server request is forwarded at all.
@@ -285,16 +308,22 @@ class _StdioRouting:
         )
 
     async def _list_roots(self, context) -> ListRootsResult:
-        caller = self._current()
+        caller, turn = self._current(), self.turn
         if caller is None:
             return ListRootsResult(roots=[])
         with _acting_as(caller) as ctx:
-            return ListRootsResult(roots=[] if ctx is None else await _caller_roots(ctx))
+            if ctx is None:
+                return ListRootsResult(roots=[])
+            if turn is None:
+                return ListRootsResult(roots=await _caller_roots(ctx))
+            if not ctx.session.check_client_capability(ClientCapabilities(roots=RootsCapability())):
+                return ListRootsResult(roots=[])
+        # Same contract as _caller_roots: anything but real roots reads as none.
+        answer = await turn.ask(ListRootsRequest())
+        return answer if isinstance(answer, ListRootsResult) else ListRootsResult(roots=[])
 
-    async def _forward(
-        self, what: str, capability: ClientCapabilities, forward, context, params
-    ):
-        caller = self._current()
+    async def _forward(self, what: str, capability: ClientCapabilities, forward, context, request):
+        caller, turn = self._current(), self.turn
         if caller is None:
             return self._refusal(what)
         with _acting_as(caller) as ctx:
@@ -302,18 +331,24 @@ class _StdioRouting:
                 return ErrorData(
                     code=INVALID_REQUEST, message=f"the calling client does not support {what}"
                 )
-            return await forward(context, params)
+            if turn is None:
+                return await forward(context, request.params)
+        return await turn.ask(request)
 
     async def _sampling(self, context, params):
         capability = ClientCapabilities(sampling=SamplingCapability())
         return await self._forward(
-            "sampling", capability, self._forward_sampling, context, params
+            "sampling", capability, self._forward_sampling, context, CreateMessageRequest(params=params)
         )
 
     async def _elicitation(self, context, params):
         capability = ClientCapabilities(elicitation=ElicitationCapability())
         return await self._forward(
-            "elicitation", capability, self._forward_elicitation, context, params
+            "elicitation",
+            capability,
+            self._forward_elicitation,
+            context,
+            ElicitRequest(params=params),
         )
 
     async def _log(self, params) -> None:
@@ -335,6 +370,166 @@ class _StdioRouting:
         _UPSTREAM_LOG.log(_LOG_LEVELS.get(params.level, logging.INFO), "%s%s", prefix, message)
 
 
+# How long a parked turn waits for its caller's retry. FastMCP seals each request_state
+# with an ephemeral key whose tokens expire after this long anyway.
+_PARKED_TURN_TTL_S = 600.0
+
+# What the client may answer each kind of input request with.
+_ANSWER_TYPES = {
+    "roots/list": (ListRootsResult,),
+    "sampling/createMessage": (CreateMessageResult, CreateMessageResultWithTools),
+    "elicitation/create": (ElicitResult,),
+}
+
+
+def _is_modern(ctx: Context | None) -> bool:
+    """Is ``ctx``'s caller on the sessionless protocol, with no back-channel to push on?"""
+    request_context = ctx.request_context if ctx is not None else None
+    return (
+        request_context is not None
+        and request_context.protocol_version in MODERN_PROTOCOL_VERSIONS
+    )
+
+
+class _Turn:
+    """A modern-era caller's ``tools/call`` on a serialized stdio child, across the round
+    trips it takes (issue #143 on the 2026-07-28 protocol).
+
+    The child pushes its requests, and a modern caller can only be asked by RETURNING them.
+    So the upstream call runs as its own task (``run``) that holds the child's lock for its
+    whole life, and each leg the caller makes waits for whichever comes first: the call's
+    result, or a request from the child (:meth:`ask`). A request ends the leg with an
+    ``InputRequiredResult`` carrying it, and the turn parks under a fresh ``request_state``,
+    which FastMCP seals and binds to this caller, tool and arguments. The retry hands each
+    answer to the child request waiting on it (:meth:`resume`) and waits again.
+
+    A caller that cancels a leg, or never retries (``_PARKED_TURN_TTL_S``), ends the turn
+    (:meth:`end`): the child's open requests are refused, later ones too, and the lock is
+    held for the call's answer up to ``_CANCELLED_CALL_DRAIN_S`` before the call is marked
+    abandoned, the same as a cancelled handshake-era call.
+    """
+
+    def __init__(self, routing: _StdioRouting, caller: _Caller | None, run) -> None:
+        self.routing = routing
+        self.pending: dict[str, tuple] = {}  # key -> (input request, future for its answer)
+        self.sent: set[str] = set()  # keys handed to the caller, awaiting its retry
+        self.asked = asyncio.Event()
+        self.closed = False
+        self.state: str | None = None
+        self._expiry: asyncio.TimerHandle | None = None
+        self._released = False
+        self._keys = itertools.count()
+        routing.caller, routing.turn = caller, self
+        self.run = asyncio.ensure_future(run())
+        self.run.add_done_callback(self._finished)
+
+    async def ask(self, request):
+        """Called for a request from the child: wait for the caller's answer to it."""
+        if self.closed:
+            return ErrorData(
+                code=INVALID_REQUEST, message="the client abandoned the call this request is for"
+            )
+        key = f"{request.method}#{next(self._keys)}"
+        future = asyncio.get_running_loop().create_future()
+        self.pending[key] = (request, future)
+        self.asked.set()
+        try:
+            return await future
+        finally:
+            self.pending.pop(key, None)
+
+    async def leg(self):
+        """Serve one leg: the call's result, or an ``InputRequiredResult`` asking for input."""
+        asked = asyncio.ensure_future(self.asked.wait())
+        try:
+            await asyncio.wait({self.run, asked}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            self.end()
+            raise
+        finally:
+            asked.cancel()
+        if self.run.done():
+            return self.run.result()
+        self.asked.clear()
+        requests = {k: request for k, (request, _) in self.pending.items() if k not in self.sent}
+        self.sent.update(requests)
+        self.state = secrets.token_urlsafe(16)
+        self.routing.parked[self.state] = self
+        self._expiry = asyncio.get_running_loop().call_later(_PARKED_TURN_TTL_S, self.end)
+        return InputRequiredToolResult(
+            InputRequiredResult(input_requests=requests, request_state=self.state)
+        )
+
+    def resume(self, caller: _Caller | None, responses) -> None:
+        """The caller retried: answer each request it was handed."""
+        self._unpark()
+        if self.routing.turn is self:
+            self.routing.caller = caller  # logs and capability checks follow the live leg
+        for key in list(self.sent):
+            self.sent.discard(key)
+            entry = self.pending.get(key)
+            if entry is None:
+                continue  # the child gave up on it
+            request, future = entry
+            answer = (responses or {}).get(key)
+            if not isinstance(answer, _ANSWER_TYPES[request.method]):
+                answer = ErrorData(
+                    code=INVALID_REQUEST,
+                    message=f"the client sent no valid answer to {request.method}",
+                )
+            if not future.done():
+                future.set_result(answer)
+
+    def end(self) -> None:
+        """The caller is gone (a cancelled leg, or no retry in time)."""
+        self._unpark()
+        if self.closed:
+            return
+        self.closed = True
+        for _, future in self.pending.values():
+            if not future.done():
+                future.set_result(
+                    ErrorData(
+                        code=INVALID_REQUEST,
+                        message="the client abandoned the call this request is for",
+                    )
+                )
+        if self.routing.turn is self:
+            self.routing.caller = self.routing.turn = None
+        if not self.run.done():
+            _UPSTREAM_LOG.warning(
+                "a client abandoned a call that is still running upstream; holding the "
+                "server for it a little longer"
+            )
+            asyncio.get_running_loop().call_later(_CANCELLED_CALL_DRAIN_S, self._drained)
+
+    def _drained(self) -> None:
+        if not self.run.done():
+            self.routing.abandon(self.run)
+            self._release()
+
+    def _unpark(self) -> None:
+        if self._expiry is not None:
+            self._expiry.cancel()
+            self._expiry = None
+        if self.state is not None:
+            self.routing.parked.pop(self.state, None)
+            self.state = None
+
+    def _finished(self, run: asyncio.Future) -> None:
+        if not run.cancelled():
+            run.exception()  # read here, so an abandoned call's failure isn't logged as lost
+        self._release()
+
+    def _release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self.routing.turn is self:
+            self.routing.caller = self.routing.turn = None
+        self.routing.lock.release()
+
+
 class _SerializeClientRequests(Middleware):
     """``serialize_client_requests``: one proxied request at a time per stdio child, with
     the caller slot naming it (see :class:`_StdioRouting`).
@@ -346,6 +541,9 @@ class _SerializeClientRequests(Middleware):
     queueing it behind someone's long tool call would stall every new client's connect
     past its init timeout. A request cancelled while queued never takes the lock;
     ``async with`` and the ``finally`` give it back and empty the slot on every exit.
+
+    A ``tools/call`` from a caller on the 2026-07-28 protocol runs as a :class:`_Turn`
+    instead, which owns the lock until the upstream call is done, across every round trip.
     """
 
     def __init__(self, routing: _StdioRouting) -> None:
@@ -354,7 +552,10 @@ class _SerializeClientRequests(Middleware):
     async def on_request(self, context, call_next):
         if context.method == "initialize":
             return await call_next(context)
-        caller = _caller_of(context.fastmcp_context)
+        ctx = context.fastmcp_context
+        if context.method == "tools/call" and _is_modern(ctx):
+            return await self._turn_leg(ctx, lambda: call_next(context))
+        caller = _caller_of(ctx)
         async with self.routing.lock:
             self.routing.caller = caller
             turn = _TURN.set(caller)
@@ -363,6 +564,22 @@ class _SerializeClientRequests(Middleware):
             finally:
                 _TURN.reset(turn)
                 self.routing.caller = None
+
+    async def _turn_leg(self, ctx: Context, run):
+        routing = self.routing
+        if ctx.request_state is not None:  # a retry: unsealed, so we minted it
+            turn = routing.parked.get(ctx.request_state)
+            if turn is None:
+                raise ToolError("the call these answers are for has ended; call the tool again")
+            turn.resume(_caller_of(ctx), ctx.input_responses)
+        else:
+            await routing.lock.acquire()
+            try:
+                turn = _Turn(routing, _caller_of(ctx), run)
+            except BaseException:
+                routing.lock.release()
+                raise
+        return await turn.leg()
 
 
 class _SharedStdioTransport(StdioTransport):

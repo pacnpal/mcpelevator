@@ -1620,19 +1620,128 @@ async def test_serialized_stdio_refuses_unsolicited_server_requests():
     sampled.assert_not_called()
 
 
+# --- the same routing for a caller on the sessionless 2026-07-28 protocol --------------
+#
+# A modern client has no back-channel, so the bridge can't push the child's requests to
+# it. Instead it RETURNS them (InputRequiredResult) and the client retries with answers,
+# while the child's call stays parked (host._Turn). fastmcp's Client drives those rounds
+# itself, so these callers look like ordinary clients; the raw-session tests below play a
+# client that misbehaves.
+
+
 @pytest.mark.asyncio
-async def test_serialized_stdio_modern_front_degrades_roots_to_empty():
-    """The tests above connect handshake-era clients (``mode="legacy"``), the only era
-    with a back-channel. A client on the sessionless 2026-07-28 protocol (FastMCP 4's
-    default) can't be asked anything mid-request, so the child's ``roots/list`` answers
-    ``[]`` — no roots, rather than an error the child would log as -32603."""
+async def test_serialized_stdio_routes_each_server_request_to_its_modern_caller():
+    """Concurrent modern callers each get only their OWN roots, a caller without the roots
+    capability gets ``[]``, and the child still only ever has one call in flight."""
     proxy, transport = _asker_proxy(serialize=True)
     try:
-        async with Client(proxy, roots=["file:///alice"]) as alice:
-            with anyio.fail_after(5):
-                assert _root_uris(await _ask(alice, "roots/list")) == []
+        async with (
+            Client(proxy, roots=["file:///alice"]) as alice,
+            Client(proxy, roots=["file:///bob"]) as bob,
+            Client(proxy) as nobody,
+        ):
+            assert alice.protocol_version in host.MODERN_PROTOCOL_VERSIONS
+            calls = [c for _ in range(3) for c in (alice, bob, nobody)]
+            with anyio.fail_after(20):
+                outcomes = await asyncio.gather(*(_ask(c, "roots/list") for c in calls))
+            peak = (await alice.call_tool_mcp("max_inflight", {})).content[0].text
+            routing = transport.routing
+            assert not routing.lock.locked() and routing.caller is None
+            assert routing.turn is None and routing.parked == {}
     finally:
         await transport.disconnect()
+    expected = {alice: ["file:///alice"], bob: ["file:///bob"], nobody: []}
+    assert [_root_uris(o) for o in outcomes] == [expected[c] for c in calls]
+    assert peak == "1"
+
+
+@pytest.mark.asyncio
+async def test_serialized_stdio_forwards_sampling_only_to_a_capable_modern_caller():
+    """Sampling and elicitation round-trip to a modern caller that declares them, and are
+    declined for one that doesn't."""
+    sampled = AsyncMock(side_effect=_sample_reply)
+    elicited = AsyncMock(side_effect=_elicit_reply)
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        async with (
+            Client(proxy, sampling_handler=sampled, elicitation_handler=elicited) as capable,
+            Client(proxy) as plain,
+        ):
+            with anyio.fail_after(10):
+                sampling = await _ask(capable, "sampling/createMessage")
+                elicitation = await _ask(capable, "elicitation/create")
+                refused = await _ask(plain, "sampling/createMessage")
+                refused_elicit = await _ask(plain, "elicitation/create")
+    finally:
+        await transport.disconnect()
+    assert sampling["result"]["content"]["text"] == "sampled"
+    assert elicitation["result"] == {"action": "accept", "content": {"name": "alice"}}
+    assert sampled.await_count == 1 and elicited.await_count == 1
+    assert "sampling" in refused["error"]["message"]
+    assert "elicitation" in refused_elicit["error"]["message"]
+
+
+async def _first_leg(client: Client, method: str):
+    """Start ``ask`` as a raw modern call and return the InputRequiredResult it ends with,
+    without the client driving the retry."""
+    from mcp.types import InputRequiredResult
+
+    result = await client.session.call_tool(
+        "ask", {"method": method}, allow_input_required=True
+    )
+    assert isinstance(result, InputRequiredResult)
+    (key, request), = result.input_requests.items()
+    assert request.method == method
+    return result, key
+
+
+@pytest.mark.asyncio
+async def test_modern_caller_that_never_retries_frees_the_child():
+    """A modern caller that's asked something and never comes back can't hold the child
+    forever: past the parked-turn bound its request is refused, the call finishes, and the
+    next caller is served (with its own roots, not the one that left)."""
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        with patch.object(host, "_PARKED_TURN_TTL_S", 0.3):
+            async with (
+                Client(proxy, roots=["file:///alice"]) as alice,
+                Client(proxy, roots=["file:///bob"]) as bob,
+            ):
+                await _first_leg(alice, "roots/list")  # ...and alice never retries
+                with anyio.fail_after(5):
+                    assert _root_uris(await _ask(bob, "roots/list")) == ["file:///bob"]
+                history = await _history(bob)
+                assert transport.routing.parked == {}
+    finally:
+        await transport.disconnect()
+    assert [_root_uris(h) for h in history] == [[], ["file:///bob"]]
+
+
+@pytest.mark.asyncio
+async def test_modern_answer_of_the_wrong_kind_is_not_handed_to_the_child():
+    """The client's answers are untrusted input bound for the child: one that doesn't
+    answer what was asked (here, roots for an elicitation) is refused instead of passed on,
+    and a retry whose turn has ended is refused too."""
+    from mcp.types import ListRootsResult
+
+    proxy, transport = _asker_proxy(serialize=True)
+    try:
+        async with Client(proxy, elicitation_handler=AsyncMock(side_effect=_elicit_reply)) as c:
+            first, key = await _first_leg(c, "elicitation/create")
+            retry = dict(
+                name="ask",
+                arguments={"method": "elicitation/create"},
+                allow_input_required=True,
+                input_responses={key: ListRootsResult(roots=[])},
+                request_state=first.request_state,
+            )
+            with anyio.fail_after(5):
+                outcome = json.loads((await c.session.call_tool(**retry)).content[0].text)
+                stale = await c.session.call_tool(**retry)  # the same state, once more
+    finally:
+        await transport.disconnect()
+    assert "no valid answer to elicitation/create" in outcome["error"]["message"]
+    assert stale.is_error and "has ended" in stale.content[0].text
 
 
 async def _cancel_server_side(client: Client, call) -> None:
