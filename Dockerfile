@@ -28,10 +28,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl -fsSL https://deb.nodesource.com/setup_26.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     # Refresh npm to a build whose bundled deps carry the fixes Trivy flags in the
-    # version Node ships: tar >=7.5.21, brace-expansion >=5.0.9,
-    # ip-address >=10.3.1, and undici >=6.27.0.
-    && npm install -g npm@11.19.1 \
+    # version Node ships: tar >=7.5.21, brace-expansion >=5.0.12,
+    # ip-address >=10.3.1.
+    && npm install -g npm@11.21.1 \
+    # npm 11.21.1 still bundles undici 6.29.0; CVE-2026-87018/-109383/-109869 are
+    # fixed in 6.29.1. Its only consumer is npm's node-gyp (range ^6.25.0) and it has
+    # no deps, so swap it in place (npm pack checks the registry integrity hash).
+    # Drop this once an npm release bundles undici >=6.29.1.
+    && npm_mods="$(npm root -g)/npm/node_modules" \
+    && npm pack -q --pack-destination /tmp undici@6.29.1 \
+    && rm -rf "${npm_mods}/undici" && mkdir "${npm_mods}/undici" \
+    && tar xzf /tmp/undici-6.29.1.tgz -C "${npm_mods}/undici" --strip-components=1 \
+    && rm /tmp/undici-6.29.1.tgz \
     && npm cache clean --force \
+    # Remove the base image's system pip: nothing here uses it (the app runs from a
+    # uv venv, servers install via uv/uvx), and its vendored msgpack, urllib3 and
+    # pkg_resources (setuptools) carry HIGH CVEs no pip release has picked up yet.
+    && python -m pip uninstall -y -q pip \
     && rm -rf /var/lib/apt/lists/*
 
 # Common native build toolchain, baked in (issue #81): plenty of npx/uvx MCP servers
