@@ -223,13 +223,19 @@ class GroupDispatch:
         # never saw. Snapshotted ONCE so start and finish stay balanced even if a
         # reconcile swaps the instance mid-request.
         #
-        # A GET is a session's standalone stream (the bundle is stateful): it stays open
+        # A GET is a session's standalone stream (the bundle is stateful), and a
+        # subscriptions/listen POST is a 2026-07-28 caller's equivalent: each stays open
         # for as long as the client is connected and carries the bundle's own
-        # notifications, not a member's call, so it holds no member awake.
+        # notifications, not a member's call, so it holds no member awake. The SDK refuses
+        # a modern request whose Mcp-Method doesn't match its body, and a caller that
+        # sends a false one anyway only gives up the lease on its own call.
         mounted = self._hub.mounted_members(name)
         app = scope.get("app")
         supervisor = app.state.supervisor if app is not None else None
-        leased = {} if request.method == "GET" else mounted
+        stream = request.method == "GET" or (
+            request.headers.get("mcp-method") == "subscriptions/listen"
+        )
+        leased = {} if stream else mounted
         for member_id in leased.values():
             if supervisor is not None:
                 supervisor.request_started(member_id)

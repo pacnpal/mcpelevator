@@ -104,7 +104,9 @@ def _endpoints(*servers: Server) -> SimpleNamespace:
     return SimpleNamespace(
         running_endpoints=lambda: [
             (s.id, s.slug, f"up-{s.slug}", 49000 + i) for i, s in enumerate(servers)
-        ]
+        ],
+        request_started=lambda _: None,  # a parked turn's hold (see _Supervisor)
+        request_finished=lambda _: None,
     )
 
 
@@ -1571,3 +1573,153 @@ async def test_turn_that_parks_after_its_member_left_cannot_resume(
         await hub.close()
         with Session(get_engine()) as session:
             repo.delete_server(session, member.id)
+
+
+class _Supervisor(SimpleNamespace):
+    """_endpoints plus the in-flight bookkeeping a parked turn's hold writes to."""
+
+    def __init__(self, *servers):
+        super().__init__(
+            running_endpoints=_endpoints(*servers).running_endpoints, in_flight={}
+        )
+
+    def request_started(self, server_id):
+        self.in_flight[server_id] = self.in_flight.get(server_id, 0) + 1
+
+    def request_finished(self, server_id):
+        self.in_flight[server_id] -= 1
+
+
+async def test_parked_turn_holds_its_members_awake(clean_settings, pushing_upstream_url):
+    """While a modern caller's request waits on its answer, no HTTP request is open,
+    so the idle sweep would see its member as idle and could stop it under the turn.
+    The turn holds the members it reached in flight until it resumes."""
+    from mcp.types import InputRequiredResult, ListRootsResult, Root
+
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Pusher")
+        other = _mk_server(session, "Other")
+    _write_groups({"all": "*"})
+    hub = _http_hub(pushing_upstream_url)
+    supervisor = _Supervisor(member, other)
+    try:
+        await hub.sync(supervisor)
+        async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
+            first = await client.session.call_tool(
+                "pusher_where", {}, allow_input_required=True
+            )
+            assert isinstance(first, InputRequiredResult)
+            # parked: held for the member it reached, not for the one it didn't
+            assert supervisor.in_flight == {member.id: 1}
+            (key,) = first.input_requests
+            final = await asyncio.wait_for(
+                client.session.call_tool(
+                    "pusher_where",
+                    {},
+                    allow_input_required=True,
+                    input_responses={key: ListRootsResult(roots=[Root(uri="file:///alice")])},
+                    request_state=first.request_state,
+                ),
+                10,
+            )
+        assert json.loads(final.content[0].text) == ["file:///alice"]
+        assert supervisor.in_flight == {member.id: 0}  # let go once it resumed
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)
+            repo.delete_server(session, other.id)
+
+
+async def test_ended_parked_turn_lets_its_members_go(clean_settings, pushing_upstream_url):
+    from mcp.types import InputRequiredResult
+
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Pusher")
+    _write_groups({"all": "*"})
+    hub = _http_hub(pushing_upstream_url)
+    supervisor = _Supervisor(member)
+    try:
+        await hub.sync(supervisor)
+        async with _client_on(hub.app_for("all"), roots=["file:///alice"]) as client:
+            first = await client.session.call_tool(
+                "pusher_where", {}, allow_input_required=True
+            )
+            assert isinstance(first, InputRequiredResult)
+        assert supervisor.in_flight == {member.id: 1}
+        for turn in list(hub._parked["all"].values()):
+            turn.end()  # what the TTL does to a caller that never retries
+        assert supervisor.in_flight == {member.id: 0}
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)
+
+
+async def test_membership_change_announces_list_changed_to_handshake_sessions(
+    clean_settings, pushing_upstream_url
+):
+    """A handshake-era session hears about a membership change on its standalone
+    stream, as the listChanged the bundle advertises promises."""
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Pusher")
+        other = _mk_server(session, "Other")
+    _write_groups({"all": "*"})
+    hub = _http_hub(pushing_upstream_url)
+    heard: list[str] = []
+    changed = asyncio.Event()
+
+    async def on_message(message):
+        method = getattr(message, "method", None)
+        if method and method.endswith("list_changed"):
+            heard.append(method)
+            if len(heard) == 3:
+                changed.set()
+
+    try:
+        await hub.sync(_endpoints(member))
+        async with _client_on(
+            hub.app_for("all"), mode="legacy", message_handler=on_message
+        ) as client:
+            caps = client.initialize_result.capabilities
+            assert caps.tools.list_changed
+            await client.list_tools()
+            await asyncio.sleep(0.2)  # the standalone stream is open
+            await hub.sync(_endpoints(member, other))
+            await asyncio.wait_for(changed.wait(), 10)
+        assert sorted(heard) == [
+            "notifications/prompts/list_changed",
+            "notifications/resources/list_changed",
+            "notifications/tools/list_changed",
+        ]
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)
+            repo.delete_server(session, other.id)
+
+
+async def test_membership_change_reaches_modern_listeners(clean_settings, pushing_upstream_url):
+    """A 2026-07-28 caller has no standing stream; it hears about membership changes on
+    subscriptions/listen, which the bundle serves (and so advertises listChanged)."""
+    from mcp.client.subscriptions import listen
+    from mcp.shared.subscriptions import ToolsListChanged
+
+    with Session(get_engine()) as session:
+        member = _mk_server(session, "Pusher")
+        other = _mk_server(session, "Other")
+    _write_groups({"all": "*"})
+    hub = _http_hub(pushing_upstream_url)
+    try:
+        await hub.sync(_endpoints(member))
+        async with _client_on(hub.app_for("all")) as client:
+            assert client.server_capabilities.tools.list_changed
+            async with listen(client.session, tools_list_changed=True) as sub:
+                await hub.sync(_endpoints(member, other))
+                event = await asyncio.wait_for(anext(aiter(sub)), 10)
+            assert isinstance(event, ToolsListChanged)
+    finally:
+        await hub.close()
+        with Session(get_engine()) as session:
+            repo.delete_server(session, member.id)
+            repo.delete_server(session, other.id)

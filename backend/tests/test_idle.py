@@ -405,6 +405,15 @@ def test_group_request_counts_members_in_flight():
             r = client.get(f"/g/{group}/mcp", headers=LOOPBACK)
             assert r.status_code == 200, r.text
             assert observed["during"] == 0
+            # A 2026-07-28 caller's subscriptions/listen stream is the same thing.
+            listen = {"jsonrpc": "2.0", "id": 2, "method": "subscriptions/listen"}
+            r = client.post(
+                f"/g/{group}/mcp",
+                json=listen,
+                headers={**LOOPBACK, "Mcp-Method": "subscriptions/listen"},
+            )
+            assert r.status_code == 200, r.text
+            assert observed["during"] == 0
         finally:
             client.delete(f"/api/groups/{group}", headers=LOOPBACK)
             client.delete(f"/api/servers/{sid}", headers=LOOPBACK)

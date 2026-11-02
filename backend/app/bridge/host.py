@@ -465,6 +465,13 @@ class _Turn:
     upstream session is then cancelled, as a cancelled handshake-era request is; a stdio
     child keeps its lock for the call's answer up to ``_CANCELLED_CALL_DRAIN_S`` before
     the call is marked abandoned, the same as a cancelled handshake-era call there.
+
+    A parked turn has no HTTP request open, so the idle sweep would count its upstream
+    as idle and could stop it under the waiting request. A group passes ``hold``, which
+    keeps the members the turn reached in flight until it resumes or ends. A bridge
+    can't do that from here: the supervisor only sees the ``/s`` requests, so a server
+    whose idle timeout is shorter than its caller takes to answer can still stop under
+    a parked turn (the retry is told to send the request again).
     """
 
     def __init__(
@@ -473,8 +480,13 @@ class _Turn:
         caller: _Caller | None,
         run,
         routing: _StdioRouting | None = None,
+        hold=None,
     ) -> None:
         self.parked = parked
+        # groups: hold(members) keeps those members awake while the turn is parked and
+        # returns the call that lets them go (see GroupHub._hold)
+        self._hold = hold
+        self._held = None
         self.caller = caller  # the live leg's caller
         self.routing = routing
         self.pending: dict[str, tuple] = {}  # key -> (input request, future for its answer)
@@ -568,6 +580,8 @@ class _Turn:
         self.state = secrets.token_urlsafe(16)
         self.parked[self.state] = self
         self._expiry = asyncio.get_running_loop().call_later(_PARKED_TURN_TTL_S, self.end)
+        if self._hold is not None:
+            self._held = self._hold(set(self.members))
         return wrap(InputRequiredResult(input_requests=requests, request_state=self.state))
 
     def resume(self, caller: _Caller | None, responses) -> None:
@@ -625,6 +639,9 @@ class _Turn:
         if self.state is not None:
             self.parked.pop(self.state, None)
             self.state = None
+        if self._held is not None:
+            release, self._held = self._held, None
+            release()
 
     def _finished(self, run: asyncio.Future) -> None:
         if not run.cancelled():
@@ -644,12 +661,15 @@ class _Turn:
 _CURRENT_TURN: ContextVar[_Turn | None] = ContextVar("mcpe_bridge_modern_turn", default=None)
 
 
-async def _turn_leg(ctx: Context, method: str, run, parked: dict, routing=None, members=None):
+async def _turn_leg(
+    ctx: Context, method: str, run, parked: dict, routing=None, members=None, hold=None
+):
     """One leg of a modern caller's interactive request: start its turn, or resume the
     parked one its ``request_state`` names (unsealed by FastMCP, so we minted it).
 
     ``members`` (groups only) returns the server ids mounted now: a turn resumes only
-    while every member it reached is still one of them."""
+    while every member it reached is still one of them. ``hold`` (groups only) keeps
+    the members a parked turn reached from idling out (see :class:`_Turn`)."""
     wrap, error = _INTERACTIVE[method]
     if ctx.request_state is not None:
         turn = parked.get(ctx.request_state)
@@ -663,7 +683,7 @@ async def _turn_leg(ctx: Context, method: str, run, parked: dict, routing=None, 
         if routing is not None:
             await routing.lock.acquire()
         try:
-            turn = _Turn(parked, _caller_of(ctx), run, routing)
+            turn = _Turn(parked, _caller_of(ctx), run, routing, hold)
         except BaseException:
             if routing is not None:
                 routing.lock.release()
@@ -675,9 +695,10 @@ class _ModernTurns(Middleware):
     """Runs each modern caller's interactive request as a :class:`_Turn`, for a proxy whose
     upstream sessions are per request (a remote upstream, or a group's members)."""
 
-    def __init__(self, parked: dict | None = None, members=None) -> None:
+    def __init__(self, parked: dict | None = None, members=None, hold=None) -> None:
         self.parked: dict[str, _Turn] = {} if parked is None else parked
         self.members = members  # groups: the server ids mounted now (see _turn_leg)
+        self.hold = hold  # groups: keeps a parked turn's members awake (see _turn_leg)
 
     async def on_request(self, context, call_next):
         ctx = context.fastmcp_context
@@ -688,6 +709,7 @@ class _ModernTurns(Middleware):
                 lambda: call_next(context),
                 self.parked,
                 members=self.members,
+                hold=self.hold,
             )
         return await call_next(context)
 

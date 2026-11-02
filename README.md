@@ -286,6 +286,11 @@ and override it per server in the server form (blank = inherit, `0` = pin the se
 always-on). Idle servers report a passing `/api/health/{slug}` status (`"idle"`) so
 load balancers don't eject a deliberately-sleeping endpoint. Group (`/g`) traffic
 counts as activity for the group's members, but doesn't wake already-idle ones.
+A request waiting on a client's answer (see below) keeps the group members it reached
+running until it resumes or ends. Through `/s`, the control plane can't see a server
+waiting like this, so a server whose idle timeout is shorter than its client takes to
+answer can stop under the request, and the client is told to send it again. An idle
+timeout of 10 minutes or more never hits this, since a waiting request ends by then.
 
 ### Try a tool from the dashboard (playground)
 
@@ -361,6 +366,10 @@ and the call carries on without it. A membership change doesn't drop a waiting
 request, unless the member it reached is no longer in the group. Clients on the older
 handshake protocol get the requests pushed to them, through a group too: groups keep a
 session per client for this, and a member starting, stopping or idling doesn't end it.
+
+When a group's members change, its clients are told the tool, resource and prompt
+lists changed: a handshake-era client on its session's stream, and a `2026-07-28`
+client on its `subscriptions/listen` stream if it opened one.
 
 A stdio server (`npx`, `uvx`, `command`, `docker`) is different: its bridge runs **one**
 process for every connected client, and a request from that process doesn't say which

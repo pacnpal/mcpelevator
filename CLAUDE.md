@@ -64,7 +64,10 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   for a remote upstream and for groups (`_ModernTurns`), each request's own upstream session
   finds its turn through `_CURRENT_TURN` (`_TurnAwareProxyClient`). A group's parked turns
   outlive its membership changes; a change ends the turns whose members (`_Turn.members`)
-  it no longer mounts. At most `_MAX_PARKED_TURNS` park at once. The upstream leg is pinned to the handshake era (`ProxyClient`
+  it no longer mounts, and a parked turn holds the members it reached in flight
+  (`GroupHub._hold`) so the idle sweep can't stop one under it; on `/s` the control plane
+  can't see a park, so an idle timeout under `_PARKED_TURN_TTL_S` can still lose one
+  (documented). At most `_MAX_PARKED_TURNS` park at once. The upstream leg is pinned to the handshake era (`ProxyClient`
   defaults to `mode="legacy"`), and caller headers reach it only via
   `ProxyClient(forward_incoming_headers=...)`, which FastMCP 4 turns ON by default.
 - **Secret env** (`sealed.py`): a per-key choice, for env vars and remote/openapi headers
@@ -151,10 +154,14 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   once, a request in flight keeps the snapshot it started with (never mutate a live provider
   list: FastMCP re-indexes it after awaiting), and the replaced snapshot's extension runtime is
   closed rather than left in the bundle's scope. A parked turn resumes only while every
-  member it reached is still mounted. An instance is rebuilt
+  member it reached is still mounted. Every membership change is announced as
+  `list_changed` (`GroupHub._announce`): to the handshake-era sessions `_Sessions` remembers,
+  on their standalone stream, and on a `2026-07-28` caller's `subscriptions/listen` stream (the
+  bundle serves it with the SDK's `ListenHandler`, which is also what makes it advertise
+  `listChanged` to those callers). An instance is rebuilt
   only after a teardown (an auth-affecting write or a failed sync), and the torn-down one
   drains its in-flight requests before closing, so a call that tears down its own group still returns;
-  standalone GET streams don't hold members awake
+  standalone GET streams and `subscriptions/listen` POSTs (by their `Mcp-Method` header) don't hold members awake
   (the hub owns each sub-app's lifespan; Starlette doesn't run mounted lifespans). There is no
   special-case name — `all` is just a conventional entry with members `"*"`. The registry is
   validated at write time and again at startup (`registry.validate_at_startup` fails the boot
