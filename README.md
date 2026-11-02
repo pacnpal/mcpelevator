@@ -1,5 +1,6 @@
 # mcpelevator
 [![Build and Push Docker Image](https://github.com/pacnpal/mcpelevator/actions/workflows/docker-image.yml/badge.svg)](https://github.com/pacnpal/mcpelevator/actions/workflows/docker-image.yml)
+
 **Elevate MCP servers into authenticated HTTP endpoints. Self-hosted, in one container.**
 
 Most [MCP](https://modelcontextprotocol.io) servers ship as **stdio** programs (`npx -y …`, `uvx …`, a command, a docker image). Stdio only works when the client can spawn the process locally, which **phones and most "any device" setups can't do**. mcpelevator runs those servers for you and exposes each one as a remote **Streamable HTTP** endpoint (the transport Claude mobile, Flutter clients, etc. connect to). Add a server, press start, copy the URL into your client. Each server can also opt into a plain **REST/OpenAPI** surface (`/s/<slug>/rest/<tool>`), so curl, automation, and GPT Actions can call its tools without speaking MCP.
