@@ -206,13 +206,21 @@ def build(app: FastAPI) -> "_Gate":
         ``repo_url`` (+ optional ``repo_ref``) is cloned, ``post_clone_script`` runs in it
         when the commit or script changes, and the command runs inside it.
         ``secret_env`` names the ``env`` keys (headers too, for remote and openapi) whose
-        values are stored encrypted and never returned: each reads "<hidden>"."""
+        values are stored encrypted and never returned: each reads "<hidden>".
+        For a stdio runner (npx, uvx, command, docker), ``serialize_client_requests``
+        serves one request at a time so the server's roots/sampling/elicitation requests
+        reach their caller, and ``attach_stderr_on_error`` (only with it; refused
+        otherwise, and for remote/openapi) appends what the server wrote to stderr during
+        a failed tool call to that call's error result, scrubbed and capped. It only
+        helps when the failure comes back as a failed call."""
         return await api("POST", "/api/servers", json=spec.model_dump(exclude_unset=True))
 
     @mcp.tool(annotations=_WRITE)
     async def update_server(server_id: str, changes: ServerUpdate) -> Any:
         """Edit a server; only the fields given change (an explicit null resets the
         nullable ones to inherit). A launch-spec change restarts its bridge. That includes
+        ``serialize_client_requests`` and ``attach_stderr_on_error`` (the latter needs the
+        former, so turn both off together), and
         ``repo_url``/``repo_ref``/``post_clone_script`` (a changed script or commit
         rebuilds on the next start; ``repo_url: ""`` drops the checkout). For an
         openapi server, ``command`` / ``args`` / ``env`` are the document URL, base-URL

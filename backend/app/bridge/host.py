@@ -9,7 +9,7 @@ The control plane resolves the runner -> a literal ProcessSpec, then launches th
 module as a subprocess, passing the spec + port via environment variables:
 
     MCPE_BRIDGE_SPEC  JSON: {command, args, env, cwd, name, transport, mcp_http, rest_openapi,
-                      serialize_client_requests, ...}
+                      serialize_client_requests, attach_stderr_on_error, ...}
     MCPE_BRIDGE_HOST  loopback host (default 127.0.0.1)
     MCPE_BRIDGE_PORT  port to listen on
 
@@ -38,6 +38,7 @@ Actions) can call the server's tools through the identical auth/proxy path. See
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import itertools
 import json
@@ -45,7 +46,10 @@ import logging
 import os
 import re
 import secrets
+import select
+import struct
 import sys
+import threading
 import weakref
 from collections.abc import Callable, Iterator, Sequence
 from contextvars import ContextVar
@@ -74,7 +78,7 @@ from fastmcp.server.transforms import ToolTransform
 from fastmcp.tools import Tool
 from fastmcp.prompts.base import InputRequiredPromptResult
 from fastmcp.resources.base import InputRequiredResourceResult
-from fastmcp.tools.base import InputRequiredToolResult
+from fastmcp.tools.base import InputRequiredToolResult, ToolResult
 from fastmcp.tools.tool_transform import ToolTransformConfig
 from fastmcp.utilities.timeout import normalize_timeout_to_seconds
 from mcp import ClientSession
@@ -95,6 +99,7 @@ from mcp.types import (
     Root,
     RootsCapability,
     SamplingCapability,
+    TextContent,
 )
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
@@ -304,6 +309,9 @@ class _StdioRouting:
         # The child may still ask something for one, and nothing says which, so while any
         # is outstanding no server request is forwarded at all.
         self.abandoned: set[asyncio.Future] = set()
+        # The child's stderr, teed so a failed call can carry its own lines back
+        # (``attach_stderr_on_error``, see _StderrTee); None when that's off.
+        self.stderr: _StderrTee | None = None
         self._forward_sampling = create_sampling_callback(default_proxy_sampling_handler)
         self._forward_elicitation = create_elicitation_callback(
             default_proxy_elicitation_handler
@@ -718,6 +726,215 @@ class _ModernTurns(Middleware):
         return await call_next(context)
 
 
+# --- a failed call's upstream stderr (attach_stderr_on_error, issue #227) -------------
+
+# The marker that heads the block appended to a failed call's result.
+STDERR_MARKER = "[mcpelevator] upstream stderr during this call:"
+# How many of the child's stderr lines the ring keeps, and how much of one line.
+_STDERR_RING_LINES = 256
+_STDERR_LINE_MAX = 4096
+# What the appended block carries at most: the window's last lines, then a byte cap.
+_STDERR_ATTACH_LINES = 20
+_STDERR_ATTACH_BYTES = 2048
+# On the error path only: a short settle for lines the child (or a relaying `docker run`)
+# writes just after its response, then a bounded wait for the pump to catch up.
+_STDERR_SETTLE_S = 0.02
+_STDERR_GRACE_S = 0.1
+
+
+def _pipe_pending(fd: int) -> int:
+    """Bytes written into the pipe ``fd`` reads that nobody has read yet (0 where the
+    platform can't say, which only loosens where a window starts, see _StderrTee.mark)."""
+    try:
+        import fcntl
+        import termios
+
+        return struct.unpack("i", fcntl.ioctl(fd, termios.FIONREAD, b"\0\0\0\0"))[0]
+    except (ImportError, OSError):
+        return 0
+
+
+class _StderrTee:
+    """The stdio child's stderr, teed: every byte still goes to the bridge's own stderr
+    (so the server's log is unchanged), and each line is also kept in a small ring, so a
+    call that fails can carry the lines written during it (``attach_stderr_on_error``).
+
+    The child writes into a pipe the bridge owns (``writer`` becomes its stderr, kept
+    across respawns), and a daemon thread pumps it. Lines are filed under their POSITION
+    in the stream (the offset of their first byte), not their arrival time: a call's
+    window is ``[mark() when it takes the child, mark() when it fails)``, and ``mark()``
+    is everything pumped so far plus what still waits in the pipe, read under the lock
+    the pump reads under. So a line the child wrote before a call began belongs to the
+    call before it even when the pump only gets to it later, and a call queued behind
+    another never sees that one's lines.
+    """
+
+    def __init__(self) -> None:
+        self._fd, write_fd = os.pipe()
+        # A real file: the child's stderr is duplicated from its descriptor at spawn.
+        self.writer = os.fdopen(write_fd, "w")
+        self._lock = threading.Lock()
+        self._read = 0  # bytes pumped so far, i.e. the offset of the next byte
+        self._lines: collections.deque[tuple[int, str]] = collections.deque(
+            maxlen=_STDERR_RING_LINES
+        )
+        self._partial = bytearray()  # the current line, until its newline arrives
+        self._partial_at = 0
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(
+                target=self._pump, name="mcpe-upstream-stderr", daemon=True
+            )
+            self._thread.start()
+
+    def mark(self) -> int:
+        """The stream position right now: where a window starts or ends."""
+        with self._lock:
+            return self._read + _pipe_pending(self._fd)
+
+    async def settled_mark(self) -> int:
+        """Where a failed call's window ends: after a short settle for lines written
+        just behind the response, wait (boundedly) for the pump to file everything
+        written up to there."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _STDERR_GRACE_S
+        await asyncio.sleep(_STDERR_SETTLE_S)
+        end = self.mark()
+        while loop.time() < deadline:
+            with self._lock:
+                if self._read >= end:
+                    break
+            await asyncio.sleep(0.005)
+        return end
+
+    def window(self, start: int, end: int) -> list[str]:
+        """The lines that began in ``[start, end)``, one still missing its newline too."""
+        with self._lock:
+            lines = [text for at, text in self._lines if start <= at < end]
+            if self._partial.strip() and start <= self._partial_at < end:
+                lines.append(self._text(self._partial))
+        return lines
+
+    def _pump(self) -> None:
+        while True:
+            try:
+                select.select([self._fd], [], [])
+                with self._lock:
+                    chunk = os.read(self._fd, 65536)
+                    self._file(chunk)
+            except (OSError, ValueError):
+                return
+            if not chunk:
+                return
+            _echo_stderr(chunk)
+
+    def _file(self, chunk: bytes) -> None:
+        at, self._read = self._read, self._read + len(chunk)
+        pos = 0
+        while (newline := chunk.find(b"\n", pos)) >= 0:
+            self._extend(at + pos, chunk[pos:newline])
+            self._flush()
+            pos = newline + 1
+        if pos < len(chunk):
+            self._extend(at + pos, chunk[pos:])
+            if len(self._partial) > _STDERR_LINE_MAX:
+                self._flush()  # a newline-less flood: file what's there as a line
+
+    def _extend(self, at: int, data: bytes) -> None:
+        if not self._partial:
+            self._partial_at = at
+        self._partial += data
+
+    def _flush(self) -> None:
+        text = self._text(self._partial)
+        if text.strip():
+            self._lines.append((self._partial_at, text))
+        self._partial.clear()
+
+    @staticmethod
+    def _text(data: bytes) -> str:
+        return bytes(data).decode("utf-8", "replace").rstrip("\r")[:_STDERR_LINE_MAX]
+
+
+def _echo_stderr(chunk: bytes) -> None:
+    """Pass the child's bytes on to the bridge's stderr, as they went before the tee."""
+    out = sys.stderr
+    try:
+        buffer = getattr(out, "buffer", None)
+        if buffer is not None:
+            out.flush()
+            buffer.write(chunk)
+            buffer.flush()
+        else:
+            out.write(chunk.decode("utf-8", "replace"))
+            out.flush()
+    except Exception:
+        pass  # a broken stderr must not stop the pump: the child would block on a full pipe
+
+
+def _stderr_block(lines: list[str]) -> TextContent:
+    """The block appended to a failed call: the window's last lines, each scrubbed of
+    credentials (app.debug.scrub) BEFORE the cap, so a cut can't expose half a token."""
+    from app.debug import scrub
+
+    kept: list[str] = []
+    room = _STDERR_ATTACH_BYTES
+    for line in reversed(lines[-_STDERR_ATTACH_LINES:]):
+        line = scrub(line)
+        size = len(line.encode()) + 1
+        if size > room:
+            if not kept:  # one huge line: keep its end, where the error usually is
+                kept.append("…" + line.encode()[-(room - 4) :].decode("utf-8", "ignore"))
+            break
+        kept.append(line)
+        room -= size
+    return TextContent(type="text", text="\n".join([STDERR_MARKER, *reversed(kept)]))
+
+
+async def _with_stderr(routing: _StdioRouting, method: str, call):
+    """Run ``call`` (one request holding the child), and if it's a ``tools/call`` that
+    fails, append the child's stderr from its window to the result.
+
+    An ``isError`` result gets one more ``TextContent`` block. A raised ``ToolError`` (the
+    upstream answered with a JSON-RPC error, timed out, or the connection broke) becomes
+    the ``isError`` result FastMCP would have sent for it (its message as the first
+    block) plus the stderr block, so both failures read the same on every surface: MCP,
+    REST's ``is_error`` envelope, a group. Nothing is attached to a success, to an empty
+    window, or while a call its caller abandoned still runs on the child (its lines
+    can't be told apart from this one's).
+    """
+    tee = routing.stderr
+    if tee is None or method != "tools/call" or routing.abandoned:
+        return await call()
+    start = tee.mark()
+    try:
+        result = await call()
+    except ToolError as exc:
+        lines = tee.window(start, await tee.settled_mark())
+        if not lines:
+            raise
+        return ToolResult(
+            content=[TextContent(type="text", text=str(exc)), _stderr_block(lines)],
+            is_error=True,
+        )
+    if (
+        isinstance(result, ToolResult)
+        and result.is_error
+        and not isinstance(result, InputRequiredToolResult)
+    ):
+        lines = tee.window(start, await tee.settled_mark())
+        if lines:
+            return ToolResult(
+                content=[*result.content, _stderr_block(lines)],
+                structured_content=result.structured_content,
+                meta=result.meta,
+                is_error=True,
+            )
+    return result
+
+
 class _SerializeClientRequests(Middleware):
     """``serialize_client_requests``: one proxied request at a time per stdio child, with
     the caller slot naming it (see :class:`_StdioRouting`).
@@ -733,6 +950,10 @@ class _SerializeClientRequests(Middleware):
     An interactive request (``tools/call``, ``resources/read``, ``prompts/get``) from a
     caller on the 2026-07-28 protocol runs as a :class:`_Turn` instead, which owns the lock
     until the upstream request is done, across every round trip.
+
+    Holding the child for the whole request is also what makes its stderr attributable:
+    with ``attach_stderr_on_error`` a failed ``tools/call`` carries the lines written
+    while it held the lock (:func:`_with_stderr`), on either path.
     """
 
     def __init__(self, routing: _StdioRouting) -> None:
@@ -742,16 +963,19 @@ class _SerializeClientRequests(Middleware):
         if context.method == "initialize":
             return await call_next(context)
         ctx = context.fastmcp_context
+
+        def run():
+            return _with_stderr(self.routing, context.method, lambda: call_next(context))
+
         if context.method in _INTERACTIVE and _is_modern(ctx):
-            return await _turn_leg(
-                ctx, context.method, lambda: call_next(context), self.routing.parked, self.routing
-            )
+            # The turn's task starts once the lock is taken, so its window does too.
+            return await _turn_leg(ctx, context.method, run, self.routing.parked, self.routing)
         caller = _caller_of(ctx)
         async with self.routing.lock:
             self.routing.caller = caller
             turn = _TURN.set(caller)
             try:
-                return await call_next(context)
+                return await run()
             finally:
                 _TURN.reset(turn)
                 self.routing.caller = None
@@ -768,11 +992,25 @@ class _SharedStdioTransport(StdioTransport):
     on its own ``_connect_lock`` and later callers attach to the session it produced.)
     """
 
-    def __init__(self, *args, serialize_client_requests: bool = False, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        serialize_client_requests: bool = False,
+        attach_stderr_on_error: bool = False,
+        **kwargs,
+    ) -> None:
+        # Only a serialized child's stderr can be attributed to a call; otherwise the
+        # child keeps writing straight to the bridge's stderr, as it always has.
+        stderr = _StderrTee() if serialize_client_requests and attach_stderr_on_error else None
+        if stderr is not None:
+            kwargs["log_file"] = stderr.writer
         super().__init__(*args, **kwargs)
         self.routing = _StdioRouting(serialize_client_requests)
+        self.routing.stderr = stderr
 
     async def connect(self, **session_kwargs):
+        if self.routing.stderr is not None:
+            self.routing.stderr.start()
         return await super().connect(**{**session_kwargs, **self.routing.session_callbacks()})
 
 
@@ -1920,6 +2158,7 @@ def _build_transport(spec: dict):
         env=_child_env(spec),
         cwd=spec.get("cwd") or None,
         serialize_client_requests=bool(spec.get("serialize_client_requests")),
+        attach_stderr_on_error=bool(spec.get("attach_stderr_on_error")),
     )
 
 

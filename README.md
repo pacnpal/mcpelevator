@@ -410,6 +410,21 @@ client it's for.
 Over the API: `PATCH /api/servers/<id>` with `{"serialize_client_requests": true}`.
 Changing it restarts the server's bridge.
 
+**Upstream stderr on failed calls.** When a stdio server's tool call fails, the real
+cause (a traceback, a diagnostic) usually goes to the process's stderr, which only lands
+in the server's log. With **Client requests** on, one call holds the process at a time,
+so what it writes to stderr meanwhile belongs to that call. Turn on **Attach stderr to
+failed calls** (`attach_stderr_on_error`, which needs `serialize_client_requests`) and a
+failed tool call (`isError`, or an error the bridge turns into one) gets one more text
+block: `[mcpelevator] upstream stderr during this call:` followed by the last 20 lines
+the process wrote during that call, at most 2 KB, each line scrubbed of credentials the
+way debug logs are. A successful call gets nothing, and the lines still go to the
+server's log as before. It reaches MCP clients, the REST `is_error` envelope and groups
+alike. Stdio runners only (`docker` too: the container's stderr); it's refused for
+`remote` and `openapi`, and without `serialize_client_requests`. It only helps when the
+failure comes back as a failed call: a process that crashes or hangs instead shows up in
+the server's log and status. Changing it restarts the server's bridge.
+
 ### Usage stats (per server, per tool)
 
 **Usage** in the header opens the instance-wide dashboard: totals across every server
