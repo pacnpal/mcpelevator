@@ -230,12 +230,30 @@ is global container bootstrap for extra Debian packages before mcpelevator start
 per-server setup.
 
 Each startup attempt runs setup, launches the bridge, and checks readiness. Setup and
-readiness each get a separate `MCPE_START_TIMEOUT_S` window. Failed setup, bridge launch
+readiness each get a separate `MCPE_START_TIMEOUT_S` window. A server can set its own
+**startup timeout** (`start_timeout_s`, and `repo_build_timeout_s` for a repository
+checkout) in its form; blank inherits the instance default. Raise it for a setup that
+installs system packages or downloads a browser (`playwright install --with-deps`), which
+can outlast two minutes on a cold container. A change applies from the next start and
+never restarts a running server. Failed setup, bridge launch
 or readiness, and exits before a stable run retry the full attempt, including setup.
 `MCPE_RESTART_BUDGET` defaults to 5 attempts, with waits of 2, 4, 8, then 16 seconds;
 further waits stay at 16 seconds. After `MCPE_RESTART_STABLE_S` (60 seconds by default)
 of uninterrupted running, the retry budget is restored. Stop cancels startup and any
-pending retry.
+pending retry. While attempts are failing, the server's `last_error` carries the latest
+one (`attempt 1/5 failed: setup exited with code 100`), and it clears once the server is
+running.
+
+Stopping a server mid-setup (a disable, a restart, or the setup's own timeout) kills the
+script. A package install killed part-way leaves dpkg interrupted, and from then on
+every `apt-get` refuses with "dpkg was interrupted, you must manually run
+'dpkg --configure -a'". So before each setup and checkout, when dpkg reports an
+interrupted run and the script runs as root, mcpelevator runs `dpkg --configure -a`
+first (the repair apt asks for, which removes nothing) and says so in the server's log.
+
+Server starts, failed attempts, terminal failures (with the hint and the last lines of
+the server's own output), crashes of a running server, idle stops and stops reach the
+container log at INFO without debug mode; `MCPE_LOG_LEVEL` adjusts that.
 
 An enabled server in `failed` or `unhealthy` state can be retried in the UI without
 changing its saved configuration, or through the API:
@@ -697,14 +715,15 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_CONTROL_MCP` | `true` | Provision the built-in mcpelevator MCP server on boot when it's missing; `false` skips that (an existing one stays, turn it off in Settings) |
 | `MCPE_CF_ACCESS_TEAM_DOMAIN` | _(none)_ | Cloudflare Access team domain (`myteam.cloudflareaccess.com`). With `MCPE_CF_ACCESS_AUD`, the built-in server accepts Cloudflare Access sign-ins; see **Manage mcpelevator from an agent** |
 | `MCPE_CF_ACCESS_AUD` | _(none)_ | The Access application's AUD tag (comma-separated for several applications) |
+| `MCPE_LOG_LEVEL` | `INFO` | Level of mcpelevator's own log lines when debug mode is off: server starts, failures with the reason and the server's last output lines, crashes, idle stops. `WARNING` keeps only failures |
 | `MCPE_DEBUG` | `false` | Debug mode: TRACE-level logs everywhere (bridges too), a full trace of every request with secrets scrubbed, crash reporting, and `GET /api/debug`; see **Debug mode** |
 | `MCPE_APT_PACKAGES` | _(none)_ | Global, space-separated extra Debian packages installed before mcpelevator starts (Docker image only), not per-server `setup_script`. A failed install warns and boot continues; packages must be reinstalled after container replacement |
 | `MCPE_DATA_DIR` | `./data` | SQLite + caches |
 | `MCPE_FRONTEND_DIR` | `../frontend/build` | Built SPA to serve |
 | `MCPE_PORT_RANGE_START` / `_END` | `49200` / `49400` | Loopback ports for bridge processes |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrent running servers |
-| `MCPE_START_TIMEOUT_S` | `120` | Separate timeout for setup and for readiness on each startup attempt (covers npx/uvx cold start) |
-| `MCPE_REPO_BUILD_TIMEOUT_S` | `900` | Timeout for a repository server's checkout + post-clone build on each startup attempt (a first build can take minutes) |
+| `MCPE_START_TIMEOUT_S` | `120` | Separate timeout for setup and for readiness on each startup attempt (covers npx/uvx cold start); a server's own `start_timeout_s` overrides it |
+| `MCPE_REPO_BUILD_TIMEOUT_S` | `900` | Timeout for a repository server's checkout + post-clone build on each startup attempt (a first build can take minutes); a server's own `repo_build_timeout_s` overrides it |
 | `MCPE_RESTART_BUDGET` | `5` | Startup attempts before `failed`; retry waits are 2/4/8/16 seconds and cap at 16 |
 | `MCPE_RESTART_STABLE_S` | `60` | Uninterrupted running time before the retry budget is restored |
 | `MCPE_VERSION` | _(image: release tag)_ | Version the instance reports (`/api/health`, UI badge). Set by the published image from the release tag; you don't normally set it. Unset → derived from the adjacent `pyproject.toml` (source tree), else installed package metadata |

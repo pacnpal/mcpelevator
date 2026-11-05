@@ -418,3 +418,126 @@ def test_oversized_launch_spec_fails_legibly(tmp_path):
     # An oversized spec must not reach create_subprocess_exec.
     with pytest.raises(_AttemptFailed, match="too large"):
         unit._bridge_env(unit._bridge_payload())
+
+
+async def test_failing_attempt_sets_last_error_and_logs_why(tmp_path, monkeypatch, caplog):
+    # A server retrying a broken setup must not read as clean: last_error carries the
+    # attempt's failure during the retry wait, and the standard (non-debug) log says a
+    # server failed and quotes its own output, so the reason is there without the UI.
+    from app.supervisor import unit as unit_module
+
+    monkeypatch.setattr(unit_module, "get_settings", lambda: _settings(tmp_path))
+    caplog.set_level("INFO", logger="app.supervisor.unit")
+    unit = ServerUnit(
+        _server(tmp_path, setup_script="printf 'E: something broke here\\n'\nexit 100\n")
+    )
+
+    await unit.start(_port())
+    await _wait_for(
+        lambda: unit.startup_status is not None and unit.startup_status.phase == "retry_wait"
+    )
+    assert unit.last_error == "attempt 1/2 failed: setup exited with code 100"
+    await _wait_for(lambda: unit.state == "failed")
+    await unit.stop()
+
+    records = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert ("INFO", "server unit-test: starting (runner command, up to 2 attempt(s), "
+            "start timeout 3s)") in records
+    assert any(
+        level == "WARNING" and "attempt 1/2 failed: setup exited with code 100" in msg
+        for level, msg in records
+    )
+    failed = [msg for level, msg in records if level == "ERROR"]
+    assert len(failed) == 1
+    assert failed[0].startswith(
+        "server unit-test: failed to start after 2 attempt(s): setup exited with code 100"
+    )
+    assert "    E: something broke here" in failed[0]  # the server's own output, quoted
+    assert ("INFO", "server unit-test: stopped") in records
+
+
+async def test_running_clears_last_error_and_logs_ready(tmp_path, monkeypatch, caplog):
+    from app.supervisor import unit as unit_module
+
+    monkeypatch.setattr(
+        unit_module, "get_settings", lambda: _settings(tmp_path, start_timeout_s=10.0)
+    )
+    caplog.set_level("INFO", logger="app.supervisor.unit")
+    unit = ServerUnit(_server(tmp_path, setup_script="true"))
+    try:
+        await unit.start(_port())
+        await _wait_for(lambda: unit.state == "running", timeout=15)
+        assert unit.last_error is None
+        assert any(
+            r.levelname == "INFO"
+            and r.getMessage().startswith("server unit-test: running on port")
+            for r in caplog.records
+        )
+    finally:
+        await unit.stop()
+
+
+async def test_per_server_start_timeout_overrides_the_default(tmp_path, monkeypatch):
+    from app.supervisor import unit as unit_module
+
+    monkeypatch.setattr(
+        unit_module,
+        "get_settings",
+        lambda: _settings(tmp_path, start_timeout_s=60.0, restart_budget=1),
+    )
+    server = _server(tmp_path, setup_script="sleep 60")
+    server.start_timeout_s = 1
+    unit = ServerUnit(server)
+
+    await unit.start(_port())
+    await _wait_for(lambda: unit.state == "failed", timeout=5)
+    assert "setup timed out after 1s" in (unit.last_error or "")
+    await unit.stop()
+
+
+def _fake_dpkg_bin(tmp_path: Path, *, uid: str, audit: str) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "id").write_text(f"#!/bin/sh\necho {uid}\n")
+    (bin_dir / "dpkg").write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = --audit ]; then printf %s "{audit}"; exit 0; fi\n'
+        'echo "dpkg called: $*" >> "$DPKG_CALLS"\n'
+    )
+    for tool in ("id", "dpkg"):
+        (bin_dir / tool).chmod(0o755)
+    return bin_dir
+
+
+@pytest.mark.parametrize(
+    ("uid", "audit", "repaired"),
+    [
+        ("0", "The following packages are only half configured", True),
+        ("0", "", False),  # nothing interrupted: dpkg is left alone
+        ("1000", "The following packages are only half configured", False),  # not root
+    ],
+)
+def test_setup_preamble_repairs_an_interrupted_dpkg(tmp_path, uid, audit, repaired):
+    # A setup stopped mid-apt (a disable, a restart, its own deadline) leaves dpkg
+    # interrupted, and every later apt call then refuses. The preamble each setup runs
+    # behind repairs exactly that case, as root, and nothing else.
+    import subprocess
+
+    from app.supervisor.unit import DPKG_REPAIR_PREAMBLE
+
+    bin_dir = _fake_dpkg_bin(tmp_path, uid=uid, audit=audit)
+    calls = tmp_path / "calls"
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", DPKG_REPAIR_PREAMBLE + "echo setup ran"],
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "DPKG_CALLS": str(calls)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip().endswith("setup ran")
+    if repaired:
+        assert calls.read_text() == "dpkg called: --configure -a\n"
+        assert "dpkg was interrupted by an earlier run" in result.stdout
+    else:
+        assert not calls.exists()
+        assert result.stdout.strip() == "setup ran"

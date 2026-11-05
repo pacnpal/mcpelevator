@@ -120,6 +120,9 @@ class Settings(BaseSettings):
     # request with credentials fingerprinted, and an admin-only diagnostics bundle at
     # GET /api/debug. Off by default; see app.debug.
     debug: bool = False
+    # Level for the control plane's own logs when debug mode is off (server starts,
+    # failures and why, stops). DEBUG, INFO, WARNING or ERROR; see app.logconfig.
+    log_level: str = "INFO"
 
     # --- data / persistence ---
     data_dir: Path = Path("./data")

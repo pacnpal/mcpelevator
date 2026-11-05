@@ -306,6 +306,8 @@ def _detail(
         oauth_client_mode=server.oauth_client_mode or "inherit",
         oauth_status=_oauth_status(server),
         idle_timeout_s=server.idle_timeout_s,
+        start_timeout_s=server.start_timeout_s,
+        repo_build_timeout_s=server.repo_build_timeout_s,
         disabled_tools=list(server.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),
@@ -480,8 +482,14 @@ async def update_server(
     # null on the nullable OAuth client fields — so clearing a static client id/secret to
     # fall back to Dynamic Client Registration would be silently ignored. Preserve those
     # when the client actually sent them (model_fields_set) so null means "clear" (and,
-    # for idle_timeout_s, "inherit the global default").
-    for key in ("oauth_client_id", "oauth_client_secret", "idle_timeout_s"):
+    # for idle_timeout_s and the startup timeouts, "inherit the global default").
+    for key in (
+        "oauth_client_id",
+        "oauth_client_secret",
+        "idle_timeout_s",
+        "start_timeout_s",
+        "repo_build_timeout_s",
+    ):
         if key in payload.model_fields_set:
             changes[key] = provided[key]
 
