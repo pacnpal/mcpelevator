@@ -3,7 +3,15 @@
 // the live backend's OpenAPI schema at /openapi.json).
 
 /** `mcpelevator` is the built-in control-plane server: provisioned, never created. */
-export type Runner = 'npx' | 'uvx' | 'command' | 'docker' | 'remote' | 'openapi' | 'mcpelevator';
+export type Runner =
+	| 'npx'
+	| 'uvx'
+	| 'command'
+	| 'docker'
+	| 'remote'
+	| 'openapi'
+	| 'graphql'
+	| 'mcpelevator';
 
 export type ServerState =
 	| 'stopped'
@@ -230,9 +238,14 @@ export interface ServerDetail extends ServerSummary {
 	/** openapi runner only: the pasted/uploaded document. Only present with
 	 * `getServer(id, true)`; a blank `command` means one is stored. */
 	openapi_document: string;
+	/** graphql runner only: the pasted/uploaded schema, likewise only with
+	 * `?include_document=true`. */
+	graphql_schema?: string;
+	/** Whether an openapi document / graphql schema is stored (even when it's left out). */
+	document_stored?: boolean;
 	/** A secret value reads `HIDDEN_ENV`; send that back to keep it. */
 	env: Record<string, string>;
-	/** The env keys (headers, for remote/openapi) whose values are secret. */
+	/** The env keys (headers, for remote/openapi/graphql) whose values are secret. */
 	secret_env: string[];
 	cwd: string | null;
 	/** uvx runner only: the mcp<2 SDK compatibility pin. Always false elsewhere. */
@@ -325,6 +338,9 @@ export interface ServerCreate {
 	post_clone_script?: string;
 	/** openapi runner only: the document itself (JSON/YAML), with `command` ''. */
 	openapi_document?: string;
+	/** graphql runner only: the schema (SDL or introspection JSON); `command` stays the
+	 * endpoint. '' = introspect, or use the schema URL in `args`. */
+	graphql_schema?: string;
 	env: Record<string, string>;
 	/** Keys of `env` stored encrypted and never returned. Omitted on a PATCH = unchanged. */
 	secret_env?: string[];
@@ -663,6 +679,18 @@ export type TokenCreated = TokenInfo & { token: string };
 
 /** What a secret env value (or header) reads as. Sent back, it keeps the stored value. */
 export const HIDDEN_ENV = '<hidden>';
+
+/** POST /api/graphql/preview: what a graphql server would serve, before it's saved. */
+export interface GraphqlPreview {
+	/** Query field names: one tool each. */
+	queries: string[];
+	/** Mutation field names: one tool each. */
+	mutations: string[];
+	/** Subscription fields, which aren't served. */
+	subscriptions: number;
+	/** Why the schema couldn't be read (introspection off, auth needed, invalid). */
+	error: string | null;
+}
 
 /** POST /api/openapi/preview: what an openapi server would call, before it's saved. */
 export interface OpenapiPreview {

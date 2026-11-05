@@ -684,6 +684,11 @@
 			const source = server.command || '(stored document)';
 			return `openapi: ${source} → ${server.args?.[0] || '(document servers)'}`;
 		}
+		if (server?.runner === 'graphql') {
+			const schema =
+				server.args?.[0] || (server.document_stored ? 'stored schema' : 'introspection');
+			return `graphql: ${server.command} (schema: ${schema})`;
+		}
 		if (server?.runner === 'docker') {
 			return [
 				'docker run -i --rm --init […]',

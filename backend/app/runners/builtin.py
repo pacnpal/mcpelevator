@@ -67,6 +67,15 @@ Typical flows:
   then wait_for_server. Each operation becomes a tool. A failed start is
   explained by one "openapi: ..." line in get_server_logs. restart_server
   re-reads the document.
+- Serve a GraphQL API: create_server with runner "graphql", command the GraphQL
+  endpoint's http(s) URL, env the API's HTTP headers, args [] to introspect the
+  endpoint (or [schema_url] for an SDL/introspection-JSON file elsewhere, or the
+  schema itself in graphql_schema when introspection is off), enabled true;
+  then wait_for_server. Each query and mutation field becomes a tool (arguments
+  sent as variables; a selection_set argument picks the returned fields), plus
+  graphql_query for any operation (with a leading underscore added for each
+  root field already named that way). A failed start is explained by one
+  "graphql: ..." line in get_server_logs. restart_server re-reads the schema.
 - Bulk add: import_servers with a standard {"mcpServers": {...}} config. Imported
   servers start disabled. Review them, then enable_server and wait_for_server.
 - Hide or relabel a server's tools: update_server with disabled_tools or

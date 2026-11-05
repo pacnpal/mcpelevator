@@ -1,6 +1,6 @@
 """Secret env values: write-only and encrypted at rest, chosen per key.
 
-A secret value (an env var, or a header for the remote and openapi runners) is stored as
+A secret value (an env var, or a header for the remote, openapi and graphql runners) is stored as
 a Fernet token behind ``PREFIX``, so a value is secret exactly when it's sealed. The key
 is ``<data_dir>/env.key`` (0600, beside the OAuth tokens and the config-hash salt, never
 in the DB). The API never hands a secret value back: it reads ``HIDDEN``, and a client
