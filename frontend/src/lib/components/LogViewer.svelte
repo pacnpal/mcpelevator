@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
+
 	import { ApiError, streamLogs } from '#lib/api.js';
 	import type { ServerState, StartupStatus } from '#lib/types.js';
 
@@ -29,9 +31,14 @@
 	let seenServerId = '';
 	let seenActivation: string | null = null;
 
+	// Memoized: the server page passes props straight off the server object it re-fetches
+	// every poll (each second during startup), so reading a prop directly in the stream
+	// effect would re-run it — abort the stream and reopen it — on every poll. A derived
+	// only notifies when its value changes.
+	const streamServerId = $derived(serverId);
 	const startupActive = $derived(startupStatus !== null);
 	const activationStartedAt = $derived(startupStatus?.activation_started_at ?? null);
-	const resetKey = $derived(`${serverId}\u0000${activationStartedAt ?? ''}`);
+	const resetKey = $derived(`${streamServerId}\u0000${activationStartedAt ?? ''}`);
 	// Setup can produce logs before the bridge changes observed runtime state.
 	const shouldConnect = $derived(startupActive || serverState !== 'stopped');
 
@@ -63,27 +70,34 @@
 		seenServerId = currentServer;
 	});
 
-	// Stream lifecycle reopens when the server, activation, or connection gate changes.
+	// Stream lifecycle reopens when the server, activation, or connection gate changes —
+	// and ONLY then: those three memoized values are the effect's whole dependency set,
+	// and the stream loop itself starts untracked, so nothing it reads on the way in can
+	// make a page poll tear the stream down.
 	// Fetch + ReadableStream (not EventSource) so the Authorization header is sent.
 	// Reconnect is manual: a dropped stream retries after a short backoff until the
-	// effect is torn down (serverId change / unmount).
+	// effect is torn down (server / activation change, gate change, unmount).
 	$effect(() => {
 		void resetKey;
+		const id = streamServerId;
 		const active = startupActive;
 		if (!shouldConnect) {
-			conn = 'idle';
+			untrack(() => (conn = 'idle'));
 			return;
 		}
-		notRunning = false;
-		conn = 'connecting';
 		const ctrl = new AbortController();
 		let stopped = false;
+		untrack(() => {
+			notRunning = false;
+			conn = 'connecting';
+			void run();
+		});
 
-		void (async () => {
+		async function run() {
 			while (!stopped && !ctrl.signal.aborted) {
 				try {
 					await streamLogs(
-						serverId,
+						id,
 						{
 							onOpen: () => {
 								// The endpoint replays its bounded activation backlog on every open.
@@ -127,7 +141,7 @@
 				if (stopped || ctrl.signal.aborted) return;
 				await new Promise((r) => setTimeout(r, 1000)); // backoff before re-opening
 			}
-		})();
+		}
 
 		return () => {
 			stopped = true;

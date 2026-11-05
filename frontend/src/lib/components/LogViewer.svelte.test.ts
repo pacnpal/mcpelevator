@@ -138,4 +138,56 @@ describe('LogViewer activation stream', () => {
 		expect(target.textContent).toContain('second activation');
 		expect(target.textContent).not.toContain('first activation');
 	});
+
+	it('keeps one stream open while the page polls in fresh but equal props', async () => {
+		// The server page re-fetches the server every second during startup and passes
+		// each response down. Equal values must not abort and reopen the stream: on a
+		// busy instance the reopened request never answers before the next poll, so the
+		// pane sits on "connecting" with nothing in it.
+		api.streamLogs.mockImplementation(async (_id, handlers, signal: AbortSignal) => {
+			await Promise.resolve();
+			handlers.onOpen?.();
+			handlers.onLine('setup output');
+			await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve()));
+		});
+
+		let server = $state({
+			id: 'srv-1',
+			state: 'starting' as const,
+			startup_status: status('2026-07-15T12:00:00Z')
+		});
+		const target = document.createElement('div');
+		document.body.append(target);
+		const component = mount(LogViewer, {
+			target,
+			props: {
+				get serverId() {
+					return server.id;
+				},
+				get serverState() {
+					return server.state;
+				},
+				get startupStatus() {
+					return server.startup_status;
+				}
+			}
+		});
+		dispose = () => void unmount(component);
+		flushSync();
+		await Promise.resolve();
+		flushSync();
+
+		for (let poll = 0; poll < 3; poll += 1) {
+			server = {
+				id: 'srv-1',
+				state: 'starting',
+				startup_status: status('2026-07-15T12:00:00Z')
+			};
+			flushSync();
+			await Promise.resolve();
+			flushSync();
+		}
+		expect(api.streamLogs).toHaveBeenCalledTimes(1);
+		expect(target.textContent).toContain('setup output');
+	});
 });
