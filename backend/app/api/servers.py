@@ -137,7 +137,7 @@ def _visible(
 
 _LAUNCH_FIELDS = {
     "runner", "command", "args", "run_args", "env", "cwd", "setup_script", "pin_mcp1",
-    "repo_url", "repo_ref", "post_clone_script", "openapi_document",
+    "repo_url", "repo_ref", "post_clone_script", "openapi_document", "graphql_schema",
 }
 
 
@@ -150,7 +150,7 @@ def _row_launch_value(row: Server, key: str):
         return bool(getattr(row, key))
     if key == "env":  # as the form got it: a kept hidden value comes back "<hidden>"
         return sealed.masked(row.env or {})
-    if key in ("repo_url", "repo_ref", "post_clone_script", "openapi_document"):
+    if key in ("repo_url", "repo_ref", "post_clone_script", "openapi_document", "graphql_schema"):
         return getattr(row, key) or ""
     return getattr(row, key)
 
@@ -298,7 +298,8 @@ def _detail(
         # Opt-in: the detail page polls this route, and a stored document can run to
         # megabytes. Only the edit form asks for it.
         openapi_document=(server.openapi_document or "") if include_document else "",
-        document_stored=bool(server.openapi_document),
+        graphql_schema=(server.graphql_schema or "") if include_document else "",
+        document_stored=bool(server.openapi_document or server.graphql_schema),
         pin_mcp1=bool(server.pin_mcp1),
         auth_provider=server.auth_provider,
         oauth=bool(server.oauth),
@@ -932,7 +933,7 @@ async def preview_graphql(
     """What a graphql server would serve before it's saved: one tool per query and
     mutation field. Reads the pasted schema, the schema URL, or introspects the endpoint."""
     policy.require_runner_allowed(principal, "graphql")
-    if not payload.openapi_document.strip():
+    if not payload.graphql_schema.strip():
         target = next((a for a in payload.args if a.strip()), "") or payload.command
         if not target.strip().startswith(("http://", "https://")):
             raise HTTPException(
@@ -940,7 +941,7 @@ async def preview_graphql(
                 detail="give the endpoint's http(s) URL, a schema URL, or the schema itself",
             )
     return await run_in_threadpool(
-        _graphql_preview, payload.command, payload.args, payload.openapi_document
+        _graphql_preview, payload.command, payload.args, payload.graphql_schema
     )
 
 

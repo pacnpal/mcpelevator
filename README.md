@@ -536,7 +536,7 @@ Everything downstream treats it like any other server: hide or relabel tools (hi
 
 - **Introspection** (the default, `"args": []`): the endpoint is asked for its schema on every start, with the configured headers.
 - **A schema URL** (`"args": ["https://…/schema.graphql"]`): an SDL file or an introspection-result JSON published somewhere, for an API with introspection turned off. Fetched without the headers; a 401/403 is retried with them only when the file lives on the endpoint's own origin, never following a redirect.
-- **The schema itself**, pasted or uploaded in the form (over the API: SDL or introspection JSON in `"openapi_document"`, the same field the openapi runner stores its document in). Checked on save; edit it to pick up a changed API.
+- **The schema itself**, pasted or uploaded in the form (over the API: SDL or introspection JSON in `"graphql_schema"`). Checked on save; edit it to pick up a changed API.
 
 ```bash
 curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/json' -d '{

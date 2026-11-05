@@ -185,9 +185,9 @@ def build(app: FastAPI) -> "_Gate":
     async def get_server(server_id: str, include_document: bool = False) -> Any:
         """One server's full detail: launch spec, live state, startup status, OAuth
         status, tools, and its /s/<slug> URLs. ``include_document`` also returns an
-        openapi server's stored document or a graphql server's stored schema
-        (``openapi_document``; it can be large, so it's left out by default) to read
-        before editing it."""
+        openapi server's stored document (``openapi_document``) or a graphql server's
+        stored schema (``graphql_schema``); they can be large, so they're left out by
+        default. Read one before editing it."""
         return await api(
             "GET",
             f"/api/servers/{_seg(server_id)}",
@@ -206,7 +206,7 @@ def build(app: FastAPI) -> "_Gate":
         mutation field served as a tool: ``command`` is the endpoint's http(s) URL,
         ``env`` the HTTP headers sent to it, and the schema comes from introspecting
         the endpoint (``args`` []), a schema file at ``args`` [schema_url] (SDL or
-        introspection JSON), or the schema itself in ``openapi_document``). Created
+        introspection JSON), or the schema itself in ``graphql_schema``). Created
         disabled unless ``enabled`` is true. A local runner can launch from a git checkout:
         ``repo_url`` (+ optional ``repo_ref``) is cloned, ``post_clone_script`` runs in it
         when the commit or script changes, and the command runs inside it.
@@ -228,15 +228,15 @@ def build(app: FastAPI) -> "_Gate":
         override and API headers; its document is re-read on every start, so
         restart_server picks up a changed API. For a graphql server, ``command`` is the
         endpoint, ``args`` [] or [schema_url], ``env`` the headers, and
-        ``openapi_document`` a stored schema (send "" to introspect instead); a restart
+        ``graphql_schema`` a stored schema (send "" to introspect instead); a restart
         re-reads the schema. A pasted document lives in
         ``openapi_document`` (with ``command`` ""); switching between the two sends both
         fields, the unused one blank. A secret ``env`` value reads "<hidden>"; sending
         "<hidden>" keeps it and any other value replaces it. ``secret_env`` lists the
         secret keys (omit it to leave each key as it is). Making a secret visible, or
         changing what the server runs (runner, command, args, run_args, cwd,
-        setup_script, the repo fields, openapi_document, and for a local server any other
-        env value), needs those secret values sent in full in the same call."""
+        setup_script, the repo fields, openapi_document, graphql_schema, and for a local
+        server any other env value), needs those secret values sent in full in the same call."""
         if changes.model_fields_set & _RESTARTING_FIELDS:
             _refuse_self(server_id, "change its exposure or tool policy")
         return await api(

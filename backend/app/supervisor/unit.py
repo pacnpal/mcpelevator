@@ -501,7 +501,7 @@ class ServerUnit:
                 "app.bridge.host",
                 cwd=str(settings.backend_root),
                 env=env,
-                stdin=asyncio.subprocess.PIPE if self.spec.openapi_document else None,
+                stdin=asyncio.subprocess.PIPE if self.spec.document else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
@@ -515,7 +515,7 @@ class ServerUnit:
         self._log_task = asyncio.create_task(self._pump_stream(self.proc.stdout))
         if self.proc.stdin is not None:
             try:
-                self.proc.stdin.write(self.spec.openapi_document.encode())
+                self.proc.stdin.write(self.spec.document.encode())
                 await asyncio.wait_for(self.proc.stdin.drain(), self._start_timeout())
                 self.proc.stdin.close()
             except (BrokenPipeError, ConnectionResetError):

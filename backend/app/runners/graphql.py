@@ -7,8 +7,8 @@ REST mirror, groups, idle, usage — treats it like any other server. The Server
 the launch spec verbatim (SSOT): ``command`` is the GraphQL endpoint, ``args`` is ``[]``
 (introspect the endpoint) or ``[schema_url]`` (an SDL or introspection-JSON file
 published elsewhere, for an API with introspection off), and ``env`` is the HTTP headers
-sent to the API. A schema pasted or uploaded instead lives in ``openapi_document`` (the
-stored API document, shared with the openapi runner) and reaches the bridge on stdin. So
+sent to the API. A schema pasted or uploaded instead lives in ``graphql_schema`` and
+reaches the bridge on stdin. So
 ``config_hash`` covers every input, and a restart re-reads the schema. Like every runner
 this is a pure ``Server -> ProcessSpec`` mapping.
 """
@@ -32,5 +32,5 @@ def build(server: Server) -> ProcessSpec:
         disabled_tools=list(server.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),
-        openapi_document=server.openapi_document or "",  # pasted/uploaded schema
+        document=server.graphql_schema or "",  # pasted/uploaded schema
     )

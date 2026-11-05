@@ -170,10 +170,10 @@
 		// openapi stores [] or [base URL override] in args (command holds the document URL).
 		const baseUrl0 = runner0 === 'openapi' ? (args0[0] ?? '') : '';
 		// graphql stores [] (introspect) or [schema URL] in args; a stored schema rides in
-		// openapi_document (command keeps the endpoint).
+		// graphql_schema (command keeps the endpoint).
 		const schemaUrl0 = runner0 === 'graphql' ? (args0[0] ?? '') : '';
 		const schemaSource0: SchemaSource =
-			runner0 === 'graphql' && init.openapi_document
+			runner0 === 'graphql' && init.graphql_schema
 				? 'pasted'
 				: schemaUrl0
 					? 'url'
@@ -192,6 +192,7 @@
 			schemaUrl: schemaUrl0,
 			schemaSource: schemaSource0,
 			openapiDocument: init.openapi_document ?? '',
+			graphqlSchema: init.graphql_schema ?? '',
 			setupScript: init.setup_script ?? '',
 			repoUrl: init.repo_url ?? '',
 			repoRef: init.repo_ref ?? '',
@@ -253,8 +254,23 @@
 	let openapiDocument = $state(seed.openapiDocument);
 	let specPasted = $state(seed.openapiDocument.length > 0);
 	// GraphQL runner: command holds the endpoint; the schema comes from introspecting it,
-	// a schema URL (args = [url]), or a pasted/uploaded schema (openapiDocument).
+	// a schema URL (args = [url]), or a pasted/uploaded schema (graphqlSchema).
 	let schemaSource = $state<SchemaSource>(seed.schemaSource);
+	let graphqlSchema = $state(seed.graphqlSchema);
+	let schemaFileError = $state('');
+
+	async function loadSchemaFile(e: Event) {
+		const input = e.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = ''; // picking the same file again still fires
+		if (!file) return;
+		try {
+			graphqlSchema = await file.text();
+			schemaFileError = '';
+		} catch {
+			schemaFileError = `Couldn't read ${file.name}.`;
+		}
+	}
 	let schemaUrl = $state(seed.schemaUrl);
 	let specFileError = $state('');
 
@@ -477,7 +493,7 @@
 			(schemaSource === 'url'
 				? isValidRemoteUrl(schemaUrl)
 				: schemaSource === 'pasted'
-					? openapiDocument.trim().length > 0
+					? graphqlSchema.trim().length > 0
 					: true)
 	);
 
@@ -489,7 +505,7 @@
 		const source = !isGraphql
 			? null
 			: schemaSource === 'pasted'
-				? openapiDocument.trim() && { command: command.trim(), args: [], document: openapiDocument }
+				? graphqlSchema.trim() && { command: command.trim(), args: [], document: graphqlSchema }
 				: schemaSource === 'url'
 					? isValidRemoteUrl(schemaUrl) && {
 							command: command.trim(),
@@ -609,11 +625,9 @@
 			command: specFromDocument ? '' : command.trim(),
 			// openapi: only when pasted ('' tells the backend to fetch `command`); graphql:
 			// only when pasted ('' = introspect, or the schema URL).
-			openapi_document: specFromDocument
-				? openapiDocument
-				: isGraphql && schemaSource === 'pasted'
-					? openapiDocument
-					: '',
+			openapi_document: specFromDocument ? openapiDocument : '',
+			// graphql only, and only when pasted ('' = introspect, or the schema URL).
+			graphql_schema: isGraphql && schemaSource === 'pasted' ? graphqlSchema : '',
 			// remote stores [transport] in args, openapi [] or [base URL]; neither has a
 			// local process, so no cwd. docker stores command=image + args=container args,
 			// and cwd is meaningless.
@@ -1184,7 +1198,7 @@
 		{:else if isGraphql}
 			<!-- runner === graphql: a GraphQL API, served as one MCP tool per query and mutation
 			     field. command = endpoint, args = [] (introspect) or [schema URL], a pasted
-			     schema in openapi_document, env = headers sent to the API. No local process. -->
+			     schema in graphql_schema, env = headers sent to the API. No local process. -->
 			<div class="flex flex-col gap-2">
 				<label for="srv-gql-endpoint" class="text-sm font-medium text-[var(--color-ink)]">
 					GraphQL endpoint
@@ -1247,7 +1261,7 @@
 					<textarea
 						id="srv-gql-schema"
 						aria-label="GraphQL schema"
-						bind:value={openapiDocument}
+						bind:value={graphqlSchema}
 						rows="8"
 						spellcheck="false"
 						placeholder={'type Query { … }   or   {"data": {"__schema": …}}'}
@@ -1258,12 +1272,12 @@
 						<input
 							type="file"
 							accept=".graphql,.graphqls,.gql,.json,application/json,application/graphql"
-							onchange={loadSpecFile}
+							onchange={loadSchemaFile}
 							class="text-xs file:mr-2 file:rounded-md file:border file:border-[var(--color-line)] file:bg-[var(--color-surface-2)] file:px-2 file:py-1 file:text-xs file:text-[var(--color-ink)]"
 						/>
 					</label>
-					{#if specFileError}
-						<p class="text-xs text-[var(--color-state-failed)]">{specFileError}</p>
+					{#if schemaFileError}
+						<p class="text-xs text-[var(--color-state-failed)]">{schemaFileError}</p>
 					{/if}
 				{/if}
 				{#if gqlPreview}

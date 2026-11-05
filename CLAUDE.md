@@ -116,7 +116,7 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   headers are never forwarded to the API),
   `graphql` (no MCP upstream either: the bridge loads a GraphQL schema — introspection of the
   endpoint in `command`, a schema URL in `args[0]`, or SDL/introspection JSON stored in
-  `openapi_document` — and serves each Query/Mutation field as a tool, `bridge/graphql.py`;
+  `graphql_schema` — and serves each Query/Mutation field as a tool, `bridge/graphql.py`;
   arguments go as variables, a generated selection set is replaceable per call via
   `selection_set`, `graphql_query` runs any operation, every operation is validated against
   the schema first; `env` = API headers, caller headers never forwarded, no redirects),

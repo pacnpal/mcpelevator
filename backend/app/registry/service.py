@@ -97,9 +97,6 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
 
 # Runners whose ``env`` is HTTP headers for an upstream, not a process environment.
 _HEADER_RUNNERS = ("remote", "openapi", "graphql")
-# Runners that can store an API document (``openapi_document``): an OpenAPI document,
-# or a GraphQL schema.
-_DOCUMENT_RUNNERS = ("openapi", "graphql")
 
 
 def normalize_openapi(
@@ -1448,6 +1445,9 @@ def _hash_payload(server: Server) -> dict[str, Any]:
     # (present only when set), and a digest: the hash input needn't carry megabytes.
     if server.openapi_document:
         payload["openapi_document"] = hashlib.sha256(server.openapi_document.encode()).hexdigest()
+    # Same for a stored GraphQL schema.
+    if server.graphql_schema:
+        payload["graphql_schema"] = hashlib.sha256(server.graphql_schema.encode()).hexdigest()
     return payload
 
 
@@ -1942,6 +1942,7 @@ def create_server(
     repo_ref: str = "",
     post_clone_script: str = "",
     openapi_document: str = "",
+    graphql_schema: str = "",
     pin_mcp1: bool = False,
     mcp_http: bool = True,
     rest_openapi: bool = False,
@@ -1991,10 +1992,12 @@ def create_server(
         command, args, openapi_document = normalize_openapi(command, args, openapi_document)
         cwd = None
     elif runner == "graphql":
-        command, args, openapi_document = normalize_graphql(command, args, openapi_document)
+        command, args, graphql_schema = normalize_graphql(command, args, graphql_schema)
         cwd = None
-    if runner not in _DOCUMENT_RUNNERS:
+    if runner != "openapi":
         openapi_document = ""
+    if runner != "graphql":
+        graphql_schema = ""
     # OAuth applies only to remote; normalize (and force-off elsewhere) before hashing.
     oauth, oauth_scopes, oauth_client_id, oauth_client_secret = normalize_oauth(
         runner, oauth, oauth_scopes, oauth_client_id, oauth_client_secret
@@ -2044,6 +2047,7 @@ def create_server(
         repo_ref=repo_ref,
         post_clone_script=post_clone_script,
         openapi_document=openapi_document,
+        graphql_schema=graphql_schema,
         pin_mcp1=pin_mcp1,
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
@@ -2088,6 +2092,7 @@ _RETARGET_FIELDS = (
     "repo_ref",
     "post_clone_script",
     "openapi_document",
+    "graphql_schema",
     "pin_mcp1",
 )
 
@@ -2109,6 +2114,7 @@ _MUTABLE_FIELDS = {
     "repo_ref",
     "post_clone_script",
     "openapi_document",
+    "graphql_schema",
     "pin_mcp1",
     "mcp_http",
     "rest_openapi",
@@ -2273,15 +2279,17 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
             )
             server.cwd = None  # likewise: no process, so no working directory
         elif server.runner == "graphql":
-            server.command, server.args, server.openapi_document = normalize_graphql(
-                server.command, server.args, server.openapi_document or ""
+            server.command, server.args, server.graphql_schema = normalize_graphql(
+                server.command, server.args, server.graphql_schema or ""
             )
             server.cwd = None
     except ValueError:
         session.rollback()
         raise
-    if server.runner not in _DOCUMENT_RUNNERS:
+    if server.runner != "openapi":
         server.openapi_document = ""
+    if server.runner != "graphql":
+        server.graphql_schema = ""
     # Normalize OAuth (and force it off for any non-remote runner) so a stray secret can't
     # ride along on a converted server and the hash stays deterministic.
     server.oauth, server.oauth_scopes, server.oauth_client_id, server.oauth_client_secret = (
@@ -2415,6 +2423,7 @@ def clone_server(
         repo_ref=src.repo_ref or "",
         post_clone_script=src.post_clone_script or "",
         openapi_document=src.openapi_document or "",
+        graphql_schema=src.graphql_schema or "",
         pin_mcp1=bool(src.pin_mcp1),
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,

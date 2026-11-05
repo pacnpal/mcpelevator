@@ -70,7 +70,7 @@ Typical flows:
 - Serve a GraphQL API: create_server with runner "graphql", command the GraphQL
   endpoint's http(s) URL, env the API's HTTP headers, args [] to introspect the
   endpoint (or [schema_url] for an SDL/introspection-JSON file elsewhere, or the
-  schema itself in openapi_document when introspection is off), enabled true;
+  schema itself in graphql_schema when introspection is off), enabled true;
   then wait_for_server. Each query and mutation field becomes a tool (arguments
   sent as variables; a selection_set argument picks the returned fields), plus
   graphql_query for any operation (with a leading underscore added for each

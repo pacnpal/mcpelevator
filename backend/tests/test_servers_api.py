@@ -753,13 +753,13 @@ def test_graphql_server_with_a_stored_schema_and_its_preview():
     with TestClient(app) as c:
         preview = c.post(
             "/api/graphql/preview",
-            json={"command": "https://api.example/graphql", "openapi_document": schema},
+            json={"command": "https://api.example/graphql", "graphql_schema": schema},
             headers=LOOPBACK,
         ).json()
         assert preview == {"queries": ["hello"], "mutations": ["bump"], "subscriptions": 0, "error": None}
         bad = c.post(
             "/api/graphql/preview",
-            json={"command": "https://api.example/graphql", "openapi_document": "type Query {"},
+            json={"command": "https://api.example/graphql", "graphql_schema": "type Query {"},
             headers=LOOPBACK,
         ).json()
         assert bad["error"].startswith("not a valid GraphQL schema")
@@ -770,7 +770,7 @@ def test_graphql_server_with_a_stored_schema_and_its_preview():
         both = c.post(
             "/api/graphql/preview",
             json={"command": "https://api.example/graphql", "args": ["https://a.example/s"],
-                  "openapi_document": schema},
+                  "graphql_schema": schema},
             headers=LOOPBACK,
         ).json()
         assert "not both" in both["error"] and both["queries"] == []
@@ -785,24 +785,24 @@ def test_graphql_server_with_a_stored_schema_and_its_preview():
         created = c.post(
             "/api/servers",
             json={"name": "GQL", "runner": "graphql", "command": "https://api.example/graphql",
-                  "openapi_document": schema},
+                  "graphql_schema": schema},
             headers=LOOPBACK,
         )
         assert created.status_code == 201, created.text
         server_id = created.json()["id"]
         try:
             polled = c.get(f"/api/servers/{server_id}", headers=LOOPBACK).json()
-            assert (polled["command"], polled["openapi_document"], polled["document_stored"]) == (
+            assert (polled["command"], polled["graphql_schema"], polled["document_stored"]) == (
                 "https://api.example/graphql", "", True
             )
             editing = c.get(
                 f"/api/servers/{server_id}?include_document=true", headers=LOOPBACK
             ).json()
-            assert editing["openapi_document"] == schema
+            assert editing["graphql_schema"] == schema
             refused = c.post(
                 "/api/servers",
                 json={"name": "Bad", "runner": "graphql", "command": "https://api.example/graphql",
-                      "openapi_document": "type Query { x: Nope }"},
+                      "graphql_schema": "type Query { x: Nope }"},
                 headers=LOOPBACK,
             )
             assert refused.status_code == 400

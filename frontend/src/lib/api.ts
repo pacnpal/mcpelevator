@@ -181,12 +181,12 @@ export function createServer(body: ServerCreate): Promise<ServerSummary> {
 export function previewGraphql(
 	command: string,
 	args: string[],
-	openapiDocument: string
+	graphqlSchema: string
 ): Promise<GraphqlPreview> {
 	return jsonRequest<GraphqlPreview>('/graphql/preview', 'POST', {
 		command,
 		args,
-		openapi_document: openapiDocument
+		graphql_schema: graphqlSchema
 	});
 }
 

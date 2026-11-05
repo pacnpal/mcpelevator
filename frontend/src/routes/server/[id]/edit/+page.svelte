@@ -60,6 +60,7 @@
 					repo_ref: server.repo_ref,
 					post_clone_script: server.post_clone_script,
 					openapi_document: server.openapi_document,
+					graphql_schema: server.graphql_schema,
 					env: server.env,
 					secret_env: server.secret_env,
 					cwd: server.cwd,

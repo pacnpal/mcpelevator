@@ -234,9 +234,12 @@ export interface ServerDetail extends ServerSummary {
 	repo_url: string;
 	repo_ref: string;
 	post_clone_script: string;
-	/** openapi: the pasted/uploaded document; graphql: the pasted/uploaded schema. Only present with
+	/** openapi runner only: the pasted/uploaded document. Only present with
 	 * `getServer(id, true)`; a blank `command` means one is stored. */
 	openapi_document: string;
+	/** graphql runner only: the pasted/uploaded schema, likewise only with
+	 * `?include_document=true`. */
+	graphql_schema?: string;
 	/** Whether an openapi document / graphql schema is stored (even when it's left out). */
 	document_stored?: boolean;
 	/** A secret value reads `HIDDEN_ENV`; send that back to keep it. */
@@ -320,9 +323,11 @@ export interface ServerCreate {
 	repo_ref?: string;
 	/** Runs in the checkout when the commit or this script changes (install + build). */
 	post_clone_script?: string;
-	/** openapi: the document itself (JSON/YAML), with `command` ''. graphql: the schema
-	 * (SDL or introspection JSON); `command` stays the endpoint. '' = none stored. */
+	/** openapi runner only: the document itself (JSON/YAML), with `command` ''. */
 	openapi_document?: string;
+	/** graphql runner only: the schema (SDL or introspection JSON); `command` stays the
+	 * endpoint. '' = introspect, or use the schema URL in `args`. */
+	graphql_schema?: string;
 	env: Record<string, string>;
 	/** Keys of `env` stored encrypted and never returned. Omitted on a PATCH = unchanged. */
 	secret_env?: string[];

@@ -265,10 +265,12 @@ class ServerDetail(ServerSummary):
     repo_url: str = ""
     repo_ref: str = ""
     post_clone_script: str = ""
-    # openapi runner: the pasted/uploaded document; graphql runner: the pasted/uploaded
-    # schema. Returned only for ``?include_document=true`` (for openapi, a blank
-    # ``command`` says one is stored either way).
+    # openapi runner only: the pasted/uploaded document, returned only for
+    # ``?include_document=true`` (a blank ``command`` says one is stored either way).
     openapi_document: str = ""
+    # graphql runner only: the pasted/uploaded schema, likewise only with
+    # ``?include_document=true``.
+    graphql_schema: str = ""
     # Whether an openapi document / graphql schema is stored, so a view that leaves the
     # document itself out can still say where the tools come from.
     document_stored: bool = False
@@ -332,11 +334,12 @@ class ServerCreate(BaseModel):
     repo_url: str = ""
     repo_ref: str = ""
     post_clone_script: str = ""
-    # openapi runner: the OpenAPI 3 document itself (JSON or YAML), for an API whose spec
-    # isn't at a URL (then leave ``command`` blank). graphql runner: the API's schema, SDL
-    # or an introspection result, for an API with introspection off (``command`` stays the
-    # endpoint). Forced "" for other runners.
+    # openapi runner only: the OpenAPI 3 document itself (JSON or YAML), for an API whose
+    # spec isn't at a URL (then leave ``command`` blank). Forced "" for other runners.
     openapi_document: str = ""
+    # graphql runner only: the API's schema, SDL or an introspection result, for an API
+    # with introspection off (``command`` stays the endpoint). Forced "" for other runners.
+    graphql_schema: str = ""
     # uvx runner only: launch with the Python mcp SDK pinned below 2.0
     # (`uvx --with "mcp<2" …`) for servers not yet compatible with the 2.x line.
     # Forced false for every other runner server-side.
@@ -398,9 +401,10 @@ class ServerUpdate(BaseModel):
     repo_url: Optional[str] = None
     repo_ref: Optional[str] = None
     post_clone_script: Optional[str] = None
-    # openapi/graphql runners only. Omitted (null) = unchanged; "" = drop the stored
-    # document (openapi: fetch ``command``; graphql: introspect or use the schema URL).
+    # openapi runner only. Omitted (null) = unchanged; "" = fetch ``command`` instead.
     openapi_document: Optional[str] = None
+    # graphql runner only. Omitted (null) = unchanged; "" = introspect, or use the schema URL.
+    graphql_schema: Optional[str] = None
     # uvx runner only: the mcp<2 SDK compatibility pin. Omitted (null) = unchanged.
     pin_mcp1: Optional[bool] = None
     mcp_http: Optional[bool] = None
@@ -472,10 +476,10 @@ class OpenapiPreview(BaseModel):
 
 class GraphqlPreviewRequest(BaseModel):
     # The GraphQL endpoint, and where the schema comes from: a schema URL (``args``), the
-    # schema itself pasted (``openapi_document``), or neither (introspect the endpoint).
+    # schema itself pasted (``graphql_schema``), or neither (introspect the endpoint).
     command: str = ""
     args: list[str] = []
-    openapi_document: str = ""
+    graphql_schema: str = ""
 
 
 class GraphqlPreview(BaseModel):

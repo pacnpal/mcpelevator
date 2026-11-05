@@ -2706,27 +2706,27 @@ def test_graphql_server_canonicalizes_and_validates(session):
         args=["", " "], env={"Authorization": "Bearer k"}, cwd="/tmp",
     )
     # Endpoint trimmed, a blank schema URL collapsed to "introspect", no working directory.
-    assert (s.command, s.args, s.cwd, s.openapi_document) == (
+    assert (s.command, s.args, s.cwd, s.graphql_schema) == (
         "https://api.example/graphql", [], None, ""
     )
     introspecting = s.config_hash
     linked = service.update_server(session, s.id, {"args": ["https://docs.example/schema.graphql"]})
     assert linked.args == ["https://docs.example/schema.graphql"]
     assert linked.config_hash != introspecting  # a new schema source restarts the bridge
-    stored = service.update_server(session, s.id, {"args": [], "openapi_document": _GQL_SCHEMA})
-    assert (stored.command, stored.args, stored.openapi_document) == (
+    stored = service.update_server(session, s.id, {"args": [], "graphql_schema": _GQL_SCHEMA})
+    assert (stored.command, stored.args, stored.graphql_schema) == (
         "https://api.example/graphql", [], _GQL_SCHEMA
     )
     before = stored.config_hash
     edited = service.update_server(
-        session, s.id, {"openapi_document": _GQL_SCHEMA.replace("bump", "bump2")}
+        session, s.id, {"graphql_schema": _GQL_SCHEMA.replace("bump", "bump2")}
     )
     assert edited.config_hash != before  # a new schema restarts the bridge
     # Converting to another runner drops the stored schema.
     converted = service.update_server(
         session, s.id, {"runner": "remote", "args": ["streamable-http"], "env": {}}
     )
-    assert converted.openapi_document == ""
+    assert converted.graphql_schema == ""
 
 
 @pytest.mark.parametrize(
@@ -2745,7 +2745,7 @@ def test_graphql_server_refuses_bad_config(session, command, args, document, mes
     with pytest.raises(ValueError, match=message):
         service.create_server(
             session, name="G", runner="graphql", command=command, args=args,
-            openapi_document=document,
+            graphql_schema=document,
         )
 
 
@@ -2771,3 +2771,17 @@ def test_rejected_graphql_update_rolls_back(session):
     session.expire_all()
     stored = repo.get_server(session, s.id)
     assert (stored.command, stored.args) == ("https://api.example/graphql", [])
+
+
+def test_graphql_schema_and_openapi_document_stay_with_their_runners(session):
+    """Each runner keeps its own stored document; neither leaks into the other's column."""
+    g = service.create_server(
+        session, name="G", runner="graphql", command="https://api.example/graphql",
+        graphql_schema=_GQL_SCHEMA, openapi_document=_INLINE_DOC,
+    )
+    assert (g.graphql_schema, g.openapi_document) == (_GQL_SCHEMA, "")
+    o = service.create_server(
+        session, name="O", runner="openapi", command="", openapi_document=_INLINE_DOC,
+        graphql_schema=_GQL_SCHEMA,
+    )
+    assert (o.openapi_document, o.graphql_schema) == (_INLINE_DOC, "")
