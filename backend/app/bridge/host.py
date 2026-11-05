@@ -17,7 +17,9 @@ module as a subprocess, passing the spec + port via environment variables:
 ``streamable-http`` / ``sse`` (front a remote URL; ``command`` is the URL and ``env``
 is the upstream HTTP headers), or ``openapi`` (no MCP upstream: serve a REST API's
 operations as tools, translated from the OpenAPI document at ``command`` — see
-:mod:`app.bridge.openapi`).
+:mod:`app.bridge.openapi`), or ``graphql`` (serve a GraphQL API's query and mutation
+fields as tools, from its schema; ``command`` is the endpoint — see
+:mod:`app.bridge.graphql`).
 
 Session isolation: the proxy serves each request from a fresh upstream client (no
 cross-client context mixing). A remote upstream gets a fresh session per request; a
@@ -1944,6 +1946,14 @@ def build_proxy(spec: dict) -> FastMCP:
         server = openapi.build_server(spec)
         server.add_transform(_tool_transform(spec))
         return server
+    if spec.get("transport") == "graphql":
+        # Same idea for a GraphQL API: its query and mutation fields are the tools,
+        # built in-process from its schema (app.bridge.graphql).
+        from app.bridge import graphql
+
+        server = graphql.build_server(spec)
+        server.add_transform(_tool_transform(spec))
+        return server
     transport = _build_transport(spec)
     # Wrap the transport in a ProxyClient ourselves so we can install a roots
     # handler that tolerates clients without roots support (see _forward_roots), and
@@ -2119,7 +2129,7 @@ def build_app(spec: dict, proxy: FastMCP):
 def main() -> None:
     """Entry point: read the ProcessSpec + port from the environment and serve."""
     spec = json.loads(os.environ["MCPE_BRIDGE_SPEC"])
-    if spec.get("document_on_stdin"):  # a stored OpenAPI document (app.bridge.spec)
+    if spec.get("document_on_stdin"):  # a stored OpenAPI document / GraphQL schema
         spec["document"] = sys.stdin.buffer.read()
     host = os.environ.get("MCPE_BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ["MCPE_BRIDGE_PORT"])
@@ -2151,6 +2161,13 @@ def main() -> None:
             # A bad document is an operator fix (URL, auth, format), not a crash: one line
             # in the server's log says which, instead of a traceback burying it.
             raise SystemExit(f"openapi: {exc}") from None
+    elif spec.get("transport") == "graphql":
+        from app.bridge.graphql import SchemaError
+
+        try:
+            proxy = build_proxy(spec)
+        except SchemaError as exc:
+            raise SystemExit(f"graphql: {exc}") from None
     else:
         proxy = build_proxy(spec)
     if spec.get("rest_openapi"):

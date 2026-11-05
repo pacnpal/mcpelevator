@@ -137,7 +137,7 @@ class ServerUnit:
         self.pin_mcp1 = bool(server.pin_mcp1)
         self.spec = _with_checkout_cwd(build_spec(server), server.id)
         self.exposure = {"mcp_http": server.mcp_http, "rest_openapi": server.rest_openapi}
-        # The plaintext of this server's secret env (headers too, for remote/openapi), so a
+        # The plaintext of this server's secret env (headers too, for remote/openapi/graphql), so a
         # failure tail quoted into the standard log can't carry one: debug.scrub only
         # recognizes labelled secrets, and a child may echo a bare value. Longest first, so
         # a value containing another is hidden whole. Very short values are skipped —
@@ -501,7 +501,7 @@ class ServerUnit:
                 "app.bridge.host",
                 cwd=str(settings.backend_root),
                 env=env,
-                stdin=asyncio.subprocess.PIPE if self.spec.openapi_document else None,
+                stdin=asyncio.subprocess.PIPE if self.spec.document else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
@@ -515,7 +515,7 @@ class ServerUnit:
         self._log_task = asyncio.create_task(self._pump_stream(self.proc.stdout))
         if self.proc.stdin is not None:
             try:
-                self.proc.stdin.write(self.spec.openapi_document.encode())
+                self.proc.stdin.write(self.spec.document.encode())
                 await asyncio.wait_for(self.proc.stdin.drain(), self._start_timeout())
                 self.proc.stdin.close()
             except (BrokenPipeError, ConnectionResetError):

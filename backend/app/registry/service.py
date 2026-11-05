@@ -95,6 +95,10 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
     return url, [transport]
 
 
+# Runners whose ``env`` is HTTP headers for an upstream, not a process environment.
+_HEADER_RUNNERS = ("remote", "openapi", "graphql")
+
+
 def normalize_openapi(
     command: str, args: Optional[list[str]], document: str = ""
 ) -> tuple[str, list[str], str]:
@@ -141,6 +145,41 @@ def normalize_openapi(
     doc = bridge_openapi.parse_document(raw)  # DocumentError is a ValueError
     bridge_openapi.resolve_base_url(doc, "", rest[0] if rest else None)
     return "", rest, document
+
+
+def normalize_graphql(
+    command: str, args: Optional[list[str]], document: str = ""
+) -> tuple[str, list[str], str]:
+    """Validate + canonicalize a graphql server's (endpoint, [schema_url?], schema).
+
+    ``command`` is always the API's ``http(s)://`` endpoint: every call goes there. The
+    schema comes from one source: introspection of the endpoint (``args == []``, no stored
+    schema), a schema file published at ``args[0]`` (SDL or introspection JSON, for an API
+    with introspection turned off), or ``document`` (the schema itself, pasted or
+    uploaded). A blank schema URL collapses to ``[]`` so the stored shape — and
+    ``config_hash`` — is deterministic. A stored schema is parsed here with the bridge's
+    own rules, so a bad one is a 400 rather than a failed start.
+    """
+    url = (command or "").strip()
+    rest = [str(a).strip() for a in (args or []) if str(a).strip()]
+    if not _is_http_url(url):
+        raise ValueError(
+            "a graphql server's command must be the http(s):// URL of its GraphQL endpoint"
+        )
+    if len(rest) > 1:
+        raise ValueError("a graphql server takes at most one argument: a schema URL")
+    if rest and not _is_http_url(rest[0]):
+        raise ValueError("a graphql server's schema URL must be an http(s):// URL with a host")
+    if not (document or "").strip():
+        return url, rest, ""
+    if rest:
+        raise ValueError(
+            "a graphql server takes its schema from a URL or from the schema itself, not both"
+        )
+    from app.bridge import graphql as bridge_graphql
+
+    bridge_graphql.parse_schema(document)  # SchemaError is a ValueError
+    return url, [], document
 
 
 def normalize_oauth(
@@ -1406,6 +1445,9 @@ def _hash_payload(server: Server) -> dict[str, Any]:
     # (present only when set), and a digest: the hash input needn't carry megabytes.
     if server.openapi_document:
         payload["openapi_document"] = hashlib.sha256(server.openapi_document.encode()).hexdigest()
+    # Same for a stored GraphQL schema.
+    if server.graphql_schema:
+        payload["graphql_schema"] = hashlib.sha256(server.graphql_schema.encode()).hexdigest()
     return payload
 
 
@@ -1900,6 +1942,7 @@ def create_server(
     repo_ref: str = "",
     post_clone_script: str = "",
     openapi_document: str = "",
+    graphql_schema: str = "",
     pin_mcp1: bool = False,
     mcp_http: bool = True,
     rest_openapi: bool = False,
@@ -1948,8 +1991,13 @@ def create_server(
     elif runner == "openapi":
         command, args, openapi_document = normalize_openapi(command, args, openapi_document)
         cwd = None
+    elif runner == "graphql":
+        command, args, graphql_schema = normalize_graphql(command, args, graphql_schema)
+        cwd = None
     if runner != "openapi":
         openapi_document = ""
+    if runner != "graphql":
+        graphql_schema = ""
     # OAuth applies only to remote; normalize (and force-off elsewhere) before hashing.
     oauth, oauth_scopes, oauth_client_id, oauth_client_secret = normalize_oauth(
         runner, oauth, oauth_scopes, oauth_client_id, oauth_client_secret
@@ -1999,6 +2047,7 @@ def create_server(
         repo_ref=repo_ref,
         post_clone_script=post_clone_script,
         openapi_document=openapi_document,
+        graphql_schema=graphql_schema,
         pin_mcp1=pin_mcp1,
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
@@ -2043,6 +2092,7 @@ _RETARGET_FIELDS = (
     "repo_ref",
     "post_clone_script",
     "openapi_document",
+    "graphql_schema",
     "pin_mcp1",
 )
 
@@ -2064,6 +2114,7 @@ _MUTABLE_FIELDS = {
     "repo_ref",
     "post_clone_script",
     "openapi_document",
+    "graphql_schema",
     "pin_mcp1",
     "mcp_http",
     "rest_openapi",
@@ -2214,18 +2265,31 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
             server.runner, server.setup_script, server.post_clone_script):
         session.expire(server)  # raises before any autoflush — discard just this instance's edits
         raise ValueError("Docker CLI invocations require the docker runner")
-    if server.runner == "remote":
-        server.command, server.args = normalize_remote(server.command, server.args)
-        # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
-        # the stale working directory here (remote has no process) to keep the row canonical.
-        server.cwd = None
-    elif server.runner == "openapi":
-        server.command, server.args, server.openapi_document = normalize_openapi(
-            server.command, server.args, server.openapi_document or ""
-        )
-        server.cwd = None  # likewise: no process, so no working directory
+    # A rejected launch line rolls back like every other refused edit above, so a caller
+    # that keeps the session can't commit half of it later.
+    try:
+        if server.runner == "remote":
+            server.command, server.args = normalize_remote(server.command, server.args)
+            # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
+            # the stale working directory here (remote has no process) to keep the row canonical.
+            server.cwd = None
+        elif server.runner == "openapi":
+            server.command, server.args, server.openapi_document = normalize_openapi(
+                server.command, server.args, server.openapi_document or ""
+            )
+            server.cwd = None  # likewise: no process, so no working directory
+        elif server.runner == "graphql":
+            server.command, server.args, server.graphql_schema = normalize_graphql(
+                server.command, server.args, server.graphql_schema or ""
+            )
+            server.cwd = None
+    except ValueError:
+        session.rollback()
+        raise
     if server.runner != "openapi":
         server.openapi_document = ""
+    if server.runner != "graphql":
+        server.graphql_schema = ""
     # Normalize OAuth (and force it off for any non-remote runner) so a stray secret can't
     # ride along on a converted server and the hash stays deterministic.
     server.oauth, server.oauth_scopes, server.oauth_client_id, server.oauth_client_secret = (
@@ -2306,9 +2370,9 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
             dict(server.env or {}),
             secret=set(secret) if secret is not None else None,
             retargeted=retargeted,
-            # Headers (remote/openapi) only travel to the upstream; a local process's env
-            # can change what it runs (NODE_OPTIONS and friends).
-            env_runs_code=server.runner not in ("remote", "openapi"),
+            # Headers (remote/openapi/graphql) only travel to the upstream; a local
+            # process's env can change what it runs (NODE_OPTIONS and friends).
+            env_runs_code=server.runner not in _HEADER_RUNNERS,
         )
         _require_launchable_spec(server)
     except ValueError:
@@ -2359,6 +2423,7 @@ def clone_server(
         repo_ref=src.repo_ref or "",
         post_clone_script=src.post_clone_script or "",
         openapi_document=src.openapi_document or "",
+        graphql_schema=src.graphql_schema or "",
         pin_mcp1=bool(src.pin_mcp1),
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,
