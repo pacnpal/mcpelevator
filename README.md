@@ -229,6 +229,26 @@ package caches configured on those paths survive. `MCPE_APT_PACKAGES` is differe
 is global container bootstrap for extra Debian packages before mcpelevator starts, not
 per-server setup.
 
+#### Per-server cache
+
+Each local (`npx`, `uvx`, `command`) server gets its own cache directory,
+`<data_dir>/cache/<server id>` (`/data/cache/<id>` in Docker). Its setup script, its
+post-clone script and the launched server all see `XDG_CACHE_HOME` set to it and
+`PLAYWRIGHT_BROWSERS_PATH` set to its `ms-playwright` subdirectory, so Hugging Face models,
+fastembed/onnx caches, anything else following `XDG_CACHE_HOME`, and Playwright browsers
+land on the data volume and survive a container recreate. A setup script's
+`npx playwright install chromium` installs where the server will look. Setting either
+variable in the server's `env` overrides it for that server. The npm and uv caches stay
+shared across servers (`npm_config_cache` / `UV_CACHE_DIR` under `/data` in the image).
+Docker-runner servers keep their own filesystem and are unaffected.
+
+When a download was cached corrupt (an embedding model failing with `TAR_BAD_ARCHIVE`, say),
+**Clear cache** on the server page (or `POST /api/servers/{id}/cache/clear`, or the built-in
+server's `clear_server_cache` tool) deletes that server's directory and returns the bytes
+freed. It needs the same access as restart. An enabled server is stopped first and
+restarted after the delete, so it downloads afresh; a disabled one is only cleared.
+Deleting a server deletes its cache directory.
+
 Each startup attempt runs setup, launches the bridge, and checks readiness. Setup and
 readiness each get a separate `MCPE_START_TIMEOUT_S` window. Failed setup, bridge launch
 or readiness, and exits before a stable run retry the full attempt, including setup.
@@ -699,7 +719,7 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_CF_ACCESS_AUD` | _(none)_ | The Access application's AUD tag (comma-separated for several applications) |
 | `MCPE_DEBUG` | `false` | Debug mode: TRACE-level logs everywhere (bridges too), a full trace of every request with secrets scrubbed, crash reporting, and `GET /api/debug`; see **Debug mode** |
 | `MCPE_APT_PACKAGES` | _(none)_ | Global, space-separated extra Debian packages installed before mcpelevator starts (Docker image only), not per-server `setup_script`. A failed install warns and boot continues; packages must be reinstalled after container replacement |
-| `MCPE_DATA_DIR` | `./data` | SQLite + caches |
+| `MCPE_DATA_DIR` | `./data` | SQLite + caches, including each local server's own `cache/<server id>` (`XDG_CACHE_HOME` / `PLAYWRIGHT_BROWSERS_PATH` for its setup script and child; see **Per-server cache**) |
 | `MCPE_FRONTEND_DIR` | `../frontend/build` | Built SPA to serve |
 | `MCPE_PORT_RANGE_START` / `_END` | `49200` / `49400` | Loopback ports for bridge processes |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrent running servers |
@@ -708,6 +728,14 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_RESTART_BUDGET` | `5` | Startup attempts before `failed`; retry waits are 2/4/8/16 seconds and cap at 16 |
 | `MCPE_RESTART_STABLE_S` | `60` | Uninterrupted running time before the retry budget is restored |
 | `MCPE_VERSION` | _(image: release tag)_ | Version the instance reports (`/api/health`, UI badge). Set by the published image from the release tag; you don't normally set it. Unset → derived from the adjacent `pyproject.toml` (source tree), else installed package metadata |
+
+The Docker image also points every cache at the `/data` volume, so a container recreate
+doesn't throw downloads away: `npm_config_cache=/data/.npm-cache`,
+`UV_CACHE_DIR=/data/.uv-cache`, `XDG_CACHE_HOME=/data/.cache` and
+`PLAYWRIGHT_BROWSERS_PATH=/data/.cache/ms-playwright`. Local servers get their own
+`XDG_CACHE_HOME` / `PLAYWRIGHT_BROWSERS_PATH` under `/data/cache/<id>` on top of that (see
+**Per-server cache**). The volume grows with the models and browsers servers download; all
+of it is regenerable.
 
 ## Debug mode
 

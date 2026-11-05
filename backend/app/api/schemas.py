@@ -457,6 +457,14 @@ class ImportResult(BaseModel):
     warnings: list[ImportWarning] = []
 
 
+class CacheCleared(BaseModel):
+    """``POST /servers/{id}/cache/clear``: what the clear freed, and the server after it
+    (an enabled one was restarted, so it reads as a queued start)."""
+    freed_bytes: int
+    restarted: bool
+    server: ServerSummary
+
+
 ControlPlaneAuthMode = Literal["auto", "always"]
 
 # How upstream-OAuth sign-ins identify this instance when no static client id is set:

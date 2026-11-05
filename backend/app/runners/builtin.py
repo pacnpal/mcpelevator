@@ -71,6 +71,9 @@ Typical flows:
   servers start disabled. Review them, then enable_server and wait_for_server.
 - Hide or relabel a server's tools: update_server with disabled_tools or
   tool_overrides.
+- Clear a local server's cache (its XDG_CACHE_HOME and Playwright browsers,
+  under <data_dir>/cache/<id>), e.g. a model download cached corrupt:
+  clear_server_cache, then wait_for_server (an enabled server restarts).
 - Keep secrets write-only: list the env keys (or headers) in secret_env on
   create_server or update_server. Their values are encrypted and read "<hidden>"
   from then on; send "<hidden>" back to keep one. Making one visible, or changing

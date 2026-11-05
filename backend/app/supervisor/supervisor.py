@@ -279,16 +279,22 @@ class Supervisor:
             return False
         return True
 
-    async def stop(self, server_id: str) -> None:
-        """Public stop (e.g. API-driven delete). Steady state is still reconciled."""
+    async def stop(self, server_id: str, while_stopped=None) -> None:
+        """Public stop (e.g. API-driven delete). Steady state is still reconciled.
+
+        ``while_stopped`` (an optional zero-arg coroutine function, may raise) runs after
+        the stop and still inside the unit lock, so no reconcile pass can relaunch the
+        server while it works on the server's files (a cache clear)."""
         # An operator/API stop overrides quiescence bookkeeping: the server must not
         # come back as "idle" (wakeable) after a delete/disable/disconnect.
         self._idle.discard(server_id)
         self._last_activity.pop(server_id, None)
         async with self._unit_lock:
             await self._stop(server_id)
+            if while_stopped is not None:
+                await while_stopped()
 
-    async def restart(self, server_id: str, authorized=None) -> None:
+    async def restart(self, server_id: str, authorized=None, while_stopped=None) -> None:
         """Bounce one desired server: stop its unit now, then queue a fresh activation.
 
         The single restart primitive — the ``/servers/{id}/restart`` endpoint and a
@@ -303,6 +309,12 @@ class Supervisor:
         inside the unit lock both before and after the stop, so an ownership
         reassignment committing in that gap can't have a former owner's queued
         activation bounce the new owner's server.
+
+        ``while_stopped`` (an optional zero-arg coroutine function, may raise) runs
+        between the stop and the queued activation, inside the same lock — the window in
+        which nothing runs for the server, which a cache clear uses to delete its files.
+        A raise leaves the server stopped with no activation queued; the reconciler then
+        converges it as usual.
         """
         async with self._unit_lock:
             if authorized is not None:
@@ -310,6 +322,8 @@ class Supervisor:
             await self._stop(server_id)
             if authorized is not None:
                 authorized()
+            if while_stopped is not None:
+                await while_stopped()
             # A quiesced server is desired-but-stopped; the activation request clears the
             # marker in reconcile, but discard it here too so nothing observes the id as
             # idle (i.e. wakeable but not starting) in the gap before the sweep runs.

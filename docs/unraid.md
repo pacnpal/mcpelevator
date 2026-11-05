@@ -104,6 +104,12 @@ The script is plain server configuration, and its output goes to the authenticat
 logs. Treat both as sensitive. The official container currently runs as root, so its setup
 scripts do too. Only `/data` and any other paths you explicitly mount survive a container
 replacement; the npm and uv caches survive because they are configured under `/data`.
+Each local server also gets its own cache directory, `/data/cache/<server id>`: its setup
+script and the server itself see `XDG_CACHE_HOME` there and `PLAYWRIGHT_BROWSERS_PATH` in
+its `ms-playwright` subdirectory, so downloaded models and Playwright browsers survive too
+(a setup script's `npx playwright install chromium` lands where the server looks). If a
+download was cached corrupt, **Clear cache** on the server page deletes that server's
+directory and restarts it.
 Use `MCPE_APT_PACKAGES` for global Debian packages needed by every server, not as a
 per-server setup script. Those packages are installed again after container replacement.
 
@@ -160,7 +166,10 @@ are listed on the [GHCR package page](https://github.com/pacnpal/mcpelevator/pkg
 
 Everything lives in the appdata share: `/mnt/user/appdata/mcpelevator`. The SQLite
 database (`mcpelevator.db`) holds servers, settings, and token hashes; `.npm-cache` /
-`.uv-cache` are safely regenerable. The CA **Appdata Backup** plugin covers it.
+`.uv-cache`, `.cache` (`XDG_CACHE_HOME` / Playwright browsers) and `cache/` (each local
+server's own downloads) are safely regenerable, and you can exclude them from backups. The
+share grows with the models and browsers servers download, so give appdata room for them.
+The CA **Appdata Backup** plugin covers it.
 
 ## If you switch to bridge networking
 

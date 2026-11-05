@@ -31,6 +31,7 @@ from app.config import (
 )
 from app.db.models import Server, utcnow
 from app.runners import build_spec
+from app.runners import cache as server_cache
 from app.runners import repo as repo_checkout
 from app.runners.base import ProcessSpec
 from app.runners.docker import DOCKER_BIN, server_label
@@ -110,6 +111,13 @@ class ServerUnit:
         self.runner = server.runner
         self.pin_mcp1 = bool(server.pin_mcp1)
         self.spec = _with_checkout_cwd(build_spec(server), server.id)
+        # A local child's own cache directory (app.runners.cache), resolved here for the
+        # same reason as the checkout cwd: the builders never see the data dir.
+        self.cache_dir: Optional[Path] = (
+            server_cache.cache_dir(get_settings().data_dir, server.id)
+            if server_cache.has_cache(server.runner)
+            else None
+        )
         self.exposure = {"mcp_http": server.mcp_http, "rest_openapi": server.rest_openapi}
 
         self.host = get_settings().bridge_host
@@ -270,6 +278,13 @@ class ServerUnit:
     async def _run_attempt(self, attempt: int, max_attempts: int) -> tuple[bool, int]:
         self.last_error = None
         self.tools = []
+        if self.cache_dir is not None:
+            try:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                # Best effort: tools create their cache dir themselves; this only spares
+                # the ones that don't.
+                self.logs.append(f"[mcpelevator] cache directory not created: {exc}")
         if self.spec.repo:
             await self._run_checkout(attempt, max_attempts)
         if self.spec.setup_script:
@@ -592,7 +607,7 @@ class ServerUnit:
                 f"({size} bytes; max {BRIDGE_SPEC_MAX_BYTES}) — "
                 f"shorten the server's env, setup script, or tool overrides"
             )
-        return {
+        env = {
             **inherited,
             BRIDGE_SPEC_ENV_KEY: spec,
             "MCPE_BRIDGE_HOST": self.host,
@@ -600,6 +615,11 @@ class ServerUnit:
             "MCPE_DATA_DIR": str(settings.data_dir.resolve()),
             "PYTHONPATH": str(settings.backend_root),
         }
+        # Never inherited: only a unit with a cache hands the bridge one.
+        env.pop(server_cache.BRIDGE_ENV_KEY, None)
+        if self.cache_dir is not None:
+            env[server_cache.BRIDGE_ENV_KEY] = str(self.cache_dir)
+        return env
 
     def _effective_child_env(self) -> dict[str, str]:
         # Setup is local-runner only and runs as ``/bin/sh -e -c <script>``, so it gets the SAME
@@ -611,7 +631,10 @@ class ServerUnit:
             # Same as the launch (bridge.host._child_env): the checkout's own .venv only.
             for key in repo_checkout.FOREIGN_ENV:
                 base.pop(key, None)
-        return {**base, **self.spec.env}
+        # Same cache as the launched child, so a setup script's `npx playwright install` or
+        # model download lands where the server will look. The server's env still wins.
+        cache = server_cache.cache_env(self.cache_dir) if self.cache_dir is not None else {}
+        return {**base, **cache, **self.spec.env}
 
     def _effective_child_cwd(self) -> str:
         settings = get_settings()
