@@ -7,8 +7,12 @@ plane's own modules; libraries keep their own levels and handlers), at
 ``MCPE_LOG_LEVEL`` (default INFO), so a server starting, failing and why lands in the
 container log without turning on debug mode.
 
+uvicorn's per-request access log is silenced here too unless ``MCPE_ACCESS_LOG`` is on:
+the UI polls every few seconds, so it would otherwise bury everything else.
+
 Debug mode replaces it: ``debug.configure_logging`` owns the root logger then and
-removes this handler, so nothing prints twice.
+removes this handler, so nothing prints twice; it also re-opens every logger,
+uvicorn's access log included.
 
 Every line passes through ``debug.scrub``: a failure report quotes the server's own
 output, which can hold a credential.
@@ -24,6 +28,7 @@ from app.config import get_settings
 
 FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 _MARK = "_mcpe_standard"
+ACCESS_LOGGER = "uvicorn.access"
 
 
 class _Scrubbed(logging.Formatter):
@@ -42,6 +47,11 @@ def configure() -> None:
     debug mode, which configures logging itself."""
     if debug.enabled():
         return
+    # uvicorn configured its own loggers before the app's lifespan ran this; raising
+    # the access logger's level drops each request line (logged at INFO) at the source.
+    # With MCPE_ACCESS_LOG on, uvicorn's own level stands.
+    if not get_settings().access_log:
+        logging.getLogger(ACCESS_LOGGER).setLevel(logging.WARNING)
     log = logging.getLogger("app")
     log.setLevel(level())
     if any(is_standard(h) for h in log.handlers):

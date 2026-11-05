@@ -207,7 +207,7 @@ def test_debug_mode_replaces_the_standard_handler(monkeypatch):
 
     from app import logconfig
 
-    off = SimpleNamespace(debug=False, log_level="INFO")
+    off = SimpleNamespace(debug=False, log_level="INFO", access_log=False)
     monkeypatch.setattr(logconfig, "get_settings", lambda: off)
     monkeypatch.setattr(debug, "get_settings", lambda: off)
     app_log = logging.getLogger("app")

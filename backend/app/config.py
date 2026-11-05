@@ -123,6 +123,10 @@ class Settings(BaseSettings):
     # Level for the control plane's own logs when debug mode is off (server starts,
     # failures and why, stops). DEBUG, INFO, WARNING or ERROR; see app.logconfig.
     log_level: str = "INFO"
+    # uvicorn's one-line-per-request access log ("GET /api/servers/… 200 OK") in the
+    # container log when debug mode is off. Off by default: the UI polls, so it buries
+    # the lines that matter. Debug mode always shows requests (and traces them).
+    access_log: bool = False
 
     # --- data / persistence ---
     data_dir: Path = Path("./data")
