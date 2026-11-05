@@ -310,15 +310,20 @@ async def test_fields_become_tools_with_their_argument_schemas():
     assert tools["createUser"].annotations.readOnlyHint is False
 
     search = tools["search"].input_schema["properties"]
-    assert search["role"] == {"type": "string", "enum": ["ADMIN", "MEMBER"], "default": "MEMBER"}
-    assert search["limit"] == {"type": "integer", "default": 10}
+    # Nullable arguments admit null: GraphQL tells an explicit null apart from omission.
+    assert search["role"] == {
+        "type": ["string", "null"], "enum": ["ADMIN", "MEMBER", None], "default": "MEMBER"
+    }
+    assert search["limit"] == {"type": ["integer", "null"], "default": 10}
+    assert search["q"] == {"type": "string"}  # String! stays non-null
 
     create = tools["createUser"].input_schema
     assert create["properties"]["input"] == {"$ref": "#/$defs/NewUser"}
     new_user = create["$defs"]["NewUser"]
     assert new_user["required"] == ["name"]
-    assert new_user["properties"]["parent"] == {"$ref": "#/$defs/NewUser"}  # recursive, finite
-    assert new_user["properties"]["tags"] == {"type": "array", "items": {"type": "string"}}
+    # Recursive, finite, and nullable.
+    assert new_user["properties"]["parent"] == {"anyOf": [{"$ref": "#/$defs/NewUser"}, {"type": "null"}]}
+    assert new_user["properties"]["tags"] == {"type": ["array", "null"], "items": {"type": "string"}}
     assert new_user["additionalProperties"] is False
 
     # Used once, so FastMCP inlines it; either way it's an exactly-one-property object.
@@ -362,6 +367,61 @@ async def test_calls_send_arguments_as_variables_with_the_configured_headers():
     assert body["operationName"] == "user"
     assert body["query"].startswith("query user($id: ID!) { user(id: $id) {")
     assert '"1"' not in body["query"]  # never spliced into the text
+
+
+async def test_selection_set_cannot_add_root_fields():
+    """The selection set is the caller's text: closing the field's braces early must not
+    run another root field (a mutation the operator hid, say) alongside the called one."""
+    server, api = _server()
+    attempts = [
+        "{ id } version",
+        "{ id } search(q: \"x\") { __typename }",
+        "{ ...F } } fragment F on User { id } query other { version",
+        "{ id } } query other { version",
+    ]
+    async with Client(server) as client:
+        for selection in attempts:
+            result = await client.call_tool(
+                "user", {"id": "1", "selection_set": selection}, raise_on_error=False
+            )
+            assert result.is_error, selection
+        created = await client.call_tool(
+            "createUser", {"input": {"name": "x"}, "selection_set": "{ id } user(id: \"1\")"},
+            raise_on_error=False,
+        )
+    assert created.is_error and "one selection set" in created.content[0].text
+    assert api.seen == []  # nothing reached the API
+
+
+async def test_explicit_null_arguments_are_sent():
+    """Leaving an argument out lets the API apply its default; null is a value of its own."""
+    server, api = _server()
+    async with Client(server) as client:
+        await client.call_tool("search", {"q": "a", "role": None})
+        await client.call_tool("search", {"q": "a"})
+    with_null, omitted = api.seen[-2][1], api.seen[-1][1]
+    assert with_null["variables"] == {"q": "a", "role": None}
+    assert "$role: Role" in with_null["query"]
+    assert omitted["variables"] == {"q": "a"}
+    assert "$role" not in omitted["query"]
+
+
+async def test_union_members_with_clashing_field_types_get_aliases():
+    """`A.value: Int` and `B.value: String` side by side fail GraphQL's overlapping-fields
+    rule, so the generated selection aliases them per member and the tool still works."""
+    schema = build_schema(
+        "type A { value: Int same: String } type B { value: String same: String } "
+        "union R = A | B type Query { r: R }"
+    )
+    selection = gql.default_selection(schema.query_type.fields["r"], schema, "query", "r")
+    assert selection == "{ __typename ... on A { value_A: value same } ... on B { value_B: value same } }"
+
+
+def test_an_invalid_generated_selection_falls_back(monkeypatch):
+    schema = build_schema("type T { a: Int b: Int } type Query { t: T }")
+    field = schema.query_type.fields["t"]
+    monkeypatch.setattr(gql, "selection_for", lambda *a, **k: "{ nope }")
+    assert gql.default_selection(field, schema, "query", "t") == "{ __typename }"
 
 
 async def test_argument_values_cannot_change_the_operation():

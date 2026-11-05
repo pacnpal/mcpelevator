@@ -41,6 +41,7 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import Tool, ToolResult
 from graphql import (
+    FieldNode,
     GraphQLEnumType,
     GraphQLError,
     GraphQLField,
@@ -299,11 +300,30 @@ def _with_doc(schema: dict, definition) -> dict:
     return schema
 
 
+def _nullable(schema: dict) -> dict:
+    """``schema`` that also admits ``null``: a nullable GraphQL input distinguishes an
+    explicit null (e.g. "clear this value") from leaving it out, so null is a real value."""
+    if "$ref" in schema:
+        return {"anyOf": [schema, {"type": "null"}]}
+    if "type" not in schema:
+        return schema  # any JSON value already includes null
+    types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
+    out = {**schema, "type": [*types, "null"]}
+    if "enum" in out:
+        out["enum"] = [*out["enum"], None]
+    return out
+
+
 def input_schema(type_, defs: dict[str, dict]) -> dict:
-    """The JSON Schema of a GraphQL input type. Input objects land once in ``defs`` and are
-    referenced from there, so a recursive input type stays finite."""
+    """The JSON Schema of a GraphQL input type: nullable unless it's non-null. Input objects
+    land once in ``defs`` and are referenced from there, so a recursive input type stays
+    finite."""
     if isinstance(type_, GraphQLNonNull):
-        return input_schema(type_.of_type, defs)
+        return _input_schema(type_.of_type, defs)
+    return _nullable(_input_schema(type_, defs))
+
+
+def _input_schema(type_, defs: dict[str, dict]) -> dict:
     if isinstance(type_, GraphQLList):
         return {"type": "array", "items": input_schema(type_.of_type, defs)}
     if isinstance(type_, GraphQLScalarType):
@@ -351,15 +371,30 @@ def _is_connection_plumbing(parent, field_name: str) -> bool:
     return parent_name.endswith("Edge") and field_name == "node"
 
 
-def selection_for(type_, depth: int, counter: list[int]) -> str:
-    """The generated selection set for an output type (empty for a leaf)."""
+def _union_conflicts(union: GraphQLUnionType) -> set[str]:
+    """Field names the union's members declare with different types. Selected side by side
+    under one response name they would fail GraphQL's overlapping-fields rule (``A.value:
+    Int`` and ``B.value: String``), so the generated selection aliases them per member."""
+    seen: dict[str, set[str]] = {}
+    for member in union.types:
+        for name, field in member.fields.items():
+            seen.setdefault(name, set()).add(str(field.type))
+    return {name for name, types in seen.items() if len(types) > 1}
+
+
+def selection_for(
+    type_, depth: int, counter: list[int], *, conflicts: frozenset[str] = frozenset()
+) -> str:
+    """The generated selection set for an output type (empty for a leaf). ``conflicts``
+    names fields to alias as ``<name>_<Type>`` (see :func:`_union_conflicts`)."""
     named = get_named_type(type_)
     if is_leaf_type(named):
         return ""
     if isinstance(named, GraphQLUnionType):
+        clashing = frozenset(_union_conflicts(named))
         parts = ["__typename"]
         for member in named.types:
-            sub = selection_for(member, depth, counter)
+            sub = selection_for(member, depth, counter, conflicts=clashing)
             if sub:
                 parts.append(f"... on {member.name} {sub}")
         return "{ " + " ".join(parts) + " }"
@@ -373,8 +408,9 @@ def selection_for(type_, depth: int, counter: list[int]) -> str:
         if any(is_required_argument(arg) for arg in field.args.values()):
             continue
         child = get_named_type(field.type)
+        selected = f"{name}_{named.name}: {name}" if name in conflicts else name
         if is_leaf_type(child):
-            parts.append(name)
+            parts.append(selected)
             counter[0] += 1
             continue
         next_depth = depth if _is_connection_plumbing(named, name) else depth - 1
@@ -382,21 +418,57 @@ def selection_for(type_, depth: int, counter: list[int]) -> str:
             continue
         sub = selection_for(field.type, next_depth, counter)
         if sub:
-            parts.append(f"{name} {sub}")
+            parts.append(f"{selected} {sub}")
             counter[0] += 1
     if isinstance(named, GraphQLInterfaceType) or not parts:
         parts.append("__typename")
     return "{ " + " ".join(parts) + " }"
 
 
-def default_selection(field: GraphQLField) -> str:
-    """The selection set a field's tool asks for when the caller doesn't choose one: as
-    deep as :data:`SELECTION_DEPTH`, or shallower when that would be too many fields."""
+def _candidate_selections(field: GraphQLField):
+    """Selection sets to try, best first: as deep as :data:`SELECTION_DEPTH` allows within
+    :data:`MAX_SELECTION_FIELDS`, then shallower, then just the type name."""
     for depth in range(SELECTION_DEPTH, 0, -1):
         counter = [0]
         selection = selection_for(field.type, depth, counter)
-        if counter[0] <= MAX_SELECTION_FIELDS:
+        if counter[0] <= MAX_SELECTION_FIELDS or depth == 1:
+            yield selection
+    yield "{ __typename }" if selection else ""
+
+
+def operation_text(operation: str, field_name: str, field: GraphQLField, args, selection: str) -> str:
+    """``<operation> <field>($a: T, …) { <field>(a: $a, …) <selection> }``: the operation a
+    field's tool sends, for the arguments named in ``args`` (each passed as a variable)."""
+    definitions = ", ".join(f"${name}: {field.args[name].type}" for name in args)
+    call = ", ".join(f"{name}: ${name}" for name in args)
+    text = f"{operation} {field_name}"
+    if definitions:
+        text += f"({definitions})"
+    text += " { " + field_name
+    if call:
+        text += f"({call})"
+    if selection:
+        text += " " + selection
+    return text + " }"
+
+
+def default_selection(
+    field: GraphQLField, schema: GraphQLSchema | None = None, operation: str = "query",
+    field_name: str = "",
+) -> str:
+    """The selection set a field's tool asks for when the caller doesn't choose one.
+
+    With ``schema``, each candidate is validated in the operation it will be sent in, and
+    the first valid one wins, so a schema shape the generator doesn't foresee costs depth
+    rather than every call to the tool."""
+    candidates = _candidate_selections(field)
+    if schema is None:
+        return next(candidates)
+    for selection in candidates:
+        text = operation_text(operation, field_name, field, list(field.args), selection)
+        if not validate(schema, parse(text)):
             return selection
+        logger.warning("GraphQL field %r: generated selection set invalid, trying a smaller one", field_name)
     return selection
 
 
@@ -435,7 +507,8 @@ class _Executor:
         )
 
     def check(self, query: str, operation_name: str | None = None):
-        """Parse and validate ``query`` against the schema; the operation to run."""
+        """Parse and validate ``query`` against the schema: the document, and the operation
+        to run."""
         try:
             document = parse(query)
         except GraphQLError as exc:
@@ -455,7 +528,7 @@ class _Executor:
             )
         if operation.operation.value == "subscription":
             raise ToolError("subscriptions aren't supported; use a query or mutation")
-        return operation
+        return document, operation
 
     async def run(self, query: str, variables: dict | None, operation_name: str | None) -> dict:
         payload: dict[str, Any] = {"query": query}
@@ -508,7 +581,7 @@ class GraphQLFieldTool(Tool):
             for arg_name, arg in field.args.items()
         }
         required = [n for n, a in field.args.items() if is_required_argument(a)]
-        selection = default_selection(field)
+        selection = default_selection(field, executor.schema, operation, field_name)
         selection_arg = SELECTION_ARG if SELECTION_ARG not in field.args else f"_{SELECTION_ARG}"
         if selection:
             preview = selection if len(selection) <= 400 else selection[:400] + " …"
@@ -546,7 +619,8 @@ class GraphQLFieldTool(Tool):
 
     def operation_text(self, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """The operation for a call, and its variables. Only the arguments given are sent,
-        so the API applies its own defaults to the rest."""
+        so the API applies its own defaults to the rest; one given as null is sent as null,
+        which GraphQL tells apart from leaving it out (clearing a value, say)."""
         selection = arguments.get(self._selection_arg)
         if selection is None or not str(selection).strip():
             selection = self._selection
@@ -556,24 +630,9 @@ class GraphQLFieldTool(Tool):
                 selection = "{ " + selection + " }"
         else:
             raise ToolError(f"`{self._field_name}` returns a scalar; it takes no selection set")
-        variables = {
-            name: value
-            for name, value in arguments.items()
-            if name in self._field.args and value is not None
-        }
-        definitions = ", ".join(
-            f"${name}: {self._field.args[name].type}" for name in variables
-        )
-        call = ", ".join(f"{name}: ${name}" for name in variables)
-        text = f"{self._operation} {self._field_name}"
-        if definitions:
-            text += f"({definitions})"
-        text += " { " + self._field_name
-        if call:
-            text += f"({call})"
-        if selection:
-            text += " " + selection
-        return text + " }", variables
+        variables = {name: value for name, value in arguments.items() if name in self._field.args}
+        text = operation_text(self._operation, self._field_name, self._field, variables, selection)
+        return text, variables
 
     async def run(self, arguments: dict[str, Any]) -> ToolResult:
         unknown = set(arguments) - set(self._field.args) - {self._selection_arg}
@@ -583,7 +642,23 @@ class GraphQLFieldTool(Tool):
                 f"accepted: {', '.join(sorted([*self._field.args, self._selection_arg])) or 'none'}"
             )
         query, variables = self.operation_text(arguments)
-        self._executor.check(query, self._field_name)
+        document, operation = self._executor.check(query, self._field_name)
+        # The selection set is the caller's text: it must stay inside this field's braces.
+        # One that closes them early ("{ id } deleteAll") would add root fields of its own,
+        # running a mutation the operator hid as part of this one, so the parsed operation
+        # has to be exactly this tool's field and nothing else.
+        roots = operation.selection_set.selections
+        if (
+            len(document.definitions) != 1
+            or len(roots) != 1
+            or not isinstance(roots[0], FieldNode)
+            or roots[0].name.value != self._field_name
+            or roots[0].alias is not None
+        ):
+            raise ToolError(
+                f"`{self._selection_arg}` must be one selection set for `{self._field_name}`'s "
+                "result, e.g. `{ id name }`; use graphql_query for anything else"
+            )
         result = await self._executor.run(query, variables, self._field_name)
         data = result.get("data")
         value = data.get(self._field_name) if isinstance(data, dict) else None
