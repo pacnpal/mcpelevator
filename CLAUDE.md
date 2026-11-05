@@ -55,8 +55,10 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   proxied request at a time (`_SerializeClientRequests` middleware) and fills the slot, so the
   child can only be asking that caller (issue #143). Progress is bound per call by its token.
   With serialization on, the opt-in `attach_stderr_on_error` tees the child's stderr
-  (`_StderrTee`: lines filed by stream offset, so a window is exact) and appends the lines a
-  failed `tools/call` window saw to its error result, scrubbed (`_with_stderr`, issue #227).
+  (`_StderrTee`: a raw byte ring addressed by stream offset, so a window is exact, with the
+  server's secret values hidden over the window's bytes before it is split into lines) and
+  appends the lines a failed `tools/call` window saw to its error result, scrubbed
+  (`_with_stderr`, issue #227).
   Pushing needs a back-channel, which only handshake-era client connections have. An
   interactive request (`tools/call`, `resources/read`, `prompts/get`) from a client on the
   sessionless `2026-07-28` protocol (FastMCP 4's default) runs as a `_Turn` instead: the

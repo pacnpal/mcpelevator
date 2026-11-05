@@ -2342,6 +2342,38 @@ def test_stderr_tee_hides_a_secret_longer_than_the_line_cap():
     pending.writer.close()
 
 
+def test_stderr_tee_hides_a_multiline_secret():
+    """A secret spanning lines (a PEM key) is hidden over the raw stream before it is split
+    into lines, so neither of its lines reaches the block."""
+    secret = "-----BEGIN KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END KEY-----"
+    tee = host._StderrTee()
+    tee.secrets = [secret]
+    tee._file(f"loading key\n{secret}\nfailed\n".encode())
+    assert tee.window(0, tee._read) == ["loading key", "<hidden>", "failed"]
+    tee.writer.close()
+
+
+def test_stderr_tee_hides_a_secret_cut_by_the_window_or_the_ring():
+    """A secret crossing a window edge is found by looking past it, and one whose head the
+    ring already dropped has its visible tail hidden: no part of it is shown."""
+    secret = "sk-live-0123456789abcdef"
+    tee = host._StderrTee()
+    tee.secrets = [secret]
+    tee._file(f"before {secret} after\n".encode())
+    mid = len("before sk-live-0123")
+    assert tee.window(mid, tee._read) == ["<hidden> after"]
+    assert tee.window(0, mid) == ["before <hidden>"]
+
+    ring = host._StderrTee()
+    ring.secrets = [secret]
+    # 15 bytes overflow the ring: "yyyyy" and the secret's first 10 characters drop out.
+    ring._file(b"yyyyy" + secret.encode() + b" tail\n" + b"x" * (host._STDERR_RING_BYTES - 20))
+    assert ring._base == 15
+    assert ring.window(0, ring._read)[0] == "<hidden> tail"
+    tee.writer.close()
+    ring.writer.close()
+
+
 @pytest.mark.asyncio
 async def test_stderr_tee_windows_lines_by_stream_position(capsys):
     """A window is a range of stream positions: a line written before the window opened

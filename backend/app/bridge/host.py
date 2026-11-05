@@ -40,7 +40,6 @@ Actions) can call the server's tools through the identical auth/proxy path. See
 from __future__ import annotations
 
 import asyncio
-import collections
 import contextlib
 import itertools
 import json
@@ -732,8 +731,9 @@ class _ModernTurns(Middleware):
 
 # The marker that heads the block appended to a failed call's result.
 STDERR_MARKER = "[mcpelevator] upstream stderr during this call:"
-# How many of the child's stderr lines the ring keeps, and how much of one line.
-_STDERR_RING_LINES = 256
+# How many of the child's latest stderr bytes the ring keeps, and how much of one line
+# a window returns.
+_STDERR_RING_BYTES = 256 * 1024
 _STDERR_LINE_MAX = 4096
 # What the appended block carries at most: the window's last lines, then a byte cap.
 _STDERR_ATTACH_LINES = 20
@@ -758,17 +758,21 @@ def _pipe_pending(fd: int) -> int:
 
 class _StderrTee:
     """The stdio child's stderr, teed: every byte still goes to the bridge's own stderr
-    (so the server's log is unchanged), and each line is also kept in a small ring, so a
-    call that fails can carry the lines written during it (``attach_stderr_on_error``).
+    (so the server's log is unchanged), and the latest bytes are also kept in a ring, so
+    a call that fails can carry what was written during it (``attach_stderr_on_error``).
 
     The child writes into a pipe the bridge owns (``writer`` becomes its stderr, kept
-    across respawns), and a daemon thread pumps it. Lines are filed under their POSITION
-    in the stream (the offset of their first byte), not their arrival time: a call's
-    window is ``[mark() when it takes the child, mark() when it fails)``, and ``mark()``
-    is everything pumped so far plus what still waits in the pipe, read under the lock
-    the pump reads under. So a line the child wrote before a call began belongs to the
-    call before it even when the pump only gets to it later, and a call queued behind
-    another never sees that one's lines.
+    across respawns), and a daemon thread pumps it. The ring is the raw byte STREAM,
+    addressed by position: a call's window is ``[mark() when it takes the child, mark()
+    when it fails)``, and ``mark()`` is everything pumped so far plus what still waits in
+    the pipe, read under the lock the pump reads under. So bytes the child wrote before a
+    call began belong to the call before it even when the pump only gets to them later,
+    and a call queued behind another never sees that one's output.
+
+    The server's secret values (``secrets``) are hidden over the raw bytes of the window
+    (looking a secret's length past each edge) BEFORE it is split into lines or cut, so a
+    secret spanning lines (a PEM key), chunks, or any cap is replaced whole, and one cut
+    off by a window or ring edge has its visible part hidden too.
     """
 
     def __init__(self) -> None:
@@ -777,13 +781,10 @@ class _StderrTee:
         self.writer = os.fdopen(write_fd, "w")
         self._lock = threading.Lock()
         self._read = 0  # bytes pumped so far, i.e. the offset of the next byte
-        self._lines: collections.deque[tuple[int, str]] = collections.deque(
-            maxlen=_STDERR_RING_LINES
-        )
-        self._partial = bytearray()  # the current line, until its newline arrives
-        self._partial_at = 0
+        self._buf = bytearray()  # the latest bytes, the first at offset ``_base``
+        self._base = 0
         self._thread: threading.Thread | None = None
-        # The server's secret env values, hidden from the attached block (_stderr_block).
+        # The server's secret env values, hidden from every window.
         self.secrets: list[str] = []
 
     def start(self) -> None:
@@ -814,14 +815,67 @@ class _StderrTee:
         return end
 
     def window(self, start: int, end: int) -> list[str]:
-        """The lines that began in ``[start, end)``, one still missing its newline too."""
+        """The non-blank lines written in ``[start, end)``, secrets hidden, each line cut
+        to ``_STDERR_LINE_MAX`` characters only after that."""
+        look = max((len(v.encode()) for v in self.secrets), default=0)
         with self._lock:
-            lines = [text for at, text in self._lines if start <= at < end]
-            if self._partial.strip() and start <= self._partial_at < end:
-                # The line still being written may end partway into a secret whose rest
-                # hasn't arrived: hide that prefix too.
-                lines.append(self._hide_secret_prefix(self._text(self._partial)))
-        return lines
+            lo, hi = max(start, self._base), min(end, self._read)
+            if hi <= lo:
+                return []
+            ext_lo, ext_hi = max(self._base, lo - look), min(self._read, hi + look)
+            raw = bytes(self._buf[ext_lo - self._base : ext_hi - self._base])
+            head_lost = self._base > 0 and ext_lo == self._base
+        text = self._redacted(raw, lo - ext_lo, hi - ext_lo)
+        if hi == ext_hi:  # the stream (so far) ends in the window: a secret may be half out
+            text = self._hide_secret_prefix(text)
+        if head_lost:  # the ring dropped what came before: a secret may be half gone
+            text = self._hide_secret_suffix(text)
+        lines = (line.rstrip("\r")[:_STDERR_LINE_MAX] for line in text.split("\n"))
+        return [line for line in lines if line.strip()]
+
+    def _redacted(self, raw: bytes, a: int, b: int) -> str:
+        """``raw[a:b]`` decoded, with every byte that belongs to a secret occurrence found
+        anywhere in ``raw`` (so one crossing ``a`` or ``b`` too) shown as ``<hidden>``."""
+        from app import sealed
+
+        spans = []
+        for value in self.secrets:
+            needle = value.encode()
+            at = raw.find(needle)
+            while at >= 0:
+                spans.append((at, at + len(needle)))
+                at = raw.find(needle, at + 1)
+        pieces, pos = [], a
+        for lo, hi in sorted(spans):
+            if hi <= pos or lo >= b:
+                continue
+            if lo > pos:
+                pieces.append(raw[pos:lo].decode("utf-8", "replace"))
+            pieces.append(sealed.HIDDEN)
+            pos = max(pos, hi)
+        if pos < b:
+            pieces.append(raw[pos:b].decode("utf-8", "replace"))
+        return "".join(pieces)
+
+    def _hide_secret_prefix(self, text: str) -> str:
+        """``text`` with a trailing proper prefix of a secret (4+ characters) hidden."""
+        from app import sealed
+
+        for value in self.secrets:
+            for k in range(min(len(value) - 1, len(text)), 3, -1):
+                if text[-1] == value[k - 1] and text.endswith(value[:k]):
+                    return text[:-k] + sealed.HIDDEN
+        return text
+
+    def _hide_secret_suffix(self, text: str) -> str:
+        """``text`` with a leading proper suffix of a secret (4+ characters) hidden."""
+        from app import sealed
+
+        for value in self.secrets:
+            for k in range(min(len(value) - 1, len(text)), 3, -1):
+                if text[0] == value[-k] and text.startswith(value[-k:]):
+                    return sealed.HIDDEN + text[k:]
+        return text
 
     def _pump(self) -> None:
         while True:
@@ -837,83 +891,12 @@ class _StderrTee:
             _echo_stderr(chunk)
 
     def _file(self, chunk: bytes) -> None:
-        at, self._read = self._read, self._read + len(chunk)
-        pos = 0
-        while (newline := chunk.find(b"\n", pos)) >= 0:
-            self._extend(at + pos, chunk[pos:newline])
-            self._flush()
-            pos = newline + 1
-        if pos < len(chunk):
-            self._extend(at + pos, chunk[pos:])
-            if len(self._partial) > _STDERR_LINE_MAX:
-                # A newline-less flood: file what's there as a line, holding back a tail
-                # one byte shorter than the longest secret, so a secret straddling the cut
-                # stays whole in the next line and is hidden there.
-                self._flush(keep=self._secret_tail())
-
-    def _extend(self, at: int, data: bytes) -> None:
-        if not self._partial:
-            self._partial_at = at
-        self._partial += data
-
-    def _flush(self, keep: int = 0) -> None:
-        cut = len(self._partial)
-        if keep > 0:
-            if keep >= len(self._partial):
-                # All of it could still be the start of a secret (one longer than the
-                # cap): hold it until more arrives. Bounded by the longest secret.
-                return
-            cut -= keep
-            # Never cut inside a secret already whole in the buffer: move the cut to its
-            # start, so it is filed (and hidden) whole with the held-back tail. One
-            # still arriving is no longer than the tail, so it lies entirely within it.
-            moved = True
-            while moved:
-                moved = False
-                for value in self.secrets:
-                    needle = value.encode()
-                    start = self._partial.find(needle, max(0, cut - len(needle) + 1))
-                    if 0 <= start < cut < start + len(needle):
-                        cut, moved = start, True
-            if cut == 0:
-                # A whole secret opens the buffer and runs past the cut: file through its
-                # end, so it is hidden whole and the rest stays held.
-                cut = max(
-                    (len(v.encode()) for v in self.secrets
-                     if self._partial.startswith(v.encode())),
-                    default=len(self._partial),
-                )
-        text = self._text(self._partial[:cut])
-        if text.strip():
-            self._lines.append((self._partial_at, text))
-        if cut < len(self._partial):
-            del self._partial[:cut]
-            self._partial_at += cut
-        else:
-            self._partial.clear()
-
-    def _hide_secret_prefix(self, text: str) -> str:
-        """``text`` with a trailing proper prefix of a secret (4+ characters) hidden."""
-        from app import sealed
-
-        for value in self.secrets:
-            for k in range(min(len(value) - 1, len(text)), 3, -1):
-                if text.endswith(value[:k]):
-                    return text[:-k] + sealed.HIDDEN
-        return text
-
-    def _secret_tail(self) -> int:
-        return max((len(s.encode()) for s in self.secrets), default=1) - 1
-
-    def _text(self, data: bytes) -> str:
-        """A filed line: the server's secret env values hidden BEFORE the length cap, so
-        a cut can never keep the start of one (debug.scrub runs later, per block)."""
-        from app import sealed
-
-        text = bytes(data).decode("utf-8", "replace").rstrip("\r")
-        for value in self.secrets:
-            text = text.replace(value, sealed.HIDDEN)
-        return text[:_STDERR_LINE_MAX]
+        self._read += len(chunk)
+        self._buf += chunk
+        if len(self._buf) > _STDERR_RING_BYTES:
+            drop = len(self._buf) - _STDERR_RING_BYTES
+            del self._buf[:drop]
+            self._base += drop
 
 
 def _echo_stderr(chunk: bytes) -> None:
