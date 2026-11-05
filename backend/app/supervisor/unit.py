@@ -724,7 +724,9 @@ class ServerUnit:
         except (asyncio.TimeoutError, TimeoutError):
             return f"timed out after {timeout:g}s", []
         except Exception as exc:
-            reason = _one_line(str(exc)) or type(exc).__name__
+            # Hidden BEFORE normalizing and cutting: a cut through a secret would leave a
+            # prefix that the full-value replacement no longer matches.
+            reason = _one_line(self._redact(str(exc))) or type(exc).__name__
             failure, output = reason[:_HEALTH_FAILURE_CHARS], [reason]
         return (self._redact(failure) if failure is not None else None), output
 
@@ -742,7 +744,7 @@ class ServerUnit:
                 result = await client.call_tool(
                     check.tool, dict(check.arguments), timeout=timeout, raise_on_error=False
                 )
-        text = _tool_result_text(result)
+        text = self._redact(_tool_result_text(result))  # before any line or length cut
         output = text.splitlines()[-_HEALTH_OUTPUT_LINES:]
         if result.is_error:
             reason = _one_line(text) or f"tool {check.tool} returned an error"
@@ -773,15 +775,26 @@ class ServerUnit:
             # Bounded chunks, not ``async for`` lines: StreamReader raises on a line past
             # its 64 KiB limit, which would fail a check whose command succeeded (a big
             # JSON response). A long line is kept truncated, never treated as a failure.
+            # Each line has the server's secret values hidden BEFORE it is cut: keeping
+            # the longest secret's length past the cap means one that starts inside the
+            # kept part is whole when replaced, so no prefix of it survives the cut.
             assert proc.stdout is not None
+            room = _HEALTH_LINE_BYTES + max(
+                (len(v.encode()) for v in self._secret_values), default=0
+            )
+
+            def keep(raw: bytes) -> str:
+                text = self._redact(raw[:room].decode(errors="replace"))
+                return text[:_HEALTH_LINE_BYTES]
+
             partial = b""
             while chunk := await proc.stdout.read(65536):
                 *lines, partial = (partial + chunk).split(b"\n")
                 for raw in lines:
-                    output.append(raw[:_HEALTH_LINE_BYTES].decode(errors="replace"))
-                partial = partial[: _HEALTH_LINE_BYTES + 1]
+                    output.append(keep(raw))
+                partial = partial[: room + 1]
             if partial:
-                output.append(partial[:_HEALTH_LINE_BYTES].decode(errors="replace"))
+                output.append(keep(partial))
 
         reader = asyncio.create_task(pump())
         try:

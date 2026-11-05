@@ -157,6 +157,43 @@ async def test_failure_quoting_the_output_hides_secret_env_values(fast_unit):
         await unit.stop()
 
 
+async def test_a_secret_across_the_failure_cut_is_hidden_whole(fast_unit):
+    """The failure text is cut at _HEALTH_FAILURE_CHARS; a secret straddling that cut must
+    be hidden before it, never leaving a prefix in last_error (tool form)."""
+    from app import sealed
+
+    secret = "sk-live-0123456789abcdef"
+    (fast_unit / "health-fail").write_text("x" * 270 + " " + secret)
+    server = _server(fast_unit, health_check_tool="check")
+    server.env = {**server.env, "API_KEY": sealed.seal(secret)}
+    unit = ServerUnit(server)
+    await unit.start(_port())
+    try:
+        await _wait_for(lambda: unit.state == "failed")
+        assert secret[:6] not in (unit.last_error or "")
+        assert "<hidden>" in (unit.last_error or "")
+    finally:
+        await unit.stop()
+
+
+async def test_a_secret_across_an_output_line_cap_is_hidden_whole(fast_unit):
+    """A command's output line is capped at _HEALTH_LINE_BYTES; a secret straddling the
+    cap is hidden before it, so no prefix reaches the failure text or the output."""
+    from app import sealed
+
+    secret = "sk-live-0123456789abcdef"
+    pad = unit_module._HEALTH_LINE_BYTES - 6
+    server = _server(fast_unit)
+    server.env = {**server.env, "API_KEY": sealed.seal(secret)}
+    unit = ServerUnit(server)
+    check = HealthCheck(command=f'printf "%0{pad}d%s\\n" 0 "$API_KEY"\nexit 2')
+    failure, output = await unit._health_check_once(check, 10)
+    assert failure is not None and failure.startswith("exited with code 2")
+    # Hidden whole, then cut: the cap may shorten the marker, never expose the secret.
+    assert secret[:6] not in failure and "<hid" in failure
+    assert not any(secret[:6] in line for line in output)
+
+
 async def test_a_passing_command_with_a_huge_output_line_still_passes(fast_unit):
     # One line past asyncio's 64 KiB StreamReader limit (a big JSON response): kept
     # truncated, never a failure of a command that exited 0.
