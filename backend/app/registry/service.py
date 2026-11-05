@@ -2259,21 +2259,27 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
             server.runner, server.setup_script, server.post_clone_script):
         session.expire(server)  # raises before any autoflush — discard just this instance's edits
         raise ValueError("Docker CLI invocations require the docker runner")
-    if server.runner == "remote":
-        server.command, server.args = normalize_remote(server.command, server.args)
-        # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
-        # the stale working directory here (remote has no process) to keep the row canonical.
-        server.cwd = None
-    elif server.runner == "openapi":
-        server.command, server.args, server.openapi_document = normalize_openapi(
-            server.command, server.args, server.openapi_document or ""
-        )
-        server.cwd = None  # likewise: no process, so no working directory
-    elif server.runner == "graphql":
-        server.command, server.args, server.openapi_document = normalize_graphql(
-            server.command, server.args, server.openapi_document or ""
-        )
-        server.cwd = None
+    # A rejected launch line rolls back like every other refused edit above, so a caller
+    # that keeps the session can't commit half of it later.
+    try:
+        if server.runner == "remote":
+            server.command, server.args = normalize_remote(server.command, server.args)
+            # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
+            # the stale working directory here (remote has no process) to keep the row canonical.
+            server.cwd = None
+        elif server.runner == "openapi":
+            server.command, server.args, server.openapi_document = normalize_openapi(
+                server.command, server.args, server.openapi_document or ""
+            )
+            server.cwd = None  # likewise: no process, so no working directory
+        elif server.runner == "graphql":
+            server.command, server.args, server.openapi_document = normalize_graphql(
+                server.command, server.args, server.openapi_document or ""
+            )
+            server.cwd = None
+    except ValueError:
+        session.rollback()
+        raise
     if server.runner not in _DOCUMENT_RUNNERS:
         server.openapi_document = ""
     # Normalize OAuth (and force it off for any non-remote runner) so a stray secret can't

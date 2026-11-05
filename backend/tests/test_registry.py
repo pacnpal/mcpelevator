@@ -2760,3 +2760,14 @@ def test_graphql_headers_are_not_process_env(session):
         session, s.id, {"env": {"Authorization": "<hidden>", "X-Tenant": "b"}}
     )
     assert edited.env["X-Tenant"] == "b"
+
+
+def test_rejected_graphql_update_rolls_back(session):
+    s = service.create_server(
+        session, name="G", runner="graphql", command="https://api.example/graphql"
+    )
+    with pytest.raises(ValueError):
+        service.update_server(session, s.id, {"command": "not a url"})
+    session.expire_all()
+    stored = repo.get_server(session, s.id)
+    assert (stored.command, stored.args) == ("https://api.example/graphql", [])

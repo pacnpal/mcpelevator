@@ -196,6 +196,41 @@ def test_introspection_falls_back_for_servers_without_one_of():
     assert asked == [True, False]
 
 
+def test_introspection_is_not_retried_for_other_failures():
+    """Only a refused `isOneOf` earns the classic query; a 401 fails once."""
+    calls = []
+
+    def denied(request):
+        calls.append(1)
+        return httpx.Response(401, json={"errors": [{"message": "Bad credentials"}]})
+
+    with pytest.raises(gql.SchemaError, match="Bad credentials"):
+        gql.introspect(ENDPOINT, {}, transport=httpx.MockTransport(denied))
+    assert len(calls) == 1
+
+
+async def test_oversized_responses_fail_instead_of_being_buffered(monkeypatch):
+    monkeypatch.setattr(gql, "MAX_RESPONSE_BYTES", 1000)
+
+    def huge(request):
+        return httpx2.Response(200, json={"data": {"version": "x" * 5000}})
+
+    server = gql.build_server(
+        {"command": ENDPOINT, "document": SDL.encode()}, api_transport=httpx2.MockTransport(huge)
+    )
+    async with Client(server) as client:
+        result = await client.call_tool("version", {}, raise_on_error=False)
+    assert result.is_error and "larger than" in result.content[0].text
+
+
+def test_one_of_custom_scalar_fields_refuse_null():
+    schema = build_schema("scalar JSON input By @oneOf { raw: JSON id: ID } type Query { f(by: By!): Int }")
+    defs: dict = {}
+    gql.input_schema(schema.query_type.fields["f"].args["by"].type, defs)
+    assert defs["By"]["properties"]["raw"]["not"] == {"type": "null"}
+    assert defs["By"]["properties"]["id"] == {"type": ["string", "integer"]}
+
+
 def test_introspection_turned_off_says_what_to_do_instead():
     api = FakeAPI(introspection=False)
     with pytest.raises(gql.SchemaError, match="introspection is not allowed.*paste its schema"):

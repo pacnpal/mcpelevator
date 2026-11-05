@@ -18,7 +18,9 @@ Each field of the ``Query`` and ``Mutation`` types becomes one tool:
   ``selection_set`` argument lets the caller ask for exactly the fields it wants.
 
 One more tool, ``graphql_query``, runs any operation the caller writes, for what the
-per-field tools can't express (aliases, several fields in one round trip, fragments).
+per-field tools can't express (aliases, several fields in one round trip, fragments). If
+the API has a root field by that name, it's ``_graphql_query`` (underscores are added
+until the name is free).
 Every operation is validated against the schema before it's sent, so a bad selection or
 query comes back as the validation error rather than an API round trip. Subscriptions
 need a long-lived transport MCP tools don't have, so they aren't served.
@@ -89,6 +91,9 @@ MAX_SCHEMA_BYTES = 32 * 1024 * 1024
 # plumbing (``edges`` / ``node`` / ``nodes``) doesn't count against the depth.
 SELECTION_DEPTH = 2
 MAX_SELECTION_FIELDS = 300
+# Ceiling on one operation's response: past it the call fails instead of the bridge
+# buffering a result no model could read anyway.
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 # The raw-operation tool's name (an API field with the same name keeps it; this one moves).
 RAW_TOOL = "graphql_query"
 # The argument that overrides a tool's selection set (underscore-prefixed until it's free
@@ -166,11 +171,15 @@ def introspect(endpoint: str, headers: dict[str, str], *, transport=None) -> byt
     headers: the endpoint is the API, so its credentials belong there).
 
     The query asks for ``isOneOf`` (``@oneOf`` input objects), which servers older than
-    that addition reject as an unknown field; any failure is retried once with the classic
-    query, and the second answer is the one reported."""
+    that addition reject as an unknown field; that refusal (and only that) is retried once
+    with the classic query, and the second answer is the one reported."""
     try:
         return _introspect(endpoint, headers, one_of=True, transport=transport)
-    except SchemaError:
+    except SchemaError as exc:
+        # Only a server refusing the field itself gets the second request; a 401, a 503 or
+        # a timeout would fail the same way again.
+        if "isoneof" not in str(exc).lower():
+            raise
         return _introspect(endpoint, headers, one_of=False, transport=transport)
 
 
@@ -315,6 +324,14 @@ def _nullable(schema: dict) -> dict:
     return out
 
 
+def _non_null(schema: dict) -> dict:
+    """``schema`` refusing ``null``. Typed schemas already do; a custom scalar's (any JSON)
+    needs it said."""
+    if "type" in schema or "$ref" in schema:
+        return schema
+    return {**schema, "not": {"type": "null"}}
+
+
 def input_schema(type_, defs: dict[str, dict]) -> dict:
     """The JSON Schema of a GraphQL input type: nullable unless it's non-null. Input objects
     land once in ``defs`` and are referenced from there, so a recursive input type stays
@@ -344,7 +361,7 @@ def _input_schema(type_, defs: dict[str, dict]) -> dict:
             properties = {
                 # A @oneOf input's one chosen field must be non-null, though declared nullable.
                 name: _with_doc(
-                    _input_schema(get_nullable_type(field.type), defs)
+                    _non_null(_input_schema(get_nullable_type(field.type), defs))
                     if one_of
                     else input_schema(field.type, defs),
                     field,
@@ -560,19 +577,28 @@ class _Executor:
         if operation_name:
             payload["operationName"] = operation_name
         try:
-            response = await self.client.post(self.endpoint, json=payload)
+            async with self.client.stream("POST", self.endpoint, json=payload) as response:
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > MAX_RESPONSE_BYTES:
+                        raise ToolError(
+                            f"the GraphQL API's response is larger than "
+                            f"{MAX_RESPONSE_BYTES // (1024 * 1024)} MiB; select fewer fields "
+                            "or page through the results"
+                        )
+                status = response.status_code
         except httpx2.HTTPError as exc:
             raise ToolError(f"can't reach the GraphQL API: {exc}") from exc
         try:
-            result = response.json()
+            result = json.loads(bytes(body))
         except ValueError:
             result = None
         # GraphQL over HTTP answers request errors with a 4xx and a GraphQL body, so a
         # body with data/errors is read whatever the status.
         if not isinstance(result, dict) or not ({"data", "errors"} & result.keys()):
-            raise ToolError(
-                f"the GraphQL API answered HTTP {response.status_code}: {response.text[:500]}"
-            )
+            text = bytes(body[:500]).decode("utf-8", "replace")
+            raise ToolError(f"the GraphQL API answered HTTP {status}: {text}")
         return result
 
 

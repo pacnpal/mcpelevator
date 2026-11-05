@@ -888,7 +888,17 @@ async def preview_openapi(
 def _graphql_preview(command: str, args: list[str], document: str) -> GraphqlPreview:
     from app.bridge import graphql as bridge_graphql
 
-    schema_url = next((a.strip() for a in args if a.strip()), "")
+    urls = [a.strip() for a in args if a.strip()]
+    # The same source rules a save applies (registry.service.normalize_graphql), so the
+    # preview never shows tools for a configuration that can't be saved. The endpoint can
+    # still be blank while a pasted schema is previewed: the form fills it in after.
+    if len(urls) > 1:
+        return GraphqlPreview(error="a graphql server takes at most one schema URL")
+    if urls and document.strip():
+        return GraphqlPreview(
+            error="a graphql server takes its schema from a URL or from the schema itself, not both"
+        )
+    schema_url = urls[0] if urls else ""
     try:
         if document.strip():
             schema = bridge_graphql.parse_schema(document)

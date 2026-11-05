@@ -766,6 +766,21 @@ def test_graphql_server_with_a_stored_schema_and_its_preview():
         assert c.post(
             "/api/graphql/preview", json={"command": "not a url"}, headers=LOOPBACK
         ).status_code == 400
+        # The save rules: one schema source.
+        both = c.post(
+            "/api/graphql/preview",
+            json={"command": "https://api.example/graphql", "args": ["https://a.example/s"],
+                  "openapi_document": schema},
+            headers=LOOPBACK,
+        ).json()
+        assert "not both" in both["error"] and both["queries"] == []
+        two = c.post(
+            "/api/graphql/preview",
+            json={"command": "https://api.example/graphql",
+                  "args": ["https://a.example/s", "https://b.example/s"]},
+            headers=LOOPBACK,
+        ).json()
+        assert "at most one schema URL" in two["error"]
 
         created = c.post(
             "/api/servers",
