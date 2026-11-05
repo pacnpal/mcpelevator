@@ -277,6 +277,9 @@ export interface ServerDetail extends ServerSummary {
 	 * calling client, serving one request at a time. Default false refuses them, since one
 	 * child serves every client (issue #143). Ignored for `remote`. */
 	serialize_client_requests: boolean;
+	/** Stdio runners with `serialize_client_requests`: append what the child wrote to
+	 * stderr during a failed tool call to its error result (issue #227). Default false. */
+	attach_stderr_on_error: boolean;
 	config_hash: string;
 	source: string;
 	tools: ServerTool[];
@@ -346,6 +349,9 @@ export interface ServerCreate {
 	/** Stdio runners: forward the child's roots/sampling/elicitation requests to the
 	 * calling client, one request at a time (issue #143). Ignored for `remote`. */
 	serialize_client_requests?: boolean;
+	/** Append the child's stderr to a failed tool call's result (issue #227). Needs
+	 * `serialize_client_requests`; refused for `remote`/`openapi`. */
+	attach_stderr_on_error?: boolean;
 	enabled?: boolean;
 	/** Provenance. Only a `catalog:<id>` value is honored server-side (a registry install). */
 	source?: string | null;

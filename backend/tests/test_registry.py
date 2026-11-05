@@ -339,6 +339,72 @@ def test_serialize_client_requests_survives_clone(session):
     assert clone.serialize_client_requests is True
 
 
+# --- attach_stderr_on_error (issue #227) ----------------------------------------
+
+
+def test_attach_stderr_on_error_default_false(session):
+    assert _mk(session).attach_stderr_on_error is False
+
+
+def test_attach_stderr_on_error_requires_serialization(session):
+    """Without serialize_client_requests a call's stderr can't be told apart from its
+    neighbours', so the flag would silently do nothing: refused at save instead."""
+    with pytest.raises(ValueError, match="requires serialize_client_requests"):
+        _mk(session, attach_stderr_on_error=True)
+    a = _mk(session, serialize_client_requests=True, attach_stderr_on_error=True)
+    assert a.attach_stderr_on_error is True
+    with pytest.raises(ValueError, match="requires serialize_client_requests"):
+        service.update_server(session, a.id, {"serialize_client_requests": False})
+    stored = repo.get_server(session, a.id)
+    assert stored.serialize_client_requests is True and stored.attach_stderr_on_error is True
+    b = _mk(session)
+    with pytest.raises(ValueError, match="requires serialize_client_requests"):
+        service.update_server(session, b.id, {"attach_stderr_on_error": True})
+    service.update_server(
+        session, a.id, {"serialize_client_requests": False, "attach_stderr_on_error": False}
+    )
+
+
+@pytest.mark.parametrize(
+    "runner,command,args",
+    [("remote", "https://up.example/mcp", []), ("openapi", "https://api.example/openapi.json", [])],
+)
+def test_attach_stderr_on_error_refused_for_http_upstreams(session, runner, command, args):
+    """A remote/openapi upstream has no stderr to tee: refused, even with serialize on."""
+    with pytest.raises(ValueError, match="only to stdio runners"):
+        _mk(
+            session,
+            runner=runner,
+            command=command,
+            args=args,
+            serialize_client_requests=True,
+            attach_stderr_on_error=True,
+        )
+    a = _mk(session, serialize_client_requests=True, attach_stderr_on_error=True)
+    with pytest.raises(ValueError, match="only to stdio runners"):
+        service.update_server(session, a.id, {"runner": runner, "command": command, "args": args})
+    assert repo.get_server(session, a.id).runner == "npx"
+
+
+def test_attach_stderr_on_error_change_bounces_bridge(session):
+    """The bridge decides whether to tee the child's stderr when it builds its transport,
+    so toggling the flag changes config_hash both ways — and a row without it keeps the
+    hash it had before the field existed (the key is present only when on)."""
+    a = _mk(session, serialize_client_requests=True)
+    before = a.config_hash
+    assert "attach_stderr_on_error" not in service._hash_payload(a)
+    service.update_server(session, a.id, {"attach_stderr_on_error": True})
+    assert repo.get_server(session, a.id).config_hash != before
+    service.update_server(session, a.id, {"attach_stderr_on_error": False})
+    assert repo.get_server(session, a.id).config_hash == before
+
+
+def test_attach_stderr_on_error_survives_clone(session):
+    a = _mk(session, serialize_client_requests=True, attach_stderr_on_error=True)
+    clone = service.clone_server(session, a.id)
+    assert clone.attach_stderr_on_error is True
+
+
 # --- tool overrides (issue #112) ----------------------------------------------
 
 

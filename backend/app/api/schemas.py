@@ -297,6 +297,9 @@ class ServerDetail(ServerSummary):
     # Stdio runners: forward the child's roots/sampling/elicitation requests to the calling
     # client, serving one request at a time (issue #143). Default false refuses them.
     serialize_client_requests: bool = False
+    # Stdio runners with serialize_client_requests: append the child's stderr from a failed
+    # tool call's window to its error result (issue #227). Default false.
+    attach_stderr_on_error: bool = False
     config_hash: str = ""
     source: str = "manual"
     # Whether GET /servers/{id}/mcpb would produce a bundle (app.mcpb.exportable);
@@ -348,6 +351,9 @@ class ServerCreate(BaseModel):
     # Stdio runners: forward the child's roots/sampling/elicitation requests to the calling
     # client, serving one request at a time (issue #143). Opt-in; ignored for `remote`.
     serialize_client_requests: bool = False
+    # Stdio runners only, and only with serialize_client_requests (refused otherwise):
+    # append the child's stderr from a failed tool call to its error result (issue #227).
+    attach_stderr_on_error: bool = False
     auth_provider: AuthProvider = "inherit"
     # Upstream OAuth (remote runner only; forced off elsewhere server-side).
     oauth: bool = False
@@ -407,6 +413,8 @@ class ServerUpdate(BaseModel):
     normalize_schema_dialect: Optional[bool] = None
     # Omitted (null) = unchanged.
     serialize_client_requests: Optional[bool] = None
+    # Omitted (null) = unchanged.
+    attach_stderr_on_error: Optional[bool] = None
     auth_provider: Optional[AuthProvider] = None
     # StrictBool (unlike mcp_http/rest_openapi above): oauth gates a security-sensitive
     # upstream-auth mode, so a truthy-coerced "yes"/1 must never silently flip it on — the

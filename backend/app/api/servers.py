@@ -314,6 +314,7 @@ def _detail(
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),
         serialize_client_requests=bool(server.serialize_client_requests),
+        attach_stderr_on_error=bool(server.attach_stderr_on_error),
         config_hash=server.config_hash,
         source=server.source,
         mcpb_exportable=mcpb.exportable(server),

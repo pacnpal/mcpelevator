@@ -148,6 +148,13 @@ class Server(SQLModel, table=True):
     # the bridge.
     serialize_client_requests: bool = False
 
+    # Stdio runners with ``serialize_client_requests`` only (the service rejects it
+    # otherwise): when a tool call fails, append the child's stderr from that call's
+    # window (scrubbed, last lines, capped) to the error result (issue #227). Serializing
+    # is what makes the window attributable: one request holds the child at a time. Part
+    # of the launch spec (config_hash, only when on), so a change restarts the bridge.
+    attach_stderr_on_error: bool = False
+
     # uvx runner only: launch with the Python mcp SDK held below 2.0
     # (``uvx --with "mcp<2" <package>``) — a compatibility escape hatch for servers
     # that haven't caught up with the SDK's 2.x line. The runner injects the pin at

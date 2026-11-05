@@ -68,6 +68,7 @@
 					rest_openapi: server.transports.rest_openapi,
 					normalize_schema_dialect: server.normalize_schema_dialect,
 					serialize_client_requests: server.serialize_client_requests,
+					attach_stderr_on_error: server.attach_stderr_on_error,
 					auth_provider: server.auth_provider,
 					idle_timeout_s: server.idle_timeout_s,
 					start_timeout_s: server.start_timeout_s,

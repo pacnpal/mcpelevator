@@ -1406,7 +1406,30 @@ def _hash_payload(server: Server) -> dict[str, Any]:
     # (present only when set), and a digest: the hash input needn't carry megabytes.
     if server.openapi_document:
         payload["openapi_document"] = hashlib.sha256(server.openapi_document.encode()).hexdigest()
+    # The bridge decides whether to tee the stdio child's stderr when it builds its
+    # transport, so a toggle must restart it. Same rule (present only when on): a new key
+    # must not rehash every existing row and bounce every bridge on upgrade.
+    if server.attach_stderr_on_error:
+        payload["attach_stderr_on_error"] = True
     return payload
+
+
+def _require_attachable_stderr(runner: str, serialize: bool, attach: bool) -> None:
+    """Refuse ``attach_stderr_on_error`` where it could never do anything, rather than
+    store a toggle that silently no-ops (issue #227). A failed call's stderr is only
+    attributable while ONE request holds the stdio child (``serialize_client_requests``),
+    and only a stdio child has a stderr: a remote/openapi upstream is reached over HTTP."""
+    if not attach:
+        return
+    if runner in ("remote", "openapi", BUILTIN_RUNNER):
+        raise ValueError(
+            "attach_stderr_on_error applies only to stdio runners (npx, uvx, command, docker)"
+        )
+    if not serialize:
+        raise ValueError(
+            "attach_stderr_on_error requires serialize_client_requests: only one request "
+            "at a time makes the server's stderr attributable to a call"
+        )
 
 
 def _require_pinnable_uvx(command: str, args) -> None:
@@ -1907,6 +1930,7 @@ def create_server(
     tool_overrides: Optional[dict[str, dict[str, str]]] = None,
     normalize_schema_dialect: bool = False,
     serialize_client_requests: bool = False,
+    attach_stderr_on_error: bool = False,
     auth_provider: str = "inherit",
     oauth: bool = False,
     oauth_scopes: str = "",
@@ -1979,6 +2003,10 @@ def create_server(
     repo_build_timeout_s = normalize_startup_timeout(repo_build_timeout_s, "repo_build_timeout_s")
     disabled_tools = normalize_disabled_tools(disabled_tools)
     tool_overrides = normalize_tool_overrides(tool_overrides, disabled_tools)
+    # After the docker reclassify above, so a docker-launching `command` is judged as docker.
+    _require_attachable_stderr(
+        runner, bool(serialize_client_requests), bool(attach_stderr_on_error)
+    )
     # Last, after docker normalization may have moved `-e K=V` values out of the args.
     env = sealed.resolve(
         {}, dict(env or {}), secret=set(secret_env or []), retargeted=False, env_runs_code=False
@@ -2006,6 +2034,7 @@ def create_server(
         tool_overrides=tool_overrides,
         normalize_schema_dialect=bool(normalize_schema_dialect),
         serialize_client_requests=bool(serialize_client_requests),
+        attach_stderr_on_error=bool(attach_stderr_on_error),
         auth_provider=auth_provider,
         oauth=oauth,
         oauth_scopes=oauth_scopes,
@@ -2071,6 +2100,7 @@ _MUTABLE_FIELDS = {
     "tool_overrides",
     "normalize_schema_dialect",
     "serialize_client_requests",
+    "attach_stderr_on_error",
     "auth_provider",
     "oauth",
     "oauth_scopes",
@@ -2287,6 +2317,11 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         server.tool_overrides = normalize_tool_overrides(
             server.tool_overrides, server.disabled_tools or []
         )
+        _require_attachable_stderr(
+            server.runner,
+            bool(server.serialize_client_requests),
+            bool(server.attach_stderr_on_error),
+        )
         # Compared after normalization, so the form resending the same config doesn't
         # count as pointing the server somewhere new.
         retargeted = any(
@@ -2366,6 +2401,7 @@ def clone_server(
         tool_overrides={k: dict(v) for k, v in (src.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(src.normalize_schema_dialect),
         serialize_client_requests=bool(src.serialize_client_requests),
+        attach_stderr_on_error=bool(src.attach_stderr_on_error),
         auth_provider=src.auth_provider,
         oauth=bool(src.oauth),
         oauth_scopes=src.oauth_scopes or "",

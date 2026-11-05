@@ -182,6 +182,7 @@
 			restOpenapi: init.rest_openapi ?? false,
 			normalizeSchemaDialect: init.normalize_schema_dialect ?? false,
 			serializeClientRequests: init.serialize_client_requests ?? false,
+			attachStderrOnError: init.attach_stderr_on_error ?? false,
 			// Blank = inherit the global default (null); "0" pins the server always-on.
 			idleTimeoutText:
 				init.idle_timeout_s === null || init.idle_timeout_s === undefined
@@ -279,6 +280,8 @@
 	let normalizeSchemaDialect = $state(seed.normalizeSchemaDialect);
 	// Stdio runners only: route the child's roots/sampling/elicitation to the caller.
 	let serializeClientRequests = $state(seed.serializeClientRequests);
+	// Needs serializeClientRequests: only then is a call's stderr its own (issue #227).
+	let attachStderrOnError = $state(seed.attachStderrOnError);
 	let idleTimeoutText = $state(seed.idleTimeoutText);
 	let startTimeoutText = $state(seed.startTimeoutText);
 	let repoBuildTimeoutText = $state(seed.repoBuildTimeoutText);
@@ -574,6 +577,7 @@
 			// Stdio runners only; a remote upstream has its own session per request, so the
 			// bridge ignores it there — keep the payload honest on a runner switch.
 			serialize_client_requests: !isHttpUpstream && serializeClientRequests,
+			attach_stderr_on_error: !isHttpUpstream && serializeClientRequests && attachStderrOnError,
 			idle_timeout_s: idleTimeoutText.trim() === '' ? null : Number(idleTimeoutText.trim()),
 			start_timeout_s: parseTimeout(startTimeoutText),
 			// Only a checkout has a build to time; dropping the repo drops its override.
@@ -1744,6 +1748,33 @@
 					></span>
 				</span>
 			</label>
+			<!-- One request at a time is what makes the child's stderr this call's (issue #227). -->
+			{#if serializeClientRequests}
+				<label
+					class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
+				>
+					<span class="flex flex-col gap-0.5">
+						<span class="text-sm font-medium text-[var(--color-ink)]">
+							Attach stderr to failed calls
+						</span>
+						<span class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+							When a tool call fails, add what this server wrote to stderr during that call (the
+							last 20 lines, scrubbed of credentials) to the error the client sees. Only helps when
+							the failure comes back as a failed call; the lines still go to the server's log.
+						</span>
+					</span>
+					<input type="checkbox" bind:checked={attachStderrOnError} class="peer sr-only" />
+					<span
+						class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
+						style="background-color: {attachStderrOnError ? '' : 'var(--color-line-strong)'};"
+					>
+						<span
+							class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
+							style={attachStderrOnError ? 'transform: translateX(16px);' : ''}
+						></span>
+					</span>
+				</label>
+			{/if}
 		{/if}
 
 		<!-- Idle shutdown (wake-on-request) -->

@@ -55,6 +55,10 @@ class ProcessSpec:
     # request at a time — see app.bridge.host._StdioRouting and
     # Server.serialize_client_requests. The bridge ignores it for a remote transport.
     serialize_client_requests: bool = False
+    # Append the stdio child's stderr from a failed call's window to its error result —
+    # see app.bridge.host._StderrTee and Server.attach_stderr_on_error. Only meaningful
+    # with ``serialize_client_requests``; the bridge ignores it otherwise.
+    attach_stderr_on_error: bool = False
     transport: str = "stdio"  # stdio | streamable-http | sse
     # For a remote runner that authenticates via OAuth: the config the bridge needs to
     # build an OAuth httpx auth on the upstream transport (server id -> token file,
@@ -125,4 +129,5 @@ def passthrough(server: Server) -> ProcessSpec:
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),
         serialize_client_requests=bool(server.serialize_client_requests),
+        attach_stderr_on_error=bool(server.attach_stderr_on_error),
     )
