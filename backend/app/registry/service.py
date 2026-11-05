@@ -1683,6 +1683,93 @@ def normalize_startup_timeout(value: Any, field: str = "start_timeout_s") -> Opt
 
 MAX_STARTUP_TIMEOUT_S = 86400
 
+# Periodic health checks: a floor so a check can't hammer a server (or fork a shell)
+# every second, and the same one-day ceiling as the startup deadlines.
+MIN_HEALTH_CHECK_INTERVAL_S = 10
+_HEALTH_CHECK_TOOL_MAX = 256
+_HEALTH_CHECK_ARGUMENTS_MAX_BYTES = 16 * 1024
+_HEALTH_CHECK_COMMAND_MAX = 16 * 1024
+
+
+def normalize_health_check(
+    runner: str,
+    tool: Any,
+    arguments: Any,
+    command: Any,
+    interval_s: Any,
+) -> tuple[Optional[str], Optional[dict], Optional[str], Optional[int]]:
+    """Canonicalize a server's health check (issue #225) to
+    ``(tool, arguments, command, interval_s)``, all None when there is no check.
+
+    Two forms, one per server: a tool call through the bridge (any runner but the
+    built-in one, whose tools authorize as the caller and so can't be called by the
+    supervisor), or a shell command (npx/uvx/command only — it runs on this host like
+    the setup script, which a container or a remote URL has none of). Blank tool/command
+    read as unset; arguments belong to a tool check; the interval needs a check and
+    sits between :data:`MIN_HEALTH_CHECK_INTERVAL_S` and a day."""
+    if tool is not None and not isinstance(tool, str):
+        raise ValueError("health_check_tool must be a tool name")
+    if command is not None and not isinstance(command, str):
+        raise ValueError("health_check_command must be a shell command")
+    tool = (tool or "").strip() or None
+    command = command if command is not None and command.strip() else None
+    if tool is not None and command is not None:
+        raise ValueError(
+            "a health check is a tool call or a shell command, not both — "
+            "set health_check_tool or health_check_command"
+        )
+    if tool is not None:
+        if runner == BUILTIN_RUNNER:
+            raise ValueError("the built-in mcpelevator server has no health check")
+        if len(tool) > _HEALTH_CHECK_TOOL_MAX:
+            raise ValueError("health_check_tool is too long")
+    if command is not None:
+        if runner == "docker":
+            raise ValueError(
+                "Health check commands are not supported for Docker servers; "
+                "use a tool health check (health_check_tool) instead."
+            )
+        if runner not in _LOCAL_EXEC_RUNNERS:
+            raise ValueError(
+                "Health check commands are supported only by the npx, uvx, and command "
+                "local runners; use a tool health check (health_check_tool) instead."
+            )
+        if len(command) > _HEALTH_CHECK_COMMAND_MAX:
+            raise ValueError("health_check_command is too long")
+    if arguments is not None and not isinstance(arguments, dict):
+        raise ValueError("health_check_arguments must be a JSON object")
+    if arguments:
+        if tool is None:
+            raise ValueError("health_check_arguments needs a health_check_tool")
+        try:
+            encoded = json.dumps(arguments)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"health_check_arguments is not JSON: {exc}") from None
+        if len(encoded.encode()) > _HEALTH_CHECK_ARGUMENTS_MAX_BYTES:
+            raise ValueError(
+                f"health_check_arguments is too large "
+                f"(max {_HEALTH_CHECK_ARGUMENTS_MAX_BYTES} bytes)"
+            )
+        arguments = dict(arguments)
+    else:
+        arguments = None
+    if interval_s is not None:
+        if (
+            isinstance(interval_s, bool)
+            or not isinstance(interval_s, int)
+            or not MIN_HEALTH_CHECK_INTERVAL_S <= interval_s <= MAX_STARTUP_TIMEOUT_S
+        ):
+            raise ValueError(
+                f"invalid health_check_interval_s: {interval_s!r} "
+                f"(seconds, {MIN_HEALTH_CHECK_INTERVAL_S} to {MAX_STARTUP_TIMEOUT_S})"
+            )
+        if tool is None and command is None:
+            raise ValueError(
+                "health_check_interval_s needs a health check "
+                "(health_check_tool or health_check_command)"
+            )
+    return tool, arguments, command, interval_s
+
 
 def normalize_disabled_tools(value: Any) -> list[str]:
     """Canonicalize the per-server hide list: non-empty tool names, de-duplicated and
@@ -1880,8 +1967,8 @@ def _normalize_repo_fields(
 
 
 def scripts_invoke_docker(runner: str, *scripts: Optional[str]) -> bool:
-    """``setup_script_invokes_docker`` over every shell script a server runs before launch
-    (its setup script and its repository's post-clone script)."""
+    """``setup_script_invokes_docker`` over every shell script a server runs on the host
+    (its setup script, its repository's post-clone script, its health check command)."""
     return any(setup_script_invokes_docker(runner, script) for script in scripts)
 
 
@@ -1940,6 +2027,10 @@ def create_server(
     idle_timeout_s: Optional[int] = None,
     start_timeout_s: Optional[int] = None,
     repo_build_timeout_s: Optional[int] = None,
+    health_check_tool: Optional[str] = None,
+    health_check_arguments: Optional[dict] = None,
+    health_check_command: Optional[str] = None,
+    health_check_interval_s: Optional[int] = None,
     enabled: bool = False,
     source: str = "manual",
     owner_id: Optional[str] = None,
@@ -1961,7 +2052,21 @@ def create_server(
     repo_url, repo_ref, post_clone_script = _normalize_repo_fields(
         runner, repo_url, repo_ref, post_clone_script
     )
-    if enabled and scripts_invoke_docker(runner, setup_script, post_clone_script):
+    (
+        health_check_tool,
+        health_check_arguments,
+        health_check_command,
+        health_check_interval_s,
+    ) = normalize_health_check(
+        runner,
+        health_check_tool,
+        health_check_arguments,
+        health_check_command,
+        health_check_interval_s,
+    )
+    if enabled and scripts_invoke_docker(
+        runner, setup_script, post_clone_script, health_check_command
+    ):
         raise ValueError("Docker CLI invocations require the docker runner")
     # A remote server reuses command/args for the upstream URL + transport; canonicalize
     # them up front so the persisted row (and config_hash) is deterministic. There is no
@@ -2044,6 +2149,10 @@ def create_server(
         idle_timeout_s=idle_timeout_s,
         start_timeout_s=start_timeout_s,
         repo_build_timeout_s=repo_build_timeout_s,
+        health_check_tool=health_check_tool,
+        health_check_arguments=health_check_arguments,
+        health_check_command=health_check_command,
+        health_check_interval_s=health_check_interval_s,
         enabled=enabled,
         source=source,
         # Ownership is identity, not launch config: outside config_hash by
@@ -2073,6 +2182,8 @@ _RETARGET_FIELDS = (
     "post_clone_script",
     "openapi_document",
     "pin_mcp1",
+    # Runs on the host with the child's env, like the setup script.
+    "health_check_command",
 )
 
 
@@ -2115,6 +2226,12 @@ _MUTABLE_FIELDS = {
     # config_hash — a change applies from the next start and never bounces a bridge.
     "start_timeout_s",
     "repo_build_timeout_s",
+    # Health check: run by the supervisor at readiness and on its own interval, outside
+    # config_hash — a change applies from the next activation or periodic check.
+    "health_check_tool",
+    "health_check_arguments",
+    "health_check_command",
+    "health_check_interval_s",
 }
 
 
@@ -2240,8 +2357,25 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     except ValueError:
         session.rollback()
         raise
+    try:
+        (
+            server.health_check_tool,
+            server.health_check_arguments,
+            server.health_check_command,
+            server.health_check_interval_s,
+        ) = normalize_health_check(
+            server.runner,
+            server.health_check_tool,
+            server.health_check_arguments,
+            server.health_check_command,
+            server.health_check_interval_s,
+        )
+    except ValueError:
+        session.rollback()
+        raise
     if server.enabled and scripts_invoke_docker(
-            server.runner, server.setup_script, server.post_clone_script):
+            server.runner, server.setup_script, server.post_clone_script,
+            server.health_check_command):
         session.expire(server)  # raises before any autoflush — discard just this instance's edits
         raise ValueError("Docker CLI invocations require the docker runner")
     if server.runner == "remote":
@@ -2411,6 +2545,10 @@ def clone_server(
         idle_timeout_s=src.idle_timeout_s,
         start_timeout_s=src.start_timeout_s,
         repo_build_timeout_s=src.repo_build_timeout_s,
+        health_check_tool=src.health_check_tool,
+        health_check_arguments=dict(src.health_check_arguments or {}) or None,
+        health_check_command=src.health_check_command,
+        health_check_interval_s=src.health_check_interval_s,
         enabled=False,
         source="clone",
         # The cloner (not the source's owner) owns the copy — cloning is a create.
@@ -2430,7 +2568,8 @@ def set_enabled(session: Session, server_id: str, enabled: bool) -> Server:
     elif enabled and (
             local_exec_invokes_docker(server.runner, server.command, server.args)
             or scripts_invoke_docker(
-                server.runner, server.setup_script, server.post_clone_script)):
+                server.runner, server.setup_script, server.post_clone_script,
+                server.health_check_command)):
         raise ValueError("Docker CLI invocations require the docker runner")
     server.enabled = enabled
     return repo.save_server(session, server)

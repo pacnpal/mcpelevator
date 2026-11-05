@@ -21,6 +21,7 @@ export type StartupPhase =
 	| 'setup'
 	| 'bridge'
 	| 'readiness'
+	| 'health'
 	| 'retry_wait';
 
 export interface StartupStatus {
@@ -257,6 +258,15 @@ export interface ServerDetail extends ServerSummary {
 	/** Deadline in seconds for a repository checkout + post-clone build; null = inherit
 	 * MCPE_REPO_BUILD_TIMEOUT_S. */
 	repo_build_timeout_s: number | null;
+	/** Health check (one form, both optional): a tool called through the server with
+	 * these arguments, or — npx/uvx/command only — a shell command run like the setup
+	 * script. Runs at readiness (a failure fails the start attempt) and, when
+	 * `health_check_interval_s` is set, periodically while running (a failure marks the
+	 * server unhealthy until a check passes). All null = no check. */
+	health_check_tool: string | null;
+	health_check_arguments: Record<string, unknown> | null;
+	health_check_command: string | null;
+	health_check_interval_s: number | null;
 	/** Whether GET /servers/{id}/mcpb would produce a bundle — the backend's
 	 * eligibility verdict, so the UI carries no mirrored rule. */
 	mcpb_exportable: boolean;
@@ -338,6 +348,12 @@ export interface ServerCreate {
 	/** Startup deadlines in seconds, 1..86400 (null = inherit the instance default). */
 	start_timeout_s?: number | null;
 	repo_build_timeout_s?: number | null;
+	/** Health check: a tool call (+ arguments) or a shell command (local runners), not
+	 * both; interval in seconds ≥ 10 (null = readiness only). null clears a field. */
+	health_check_tool?: string | null;
+	health_check_arguments?: Record<string, unknown> | null;
+	health_check_command?: string | null;
+	health_check_interval_s?: number | null;
 	/** Upstream tool names to hide from every exposed surface. [] re-exposes all. */
 	disabled_tools?: string[];
 	/** Upstream tool name -> replacement name/description. Replaces the whole map;
