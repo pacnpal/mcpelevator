@@ -229,7 +229,8 @@ def build(app: FastAPI) -> "_Gate":
         helps when the failure comes back as a failed call.
         An optional health check proves more than "it lists its tools": either
         ``health_check_tool`` (an exposed tool name, called through the server with
-        ``health_check_arguments``; fails on an error result; any runner) or
+        ``health_check_arguments``; fails on an error result; any runner but the built-in
+        mcpelevator server) or
         ``health_check_command`` (npx/uvx/command only: a shell command run like the setup
         script, with the server's env and working directory; fails on a non-zero exit),
         not both. It runs once the server answers, inside the startup deadline, and a
@@ -312,9 +313,11 @@ def build(app: FastAPI) -> "_Gate":
 
     @mcp.tool(annotations=_DESTRUCTIVE)
     async def clear_server_cache(server_id: str) -> Any:
-        """Delete a local (npx/uvx/command) server's cache directory — its downloaded
-        models, Playwright browsers and anything else under its XDG_CACHE_HOME — e.g. to
-        drop a download that was cached corrupt. An enabled server is stopped first and
+        """Delete a local (npx/uvx/command) server's cache directory
+        (``<data_dir>/cache/<server id>``: its downloaded models, Playwright browsers and
+        anything else under its default XDG_CACHE_HOME) — e.g. to drop a download that was
+        cached corrupt. A location the server's ``env`` sets instead (XDG_CACHE_HOME /
+        PLAYWRIGHT_BROWSERS_PATH) is never touched. An enabled server is stopped first and
         restarted after (it re-downloads on start); returns ``freed_bytes``."""
         return await api("POST", f"/api/servers/{_seg(server_id)}/cache/clear")
 

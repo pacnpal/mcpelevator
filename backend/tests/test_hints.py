@@ -183,7 +183,8 @@ def test_playwright_missing_browser_in_the_health_phase_recommends_the_setup_ins
     ]
     hint = startup_hint(lines, "npx", command="npx", args=["-y", "@playwright/mcp"])
     assert hint is not None
-    assert "npx playwright install chromium" in hint
+    assert "npx playwright@<version> install chromium" in hint
+    assert "the Playwright version the server itself uses" in hint
     assert "setup script" in hint
     assert "MCPE_APT_PACKAGES" in hint and "--with-deps" in hint
 
@@ -191,7 +192,7 @@ def test_playwright_missing_browser_in_the_health_phase_recommends_the_setup_ins
 def test_playwright_install_banner_line_is_evidence_too():
     banner = "[health] ║     npx playwright install                                   ║"
     lines = ["[mcpelevator] attempt 1/1: health", banner]
-    assert "npx playwright install chromium" in (startup_hint(lines, "command") or "")
+    assert "npx playwright@<version> install chromium" in (startup_hint(lines, "command") or "")
     # The command merely mentioned in prose is not.
     prose = ["[mcpelevator] attempt 1/1: health", "tip: run npx playwright install first"]
     assert startup_hint(prose, "command") is None
@@ -217,4 +218,17 @@ def test_playwright_hint_adapts_to_the_runner():
     assert "image" in docker and "setup script" not in docker
     remote = startup_hint(lines, "remote") or ""
     assert "upstream" in remote and "setup script" not in remote
-    assert "uvx playwright install chromium" in (startup_hint(lines, "uvx") or "")
+    assert "uvx playwright@<version> install chromium" in (startup_hint(lines, "uvx") or "")
+
+
+def test_playwright_hint_names_the_missing_browser():
+    # Installing chromium doesn't give a server launching Firefox or WebKit its browser.
+    builds = {"firefox": "firefox-1488/firefox/firefox", "webkit": "webkit-2182/pw_run.sh"}
+    for browser, build in builds.items():
+        line = f"[health] Error: Executable doesn't exist at /data/cache/x/ms-playwright/{build}"
+        hint = startup_hint(["[mcpelevator] attempt 1/1: health", line], "npx") or ""
+        assert f"npx playwright@<version> install {browser}" in hint
+        assert "chromium" not in hint
+    headless = _PLAYWRIGHT_LINE.replace("chromium-1179", "chromium_headless_shell-1179")
+    hint = startup_hint(["[mcpelevator] attempt 1/1: health", headless], "npx") or ""
+    assert "install chromium" in hint

@@ -31,7 +31,12 @@ _MCP2_IMPORT = re.compile(
 
 
 def _mcp2_hint(
-    runner: str, setup_failed: bool, command: str, args: Sequence[str], pinned: bool
+    runner: str,
+    setup_failed: bool,
+    command: str,
+    args: Sequence[str],
+    pinned: bool,
+    evidence: Sequence[str] = (),
 ) -> str:
     cause = (
         "the upstream server crashed importing the Python mcp SDK — "
@@ -100,10 +105,26 @@ _PLAYWRIGHT_BROWSER = re.compile(
     r"Executable doesn't exist at \S*ms-playwright"
     r"|^(?:\[health\] )?[\s║|]*npx playwright install[\s║|]*$"
 )
+# The browser a missing executable belongs to (``ms-playwright/firefox-1488/...``); the
+# install banner names none, and chromium covers its headless shell (and ffmpeg) too.
+_PLAYWRIGHT_DIR = re.compile(r"ms-playwright/(firefox|webkit)-")
+
+
+def _playwright_browser(evidence: Sequence[str]) -> str:
+    for line in evidence:
+        found = _PLAYWRIGHT_DIR.search(line)
+        if found:
+            return found.group(1)
+    return "chromium"
 
 
 def _playwright_hint(
-    runner: str, setup_failed: bool, command: str, args: Sequence[str], pinned: bool
+    runner: str,
+    setup_failed: bool,
+    command: str,
+    args: Sequence[str],
+    pinned: bool,
+    evidence: Sequence[str] = (),
 ) -> str:
     cause = "Playwright couldn't find its browser — it was never downloaded where this server runs"
     if runner == "docker":
@@ -122,26 +143,30 @@ def _playwright_hint(
         else "to the server's setup script (it runs before every start, with the "
         "server's environment, so the browser lands in the cache the server reads)"
     )
+    browser = _playwright_browser(evidence)
     python = (
-        " For a Python server, run the install from the same Playwright version "
-        "(e.g. uvx playwright install chromium)."
+        " For a Python server, install with its Python Playwright package instead "
+        f"(e.g. uvx playwright@<version> install {browser})."
         if runner == "uvx"
         else ""
     )
     return (
-        f"{cause}. Add `npx playwright install chromium` {where}; if the browser then "
-        "fails on missing system libraries, add them with MCPE_APT_PACKAGES or use "
-        "`npx playwright install --with-deps chromium` (needs root). Raise the startup "
-        f"timeout if the download is cut off.{python}"
+        f"{cause}. Add `npx playwright@<version> install {browser}` {where}, with "
+        "<version> the Playwright version the server itself uses (another release "
+        "downloads a different browser build than the one it looks for); if the browser "
+        "then fails on missing system libraries, add them with MCPE_APT_PACKAGES or use "
+        f"`npx playwright@<version> install --with-deps {browser}` (needs root). Raise "
+        f"the startup timeout if the download is cut off.{python}"
     )
 
 
-# (signature, (runner, setup_failed, command, args, pinned) -> hint) — first
-# match over the log tail wins. Hints see the launch shape and current pin state
-# so a recommendation is only ever an action the operator can actually take on
-# THIS server — never a toggle that's refused, or one that's already on.
+# (signature, (runner, setup_failed, command, args, pinned, evidence) -> hint) — first
+# match over the log tail wins; ``evidence`` is the lines it matched. Hints see the
+# launch shape and current pin state so a recommendation is only ever an action the
+# operator can actually take on THIS server — never a toggle that's refused, or one
+# that's already on.
 _SIGNATURES: list[
-    tuple[re.Pattern[str], Callable[[str, bool, str, Sequence[str], bool], str]]
+    tuple[re.Pattern[str], Callable[[str, bool, str, Sequence[str], bool, Sequence[str]], str]]
 ] = [
     (_MCP2_IMPORT, _mcp2_hint),
     (_PLAYWRIGHT_BROWSER, _playwright_hint),
@@ -205,6 +230,7 @@ def startup_hint(
         if phase == wanted:
             relevant.append(line)
     for pattern, hint in _SIGNATURES:
-        if any(pattern.search(line) for line in relevant):
-            return hint(runner, setup_failed, command, args, pinned)
+        evidence = [line for line in relevant if pattern.search(line)]
+        if evidence:
+            return hint(runner, setup_failed, command, args, pinned, evidence)
     return None

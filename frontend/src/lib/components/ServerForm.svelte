@@ -2186,6 +2186,7 @@
 							id="srv-health-tool"
 							type="text"
 							bind:value={healthTool}
+							maxlength={256}
 							autocomplete="off"
 							spellcheck="false"
 							placeholder="e.g. ping"

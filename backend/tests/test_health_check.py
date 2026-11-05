@@ -272,7 +272,7 @@ async def test_health_phase_failure_carries_the_playwright_hint(fast_unit, monke
     try:
         await _wait_for(lambda: unit.state == "failed")
         assert "health check failed" in (unit.last_error or "")
-        assert "npx playwright install chromium" in (unit.last_error or "")
+        assert "npx playwright@<version> install chromium" in (unit.last_error or "")
     finally:
         await unit.stop()
 

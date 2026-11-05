@@ -245,7 +245,7 @@ Docker-runner servers keep their own filesystem and are unaffected.
 When a download was cached corrupt (an embedding model failing with `TAR_BAD_ARCHIVE`, say),
 **Clear cache** on the server page (or `POST /api/servers/{id}/cache/clear`, or the built-in
 server's `clear_server_cache` tool) deletes that server's directory and returns the bytes
-freed. It needs the same access as restart. An enabled server is stopped first and
+freed. A location set by the server's own `env` override is not cleared. It needs the same access as restart. An enabled server is stopped first and
 restarted after the delete, so it downloads afresh; a disabled one is only cleared.
 Deleting a server deletes its cache directory.
 
