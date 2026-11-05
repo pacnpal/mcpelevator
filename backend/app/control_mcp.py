@@ -204,7 +204,12 @@ def build(app: FastAPI) -> "_Gate":
         is the HTTP headers sent to the API). Created
         disabled unless ``enabled`` is true. A local runner can launch from a git checkout:
         ``repo_url`` (+ optional ``repo_ref``) is cloned, ``post_clone_script`` runs in it
-        when the commit or script changes, and the command runs inside it.
+        when the commit or script changes, and the command runs inside it. A local
+        (npx/uvx/command) server's ``setup_script``, post-clone script and launch all get
+        its own persistent cache: ``XDG_CACHE_HOME`` and ``PLAYWRIGHT_BROWSERS_PATH`` point
+        under ``<data_dir>/cache/<server id>`` (so ``npx playwright install chromium`` in a
+        setup script lands where the server looks; ``env`` overrides either), and
+        clear_server_cache empties it.
         ``secret_env`` names the ``env`` keys (headers too, for remote and openapi) whose
         values are stored encrypted and never returned: each reads "<hidden>".
         ``start_timeout_s`` (setup and readiness, each per attempt) and
@@ -272,6 +277,14 @@ def build(app: FastAPI) -> "_Gate":
         """Restart an enabled server's bridge from unchanged config (re-discovers tools)."""
         _refuse_self(server_id, "restart")
         return await api("POST", f"/api/servers/{_seg(server_id)}/restart")
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def clear_server_cache(server_id: str) -> Any:
+        """Delete a local (npx/uvx/command) server's cache directory — its downloaded
+        models, Playwright browsers and anything else under its XDG_CACHE_HOME — e.g. to
+        drop a download that was cached corrupt. An enabled server is stopped first and
+        restarted after (it re-downloads on start); returns ``freed_bytes``."""
+        return await api("POST", f"/api/servers/{_seg(server_id)}/cache/clear")
 
     # No destructiveHint: whether a call destroys anything depends on the tool chosen,
     # and an absent hint means "may be destructive" to the client.

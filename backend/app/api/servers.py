@@ -22,6 +22,7 @@ from sqlmodel import Session
 from starlette.responses import Response, StreamingResponse
 
 from app.api.schemas import (
+    CacheCleared,
     ImportResult,
     ImportSkipped,
     ImportWarning,
@@ -49,6 +50,7 @@ from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
 from app.db import get_engine, get_session, repo
 from app.db.models import BUILTIN_RUNNER, Server
+from app.runners import cache as server_cache
 from app.runners import repo as repo_checkout
 from app.runners.builtin import ORIGINAL_HOST_HEADER
 from app.groups import registry as group_registry
@@ -701,6 +703,8 @@ async def delete_server(
         # deleted id, so nothing else would ever reuse or remove it. Last, and best-effort,
         # so a filesystem hiccup can't skip the group resync above.
         await run_in_threadpool(repo_checkout.remove_checkout, get_settings().data_dir, server_id)
+        # Same for its cache directory (models, browsers): keyed by the id, so orphaned.
+        await run_in_threadpool(server_cache.remove_cache, get_settings().data_dir, server_id)
     return Response(status_code=204)
 
 
@@ -1029,6 +1033,73 @@ async def restart_server(
 
     await sup.restart(server_id, authorized=_authorize)
     return _summary(server, sup, session, base_url(request))
+
+
+@router.post("/servers/{server_id}/cache/clear", response_model=CacheCleared)
+async def clear_server_cache(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    """Delete a local server's cache directory (``<data_dir>/cache/<id>``: its
+    XDG_CACHE_HOME and Playwright browsers, app.runners.cache) — e.g. a model download
+    cached corrupt. The directory is deleted while the server is stopped, inside the
+    supervisor's unit lock, so neither the bridge's child nor a setup script is writing
+    into it: an enabled server goes through ``Supervisor.restart`` (stop, delete, queue a
+    fresh activation, which re-downloads), a disabled one is only stopped-and-deleted.
+    Same authorization as restart; 400 for a runner without a per-server cache."""
+    server = _visible(principal, session, server_id)
+    if not server_cache.has_cache(server.runner):
+        raise HTTPException(
+            status_code=400,
+            detail="only local servers (npx, uvx, command) have a per-server cache",
+        )
+    sup = request.app.state.supervisor
+    data_dir = get_settings().data_dir
+    freed = 0
+
+    async def _wipe() -> None:
+        nonlocal freed
+        try:
+            freed = await run_in_threadpool(server_cache.clear_cache, data_dir, server_id)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail=f"cache could not be cleared: {exc}")
+
+    restarted = bool(server.enabled)
+    if restarted:
+        # The restart route's own re-validation, at the supervisor's decision points.
+        def _authorize() -> None:
+            visible, enabled = _visible_enabled_now(server_id, principal)
+            if not visible:
+                raise HTTPException(status_code=404, detail="server not found")
+            if not enabled:
+                # Disabled while the stop awaited teardown: the stop stands (it's the
+                # desired state now) and the clear goes ahead without a restart.
+                raise _DisabledMidway()
+
+        try:
+            await sup.restart(server_id, authorized=_authorize, while_stopped=_wipe)
+        except _DisabledMidway:
+            restarted = False
+    if not restarted:
+        async def _wipe_if_visible() -> None:
+            if not _visible_now(server_id, principal):
+                raise HTTPException(status_code=404, detail="server not found")
+            await _wipe()
+
+        await sup.stop(server_id, while_stopped=_wipe_if_visible)
+    session.expire_all()
+    current = _visible(principal, session, server_id)
+    return CacheCleared(
+        freed_bytes=freed,
+        restarted=restarted,
+        server=_summary(current, sup, session, base_url(request)),
+    )
+
+
+class _DisabledMidway(Exception):
+    """A cache clear's server was disabled while its unit stopped (see above)."""
 
 
 @router.post("/servers/import", response_model=ImportResult, status_code=201)

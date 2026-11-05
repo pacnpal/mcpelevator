@@ -954,6 +954,7 @@ class _HandshakeOnceProxyClient(_TurnAwareProxyClient):
 # the broader "a container must not supply this" set (adds Go proxy vars).
 from app.config import is_control_plane_env_var as _is_control_plane_env_var  # noqa: E402
 from app.runners.repo import FOREIGN_ENV as _CHECKOUT_FOREIGN_ENV  # noqa: E402
+from app.runners import cache as _server_cache  # noqa: E402
 from app.runners.docker import (  # noqa: E402
     is_forbidden_container_env as _is_forbidden_container_env,
     is_reserved_docker_env as _is_reserved_docker_env,
@@ -1002,7 +1003,11 @@ def _child_env(spec: dict) -> dict[str, str]:
         # A source checkout runs from its own .venv, never the control plane's.
         for key in _CHECKOUT_FOREIGN_ENV:
             base.pop(key, None)
-    return {**base, **server_env}
+    # The server's own cache directory (app.runners.cache), handed over by the unit in the
+    # bridge's env: XDG_CACHE_HOME / PLAYWRIGHT_BROWSERS_PATH, unless the server sets them.
+    cache_dir = os.environ.get(_server_cache.BRIDGE_ENV_KEY)
+    cache = _server_cache.cache_env(cache_dir) if cache_dir else {}
+    return {**base, **cache, **server_env}
 
 
 def _build_oauth_auth(oauth: dict):

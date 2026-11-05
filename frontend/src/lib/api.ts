@@ -12,6 +12,7 @@ import { goto } from '$app/navigation';
 import { clearToken, getToken } from './auth';
 import type {
 	AuthStatus,
+	CacheClearResult,
 	CatalogDetail,
 	CatalogList,
 	CatalogSource,
@@ -375,6 +376,18 @@ export function retryServer(id: string): Promise<ServerSummary> {
  */
 export function restartServer(id: string): Promise<ServerSummary> {
 	return request<ServerSummary>(`/servers/${encodeURIComponent(id)}/restart`, {
+		method: 'POST'
+	});
+}
+
+/**
+ * Delete a local (npx/uvx/command) server's cache directory — its XDG_CACHE_HOME and
+ * Playwright browsers under `<data_dir>/cache/<id>`. An enabled server is stopped first
+ * and restarted after (through the same restart primitive); a disabled one is only
+ * cleared. Any other runner is a 400.
+ */
+export function clearServerCache(id: string): Promise<CacheClearResult> {
+	return request<CacheClearResult>(`/servers/${encodeURIComponent(id)}/cache/clear`, {
 		method: 'POST'
 	});
 }

@@ -90,6 +90,14 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   (and the control MCP's `get_repository_draft` / `install_from_repository`) detect the
   steps from a GitHub repo's manifests; detection is best effort and every field stays
   editable.
+- **Per-server cache** (`runners/cache.py`): each local (`npx`/`uvx`/`command`) server's
+  setup/checkout shells and child see `XDG_CACHE_HOME` = `<data_dir>/cache/<id>` and
+  `PLAYWRIGHT_BROWSERS_PATH` under it (server `env` wins). The unit resolves the dir (like
+  the checkout cwd, builders stay pure) and hands it to the bridge in its own env
+  (`MCPE_BRIDGE_CACHE_DIR`), not the size-capped spec; not in `config_hash`.
+  `POST /api/servers/{id}/cache/clear` deletes it inside `Supervisor.restart`'s
+  `while_stopped` hook (or `stop`'s, when disabled), so nothing writes into it meanwhile;
+  delete removes it too.
 - **Upstream OAuth** (`auth/oauth_store.py`, `auth/oauth_flow.py`): a `remote` server can
   authenticate to its upstream via OAuth instead of static `env` headers. The interactive
   authorization-code grant (DCR + PKCE) runs in the control plane (`/api/servers/{id}/oauth/authorize`

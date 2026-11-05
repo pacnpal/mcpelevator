@@ -565,6 +565,14 @@ export interface GroupInfo {
  * restarting it restarts each ENABLED member. `skipped` carries the members with no
  * bridge to bounce (disabled before or during the batch) and `failed` those whose
  * teardown raised — reported rather than aborting the rest. All three hold server ids. */
+/** POST /api/servers/{id}/cache/clear: what the clear freed, and the server after it
+ *  (an enabled one is restarted, so it reads as a queued start). */
+export interface CacheClearResult {
+	freed_bytes: number;
+	restarted: boolean;
+	server: ServerSummary;
+}
+
 export interface GroupRestartResult {
 	name: string;
 	restarted: string[];
