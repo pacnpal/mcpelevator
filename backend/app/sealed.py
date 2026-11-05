@@ -174,19 +174,25 @@ def hide_values(
 ) -> str:
     """``raw[start:end]`` decoded, with every byte belonging to an occurrence of a value
     found anywhere in ``raw`` (so one crossing ``start`` or ``end`` too) shown as
-    :data:`HIDDEN`. ``open_end``: the stream may continue past ``end`` (or was cut there),
-    so a trailing proper prefix of a value is hidden too; ``open_start`` likewise for a
-    leading proper suffix (the stream's head was dropped). Only prefixes/suffixes of 4+
-    characters count: shorter ones are indistinguishable from ordinary text."""
+    :data:`HIDDEN`. ``open_end``: the stream may continue past the end of ``raw`` (or was
+    cut there), so a proper prefix of a value ending there is hidden too; ``open_start``
+    likewise for a proper suffix at the start of ``raw`` (the stream's head was dropped). All matching is on the raw
+    BYTES, before decoding, so an edge that splits a multibyte character inside a value
+    can't turn its bytes into replacement characters that no longer match. Only
+    prefixes/suffixes of 4+ bytes count: shorter ones are indistinguishable from text."""
     end = len(raw) if end is None else end
-    values = [v for v in values if v]
+    needles = [v.encode() for v in values if v]
     spans = []
-    for value in values:
-        needle = value.encode()
+    for needle in needles:
         at = raw.find(needle)
         while at >= 0:
             spans.append((at, at + len(needle)))
             at = raw.find(needle, at + 1)
+    # Anchored on raw's own edges, where the stream was cut, not on the window's.
+    if open_end:
+        spans.extend(_open_end_spans(raw, needles, 0, len(raw)))
+    if open_start:
+        spans.extend(_open_start_spans(raw, needles, 0, len(raw)))
     pieces, pos = [], start
     for lo, hi in sorted(spans):
         if hi <= pos or lo >= end:
@@ -197,25 +203,29 @@ def hide_values(
         pos = max(pos, hi)
     if pos < end:
         pieces.append(raw[pos:end].decode("utf-8", "replace"))
-    text = "".join(pieces)
-    if open_end:
-        text = _hide_open_end(text, values)
-    if open_start:
-        text = _hide_open_start(text, values)
-    return text
+    return "".join(pieces)
 
 
-def _hide_open_end(text: str, values) -> str:
-    for value in values:
-        for k in range(min(len(value) - 1, len(text)), 3, -1):
-            if text[-1] == value[k - 1] and text.endswith(value[:k]):
-                return text[:-k] + HIDDEN
-    return text
+_MIN_PARTIAL = 4  # bytes
 
 
-def _hide_open_start(text: str, values) -> str:
-    for value in values:
-        for k in range(min(len(value) - 1, len(text)), 3, -1):
-            if text[0] == value[-k] and text.startswith(value[-k:]):
-                return HIDDEN + text[k:]
-    return text
+def _open_end_spans(raw: bytes, needles, start: int, end: int):
+    """The span of the longest trailing proper prefix of each value in ``raw[start:end]``."""
+    if end <= start:
+        return
+    for needle in needles:
+        for k in range(min(len(needle) - 1, end - start), _MIN_PARTIAL - 1, -1):
+            if raw[end - 1] == needle[k - 1] and raw.endswith(needle[:k], start, end):
+                yield (end - k, end)
+                break
+
+
+def _open_start_spans(raw: bytes, needles, start: int, end: int):
+    """The span of the longest leading proper suffix of each value in ``raw[start:end]``."""
+    if end <= start:
+        return
+    for needle in needles:
+        for k in range(min(len(needle) - 1, end - start), _MIN_PARTIAL - 1, -1):
+            if raw[start] == needle[-k] and raw.startswith(needle[-k:], start, end):
+                yield (start, start + k)
+                break

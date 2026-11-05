@@ -2351,6 +2351,21 @@ def test_stderr_tee_hides_a_secret_longer_than_the_line_cap():
     pending.writer.close()
 
 
+def test_stderr_tee_hides_a_secret_split_inside_a_multibyte_character():
+    """A ring edge that splits a multibyte character inside a secret must not turn its
+    bytes into replacement characters the partial match no longer recognizes: the
+    matching is on raw bytes, before decoding."""
+    secret = "密碼-super-secret-0123456789"
+    ring = host._StderrTee()
+    ring.secrets = [secret]
+    data = secret.encode() + b"\n" + b" " * host._STDERR_RING_BYTES
+    ring._file(data[: host._STDERR_RING_BYTES + 1])  # overflow by one: drops the 1st byte
+    assert ring._base == 1
+    lines = ring.window(0, ring._read)
+    assert lines == ["<hidden>"], lines
+    ring.writer.close()
+
+
 def test_stderr_tee_hides_a_multiline_secret():
     """A secret spanning lines (a PEM key) is hidden over the raw stream before it is split
     into lines, so neither of its lines reaches the block."""
