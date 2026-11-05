@@ -253,7 +253,8 @@ first (the repair apt asks for, which removes nothing) and says so in the server
 
 Server starts, failed attempts, terminal failures (with the hint and the last lines of
 the server's own output), crashes of a running server, idle stops and stops reach the
-container log at INFO without debug mode; `MCPE_LOG_LEVEL` adjusts that.
+container log at INFO without debug mode; `MCPE_LOG_LEVEL` adjusts that. The per-request
+access log stays out of it unless `MCPE_ACCESS_LOG=true` or debug mode is on.
 
 An enabled server in `failed` or `unhealthy` state can be retried in the UI without
 changing its saved configuration, or through the API:
@@ -715,6 +716,7 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_CONTROL_MCP` | `true` | Provision the built-in mcpelevator MCP server on boot when it's missing; `false` skips that (an existing one stays, turn it off in Settings) |
 | `MCPE_CF_ACCESS_TEAM_DOMAIN` | _(none)_ | Cloudflare Access team domain (`myteam.cloudflareaccess.com`). With `MCPE_CF_ACCESS_AUD`, the built-in server accepts Cloudflare Access sign-ins; see **Manage mcpelevator from an agent** |
 | `MCPE_CF_ACCESS_AUD` | _(none)_ | The Access application's AUD tag (comma-separated for several applications) |
+| `MCPE_ACCESS_LOG` | `false` | uvicorn's one-line-per-request access log (`"GET /api/servers/… 200 OK"`) in the container log when debug mode is off. Off by default because the UI polls; debug mode always logs requests |
 | `MCPE_LOG_LEVEL` | `INFO` | Level of mcpelevator's own log lines when debug mode is off: server starts, failures with the reason and the server's last output lines, crashes, idle stops. `WARNING` keeps only failures |
 | `MCPE_DEBUG` | `false` | Debug mode: TRACE-level logs everywhere (bridges too), a full trace of every request with secrets scrubbed, crash reporting, and `GET /api/debug`; see **Debug mode** |
 | `MCPE_APT_PACKAGES` | _(none)_ | Global, space-separated extra Debian packages installed before mcpelevator starts (Docker image only), not per-server `setup_script`. A failed install warns and boot continues; packages must be reinstalled after container replacement |

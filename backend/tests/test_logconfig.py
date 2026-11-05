@@ -14,15 +14,19 @@ from app import logconfig
 @pytest.fixture
 def app_logger(monkeypatch):
     log = logging.getLogger("app")
-    saved = (log.level, list(log.handlers))
+    access = logging.getLogger(logconfig.ACCESS_LOGGER)
+    saved = (log.level, list(log.handlers), access.level)
     log.handlers = [h for h in log.handlers if not logconfig.is_standard(h)]
     yield log
     log.setLevel(saved[0])
     log.handlers = saved[1]
+    access.setLevel(saved[2])
 
 
 def _use(monkeypatch, **values):
-    settings = SimpleNamespace(**{"debug": False, "log_level": "INFO", **values})
+    settings = SimpleNamespace(
+        **{"debug": False, "log_level": "INFO", "access_log": False, **values}
+    )
     monkeypatch.setattr(logconfig, "get_settings", lambda: settings)
     monkeypatch.setattr(logconfig.debug, "get_settings", lambda: settings)
 
@@ -56,3 +60,22 @@ def test_debug_mode_leaves_logging_to_debug(app_logger, monkeypatch):
 def test_log_level_setting(monkeypatch, value, level):
     _use(monkeypatch, log_level=value)
     assert logconfig.level() == level
+
+
+@pytest.mark.parametrize(("access_log", "shown"), [(False, False), (True, True)])
+def test_access_log_hidden_unless_asked_for(app_logger, monkeypatch, access_log, shown):
+    # The UI polls; one INFO line per request buries the supervisor's lines.
+    _use(monkeypatch, access_log=access_log)
+    access = logging.getLogger(logconfig.ACCESS_LOGGER)
+    access.setLevel(logging.INFO)  # what uvicorn's own config sets before the lifespan
+    logconfig.configure()
+    assert access.isEnabledFor(logging.INFO) is shown
+    assert access.isEnabledFor(logging.WARNING)
+
+
+def test_debug_mode_leaves_the_access_log_alone(app_logger, monkeypatch):
+    _use(monkeypatch, debug=True)
+    access = logging.getLogger(logconfig.ACCESS_LOGGER)
+    access.setLevel(logging.INFO)
+    logconfig.configure()
+    assert access.isEnabledFor(logging.INFO)

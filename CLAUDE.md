@@ -137,7 +137,8 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   global switch is the row's `enabled` (surfaced as the `control_mcp` setting) and the per-user
   switch is `User.control_mcp`. `/api/mcp` checks both on every request.
 - **Standard logging** (`logconfig.py`): with debug off, one scrubbed stderr handler on the
-  `app` logger at `MCPE_LOG_LEVEL` (INFO). The supervisor logs each server's start, failed
+  `app` logger at `MCPE_LOG_LEVEL` (INFO); uvicorn's access log is silenced unless
+  `MCPE_ACCESS_LOG` (debug re-opens it). The supervisor logs each server's start, failed
   attempts, terminal failure (hint + the tail of its own log), crash, idle stop and stop
   there, so a failure's reason reaches the container log without debug mode; debug mode
   removes that handler and takes over. A startup attempt's failure also lands in
