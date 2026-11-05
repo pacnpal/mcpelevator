@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from datetime import datetime, timedelta
 from typing import Awaitable, Callable, NamedTuple, Optional
 
@@ -28,6 +29,8 @@ from app.registry import settings as runtime_settings
 from app.runners.docker import DOCKER_BIN, LABEL_KEY
 from app.supervisor.ports import PortAllocator
 from app.supervisor.unit import ServerUnit
+
+logger = logging.getLogger(__name__)
 
 # `docker ps` Go-template that prints "<container-id> <server-id-label>" per line, so the
 # boot sweep can keep only containers whose label value is a server in THIS instance's DB.
@@ -102,6 +105,10 @@ class Supervisor:
         # Fired after each reconcile pass so a dependent (the group hub) can
         # converge on the new topology. The supervisor stays group-unaware.
         self.on_converged: Optional[Callable[[], Awaitable[None]]] = None
+        # The last start refusal logged per server (forbidden docker, max_running, no
+        # free port). Reconcile re-derives these every pass; logging each once until it
+        # changes or clears keeps the log readable.
+        self._logged_start_errors: dict[str, str] = {}
 
     # --- lookups (used by the reverse proxy + API) ----------------------- #
 
@@ -272,7 +279,7 @@ class Supervisor:
         try:
             await self._stop(server_id)
         except Exception as exc:
-            print(f"[mcpelevator] stop failed for {server_id}: {exc}")
+            logger.warning("server %s: stop failed: %s", server_id, exc)
             unit = self.units.get(server_id)
             if unit is not None:
                 unit.last_error = f"stop failed: {str(exc)[:280]}"
@@ -353,7 +360,7 @@ class Supervisor:
             try:
                 await self.on_converged()
             except Exception as exc:  # a hub bug must never kill the reconcile loop
-                print(f"[mcpelevator] post-reconcile hook error: {exc}")
+                logger.exception("post-reconcile hook failed: %s", exc)
 
     async def _reconcile_once_unlocked(self) -> None:
         # Snapshot desired state under a short-lived session, then RELEASE it before the slow
@@ -416,6 +423,7 @@ class Supervisor:
         # gate: stop any docker unit now forbidden (runner off, or an unhardenable shell wrapper),
         # and surface why
         for sv, reason in forbidden_docker:
+            self._log_start_error(sv.id, sv.slug, reason)
             self.cancel_activation_request(sv.id)
             if sv.id in self.units:
                 await self._stop_quietly(sv.id)
@@ -532,6 +540,10 @@ class Supervisor:
                     # the proxy may wake, and waking a unit whose process never died
                     # would start a second one. Leave it quarantined and try next pass.
                     if await self._stop_quietly(server_id):
+                        logger.info(
+                            "server %s: idle for %ds; stopped until the next request",
+                            server.slug, timeout,
+                        )
                         self._idle.add(server_id)
                         self._write_runtime(
                             server_id, state="idle", pid=None, port=None,
@@ -583,6 +595,7 @@ class Supervisor:
                     last_health=getattr(unit, "last_health", None),
                 )
             elif start_error is not None:
+                self._log_start_error(server_id, server.slug, start_error)
                 # _start raised before creating a unit (port exhaustion / max_running). On the
                 # restart path _stop() doesn't write runtime, so the row still carries the prior
                 # RUNNING pid/port — clear them here (matching the other failure writes) so a
@@ -591,6 +604,11 @@ class Supervisor:
                     server_id, state="failed", pid=None, port=None,
                     last_error=start_error, restart_count=0, last_health=None, tools=[], tools_config_hash="",
                 )
+
+    def _log_start_error(self, server_id: str, slug: str, error: str) -> None:
+        if self._logged_start_errors.get(server_id) != error:
+            self._logged_start_errors[server_id] = error
+            logger.error("server %s: cannot start: %s", slug, error)
 
     def _write_runtime(self, server_id: str, **fields) -> None:
         """Persist one runtime row in its own short-lived session/transaction, so a slow
@@ -604,6 +622,7 @@ class Supervisor:
         reconcile write lock."""
         try:
             await self._start(server, activation_started_at=activation_started_at)
+            self._logged_start_errors.pop(server.id, None)
             return None
         except Exception as exc:  # port exhaustion, max_running, spawn failure
             return str(exc)[:300]
@@ -656,7 +675,7 @@ class Supervisor:
             try:
                 await self.reconcile_once()
             except Exception as exc:  # never let the loop die
-                print(f"[mcpelevator] reconcile error: {exc}")
+                logger.exception("reconcile failed: %s", exc)
             try:
                 await asyncio.wait_for(self._nudge.wait(), timeout=self.interval)
             except asyncio.TimeoutError:

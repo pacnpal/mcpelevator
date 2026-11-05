@@ -136,6 +136,16 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   bridge's internal header (`runners.builtin.is_internal`), never on the rest of `/api` (CSRF). The
   global switch is the row's `enabled` (surfaced as the `control_mcp` setting) and the per-user
   switch is `User.control_mcp`. `/api/mcp` checks both on every request.
+- **Standard logging** (`logconfig.py`): with debug off, one scrubbed stderr handler on the
+  `app` logger at `MCPE_LOG_LEVEL` (INFO). The supervisor logs each server's start, failed
+  attempts, terminal failure (hint + the tail of its own log), crash, idle stop and stop
+  there, so a failure's reason reaches the container log without debug mode; debug mode
+  removes that handler and takes over. A startup attempt's failure also lands in
+  `last_error` while retrying (cleared on running). Setup/checkout shells run behind
+  `unit.DPKG_REPAIR_PREAMBLE`, which runs `dpkg --configure -a` as root when dpkg reports
+  an interrupted run (a setup killed mid-apt otherwise breaks every later attempt).
+  Per-server `start_timeout_s` / `repo_build_timeout_s` override the instance deadlines,
+  outside `config_hash`.
 - **Debug mode** (`debug.py`, `MCPE_DEBUG=true`): deliberately maximal. TRACE logging for every
   logger in the control plane and every bridge (they inherit the env; bridges also run uvicorn at
   `trace`), every SQL statement (values hidden by `hide_parameters`), `TraceMiddleware` logging each request's arrival and headers, its body as the app reads it,

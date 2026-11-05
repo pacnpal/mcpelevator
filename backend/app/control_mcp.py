@@ -206,7 +206,11 @@ def build(app: FastAPI) -> "_Gate":
         ``repo_url`` (+ optional ``repo_ref``) is cloned, ``post_clone_script`` runs in it
         when the commit or script changes, and the command runs inside it.
         ``secret_env`` names the ``env`` keys (headers too, for remote and openapi) whose
-        values are stored encrypted and never returned: each reads "<hidden>"."""
+        values are stored encrypted and never returned: each reads "<hidden>".
+        ``start_timeout_s`` (setup and readiness, each per attempt) and
+        ``repo_build_timeout_s`` (checkout + post-clone build) override the instance's
+        startup deadlines in seconds (1 to 86400; null inherits); raise them for a setup
+        that installs system packages or a browser."""
         return await api("POST", "/api/servers", json=spec.model_dump(exclude_unset=True))
 
     @mcp.tool(annotations=_WRITE)

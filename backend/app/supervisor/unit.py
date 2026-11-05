@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import signal
 import sys
@@ -38,8 +39,32 @@ from app.supervisor.hints import startup_hint
 from app.supervisor.logbuffer import LogBuffer
 
 
+logger = logging.getLogger(__name__)
+
 _BACKOFF_SECONDS = (2.0, 4.0, 8.0, 16.0)
 _READINESS_RETRY_SECONDS = 2.0
+# Lines of the server's own log quoted in the standard log when an activation fails
+# terminally or a running bridge dies, so the reason is there without opening the UI.
+_FAILURE_TAIL_LINES = 20
+_FAILURE_TAIL_LINE_CHARS = 500
+
+# Prepended to every setup / checkout shell. A setup that installs system packages (an
+# ``apt-get install``, ``playwright install --with-deps``) and is stopped mid-run (a
+# disable, a restart, its own deadline) leaves dpkg's journal half-applied, and from then
+# on every apt call refuses with "dpkg was interrupted, you must manually run 'dpkg
+# --configure -a'" — so every later attempt fails the same way until someone repairs it
+# by hand. Only when dpkg says it was interrupted (a pending journal in
+# /var/lib/dpkg/updates, or ``dpkg --audit`` reporting half-done packages), only as root,
+# and only the repair apt itself prescribes: ``dpkg --configure -a`` finishes what was
+# unpacked and removes nothing. A failed repair is reported and the script runs anyway,
+# so its own error stays the one the operator sees.
+DPKG_REPAIR_PREAMBLE = r'''if [ "$(id -u)" = 0 ] && command -v dpkg >/dev/null 2>&1 \
+  && { [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ] || [ -n "$(dpkg --audit 2>/dev/null)" ]; }; then
+  echo "[mcpelevator] dpkg was interrupted by an earlier run; repairing with dpkg --configure -a"
+  DEBIAN_FRONTEND=noninteractive dpkg --configure -a \
+    || echo "[mcpelevator] dpkg repair failed; run 'dpkg --configure -a' and 'apt-get -f install' in the container"
+fi
+'''
 
 
 @dataclass(frozen=True)
@@ -111,6 +136,9 @@ class ServerUnit:
         self.pin_mcp1 = bool(server.pin_mcp1)
         self.spec = _with_checkout_cwd(build_spec(server), server.id)
         self.exposure = {"mcp_http": server.mcp_http, "rest_openapi": server.rest_openapi}
+        # Per-server startup deadlines; None = the instance default (read per attempt).
+        self.start_timeout_s: Optional[int] = getattr(server, "start_timeout_s", None)
+        self.repo_build_timeout_s: Optional[int] = getattr(server, "repo_build_timeout_s", None)
 
         self.host = get_settings().bridge_host
         self.port: Optional[int] = None
@@ -149,9 +177,38 @@ class ServerUnit:
         self._set_state("starting")
         self._set_status("queued", attempt=1, max_attempts=max_attempts)
         self.logs.append(f"[mcpelevator] activation started; max attempts={max_attempts}")
+        logger.info(
+            "server %s: starting (runner %s, up to %d attempt(s), start timeout %gs)",
+            self.slug, self.runner, max_attempts, self._start_timeout(),
+        )
         self._activation_task = asyncio.create_task(self._run_activation(max_attempts))
 
+    def _start_timeout(self) -> float:
+        return float(self.start_timeout_s or get_settings().start_timeout_s)
+
+    def _repo_build_timeout(self) -> float:
+        return float(self.repo_build_timeout_s or get_settings().repo_build_timeout_s)
+
+    def _failure_tail(self) -> str:
+        """The last lines of this server's log, indented for the standard log."""
+        lines = [line for line in list(self.logs.lines)[-_FAILURE_TAIL_LINES:] if line.strip()]
+        if not lines:
+            return ""
+        body = "\n".join(
+            "    " + (line if len(line) <= _FAILURE_TAIL_LINE_CHARS
+                      else line[:_FAILURE_TAIL_LINE_CHARS] + "…")
+            for line in lines
+        )
+        return f"\n  last {len(lines)} log line(s):\n{body}"
+
     async def stop(self) -> None:
+        was = self.state
+        if self.startup_status is not None and self.startup_status.phase in ("setup", "checkout"):
+            logger.warning(
+                "server %s: stopping during %s; the script is interrupted (an interrupted "
+                "package install is repaired on the next start)",
+                self.slug, self.startup_status.phase,
+            )
         self._stopping = True
         self.startup_status = None
         self._set_state("stopping")
@@ -165,6 +222,8 @@ class ServerUnit:
         self.proc = None
         self.setup_proc = None
         self._set_state("stopped")
+        if was != "stopped":
+            logger.info("server %s: stopped", self.slug)
 
     async def _run_activation(self, max_attempts: int) -> None:
         last_failure = "startup failed"
@@ -188,6 +247,11 @@ class ServerUnit:
                             max_attempts=max_attempts,
                             next_retry_at=utcnow() + timedelta(seconds=delay),
                             message=failure,
+                        )
+                        logger.warning(
+                            "server %s: bridge exited while running (%s); "
+                            "starting a new activation in %gs%s",
+                            self.slug, failure, delay, self._failure_tail(),
                         )
                         self.logs.append(
                             f"[mcpelevator] stable run ended: {failure}; "
@@ -213,10 +277,24 @@ class ServerUnit:
                         self.last_error = self._with_hint(last_failure)
                         self.startup_status = None
                         self._release_port()
+                        logger.error(
+                            "server %s: failed to start after %d attempt(s): %s%s",
+                            self.slug, attempt, self.last_error, self._failure_tail(),
+                        )
                         self._set_state("failed")
                         self.logs.append(f"[mcpelevator] activation failed: {self.last_error}")
                         return
                     delay = _BACKOFF_SECONDS[min(attempt - 1, len(_BACKOFF_SECONDS) - 1)]
+                    # Surface the failure on the server itself, not only in the retry
+                    # status: a server retrying a broken setup must not read as clean.
+                    # Cleared when an attempt reaches running.
+                    self.last_error = (
+                        f"attempt {attempt}/{max_attempts} failed: {last_failure}"
+                    )
+                    logger.warning(
+                        "server %s: attempt %d/%d failed: %s; retrying in %gs",
+                        self.slug, attempt, max_attempts, last_failure, delay,
+                    )
                     self._set_state("starting")
                     self._set_status(
                         "retry_wait",
@@ -234,6 +312,7 @@ class ServerUnit:
             await self._cleanup_attempt()
             raise
         except Exception as exc:
+            logger.exception("server %s: activation crashed", self.slug)
             await self._cleanup_attempt()
             if not self._stopping:
                 self.last_error = self._with_hint(str(exc)[:300] or last_failure)
@@ -268,7 +347,7 @@ class ServerUnit:
         return f"{failure} (hint: {hint})" if hint else failure
 
     async def _run_attempt(self, attempt: int, max_attempts: int) -> tuple[bool, int]:
-        self.last_error = None
+        # last_error keeps the previous attempt's failure until this one reaches running.
         self.tools = []
         if self.spec.repo:
             await self._run_checkout(attempt, max_attempts)
@@ -279,9 +358,14 @@ class ServerUnit:
 
         self.last_health = utcnow()
         self.restart_count = 0
+        self.last_error = None
         self.startup_status = None
         self._set_state("running")
         self.logs.append(f"[mcpelevator] ready - {len(self.tools)} tool(s)")
+        logger.info(
+            "server %s: running on port %s with %d tool(s) (attempt %d/%d)",
+            self.slug, self.port, len(self.tools), attempt, max_attempts,
+        )
         return await self._wait_for_bridge_exit(get_settings().restart_stable_s)
 
     async def _run_checkout(self, attempt: int, max_attempts: int) -> None:
@@ -306,7 +390,7 @@ class ServerUnit:
             "checkout",
             script,
             cwd=str(repo_checkout.checkout_dir(settings.data_dir, self.id).parent),
-            timeout=float(settings.repo_build_timeout_s),
+            timeout=self._repo_build_timeout(),
             attempt=attempt,
             max_attempts=max_attempts,
         )
@@ -316,7 +400,7 @@ class ServerUnit:
             "setup",
             self.spec.setup_script,
             cwd=self._effective_child_cwd(),
-            timeout=float(get_settings().start_timeout_s),
+            timeout=self._start_timeout(),
             attempt=attempt,
             max_attempts=max_attempts,
         )
@@ -348,7 +432,7 @@ class ServerUnit:
                     "/bin/sh",
                     "-e",
                     "-c",
-                    script,
+                    DPKG_REPAIR_PREAMBLE + script,
                     cwd=cwd,
                     env=self._effective_child_env(),
                     stdout=asyncio.subprocess.PIPE,
@@ -407,7 +491,7 @@ class ServerUnit:
         if self.proc.stdin is not None:
             try:
                 self.proc.stdin.write(self.spec.openapi_document.encode())
-                await asyncio.wait_for(self.proc.stdin.drain(), settings.start_timeout_s)
+                await asyncio.wait_for(self.proc.stdin.drain(), self._start_timeout())
                 self.proc.stdin.close()
             except (BrokenPipeError, ConnectionResetError):
                 pass  # the bridge already exited; readiness reports it with its log
@@ -418,8 +502,7 @@ class ServerUnit:
         return bridge_payload(self.spec, self.name, **self.exposure)
 
     async def _await_ready(self, attempt: int, max_attempts: int) -> None:
-        settings = get_settings()
-        timeout = float(settings.start_timeout_s)
+        timeout = self._start_timeout()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         url = f"http://{self.host}:{self.port}/mcp"

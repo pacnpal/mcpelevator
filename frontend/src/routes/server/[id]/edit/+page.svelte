@@ -70,6 +70,8 @@
 					serialize_client_requests: server.serialize_client_requests,
 					auth_provider: server.auth_provider,
 					idle_timeout_s: server.idle_timeout_s,
+					start_timeout_s: server.start_timeout_s,
+					repo_build_timeout_s: server.repo_build_timeout_s,
 					oauth: server.oauth,
 					oauth_scopes: server.oauth_scopes,
 					oauth_client_id: server.oauth_client_id,

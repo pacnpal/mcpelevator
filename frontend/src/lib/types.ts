@@ -251,6 +251,12 @@ export interface ServerDetail extends ServerSummary {
 	/** Idle quiescence override in seconds: null = inherit the global setting,
 	 * 0 = never idle this server out. */
 	idle_timeout_s: number | null;
+	/** Startup deadline in seconds for setup and for readiness (each, per attempt);
+	 * null = inherit MCPE_START_TIMEOUT_S. */
+	start_timeout_s: number | null;
+	/** Deadline in seconds for a repository checkout + post-clone build; null = inherit
+	 * MCPE_REPO_BUILD_TIMEOUT_S. */
+	repo_build_timeout_s: number | null;
 	/** Whether GET /servers/{id}/mcpb would produce a bundle — the backend's
 	 * eligibility verdict, so the UI carries no mirrored rule. */
 	mcpb_exportable: boolean;
@@ -326,6 +332,9 @@ export interface ServerCreate {
 	oauth_client_mode?: ServerOauthClientMode;
 	/** Idle quiescence override in seconds (null = inherit, 0 = never idle). */
 	idle_timeout_s?: number | null;
+	/** Startup deadlines in seconds, 1..86400 (null = inherit the instance default). */
+	start_timeout_s?: number | null;
+	repo_build_timeout_s?: number | null;
 	/** Upstream tool names to hide from every exposed surface. [] re-exposes all. */
 	disabled_tools?: string[];
 	/** Upstream tool name -> replacement name/description. Replaces the whole map;

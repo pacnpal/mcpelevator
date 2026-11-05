@@ -186,6 +186,13 @@ class Server(SQLModel, table=True):
     # Excluded from config_hash — changing it must not bounce a running bridge.
     idle_timeout_s: Optional[int] = None
 
+    # Startup deadlines, in seconds: ``start_timeout_s`` bounds the setup script and the
+    # readiness wait (each, per attempt), ``repo_build_timeout_s`` the checkout + post-clone
+    # build. NULL = inherit MCPE_START_TIMEOUT_S / MCPE_REPO_BUILD_TIMEOUT_S. Supervisor
+    # concerns, not launch config: outside config_hash, read when an activation starts.
+    start_timeout_s: Optional[int] = None
+    repo_build_timeout_s: Optional[int] = None
+
     # desired runtime
     enabled: bool = False
     config_hash: str = ""  # idempotency anchor

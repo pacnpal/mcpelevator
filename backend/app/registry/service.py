@@ -1640,6 +1640,27 @@ def normalize_idle_timeout(value: Any) -> Optional[int]:
     return value
 
 
+def normalize_startup_timeout(value: Any, field: str = "start_timeout_s") -> Optional[int]:
+    """Canonicalize a per-server startup deadline (``start_timeout_s`` or
+    ``repo_build_timeout_s``): ``None`` inherits the instance default
+    (MCPE_START_TIMEOUT_S / MCPE_REPO_BUILD_TIMEOUT_S), otherwise whole seconds from 1 to
+    a day. bool is refused for the same reason as in :func:`normalize_idle_timeout`."""
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_STARTUP_TIMEOUT_S
+    ):
+        raise ValueError(
+            f"invalid {field}: {value!r} (seconds, 1 to {MAX_STARTUP_TIMEOUT_S})"
+        )
+    return value
+
+
+MAX_STARTUP_TIMEOUT_S = 86400
+
+
 def normalize_disabled_tools(value: Any) -> list[str]:
     """Canonicalize the per-server hide list: non-empty tool names, de-duplicated and
     SORTED so the stored value (and thus config_hash) is order-independent — reordering the
@@ -1893,6 +1914,8 @@ def create_server(
     oauth_client_secret: Optional[str] = None,
     oauth_client_mode: str = "inherit",
     idle_timeout_s: Optional[int] = None,
+    start_timeout_s: Optional[int] = None,
+    repo_build_timeout_s: Optional[int] = None,
     enabled: bool = False,
     source: str = "manual",
     owner_id: Optional[str] = None,
@@ -1952,6 +1975,8 @@ def create_server(
     if pin_mcp1:
         _require_pinnable_uvx(command, args)
     idle_timeout_s = normalize_idle_timeout(idle_timeout_s)
+    start_timeout_s = normalize_startup_timeout(start_timeout_s, "start_timeout_s")
+    repo_build_timeout_s = normalize_startup_timeout(repo_build_timeout_s, "repo_build_timeout_s")
     disabled_tools = normalize_disabled_tools(disabled_tools)
     tool_overrides = normalize_tool_overrides(tool_overrides, disabled_tools)
     # Last, after docker normalization may have moved `-e K=V` values out of the args.
@@ -1988,6 +2013,8 @@ def create_server(
         oauth_client_secret=oauth_client_secret,
         oauth_client_mode=oauth_client_mode,
         idle_timeout_s=idle_timeout_s,
+        start_timeout_s=start_timeout_s,
+        repo_build_timeout_s=repo_build_timeout_s,
         enabled=enabled,
         source=source,
         # Ownership is identity, not launch config: outside config_hash by
@@ -2054,6 +2081,10 @@ _MUTABLE_FIELDS = {
     # Like auth_provider, idle_timeout_s is enforced outside the bridge (by the
     # supervisor), so it's mutable without entering config_hash — no restart on change.
     "idle_timeout_s",
+    # Startup deadlines: read by the supervisor when an activation starts, outside
+    # config_hash — a change applies from the next start and never bounces a bridge.
+    "start_timeout_s",
+    "repo_build_timeout_s",
 }
 
 
@@ -2246,6 +2277,12 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         if server.pin_mcp1:
             _require_pinnable_uvx(server.command, server.args)
         server.idle_timeout_s = normalize_idle_timeout(server.idle_timeout_s)
+        server.start_timeout_s = normalize_startup_timeout(
+            server.start_timeout_s, "start_timeout_s"
+        )
+        server.repo_build_timeout_s = normalize_startup_timeout(
+            server.repo_build_timeout_s, "repo_build_timeout_s"
+        )
         server.disabled_tools = normalize_disabled_tools(server.disabled_tools)
         server.tool_overrides = normalize_tool_overrides(
             server.tool_overrides, server.disabled_tools or []
@@ -2336,6 +2373,8 @@ def clone_server(
         oauth_client_secret=src.oauth_client_secret,
         oauth_client_mode=src.oauth_client_mode or "inherit",
         idle_timeout_s=src.idle_timeout_s,
+        start_timeout_s=src.start_timeout_s,
+        repo_build_timeout_s=src.repo_build_timeout_s,
         enabled=False,
         source="clone",
         # The cloner (not the source's owner) owns the copy — cloning is a create.

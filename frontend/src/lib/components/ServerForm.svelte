@@ -187,6 +187,10 @@
 				init.idle_timeout_s === null || init.idle_timeout_s === undefined
 					? ''
 					: String(init.idle_timeout_s),
+			// Blank = inherit MCPE_START_TIMEOUT_S / MCPE_REPO_BUILD_TIMEOUT_S (null).
+			startTimeoutText: init.start_timeout_s == null ? '' : String(init.start_timeout_s),
+			repoBuildTimeoutText:
+				init.repo_build_timeout_s == null ? '' : String(init.repo_build_timeout_s),
 			startAfter: init.enabled ?? true,
 			authProvider: init.auth_provider ?? 'inherit',
 			oauth: init.oauth ?? false,
@@ -276,6 +280,8 @@
 	// Stdio runners only: route the child's roots/sampling/elicitation to the caller.
 	let serializeClientRequests = $state(seed.serializeClientRequests);
 	let idleTimeoutText = $state(seed.idleTimeoutText);
+	let startTimeoutText = $state(seed.startTimeoutText);
+	let repoBuildTimeoutText = $state(seed.repoBuildTimeoutText);
 	let authProvider = $state<ServerAuthProvider>(seed.authProvider);
 	let startAfter = $state(seed.startAfter);
 	let advancedOpen = $state(seed.setupScript.trim().length > 0);
@@ -356,6 +362,8 @@
 	const setupBlocked = $derived(!setupAllowed && setupScript.trim().length > 0);
 	// A checkout needs a host process to run in, and a post-clone script needs a checkout.
 	const repoAllowed = $derived(!isRemote && !isDocker);
+	// A server launched from a checkout: the only kind with a build deadline to set.
+	const hasCheckout = $derived(repoAllowed && repoUrl.trim().length > 0);
 	const repoBlocked = $derived(
 		(!repoAllowed && (repoUrl.trim().length > 0 || postCloneScript.trim().length > 0)) ||
 			(postCloneScript.trim().length > 0 && !repoUrl.trim())
@@ -376,6 +384,18 @@
 	const idleTimeoutValid = $derived(
 		idleTimeoutText.trim() === '' || /^\d+$/.test(idleTimeoutText.trim())
 	);
+	// Startup deadlines: blank = inherit; otherwise 1 second to a day (the backend's range).
+	const MAX_STARTUP_TIMEOUT_S = 86400;
+	const startupTimeoutValid = (text: string) => {
+		const t = text.trim();
+		if (t === '') return true;
+		if (!/^\d+$/.test(t)) return false;
+		const n = Number(t);
+		return n >= 1 && n <= MAX_STARTUP_TIMEOUT_S;
+	};
+	const parseTimeout = (text: string) => (text.trim() === '' ? null : Number(text.trim()));
+	const startTimeoutValid = $derived(startupTimeoutValid(startTimeoutText));
+	const repoBuildTimeoutValid = $derived(startupTimeoutValid(repoBuildTimeoutText));
 
 	// The hardened `docker run …` the backend will synthesize, live as the operator types
 	// (an honest preview; the exact hardening flags are elided as […]). Mirrors the real
@@ -472,6 +492,8 @@
 			remoteUrlValid &&
 			baseUrlValid &&
 			idleTimeoutValid &&
+			startTimeoutValid &&
+			(!hasCheckout || repoBuildTimeoutValid) &&
 			!dockerBlocked &&
 			!setupBlocked &&
 			!repoBlocked &&
@@ -553,6 +575,9 @@
 			// bridge ignores it there — keep the payload honest on a runner switch.
 			serialize_client_requests: !isHttpUpstream && serializeClientRequests,
 			idle_timeout_s: idleTimeoutText.trim() === '' ? null : Number(idleTimeoutText.trim()),
+			start_timeout_s: parseTimeout(startTimeoutText),
+			// Only a checkout has a build to time; dropping the repo drops its override.
+			repo_build_timeout_s: hasCheckout ? parseTimeout(repoBuildTimeoutText) : null,
 			auth_provider: authProvider,
 			// Upstream OAuth only applies to remote; the backend forces it off elsewhere,
 			// but keep the payload honest so a runner switch clears it client-side too.
@@ -1752,6 +1777,73 @@
 				<code class="font-mono text-[var(--color-ink-muted)]">0</code> keeps it always running.
 			</p>
 		</div>
+
+		{#if !isBuiltin}
+			<!-- Startup deadlines -->
+			<div class="flex flex-col gap-1.5">
+				<div class="flex flex-wrap gap-4">
+					<div class="flex flex-col gap-1.5">
+						<label
+							for="srv-start-timeout"
+							class="text-xs font-medium text-[var(--color-ink-muted)]"
+						>
+							Startup timeout <span class="text-[var(--color-ink-dim)]">(seconds, optional)</span>
+						</label>
+						<input
+							id="srv-start-timeout"
+							type="text"
+							inputmode="numeric"
+							bind:value={startTimeoutText}
+							autocomplete="off"
+							spellcheck="false"
+							placeholder="inherit default"
+							aria-invalid={!startTimeoutValid}
+							class="w-48 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							style={startTimeoutValid
+								? 'border-color: var(--color-line);'
+								: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+						/>
+					</div>
+					{#if hasCheckout}
+						<div class="flex flex-col gap-1.5">
+							<label
+								for="srv-build-timeout"
+								class="text-xs font-medium text-[var(--color-ink-muted)]"
+							>
+								Checkout &amp; build timeout <span class="text-[var(--color-ink-dim)]">(seconds, optional)</span>
+							</label>
+							<input
+								id="srv-build-timeout"
+								type="text"
+								inputmode="numeric"
+								bind:value={repoBuildTimeoutText}
+								autocomplete="off"
+								spellcheck="false"
+								placeholder="inherit default"
+								aria-invalid={!repoBuildTimeoutValid}
+								class="w-48 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								style={repoBuildTimeoutValid
+									? 'border-color: var(--color-line);'
+									: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+							/>
+						</div>
+					{/if}
+				</div>
+				{#if !startTimeoutValid || (hasCheckout && !repoBuildTimeoutValid)}
+					<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+						Enter a whole number of seconds from 1 to {MAX_STARTUP_TIMEOUT_S} (or leave blank
+						to inherit).
+					</p>
+				{/if}
+				<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+					How long each start attempt may spend in the setup script, and again waiting for
+					the server to answer{hasCheckout ? '; the checkout and its build get their own limit' : ''}.
+					Raise it for a setup that installs system packages or downloads a browser, so it
+					isn't cut off part-way. Blank inherits the instance default. Takes effect on the next
+					start.
+				</p>
+			</div>
+		{/if}
 	</fieldset>
 
 	<!-- Auth -->

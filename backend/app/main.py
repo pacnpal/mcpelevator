@@ -19,7 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.staticfiles import StaticFiles
 
-from app import __version__, control_mcp, debug, usage
+from app import __version__, control_mcp, debug, logconfig, usage
 from app.api import auth as auth_api
 from app.api import catalog as catalog_api
 from app.api import groups as groups_api
@@ -137,6 +137,8 @@ async def lifespan(app: FastAPI):
         # Never-awaited coroutines and callbacks that block the loop over 100ms.
         asyncio.get_running_loop().set_debug(True)
         debug.log_startup()
+    else:
+        logconfig.configure()
     init_db()
     cf_access.prewarm()
     with Session(get_engine()) as session:

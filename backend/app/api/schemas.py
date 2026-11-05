@@ -282,6 +282,10 @@ class ServerDetail(ServerSummary):
     oauth_status: OAuthStatus = OAuthStatus()
     # Idle quiescence: None = inherit the global `idle_timeout_s` setting; 0 = never.
     idle_timeout_s: Optional[int] = None
+    # Startup deadlines (seconds): None = inherit MCPE_START_TIMEOUT_S /
+    # MCPE_REPO_BUILD_TIMEOUT_S.
+    start_timeout_s: Optional[int] = None
+    repo_build_timeout_s: Optional[int] = None
     # Upstream tool names hidden from every exposed surface. Empty = expose all (default).
     disabled_tools: list[str] = []
     # Upstream tool name -> replacement name/description. Empty = serve tools as declared.
@@ -356,6 +360,10 @@ class ServerCreate(BaseModel):
     # StrictInt: lax mode coerces a JSON `true` to 1, which would silently
     # configure a one-second shutdown instead of failing validation.
     idle_timeout_s: Optional[StrictInt] = None
+    # Startup deadlines in seconds (≥ 1): ``start_timeout_s`` bounds setup and readiness,
+    # ``repo_build_timeout_s`` the checkout + post-clone build. None = the instance default.
+    start_timeout_s: Optional[StrictInt] = None
+    repo_build_timeout_s: Optional[StrictInt] = None
     enabled: bool = False
     # Provenance. Only a "catalog:<id>" (registry install) or "github:<owner>/<repo>"
     # (repository install) value is honored; anything else falls back to "manual"
@@ -413,6 +421,10 @@ class ServerUpdate(BaseModel):
     # global default" and is preserved by the PATCH handler (model_fields_set).
     # StrictInt so a JSON `true` can't lax-coerce to a 1-second shutdown.
     idle_timeout_s: Optional[StrictInt] = None
+    # Startup deadlines; an explicit null means "inherit the instance default", like
+    # idle_timeout_s.
+    start_timeout_s: Optional[StrictInt] = None
+    repo_build_timeout_s: Optional[StrictInt] = None
     # Admin-only reassignment; explicit null = make it admin-owned. Ignored (403)
     # for members. Preserved-on-null like the OAuth client fields.
     owner_id: Optional[str] = None
