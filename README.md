@@ -244,6 +244,21 @@ pending retry. While attempts are failing, the server's `last_error` carries the
 one (`attempt 1/5 failed: setup exited with code 100`), and it clears once the server is
 running.
 
+Readiness only proves the bridge answers `tools/list`. An optional per-server **health
+check** proves more: either a **tool call** (`health_check_tool` plus
+`health_check_arguments`, called through the bridge as clients see it; fails on an error
+result; any runner) or, for npx/uvx/command servers, a **shell command**
+(`health_check_command`, run like the setup script with the server's environment and
+working directory; fails on a non-zero exit). It runs once the server answers, inside the
+startup timeout, and a failure fails that attempt (`health check failed: …` in
+`last_error`, its output in the server's log under an `attempt N/M: health` marker).
+With `health_check_interval_s` (10 seconds or more; blank = at startup only) it also runs
+while the server is running: a failure marks the server `unhealthy` — `/api/health/{slug}`
+answers 503 and `/s/<slug>` stops routing to it — without restarting it, and a later
+passing check returns it to `running`. Checks are never counted as usage, never run
+against an idle server, and never keep one awake. A change applies from the next start or
+check and never restarts a running server.
+
 Stopping a server mid-setup (a disable, a restart, or the setup's own timeout) kills the
 script. A package install killed part-way leaves dpkg interrupted, and from then on
 every `apt-get` refuses with "dpkg was interrupted, you must manually run

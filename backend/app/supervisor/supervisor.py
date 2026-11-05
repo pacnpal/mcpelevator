@@ -28,7 +28,7 @@ from app.registry import service as registry_service
 from app.registry import settings as runtime_settings
 from app.runners.docker import DOCKER_BIN, LABEL_KEY
 from app.supervisor.ports import PortAllocator
-from app.supervisor.unit import ServerUnit
+from app.supervisor.unit import HealthCheck, ServerUnit
 
 logger = logging.getLogger(__name__)
 
@@ -412,7 +412,7 @@ class Supervisor:
             if registry_service.local_exec_invokes_docker(
                 sv.runner, sv.command, sv.args
             ) or registry_service.scripts_invoke_docker(
-                sv.runner, sv.setup_script, sv.post_clone_script
+                sv.runner, sv.setup_script, sv.post_clone_script, sv.health_check_command
             ):
                 forbidden_docker.append(
                     (sv, "Docker CLI invocations require the docker runner")
@@ -565,7 +565,10 @@ class Supervisor:
                 # in this sweep looks at a unit whose config still matches.
                 or server_id in self._teardown_failed
                 or unit.config_hash != server.config_hash
-                or unit.state == "unhealthy"
+                # A crashed bridge's unhealthy, not one whose bridge still runs but fails
+                # its periodic health check: that one only reports (no auto-restart), is
+                # re-checked below, and returns to running when a check passes.
+                or (unit.state == "unhealthy" and not getattr(unit, "health_failing", False))
             ):
                 # Start only if the teardown actually succeeded: a failed one leaves the
                 # unit quarantined (the next pass retries it), and launching a second
@@ -586,6 +589,14 @@ class Supervisor:
                 # started here from a pre-rename snapshot). Re-reading the slug each
                 # pass guarantees ``endpoint(<new>)`` resolves within one interval.
                 unit.slug = server.slug
+                # Periodic health check: the CURRENT config each pass (it's outside
+                # config_hash, so an edit lands on the next check without a restart). The
+                # unit starts a check only when one is due against a live, running bridge;
+                # it runs off this sweep and never counts as traffic, so it can't hold an
+                # idle window open (and an idle server has no unit to check).
+                tick = getattr(unit, "tick_health_check", None)
+                if tick is not None:
+                    tick(HealthCheck.from_server(server))
                 self._write_runtime(
                     server_id,
                     state=unit.state, pid=unit.pid, port=unit.port,

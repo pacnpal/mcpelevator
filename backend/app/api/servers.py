@@ -136,6 +136,9 @@ def _visible(
 _LAUNCH_FIELDS = {
     "runner", "command", "args", "run_args", "env", "cwd", "setup_script", "pin_mcp1",
     "repo_url", "repo_ref", "post_clone_script", "openapi_document",
+    # Not launch config (outside config_hash), but it executes on the host like the
+    # setup script, so shaping it takes the same local-runner permission.
+    "health_check_command",
 }
 
 
@@ -150,6 +153,8 @@ def _row_launch_value(row: Server, key: str):
         return sealed.masked(row.env or {})
     if key in ("repo_url", "repo_ref", "post_clone_script", "openapi_document"):
         return getattr(row, key) or ""
+    if key == "health_check_command":
+        return (getattr(row, key) or "").strip() or None
     return getattr(row, key)
 
 
@@ -160,9 +165,16 @@ def _launch_touched(row: Server, changes: dict) -> bool:
     nullable in storage (legacy rows hold NULL, read as [] / false) while the form
     always sends a value — normalized so NULL vs the empty value isn't a "change"."""
     return any(
-        changes[k] != _row_launch_value(row, k)
+        _sent_launch_value(changes, k) != _row_launch_value(row, k)
         for k in changes.keys() & _LAUNCH_FIELDS
     )
+
+
+def _sent_launch_value(changes: dict, key: str):
+    # A blank health check command and none at all are the same thing (no check).
+    if key == "health_check_command":
+        return (changes[key] or "").strip() or None
+    return changes[key]
 
 
 def _fresh(session: Session, principal: Principal) -> Principal:
@@ -308,6 +320,10 @@ def _detail(
         idle_timeout_s=server.idle_timeout_s,
         start_timeout_s=server.start_timeout_s,
         repo_build_timeout_s=server.repo_build_timeout_s,
+        health_check_tool=server.health_check_tool,
+        health_check_arguments=server.health_check_arguments,
+        health_check_command=server.health_check_command,
+        health_check_interval_s=server.health_check_interval_s,
         disabled_tools=list(server.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),
@@ -482,13 +498,18 @@ async def update_server(
     # null on the nullable OAuth client fields — so clearing a static client id/secret to
     # fall back to Dynamic Client Registration would be silently ignored. Preserve those
     # when the client actually sent them (model_fields_set) so null means "clear" (and,
-    # for idle_timeout_s and the startup timeouts, "inherit the global default").
+    # for idle_timeout_s and the startup timeouts, "inherit the global default"; for the
+    # health check fields, "no check").
     for key in (
         "oauth_client_id",
         "oauth_client_secret",
         "idle_timeout_s",
         "start_timeout_s",
         "repo_build_timeout_s",
+        "health_check_tool",
+        "health_check_arguments",
+        "health_check_command",
+        "health_check_interval_s",
     ):
         if key in payload.model_fields_set:
             changes[key] = provided[key]

@@ -266,6 +266,112 @@ describe('ServerForm source repository', () => {
 	});
 });
 
+describe('ServerForm health check', () => {
+	function submit(target: HTMLElement) {
+		target.querySelector('form')?.dispatchEvent(
+			new SubmitEvent('submit', { bubbles: true, cancelable: true })
+		);
+	}
+
+	function type(el: HTMLInputElement | HTMLTextAreaElement | null, value: string) {
+		if (!el) throw new Error('field not found');
+		el.value = value;
+		el.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+	}
+
+	it('sends no check by default', () => {
+		const onsubmit = vi.fn();
+		const target = render({
+			initial: { name: 'plain', runner: 'command', command: '/usr/bin/server', args: [] },
+			onsubmit
+		});
+		submit(target);
+		expect(onsubmit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				health_check_tool: null,
+				health_check_arguments: null,
+				health_check_command: null,
+				health_check_interval_s: null
+			})
+		);
+	});
+
+	it('seeds a tool check and submits its arguments and interval', () => {
+		const onsubmit = vi.fn();
+		const target = render({
+			mode: 'edit',
+			initial: {
+				name: 'browser',
+				runner: 'remote',
+				command: 'https://example.com/mcp',
+				args: ['streamable-http'],
+				health_check_tool: 'navigate',
+				health_check_arguments: { url: 'about:blank' },
+				health_check_interval_s: 300
+			},
+			onsubmit
+		});
+		expect(target.querySelector<HTMLSelectElement>('#srv-health-mode')?.value).toBe('tool');
+		// A remote server has no host shell: the command form isn't offered.
+		expect(target.querySelector('#srv-health-mode option[value="command"]')).toBeNull();
+		expect(target.querySelector<HTMLInputElement>('#srv-health-tool')?.value).toBe('navigate');
+		submit(target);
+		expect(onsubmit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				health_check_tool: 'navigate',
+				health_check_arguments: { url: 'about:blank' },
+				health_check_command: null,
+				health_check_interval_s: 300
+			})
+		);
+	});
+
+	it('blocks invalid arguments and a too-short interval', () => {
+		const target = render({
+			initial: {
+				name: 'x',
+				runner: 'command',
+				command: '/usr/bin/server',
+				args: [],
+				health_check_tool: 'ping'
+			},
+			onsubmit: vi.fn()
+		});
+		const submitButton = target.querySelector<HTMLButtonElement>('button[type="submit"]');
+		expect(submitButton?.disabled).toBe(false);
+		type(target.querySelector('#srv-health-args'), '[1, 2]');
+		expect(submitButton?.disabled).toBe(true);
+		type(target.querySelector('#srv-health-args'), '{"a": 1}');
+		expect(submitButton?.disabled).toBe(false);
+		type(target.querySelector('#srv-health-interval'), '5');
+		expect(submitButton?.disabled).toBe(true);
+	});
+
+	it('submits a shell command check for a local runner', () => {
+		const onsubmit = vi.fn();
+		const target = render({
+			initial: {
+				name: 'local',
+				runner: 'command',
+				command: '/usr/bin/server',
+				args: [],
+				health_check_command: 'curl -fsS http://127.0.0.1:3000/health'
+			},
+			onsubmit
+		});
+		expect(target.querySelector<HTMLSelectElement>('#srv-health-mode')?.value).toBe('command');
+		submit(target);
+		expect(onsubmit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				health_check_tool: null,
+				health_check_command: 'curl -fsS http://127.0.0.1:3000/health',
+				health_check_interval_s: null
+			})
+		);
+	});
+});
+
 describe('ServerForm secret env', () => {
 	it('keeps a hidden secret blank and sends it back as hidden', () => {
 		const onsubmit = vi.fn();

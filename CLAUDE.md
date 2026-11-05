@@ -147,6 +147,17 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   an interrupted run (a setup killed mid-apt otherwise breaks every later attempt).
   Per-server `start_timeout_s` / `repo_build_timeout_s` override the instance deadlines,
   outside `config_hash`.
+- **Health checks** (`supervisor.unit.HealthCheck`, issue #225): an optional per-server
+  tool call (through the bridge's loopback `/mcp`, so never usage or idle traffic) or,
+  for npx/uvx/command, a shell command run like setup (`DPKG_REPAIR_PREAMBLE`, child env
+  and cwd). It runs at the end of `_await_ready` as its own `health` phase under the same
+  deadline (a failure is an ordinary `_AttemptFailed`), and, with
+  `health_check_interval_s`, the reconcile sweep hands each unit its current check
+  (`tick_health_check`), which runs a due one against a live running unit off the sweep.
+  A periodic failure sets `unhealthy` with `health_failing` (no restart: the sweep only
+  re-derives a crashed `unhealthy`), and a passing check returns it to `running`. Outside
+  `config_hash`; `health_check_command` is a retarget field for sealed env and needs the
+  local-runner permission.
 - **Debug mode** (`debug.py`, `MCPE_DEBUG=true`): deliberately maximal. TRACE logging for every
   logger in the control plane and every bridge (they inherit the env; bridges also run uvicorn at
   `trace`), every SQL statement (values hidden by `hide_parameters`), `TraceMiddleware` logging each request's arrival and headers, its body as the app reads it,

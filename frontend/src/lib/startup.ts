@@ -17,6 +17,7 @@ const PHASE_LABELS: Record<StartupPhase, string> = {
 	setup: 'Running setup',
 	bridge: 'Starting bridge',
 	readiness: 'Checking readiness',
+	health: 'Running health check',
 	retry_wait: 'Waiting to retry'
 };
 

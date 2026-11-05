@@ -19,7 +19,9 @@ AuthProvider = Literal["inherit", "none", "bearer", "oauth"]
 # ('auto' = self-probe CIMD with DCR fallback, 'cimd'/'dcr' = explicit, probe-free).
 OauthClientMode = Literal["inherit", "auto", "cimd", "dcr"]
 EffectiveAuthProvider = Literal["none", "bearer", "oauth"]
-StartupPhase = Literal["queued", "checkout", "setup", "bridge", "readiness", "retry_wait"]
+StartupPhase = Literal[
+    "queued", "checkout", "setup", "bridge", "readiness", "health", "retry_wait"
+]
 
 
 class Transports(BaseModel):
@@ -286,6 +288,12 @@ class ServerDetail(ServerSummary):
     # MCPE_REPO_BUILD_TIMEOUT_S.
     start_timeout_s: Optional[int] = None
     repo_build_timeout_s: Optional[int] = None
+    # Health check (issue #225): a tool call or (local runners) a shell command, run at
+    # readiness and, with an interval, periodically. All null = no check. See ServerCreate.
+    health_check_tool: Optional[str] = None
+    health_check_arguments: Optional[dict] = None
+    health_check_command: Optional[str] = None
+    health_check_interval_s: Optional[int] = None
     # Upstream tool names hidden from every exposed surface. Empty = expose all (default).
     disabled_tools: list[str] = []
     # Upstream tool name -> replacement name/description. Empty = serve tools as declared.
@@ -364,6 +372,17 @@ class ServerCreate(BaseModel):
     # ``repo_build_timeout_s`` the checkout + post-clone build. None = the instance default.
     start_timeout_s: Optional[StrictInt] = None
     repo_build_timeout_s: Optional[StrictInt] = None
+    # Optional health check, one form: ``health_check_tool`` (an exposed tool name, called
+    # through the bridge with ``health_check_arguments``; fails on an error result) or
+    # ``health_check_command`` (npx/uvx/command only: a shell command run like the setup
+    # script, with the server's env and cwd; fails on a non-zero exit). It runs once the
+    # server answers, inside the startup deadline (a failure fails the attempt), and every
+    # ``health_check_interval_s`` seconds (≥ 10; null = at startup only) while it runs,
+    # where a failure marks it unhealthy until a check passes. Never counted as usage.
+    health_check_tool: Optional[StrictStr] = None
+    health_check_arguments: Optional[dict] = None
+    health_check_command: Optional[StrictStr] = None
+    health_check_interval_s: Optional[StrictInt] = None
     enabled: bool = False
     # Provenance. Only a "catalog:<id>" (registry install) or "github:<owner>/<repo>"
     # (repository install) value is honored; anything else falls back to "manual"
@@ -425,6 +444,12 @@ class ServerUpdate(BaseModel):
     # idle_timeout_s.
     start_timeout_s: Optional[StrictInt] = None
     repo_build_timeout_s: Optional[StrictInt] = None
+    # Health check; an explicit null clears the field (all null = no check), like the
+    # startup deadlines. Outside config_hash: never restarts a running bridge.
+    health_check_tool: Optional[StrictStr] = None
+    health_check_arguments: Optional[dict] = None
+    health_check_command: Optional[StrictStr] = None
+    health_check_interval_s: Optional[StrictInt] = None
     # Admin-only reassignment; explicit null = make it admin-owned. Ignored (403)
     # for members. Preserved-on-null like the OAuth client fields.
     owner_id: Optional[str] = None

@@ -91,6 +91,51 @@ def _mcp2_hint(
     )
 
 
+# Playwright launching a browser it never downloaded: its own error names the missing
+# executable under the ms-playwright cache, and its banner tells you to run the install
+# command on a line of its own (box-drawing borders, and the unit's "[health] " prefix
+# on a health check's output, aside). A bare mention of the command inside other text
+# is not evidence.
+_PLAYWRIGHT_BROWSER = re.compile(
+    r"Executable doesn't exist at \S*ms-playwright"
+    r"|^(?:\[health\] )?[\s║|]*npx playwright install[\s║|]*$"
+)
+
+
+def _playwright_hint(
+    runner: str, setup_failed: bool, command: str, args: Sequence[str], pinned: bool
+) -> str:
+    cause = "Playwright couldn't find its browser — it was never downloaded where this server runs"
+    if runner == "docker":
+        return (
+            f"{cause}. Use (or build) an image that ships the Playwright browsers "
+            "(e.g. one based on mcr.microsoft.com/playwright), or install them in its Dockerfile"
+        )
+    if runner not in ("npx", "uvx", "command"):
+        return (
+            f"{cause}: the upstream server is missing it, and it has to be installed "
+            "where that server runs"
+        )
+    where = (
+        "at the start of the setup script, before whatever ran Playwright"
+        if setup_failed
+        else "to the server's setup script (it runs before every start, with the "
+        "server's environment, so the browser lands in the cache the server reads)"
+    )
+    python = (
+        " For a Python server, run the install from the same Playwright version "
+        "(e.g. uvx playwright install chromium)."
+        if runner == "uvx"
+        else ""
+    )
+    return (
+        f"{cause}. Add `npx playwright install chromium` {where}; if the browser then "
+        "fails on missing system libraries, add them with MCPE_APT_PACKAGES or use "
+        "`npx playwright install --with-deps chromium` (needs root). Raise the startup "
+        f"timeout if the download is cut off.{python}"
+    )
+
+
 # (signature, (runner, setup_failed, command, args, pinned) -> hint) — first
 # match over the log tail wins. Hints see the launch shape and current pin state
 # so a recommendation is only ever an action the operator can actually take on
@@ -99,6 +144,7 @@ _SIGNATURES: list[
     tuple[re.Pattern[str], Callable[[str, bool, str, Sequence[str], bool], str]]
 ] = [
     (_MCP2_IMPORT, _mcp2_hint),
+    (_PLAYWRIGHT_BROWSER, _playwright_hint),
 ]
 
 # Failures repeat per attempt, so the signature is always near the end; a
@@ -106,7 +152,8 @@ _SIGNATURES: list[
 _TAIL_LINES = 400
 
 # The unit's own phase markers (``ServerUnit`` logs one before each phase's
-# output: "[mcpelevator] attempt N/M: setup|bridge|readiness"). They section the
+# output: "[mcpelevator] attempt N/M: setup|bridge|readiness|health"; the health
+# check's output counts on the launch side, like the bridge's). They section the
 # shared log so a signature is only credited to the phase that emitted it — a
 # setup script that PRINTS the traceback but succeeds must not put a launch-argv
 # remedy on an unrelated later failure, and vice versa.
@@ -116,7 +163,7 @@ _TAIL_LINES = 400
 # an unbounded group would raise and (via the unit's failure path) could block the
 # activation from converging to "failed".
 _PHASE_MARKER = re.compile(
-    r"^\[mcpelevator\] attempt (\d{1,9})/\d+: (checkout|setup|bridge|readiness)\b"
+    r"^\[mcpelevator\] attempt (\d{1,9})/\d+: (checkout|setup|bridge|readiness|health)\b"
 )
 
 

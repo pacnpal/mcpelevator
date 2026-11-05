@@ -210,7 +210,18 @@ def build(app: FastAPI) -> "_Gate":
         ``start_timeout_s`` (setup and readiness, each per attempt) and
         ``repo_build_timeout_s`` (checkout + post-clone build) override the instance's
         startup deadlines in seconds (1 to 86400; null inherits); raise them for a setup
-        that installs system packages or a browser."""
+        that installs system packages or a browser.
+        An optional health check proves more than "it lists its tools": either
+        ``health_check_tool`` (an exposed tool name, called through the server with
+        ``health_check_arguments``; fails on an error result; any runner) or
+        ``health_check_command`` (npx/uvx/command only: a shell command run like the setup
+        script, with the server's env and working directory; fails on a non-zero exit),
+        not both. It runs once the server answers, inside the startup deadline, and a
+        failure fails that start attempt (retried, then "failed" with "health check
+        failed: ..." in last_error). ``health_check_interval_s`` (10 to 86400; null = at
+        startup only) also runs it periodically while the server runs: a failure marks it
+        "unhealthy" (no restart, /api/health/<slug> answers 503) until a check passes.
+        Health checks are not counted as usage and never wake an idle server."""
         return await api("POST", "/api/servers", json=spec.model_dump(exclude_unset=True))
 
     @mcp.tool(annotations=_WRITE)
@@ -227,8 +238,13 @@ def build(app: FastAPI) -> "_Gate":
         "<hidden>" keeps it and any other value replaces it. ``secret_env`` lists the
         secret keys (omit it to leave each key as it is). Making a secret visible, or
         changing what the server runs (runner, command, args, run_args, cwd,
-        setup_script, the repo fields, openapi_document, and for a local server any other
-        env value), needs those secret values sent in full in the same call."""
+        setup_script, the repo fields, openapi_document, health_check_command, and for a
+        local server any other env value), needs those secret values sent in full in the
+        same call. The health check fields (``health_check_tool`` /
+        ``health_check_arguments``, or ``health_check_command``, and
+        ``health_check_interval_s``; see create_server) never restart the bridge: a
+        change applies from the next start or periodic check, and an explicit null clears
+        one (all null = no check)."""
         if changes.model_fields_set & _RESTARTING_FIELDS:
             _refuse_self(server_id, "change its exposure or tool policy")
         return await api(

@@ -71,6 +71,13 @@ Typical flows:
   servers start disabled. Review them, then enable_server and wait_for_server.
 - Hide or relabel a server's tools: update_server with disabled_tools or
   tool_overrides.
+- Check that a server really works, not just that it lists tools: set
+  health_check_tool (+ health_check_arguments) to a cheap tool call, or, for
+  npx/uvx/command, health_check_command to a shell command (exit 0 = healthy).
+  It runs at startup (a failure fails the start, explained in last_error and
+  get_server_logs), and every health_check_interval_s seconds if set, where a
+  failure marks the server "unhealthy" until a check passes. Editing it never
+  restarts the server.
 - Keep secrets write-only: list the env keys (or headers) in secret_env on
   create_server or update_server. Their values are encrypted and read "<hidden>"
   from then on; send "<hidden>" back to keep one. Making one visible, or changing
