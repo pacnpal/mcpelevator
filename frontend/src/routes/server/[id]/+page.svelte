@@ -78,7 +78,16 @@
 			if (requestedId !== id) return; // route changed mid-flight; stale response
 			// An action returned newer state for THIS server; one for a server the page has
 			// since left is no reason to drop it (that would strand the spinner).
-			if (revision !== mutationRevision && server?.id === requestedId) return;
+			if (revision !== mutationRevision && server?.id === requestedId) {
+				// That newer state is on screen already, so the page is ready: a discarded
+				// non-silent load must not leave the spinner up (e.g. A -> B -> A while A's
+				// cache clear was in flight, which then landed before A's reload).
+				if (!silent) {
+					loadState = 'ready';
+					loadError = null;
+				}
+				return;
+			}
 			server = result;
 			loadState = 'ready';
 			loadError = null;
