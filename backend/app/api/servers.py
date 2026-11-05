@@ -1116,7 +1116,20 @@ async def clear_server_cache(
                 raise HTTPException(status_code=404, detail="server not found")
             await _wipe()
 
-        await sup.stop(server_id, while_stopped=_wipe_if_visible)
+        def _authorize_stop() -> None:
+            # Before the stop, inside the unit lock: an owner reassignment, or the server
+            # being enabled and started, while this waited must not let the clear
+            # interrupt a unit it no longer has the right to (or would leave stopped).
+            visible, enabled = _visible_enabled_now(server_id, principal)
+            if not visible:
+                raise HTTPException(status_code=404, detail="server not found")
+            if enabled:
+                raise HTTPException(
+                    status_code=409,
+                    detail="the server was enabled meanwhile; clear its cache again",
+                )
+
+        await sup.stop(server_id, while_stopped=_wipe_if_visible, authorized=_authorize_stop)
     session.expire_all()
     current = _visible(principal, session, server_id)
     return CacheCleared(

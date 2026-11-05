@@ -2295,6 +2295,31 @@ def test_stderr_block_keeps_the_last_lines_within_the_cap():
     assert huge.startswith("…") and len(huge.encode()) <= host._STDERR_ATTACH_BYTES
 
 
+def test_stderr_tee_hides_a_secret_before_the_line_cap():
+    """The tee caps a line at _STDERR_LINE_MAX; a secret straddling that cap must be
+    hidden whole first, never left as a visible prefix — at a newline-terminated line's
+    cap, and at a newline-less flood's cut, across chunk boundaries too."""
+    secret = "S" * 32 + "0123456789abcdef0123456789abcdef"  # 64 chars
+    cap = host._STDERR_LINE_MAX
+
+    tee = host._StderrTee()
+    tee.secrets = [secret]
+    tee._file(("x" * (cap - 16) + secret + "\n").encode())
+    (line,) = tee.window(0, tee._read)
+    assert line == "x" * (cap - 16) + "<hidden>"
+
+    flood = host._StderrTee()
+    flood.secrets = [secret]
+    data = ("y" * (cap - 10) + secret + "y" * 50).encode()
+    for at in range(0, len(data), 1000):  # arrives in pieces, no newline at all
+        flood._file(data[at : at + 1000])
+    lines = flood.window(0, flood._read)
+    assert all(secret[:8] not in text for text in lines), lines
+    assert any("<hidden>" in text for text in lines)
+    tee.writer.close()
+    flood.writer.close()
+
+
 @pytest.mark.asyncio
 async def test_stderr_tee_windows_lines_by_stream_position(capsys):
     """A window is a range of stream positions: a line written before the window opened

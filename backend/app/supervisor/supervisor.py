@@ -286,17 +286,22 @@ class Supervisor:
             return False
         return True
 
-    async def stop(self, server_id: str, while_stopped=None) -> None:
+    async def stop(self, server_id: str, while_stopped=None, authorized=None) -> None:
         """Public stop (e.g. API-driven delete). Steady state is still reconciled.
 
         ``while_stopped`` (an optional zero-arg coroutine function, may raise) runs after
         the stop and still inside the unit lock, so no reconcile pass can relaunch the
-        server while it works on the server's files (a cache clear)."""
+        server while it works on the server's files (a cache clear). ``authorized`` (a
+        zero-arg callable, may raise) runs inside the lock BEFORE the stop, as in
+        :meth:`restart`: a caller's entry check precedes the lock wait, and a refusal
+        afterwards could no longer undo the interruption."""
         # An operator/API stop overrides quiescence bookkeeping: the server must not
         # come back as "idle" (wakeable) after a delete/disable/disconnect.
         self._idle.discard(server_id)
         self._last_activity.pop(server_id, None)
         async with self._unit_lock:
+            if authorized is not None:
+                authorized()
             await self._stop(server_id)
             if while_stopped is not None:
                 await while_stopped()

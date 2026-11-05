@@ -842,22 +842,54 @@ class _StderrTee:
         if pos < len(chunk):
             self._extend(at + pos, chunk[pos:])
             if len(self._partial) > _STDERR_LINE_MAX:
-                self._flush()  # a newline-less flood: file what's there as a line
+                # A newline-less flood: file what's there as a line, holding back a tail
+                # one byte shorter than the longest secret, so a secret straddling the cut
+                # stays whole in the next line and is hidden there.
+                self._flush(keep=self._secret_tail())
 
     def _extend(self, at: int, data: bytes) -> None:
         if not self._partial:
             self._partial_at = at
         self._partial += data
 
-    def _flush(self) -> None:
-        text = self._text(self._partial)
+    def _flush(self, keep: int = 0) -> None:
+        keep = min(keep, len(self._partial) - 1) if keep > 0 else 0
+        cut = len(self._partial) - keep
+        if keep:
+            # Never cut inside a secret already whole in the buffer: move the cut to its
+            # start, so it is filed (and hidden) whole with the held-back tail. One
+            # still arriving is no longer than the tail, so it lies entirely within it.
+            moved = True
+            while moved:
+                moved = False
+                for value in self.secrets:
+                    needle = value.encode()
+                    start = self._partial.find(needle, max(0, cut - len(needle) + 1))
+                    if 0 <= start < cut < start + len(needle):
+                        cut, moved = start, True
+            if cut == 0:  # a secret longer than the cap itself: file it all, hidden
+                cut, keep = len(self._partial), 0
+        text = self._text(self._partial[:cut])
         if text.strip():
             self._lines.append((self._partial_at, text))
-        self._partial.clear()
+        if cut < len(self._partial):
+            del self._partial[:cut]
+            self._partial_at += cut
+        else:
+            self._partial.clear()
 
-    @staticmethod
-    def _text(data: bytes) -> str:
-        return bytes(data).decode("utf-8", "replace").rstrip("\r")[:_STDERR_LINE_MAX]
+    def _secret_tail(self) -> int:
+        return max((len(s.encode()) for s in self.secrets), default=1) - 1
+
+    def _text(self, data: bytes) -> str:
+        """A filed line: the server's secret env values hidden BEFORE the length cap, so
+        a cut can never keep the start of one (debug.scrub runs later, per block)."""
+        from app import sealed
+
+        text = bytes(data).decode("utf-8", "replace").rstrip("\r")
+        for value in self.secrets:
+            text = text.replace(value, sealed.HIDDEN)
+        return text[:_STDERR_LINE_MAX]
 
 
 def _echo_stderr(chunk: bytes) -> None:

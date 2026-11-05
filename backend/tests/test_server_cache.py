@@ -366,6 +366,32 @@ def test_clear_404s_for_a_server_the_caller_cant_see(client):
     assert client.post(f"/api/servers/{mine}/cache/clear", headers=member).status_code == 200
 
 
+def test_clear_on_a_disabled_server_rechecks_before_stopping(client, monkeypatch):
+    """The disabled branch re-judges the caller inside the unit lock BEFORE stopping:
+    an owner reassignment (404) or the server being enabled (409) while the request
+    waited must not let it interrupt the unit; the cache stays too."""
+    from app.api import servers as servers_api
+
+    server_id = _create(client)
+    directory = _cache(server_id)
+    directory.mkdir(parents=True)
+    _fill(directory)
+    sup = client.app.state.supervisor
+    stopped: list[str] = []
+    real_stop = sup._stop
+
+    async def recording_stop(sid):
+        stopped.append(sid)
+        await real_stop(sid)
+
+    monkeypatch.setattr(sup, "_stop", recording_stop)
+    for now, status in (((False, False), 404), ((True, True), 409)):
+        monkeypatch.setattr(servers_api, "_visible_enabled_now", lambda sid, p, now=now: now)
+        r = client.post(f"/api/servers/{server_id}/cache/clear", headers=LOOPBACK)
+        assert r.status_code == status, r.text
+        assert stopped == [] and directory.exists()
+
+
 def test_delete_removes_the_cache_directory(client):
     server_id = _create(client)
     directory = _cache(server_id)
