@@ -544,7 +544,13 @@ class Supervisor:
                 requested_at is None
                 and timeout > 0
                 and unit is not None
-                and unit.state == "running"
+                and (
+                    unit.state == "running"
+                    # A live bridge failing its periodic health check is still up and
+                    # still checked: unused, it must sleep like a running one (waking
+                    # re-runs the check at readiness), not stay up forever.
+                    or (unit.state == "unhealthy" and getattr(unit, "health_failing", False))
+                )
                 and self._in_flight.get(server_id, 0) == 0
             ):
                 last = self._last_activity.get(server_id)

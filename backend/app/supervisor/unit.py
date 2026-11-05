@@ -55,6 +55,8 @@ _FAILURE_TAIL_LINE_CHARS = 500
 _HEALTH_OUTPUT_LINES = 40
 _HEALTH_OUTPUT_LINE_CHARS = 500
 _HEALTH_FAILURE_CHARS = 280
+# Per output line kept from a health command (the rest of a longer line is dropped).
+_HEALTH_LINE_BYTES = 4096
 
 # Prepended to every setup / checkout shell. A setup that installs system packages (an
 # ``apt-get install``, ``playwright install --with-deps``) and is stopped mid-run (a
@@ -768,9 +770,18 @@ class ServerUnit:
         )
 
         async def pump() -> None:
+            # Bounded chunks, not ``async for`` lines: StreamReader raises on a line past
+            # its 64 KiB limit, which would fail a check whose command succeeded (a big
+            # JSON response). A long line is kept truncated, never treated as a failure.
             assert proc.stdout is not None
-            async for raw in proc.stdout:
-                output.append(raw.decode(errors="replace").rstrip("\n"))
+            partial = b""
+            while chunk := await proc.stdout.read(65536):
+                *lines, partial = (partial + chunk).split(b"\n")
+                for raw in lines:
+                    output.append(raw[:_HEALTH_LINE_BYTES].decode(errors="replace"))
+                partial = partial[: _HEALTH_LINE_BYTES + 1]
+            if partial:
+                output.append(partial[:_HEALTH_LINE_BYTES].decode(errors="replace"))
 
         reader = asyncio.create_task(pump())
         try:

@@ -157,6 +157,22 @@ async def test_failure_quoting_the_output_hides_secret_env_values(fast_unit):
         await unit.stop()
 
 
+async def test_a_passing_command_with_a_huge_output_line_still_passes(fast_unit):
+    # One line past asyncio's 64 KiB StreamReader limit (a big JSON response): kept
+    # truncated, never a failure of a command that exited 0.
+    unit = ServerUnit(
+        _server(fast_unit, health_check_command="head -c 70000 /dev/zero | tr '\\0' x; echo")
+    )
+    await unit.start(_port())
+    try:
+        await _wait_for(lambda: unit.state in ("running", "failed"))
+        assert unit.state == "running", unit.last_error
+        kept = [line for line in unit.logs.snapshot() if line.startswith("[health] x")]
+        assert kept and len(kept[0]) <= len("[health] ") + unit_module._HEALTH_LINE_BYTES
+    finally:
+        await unit.stop()
+
+
 async def test_passing_shell_check_runs_with_the_child_env_and_cwd(fast_unit):
     unit = ServerUnit(
         _server(
@@ -361,6 +377,45 @@ async def test_idle_server_is_never_health_checked():
         await sup.reconcile_once()  # quiesced this pass, never checked
         assert sup.is_idle(sid) and sid not in sup.units
         await sup.reconcile_once()  # and still nothing to check while idle
+        assert unit.ticks == []
+    finally:
+        sup.units.pop(sid, None)
+        _delete(sid)
+
+
+async def test_a_health_failing_unit_still_idles():
+    """A live bridge failing its periodic check is unhealthy but up; unused past its idle
+    window it must sleep like a running one, not stay up running checks forever."""
+    from datetime import timedelta
+
+    from app.db.models import utcnow
+
+    server = _make_server(
+        name="Idle failing",
+        runner="npx",
+        command="npx",
+        enabled=True,
+        idle_timeout_s=30,
+        health_check_tool="check",
+        health_check_interval_s=10,
+    )
+    sid = server.id
+    sup = Supervisor()
+    unit = _IdleableUnit(
+        slug=server.slug, config_hash=server.config_hash, state="unhealthy", pid=1,
+        port=49999, last_error="health check failed: boom", tools=[], restart_count=0,
+        last_health=None, startup_status=None, ticks=[], health_failing=True,
+    )
+    sup.units[sid] = unit
+    sup._last_activity[sid] = utcnow() - timedelta(days=1)
+
+    async def no_start(sv, *, activation_started_at=None):
+        raise AssertionError("an idled server must not be started")
+
+    sup._try_start = no_start
+    try:
+        await sup.reconcile_once()
+        assert sup.is_idle(sid) and sid not in sup.units
         assert unit.ticks == []
     finally:
         sup.units.pop(sid, None)
