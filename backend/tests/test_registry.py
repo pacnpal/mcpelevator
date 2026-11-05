@@ -2695,3 +2695,68 @@ def test_create_refuses_a_config_too_large_to_launch(session):
     activation the moment it's enabled."""
     with pytest.raises(ValueError, match="too large to launch"):
         _mk(session, env={"HUGE": "x" * (129 * 1024)})
+
+
+_GQL_SCHEMA = "type Query { hello(name: String): String }\ntype Mutation { bump: Int }\n"
+
+
+def test_graphql_server_canonicalizes_and_validates(session):
+    s = service.create_server(
+        session, name="GQL", runner="graphql", command=" https://api.example/graphql ",
+        args=["", " "], env={"Authorization": "Bearer k"}, cwd="/tmp",
+    )
+    # Endpoint trimmed, a blank schema URL collapsed to "introspect", no working directory.
+    assert (s.command, s.args, s.cwd, s.openapi_document) == (
+        "https://api.example/graphql", [], None, ""
+    )
+    introspecting = s.config_hash
+    linked = service.update_server(session, s.id, {"args": ["https://docs.example/schema.graphql"]})
+    assert linked.args == ["https://docs.example/schema.graphql"]
+    assert linked.config_hash != introspecting  # a new schema source restarts the bridge
+    stored = service.update_server(session, s.id, {"args": [], "openapi_document": _GQL_SCHEMA})
+    assert (stored.command, stored.args, stored.openapi_document) == (
+        "https://api.example/graphql", [], _GQL_SCHEMA
+    )
+    before = stored.config_hash
+    edited = service.update_server(
+        session, s.id, {"openapi_document": _GQL_SCHEMA.replace("bump", "bump2")}
+    )
+    assert edited.config_hash != before  # a new schema restarts the bridge
+    # Converting to another runner drops the stored schema.
+    converted = service.update_server(
+        session, s.id, {"runner": "remote", "args": ["streamable-http"], "env": {}}
+    )
+    assert converted.openapi_document == ""
+
+
+@pytest.mark.parametrize(
+    "command, args, document, message",
+    [
+        ("", [], "", "command is required"),
+        ("/var/run/api.sock", [], "", r"http\(s\):// URL of its GraphQL endpoint"),
+        ("https://api.example/graphql", ["not-a-url"], "", "schema URL must be an http"),
+        ("https://api.example/graphql", ["https://a.example/s", "https://b.example/s"], "", "at most one"),
+        ("https://api.example/graphql", ["https://a.example/s"], _GQL_SCHEMA, "not both"),
+        ("https://api.example/graphql", [], "type Query { x: Nope }", "not a valid GraphQL schema"),
+        ("https://api.example/graphql", [], '{"openapi": "3.1.0"}', "introspection result"),
+    ],
+)
+def test_graphql_server_refuses_bad_config(session, command, args, document, message):
+    with pytest.raises(ValueError, match=message):
+        service.create_server(
+            session, name="G", runner="graphql", command=command, args=args,
+            openapi_document=document,
+        )
+
+
+def test_graphql_headers_are_not_process_env(session):
+    """Headers only travel to the API, so (like remote/openapi) editing an unrelated one
+    doesn't demand the hidden ones again."""
+    s = service.create_server(
+        session, name="G", runner="graphql", command="https://api.example/graphql",
+        env={"Authorization": "Bearer k", "X-Tenant": "a"}, secret_env=["Authorization"],
+    )
+    edited = service.update_server(
+        session, s.id, {"env": {"Authorization": "<hidden>", "X-Tenant": "b"}}
+    )
+    assert edited.env["X-Tenant"] == "b"

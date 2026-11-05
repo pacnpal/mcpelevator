@@ -746,3 +746,50 @@ def test_summary_reports_why_a_teardown_is_being_retried(monkeypatch):
             sup._teardown_failed.pop(server_id, None)
             with Session(get_engine()) as session:
                 repo.delete_server(session, server_id)
+
+
+def test_graphql_server_with_a_stored_schema_and_its_preview():
+    schema = "type Query { hello(name: String): String }\ntype Mutation { bump: Int }\n"
+    with TestClient(app) as c:
+        preview = c.post(
+            "/api/graphql/preview",
+            json={"command": "https://api.example/graphql", "openapi_document": schema},
+            headers=LOOPBACK,
+        ).json()
+        assert preview == {"queries": ["hello"], "mutations": ["bump"], "subscriptions": 0, "error": None}
+        bad = c.post(
+            "/api/graphql/preview",
+            json={"command": "https://api.example/graphql", "openapi_document": "type Query {"},
+            headers=LOOPBACK,
+        ).json()
+        assert bad["error"].startswith("not a valid GraphQL schema")
+        assert c.post(
+            "/api/graphql/preview", json={"command": "not a url"}, headers=LOOPBACK
+        ).status_code == 400
+
+        created = c.post(
+            "/api/servers",
+            json={"name": "GQL", "runner": "graphql", "command": "https://api.example/graphql",
+                  "openapi_document": schema},
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            polled = c.get(f"/api/servers/{server_id}", headers=LOOPBACK).json()
+            assert (polled["command"], polled["openapi_document"], polled["document_stored"]) == (
+                "https://api.example/graphql", "", True
+            )
+            editing = c.get(
+                f"/api/servers/{server_id}?include_document=true", headers=LOOPBACK
+            ).json()
+            assert editing["openapi_document"] == schema
+            refused = c.post(
+                "/api/servers",
+                json={"name": "Bad", "runner": "graphql", "command": "https://api.example/graphql",
+                      "openapi_document": "type Query { x: Nope }"},
+                headers=LOOPBACK,
+            )
+            assert refused.status_code == 400
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)

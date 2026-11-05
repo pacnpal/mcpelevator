@@ -137,7 +137,7 @@ class ServerUnit:
         self.pin_mcp1 = bool(server.pin_mcp1)
         self.spec = _with_checkout_cwd(build_spec(server), server.id)
         self.exposure = {"mcp_http": server.mcp_http, "rest_openapi": server.rest_openapi}
-        # The plaintext of this server's secret env (headers too, for remote/openapi), so a
+        # The plaintext of this server's secret env (headers too, for remote/openapi/graphql), so a
         # failure tail quoted into the standard log can't carry one: debug.scrub only
         # recognizes labelled secrets, and a child may echo a bare value. Longest first, so
         # a value containing another is hidden whole. Very short values are skipped —

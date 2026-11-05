@@ -24,6 +24,9 @@ dependencies = [
     "pyjwt[crypto]>=2.10",
     # YAML OpenAPI documents for the openapi runner (app.bridge.openapi).
     "pyyaml>=6",
+    # GraphQL schemas (SDL or introspection), operation building and validation for the
+    # graphql runner (app.bridge.graphql). The reference implementation, pure Python.
+    "graphql-core>=3.2,<4",
     # Encrypts secret env values at rest (app.sealed). Already pulled in by pyjwt[crypto].
     "cryptography>=42",
     # Every .mcpb manifest is checked against the official schema before it's served

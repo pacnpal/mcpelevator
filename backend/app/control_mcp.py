@@ -185,8 +185,9 @@ def build(app: FastAPI) -> "_Gate":
     async def get_server(server_id: str, include_document: bool = False) -> Any:
         """One server's full detail: launch spec, live state, startup status, OAuth
         status, tools, and its /s/<slug> URLs. ``include_document`` also returns an
-        openapi server's stored document (``openapi_document``; it can be large, so
-        it's left out by default) to read before editing it."""
+        openapi server's stored document or a graphql server's stored schema
+        (``openapi_document``; it can be large, so it's left out by default) to read
+        before editing it."""
         return await api(
             "GET",
             f"/api/servers/{_seg(server_id)}",
@@ -201,11 +202,15 @@ def build(app: FastAPI) -> "_Gate":
         its OpenAPI 3 document (or blank, with the document itself as JSON or YAML text in
         ``openapi_document``), ``args`` is [] or [base_url] to override the document's
         ``servers`` entry (required for a relative one in a pasted document), and ``env``
-        is the HTTP headers sent to the API). Created
+        is the HTTP headers sent to the API), or graphql (a GraphQL API, each query and
+        mutation field served as a tool: ``command`` is the endpoint's http(s) URL,
+        ``env`` the HTTP headers sent to it, and the schema comes from introspecting
+        the endpoint (``args`` []), a schema file at ``args`` [schema_url] (SDL or
+        introspection JSON), or the schema itself in ``openapi_document``). Created
         disabled unless ``enabled`` is true. A local runner can launch from a git checkout:
         ``repo_url`` (+ optional ``repo_ref``) is cloned, ``post_clone_script`` runs in it
         when the commit or script changes, and the command runs inside it.
-        ``secret_env`` names the ``env`` keys (headers too, for remote and openapi) whose
+        ``secret_env`` names the ``env`` keys (headers too, for remote, openapi and graphql) whose
         values are stored encrypted and never returned: each reads "<hidden>".
         ``start_timeout_s`` (setup and readiness, each per attempt) and
         ``repo_build_timeout_s`` (checkout + post-clone build) override the instance's
@@ -221,7 +226,10 @@ def build(app: FastAPI) -> "_Gate":
         rebuilds on the next start; ``repo_url: ""`` drops the checkout). For an
         openapi server, ``command`` / ``args`` / ``env`` are the document URL, base-URL
         override and API headers; its document is re-read on every start, so
-        restart_server picks up a changed API. A pasted document lives in
+        restart_server picks up a changed API. For a graphql server, ``command`` is the
+        endpoint, ``args`` [] or [schema_url], ``env`` the headers, and
+        ``openapi_document`` a stored schema (send "" to introspect instead); a restart
+        re-reads the schema. A pasted document lives in
         ``openapi_document`` (with ``command`` ""); switching between the two sends both
         fields, the unused one blank. A secret ``env`` value reads "<hidden>"; sending
         "<hidden>" keeps it and any other value replaces it. ``secret_env`` lists the
@@ -412,7 +420,7 @@ def build(app: FastAPI) -> "_Gate":
         name: str, role: Role = "member", local_runners: bool = False, control_mcp: bool = True
     ) -> Any:
         """Create a user. ``local_runners`` lets a member use npx/uvx/command/docker
-        (code execution on this host; remote and openapi need no permission);
+        (code execution on this host; remote, openapi and graphql need no permission);
         ``control_mcp`` lets them use this MCP server. Mint their login with
         create_user_credential."""
         payload = {

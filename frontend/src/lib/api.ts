@@ -22,6 +22,7 @@ import type {
 	HealthResponse,
 	ImportResult,
 	InstanceUsage,
+	GraphqlPreview,
 	OpenapiPreview,
 	ServerCreate,
 	ServerDetail,
@@ -138,7 +139,8 @@ export function listServers(): Promise<ServerSummary[]> {
 	return request<ServerSummary[]>('/servers');
 }
 
-/** `includeDocument`: also return an openapi server's stored document (edit form only;
+/** `includeDocument`: also return an openapi server's stored document or a graphql
+ * server's stored schema (edit form only;
  * it can be megabytes, so the polled detail view leaves it out). */
 export function getServer(id: string, includeDocument = false): Promise<ServerDetail> {
 	const q = includeDocument ? '?include_document=true' : '';
@@ -172,6 +174,20 @@ export function getInstanceUsage(days = 7): Promise<InstanceUsage> {
 
 export function createServer(body: ServerCreate): Promise<ServerSummary> {
 	return jsonRequest<ServerSummary>('/servers', 'POST', body);
+}
+
+/** What a graphql server would serve: its query and mutation fields, read from the pasted
+ * schema, the schema URL, or the endpoint's introspection — all without credentials. */
+export function previewGraphql(
+	command: string,
+	args: string[],
+	openapiDocument: string
+): Promise<GraphqlPreview> {
+	return jsonRequest<GraphqlPreview>('/graphql/preview', 'POST', {
+		command,
+		args,
+		openapi_document: openapiDocument
+	});
 }
 
 /** The base URL an openapi document names, fetched without credentials. */

@@ -26,6 +26,8 @@ from app.api.schemas import (
     ImportSkipped,
     ImportWarning,
     OAuthStatus,
+    GraphqlPreview,
+    GraphqlPreviewRequest,
     OpenapiPreview,
     OpenapiPreviewRequest,
     ServerClone,
@@ -296,6 +298,7 @@ def _detail(
         # Opt-in: the detail page polls this route, and a stored document can run to
         # megabytes. Only the edit form asks for it.
         openapi_document=(server.openapi_document or "") if include_document else "",
+        document_stored=bool(server.openapi_document),
         pin_mcp1=bool(server.pin_mcp1),
         auth_provider=server.auth_provider,
         oauth=bool(server.oauth),
@@ -880,6 +883,55 @@ async def preview_openapi(
     ):
         raise HTTPException(status_code=400, detail="give the document's http(s) URL or the document")
     return await run_in_threadpool(_openapi_preview, payload.command, payload.openapi_document)
+
+
+def _graphql_preview(command: str, args: list[str], document: str) -> GraphqlPreview:
+    from app.bridge import graphql as bridge_graphql
+
+    schema_url = next((a.strip() for a in args if a.strip()), "")
+    try:
+        if document.strip():
+            schema = bridge_graphql.parse_schema(document)
+        elif schema_url:
+            # No headers, as for an OpenAPI document: the preview never sends the API's
+            # credentials anywhere.
+            schema = bridge_graphql.parse_schema(
+                bridge_graphql.fetch_schema_url(schema_url, command.strip(), {})
+            )
+        else:
+            schema = bridge_graphql.parse_schema(
+                bridge_graphql.introspect(command.strip(), {})
+            )
+    except ValueError as exc:  # SchemaError is a ValueError
+        message = str(exc)
+        if not document.strip():
+            message += " (the preview sends no headers; the server sends its own when it starts)"
+        return GraphqlPreview(error=message[:400])
+    return GraphqlPreview(
+        queries=sorted(schema.query_type.fields) if schema.query_type else [],
+        mutations=sorted(schema.mutation_type.fields) if schema.mutation_type else [],
+        subscriptions=len(schema.subscription_type.fields) if schema.subscription_type else 0,
+    )
+
+
+@router.post("/graphql/preview", response_model=GraphqlPreview)
+async def preview_graphql(
+    payload: GraphqlPreviewRequest,
+    principal: Principal = Depends(current_principal),
+):
+    """What a graphql server would serve before it's saved: one tool per query and
+    mutation field. Reads the pasted schema, the schema URL, or introspects the endpoint."""
+    policy.require_runner_allowed(principal, "graphql")
+    if not payload.openapi_document.strip():
+        target = next((a for a in payload.args if a.strip()), "") or payload.command
+        if not target.strip().startswith(("http://", "https://")):
+            raise HTTPException(
+                status_code=400,
+                detail="give the endpoint's http(s) URL, a schema URL, or the schema itself",
+            )
+    return await run_in_threadpool(
+        _graphql_preview, payload.command, payload.args, payload.openapi_document
+    )
 
 
 @router.post("/servers/{server_id}/clone", response_model=ServerSummary, status_code=201)
