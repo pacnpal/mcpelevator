@@ -2320,6 +2320,28 @@ def test_stderr_tee_hides_a_secret_before_the_line_cap():
     flood.writer.close()
 
 
+def test_stderr_tee_hides_a_secret_longer_than_the_line_cap():
+    """A secret longer than _STDERR_LINE_MAX (a PEM key, say) arriving across chunks is
+    held whole until it can be hidden, never filed in pieces; and a line still waiting
+    for the rest of a secret shows no prefix of it."""
+    secret = "K" + "".join(chr(ord("a") + i % 26) for i in range(5993))  # 5,994 chars
+    tee = host._StderrTee()
+    tee.secrets = [secret]
+    data = (secret + "\n").encode()
+    tee._file(data[:5000])
+    assert all(secret[:16] not in text for text in tee.window(0, tee._read))
+    tee._file(data[5000:])
+    lines = tee.window(0, tee._read)
+    assert lines == ["<hidden>"], [line[:40] for line in lines]
+
+    pending = host._StderrTee()
+    pending.secrets = ["sk-live-0123456789abcdef"]
+    pending._file(b"auth failed with sk-live-0123")  # the rest never came
+    assert pending.window(0, pending._read) == ["auth failed with <hidden>"]
+    tee.writer.close()
+    pending.writer.close()
+
+
 @pytest.mark.asyncio
 async def test_stderr_tee_windows_lines_by_stream_position(capsys):
     """A window is a range of stream positions: a line written before the window opened

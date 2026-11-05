@@ -818,7 +818,9 @@ class _StderrTee:
         with self._lock:
             lines = [text for at, text in self._lines if start <= at < end]
             if self._partial.strip() and start <= self._partial_at < end:
-                lines.append(self._text(self._partial))
+                # The line still being written may end partway into a secret whose rest
+                # hasn't arrived: hide that prefix too.
+                lines.append(self._hide_secret_prefix(self._text(self._partial)))
         return lines
 
     def _pump(self) -> None:
@@ -855,9 +857,13 @@ class _StderrTee:
         self._partial += data
 
     def _flush(self, keep: int = 0) -> None:
-        keep = min(keep, len(self._partial) - 1) if keep > 0 else 0
-        cut = len(self._partial) - keep
-        if keep:
+        cut = len(self._partial)
+        if keep > 0:
+            if keep >= len(self._partial):
+                # All of it could still be the start of a secret (one longer than the
+                # cap): hold it until more arrives. Bounded by the longest secret.
+                return
+            cut -= keep
             # Never cut inside a secret already whole in the buffer: move the cut to its
             # start, so it is filed (and hidden) whole with the held-back tail. One
             # still arriving is no longer than the tail, so it lies entirely within it.
@@ -869,8 +875,14 @@ class _StderrTee:
                     start = self._partial.find(needle, max(0, cut - len(needle) + 1))
                     if 0 <= start < cut < start + len(needle):
                         cut, moved = start, True
-            if cut == 0:  # a secret longer than the cap itself: file it all, hidden
-                cut, keep = len(self._partial), 0
+            if cut == 0:
+                # A whole secret opens the buffer and runs past the cut: file through its
+                # end, so it is hidden whole and the rest stays held.
+                cut = max(
+                    (len(v.encode()) for v in self.secrets
+                     if self._partial.startswith(v.encode())),
+                    default=len(self._partial),
+                )
         text = self._text(self._partial[:cut])
         if text.strip():
             self._lines.append((self._partial_at, text))
@@ -879,6 +891,16 @@ class _StderrTee:
             self._partial_at += cut
         else:
             self._partial.clear()
+
+    def _hide_secret_prefix(self, text: str) -> str:
+        """``text`` with a trailing proper prefix of a secret (4+ characters) hidden."""
+        from app import sealed
+
+        for value in self.secrets:
+            for k in range(min(len(value) - 1, len(text)), 3, -1):
+                if text.endswith(value[:k]):
+                    return text[:-k] + sealed.HIDDEN
+        return text
 
     def _secret_tail(self) -> int:
         return max((len(s.encode()) for s in self.secrets), default=1) - 1
