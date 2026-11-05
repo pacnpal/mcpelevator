@@ -53,6 +53,11 @@ def bridge_payload(spec, name: str, *, mcp_http: bool, rest_openapi: bool) -> di
         payload["serialize_client_requests"] = True
     if spec.attach_stderr_on_error:
         payload["attach_stderr_on_error"] = True
+        # Names only (the values are already in ``env``): which ones the attached stderr
+        # must hide. Present only with the flag, so no other spec grows.
+        secret_keys = list(getattr(spec, "secret_env_keys", None) or [])
+        if secret_keys:
+            payload["secret_env_keys"] = secret_keys
     if spec.forward_authorization:
         payload["forward_authorization"] = True
     if spec.instructions:

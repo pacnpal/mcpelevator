@@ -781,6 +781,8 @@ class _StderrTee:
         self._partial = bytearray()  # the current line, until its newline arrives
         self._partial_at = 0
         self._thread: threading.Thread | None = None
+        # The server's secret env values, hidden from the attached block (_stderr_block).
+        self.secrets: list[str] = []
 
     def start(self) -> None:
         if self._thread is None:
@@ -874,14 +876,19 @@ def _echo_stderr(chunk: bytes) -> None:
         pass  # a broken stderr must not stop the pump: the child would block on a full pipe
 
 
-def _stderr_block(lines: list[str]) -> TextContent:
-    """The block appended to a failed call: the window's last lines, each scrubbed of
-    credentials (app.debug.scrub) BEFORE the cap, so a cut can't expose half a token."""
+def _stderr_block(lines: list[str], secrets: list[str] | tuple[str, ...] = ()) -> TextContent:
+    """The block appended to a failed call: the window's last lines, each cleaned BEFORE
+    the cap, so a cut can't expose half a token — the server's own secret env values
+    (``secrets``, longest first) become ``<hidden>``, since a child may echo one bare,
+    then app.debug.scrub hides labelled credentials."""
+    from app import sealed
     from app.debug import scrub
 
     kept: list[str] = []
     room = _STDERR_ATTACH_BYTES
     for line in reversed(lines[-_STDERR_ATTACH_LINES:]):
+        for value in secrets:
+            line = line.replace(value, sealed.HIDDEN)
         line = scrub(line)
         size = len(line.encode()) + 1
         if size > room:
@@ -916,7 +923,7 @@ async def _with_stderr(routing: _StdioRouting, method: str, call):
         if not lines:
             raise
         return ToolResult(
-            content=[TextContent(type="text", text=str(exc)), _stderr_block(lines)],
+            content=[TextContent(type="text", text=str(exc)), _stderr_block(lines, tee.secrets)],
             is_error=True,
         )
     if (
@@ -927,7 +934,7 @@ async def _with_stderr(routing: _StdioRouting, method: str, call):
         lines = tee.window(start, await tee.settled_mark())
         if lines:
             return ToolResult(
-                content=[*result.content, _stderr_block(lines)],
+                content=[*result.content, _stderr_block(lines, tee.secrets)],
                 structured_content=result.structured_content,
                 meta=result.meta,
                 is_error=True,
@@ -997,12 +1004,14 @@ class _SharedStdioTransport(StdioTransport):
         *args,
         serialize_client_requests: bool = False,
         attach_stderr_on_error: bool = False,
+        secret_values: list[str] | None = None,
         **kwargs,
     ) -> None:
         # Only a serialized child's stderr can be attributed to a call; otherwise the
         # child keeps writing straight to the bridge's stderr, as it always has.
         stderr = _StderrTee() if serialize_client_requests and attach_stderr_on_error else None
         if stderr is not None:
+            stderr.secrets = list(secret_values or [])
             kwargs["log_file"] = stderr.writer
         super().__init__(*args, **kwargs)
         self.routing = _StdioRouting(serialize_client_requests)
@@ -2164,7 +2173,22 @@ def _build_transport(spec: dict):
         cwd=spec.get("cwd") or None,
         serialize_client_requests=bool(spec.get("serialize_client_requests")),
         attach_stderr_on_error=bool(spec.get("attach_stderr_on_error")),
+        secret_values=_secret_values(spec),
     )
+
+
+def _secret_values(spec: dict) -> list[str]:
+    """The plaintext of the server's sealed env values (``secret_env_keys``), longest
+    first so a value containing another is hidden whole; values under 4 characters are
+    skipped (hiding them would mangle the output, and they aren't credentials). The same
+    rule as the unit's failure-tail redaction (``ServerUnit._redact``)."""
+    env = spec.get("env") or {}
+    values = {
+        str(env[key])
+        for key in spec.get("secret_env_keys") or []
+        if key in env and len(str(env[key])) >= 4
+    }
+    return sorted(values, key=len, reverse=True)
 
 
 def build_proxy(spec: dict) -> FastMCP:

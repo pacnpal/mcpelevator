@@ -322,6 +322,20 @@ def test_clear_on_a_disabled_server_only_deletes(client):
     assert r.status_code == 200 and r.json()["freed_bytes"] == 0
 
 
+def test_clear_drops_the_post_clone_build_stamp(client):
+    """A repo server's post-clone script may be what filled the cache; clearing it must
+    make the next activation rerun that script, not skip an unchanged commit + script."""
+    from app.runners import repo as repo_checkout
+
+    server_id = _create(client)
+    stamp = repo_checkout.stamp_path(get_settings().data_dir, server_id)
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text("commit+script\n")
+    r = client.post(f"/api/servers/{server_id}/cache/clear", headers=LOOPBACK)
+    assert r.status_code == 200, r.text
+    assert not stamp.exists()
+
+
 def test_clear_refuses_runners_without_a_cache_and_unknown_servers(client):
     remote = _create(client, runner="remote", command="https://up.example/mcp")
     r = client.post(f"/api/servers/{remote}/cache/clear", headers=LOOPBACK)

@@ -258,3 +258,20 @@ def test_openapi_runner_maps_document_base_url_headers():
 def test_local_runner_transport_is_stdio():
     # The discriminator defaults so existing runners are unchanged.
     assert build_spec(_server(runner="npx", command="npx")).transport == "stdio"
+
+
+def test_build_spec_names_the_sealed_env_keys():
+    """build_spec, the one place sealed env is decrypted, also records which keys were
+    sealed, so the bridge can hide their values from attached stderr (#227)."""
+    from app import sealed as sealed_mod
+    from app.db.models import Server
+    from app.runners import build_spec
+
+    token = sealed_mod.seal("sk-live-0123456789abcdef")
+    server = Server(
+        id="s1", name="s", slug="s", runner="command", command="x",
+        env={"API_KEY": token, "REGION": "eu"},
+    )
+    spec = build_spec(server)
+    assert spec.env["API_KEY"] == "sk-live-0123456789abcdef"
+    assert spec.secret_env_keys == ["API_KEY"]

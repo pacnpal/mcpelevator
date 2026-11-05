@@ -2084,8 +2084,8 @@ def test_serialize_flag_installs_the_request_lock_for_stdio():
 _STDERR_FIXTURE = str(Path(__file__).with_name("stderr_stdio_server_fixture.py"))
 
 
-def _stderr_proxy(serialize: bool = True, attach: bool = True):
-    spec = {"command": sys.executable, "args": [_STDERR_FIXTURE], "name": "stderr"}
+def _stderr_proxy(serialize: bool = True, attach: bool = True, **extra):
+    spec = {"command": sys.executable, "args": [_STDERR_FIXTURE], "name": "stderr", **extra}
     if serialize:
         spec["serialize_client_requests"] = True
     if attach:
@@ -2214,6 +2214,39 @@ async def test_attached_stderr_is_scrubbed():
         await transport.disconnect()
     (line,) = _stderr_of(result)
     assert secret not in line and "<redacted>" in line
+
+
+@pytest.mark.asyncio
+async def test_attached_stderr_hides_the_servers_secret_env_values():
+    """A child can echo a bare secret value that debug.scrub doesn't recognize; the
+    server's sealed env values (``secret_env_keys``) are hidden before attaching."""
+    secret = "sk-live-0123456789abcdef"
+    proxy, transport = _stderr_proxy(
+        env={"API_KEY": secret, "REGION": "eu-west-1"}, secret_env_keys=["API_KEY"]
+    )
+    try:
+        async with Client(proxy, mode="legacy") as client:
+            result = await client.call_tool_mcp(
+                "fail", {"line": f"upstream rejected credential {secret} in eu-west-1"}
+            )
+    finally:
+        await transport.disconnect()
+    (line,) = _stderr_of(result)
+    assert secret not in line
+    assert line == "upstream rejected credential <hidden> in eu-west-1"
+
+
+def test_bridge_payload_names_secret_env_keys_only_with_attach():
+    from dataclasses import replace
+
+    from app.bridge.spec import bridge_payload
+    from app.runners.base import ProcessSpec
+
+    spec = ProcessSpec(command="x", env={"K": "v"}, secret_env_keys=["K"])
+    assert "secret_env_keys" not in bridge_payload(spec, "n", mcp_http=True, rest_openapi=False)
+    spec = replace(spec, serialize_client_requests=True, attach_stderr_on_error=True)
+    payload = bridge_payload(spec, "n", mcp_http=True, rest_openapi=False)
+    assert payload["secret_env_keys"] == ["K"]
 
 
 @pytest.mark.asyncio

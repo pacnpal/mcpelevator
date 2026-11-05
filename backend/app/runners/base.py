@@ -59,6 +59,11 @@ class ProcessSpec:
     # see app.bridge.host._StderrTee and Server.attach_stderr_on_error. Only meaningful
     # with ``serialize_client_requests``; the bridge ignores it otherwise.
     attach_stderr_on_error: bool = False
+    # The ``env`` keys whose values were sealed at rest (app.sealed), filled by
+    # :func:`build_spec` where it decrypts them. The bridge only needs them for
+    # ``attach_stderr_on_error``: a child can echo a bare secret value that debug.scrub
+    # doesn't recognize, and that block goes to callers, not just the operator.
+    secret_env_keys: list[str] = field(default_factory=list)
     transport: str = "stdio"  # stdio | streamable-http | sse
     # For a remote runner that authenticates via OAuth: the config the bridge needs to
     # build an OAuth httpx auth on the upstream transport (server id -> token file,
@@ -103,8 +108,9 @@ def build_spec(server: Server) -> ProcessSpec:
     # A locked server's env is sealed at rest (app.sealed). Decrypting here, once, keeps
     # every builder unaware of it; no builder puts an env value in argv, so the env dict
     # is the only place one lands.
-    if any(sealed.is_sealed(value) for value in spec.env.values()):
-        spec = replace(spec, env=sealed.unseal_env(spec.env))
+    secret_keys = sorted(key for key, value in spec.env.items() if sealed.is_sealed(value))
+    if secret_keys:
+        spec = replace(spec, env=sealed.unseal_env(spec.env), secret_env_keys=secret_keys)
     return spec
 
 
