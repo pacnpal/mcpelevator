@@ -57,6 +57,7 @@ from graphql import (
     build_schema,
     get_introspection_query,
     get_named_type,
+    get_nullable_type,
     get_operation_ast,
     is_leaf_type,
     is_required_argument,
@@ -339,8 +340,15 @@ def _input_schema(type_, defs: dict[str, dict]) -> dict:
     if isinstance(type_, GraphQLInputObjectType):
         if type_.name not in defs:
             defs[type_.name] = {}  # placeholder first: the fields may refer back to it
+            one_of = getattr(type_, "is_one_of", False)
             properties = {
-                name: _with_doc(input_schema(field.type, defs), field)
+                # A @oneOf input's one chosen field must be non-null, though declared nullable.
+                name: _with_doc(
+                    _input_schema(get_nullable_type(field.type), defs)
+                    if one_of
+                    else input_schema(field.type, defs),
+                    field,
+                )
                 for name, field in type_.fields.items()
             }
             definition: dict[str, Any] = {
@@ -351,7 +359,7 @@ def _input_schema(type_, defs: dict[str, dict]) -> dict:
             required = [n for n, f in type_.fields.items() if is_required_input_field(f)]
             if required:
                 definition["required"] = required
-            if getattr(type_, "is_one_of", False):
+            if one_of:
                 # @oneOf: exactly one field, and not null.
                 definition["minProperties"] = 1
                 definition["maxProperties"] = 1

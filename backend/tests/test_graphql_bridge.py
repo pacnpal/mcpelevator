@@ -332,6 +332,8 @@ async def test_fields_become_tools_with_their_argument_schemas():
     if "$ref" in lookup:
         lookup = find["$defs"][lookup["$ref"].rsplit("/", 1)[1]]
     assert (lookup["minProperties"], lookup["maxProperties"]) == (1, 1)  # @oneOf
+    # …and the one chosen field can't be null, though the fields are declared nullable.
+    assert lookup["properties"] == {"id": {"type": ["string", "integer"]}, "name": {"type": "string"}}
 
     assert tools["now"].input_schema["properties"]["at"]["description"].startswith("GraphQL scalar DateTime")
     # A scalar result has nothing to select.
