@@ -348,6 +348,21 @@ describe('ServerForm health check', () => {
 		expect(submitButton?.disabled).toBe(true);
 	});
 
+	it('caps the tool name at the backend limit', () => {
+		const target = render({
+			initial: {
+				name: 'x',
+				runner: 'command',
+				command: '/usr/bin/server',
+				args: [],
+				health_check_tool: 'ping'
+			},
+			onsubmit: vi.fn()
+		});
+		// The backend refuses a health_check_tool longer than 256 characters.
+		expect(target.querySelector<HTMLInputElement>('#srv-health-tool')?.maxLength).toBe(256);
+	});
+
 	it('submits a shell command check for a local runner', () => {
 		const onsubmit = vi.fn();
 		const target = render({

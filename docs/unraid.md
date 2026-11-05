@@ -109,7 +109,7 @@ script and the server itself see `XDG_CACHE_HOME` there and `PLAYWRIGHT_BROWSERS
 its `ms-playwright` subdirectory, so downloaded models and Playwright browsers survive too
 (a setup script's `npx playwright install chromium` lands where the server looks). If a
 download was cached corrupt, **Clear cache** on the server page deletes that server's
-directory and restarts it.
+directory (not a location its `env` overrides to) and restarts it if it's enabled.
 Use `MCPE_APT_PACKAGES` for global Debian packages needed by every server, not as a
 per-server setup script. Those packages are installed again after container replacement.
 
@@ -167,7 +167,9 @@ are listed on the [GHCR package page](https://github.com/pacnpal/mcpelevator/pkg
 Everything lives in the appdata share: `/mnt/user/appdata/mcpelevator`. The SQLite
 database (`mcpelevator.db`) holds servers, settings, and token hashes; `.npm-cache` /
 `.uv-cache`, `.cache` (`XDG_CACHE_HOME` / Playwright browsers) and `cache/` (each local
-server's own downloads) are safely regenerable, and you can exclude them from backups. The
+server's own downloads) are safely regenerable, and you can exclude them from backups. If
+you exclude `cache/`, exclude `repos/` (repository checkouts, also regenerable) with it: a
+restored build stamp there would skip the post-clone script that filled the cache. The
 share grows with the models and browsers servers download, so give appdata room for them.
 The CA **Appdata Backup** plugin covers it.
 

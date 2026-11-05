@@ -1147,13 +1147,14 @@ async def clear_server_cache(
     async def _wipe() -> None:
         nonlocal freed
         try:
-            freed = await run_in_threadpool(server_cache.clear_cache, data_dir, server_id)
             # A repo server's post-clone script may be what filled the cache (e.g.
             # `npx playwright install chromium`); drop its build stamp so the next
             # activation reruns it instead of skipping an unchanged commit + script.
+            # First: a delete that then fails partway must still leave it rerunning.
             await run_in_threadpool(
                 repo_checkout.stamp_path(data_dir, server_id).unlink, missing_ok=True
             )
+            freed = await run_in_threadpool(server_cache.clear_cache, data_dir, server_id)
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=500, detail=f"cache could not be cleared: {exc}")
 

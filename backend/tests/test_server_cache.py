@@ -336,6 +336,26 @@ def test_clear_drops_the_post_clone_build_stamp(client):
     assert not stamp.exists()
 
 
+def test_a_failed_clear_still_drops_the_build_stamp(client, monkeypatch):
+    """The stamp goes BEFORE the delete: a delete that fails partway must not leave a
+    matching stamp that skips the post-clone script on the next activation."""
+    from app.runners import repo as repo_checkout
+
+    server_id = _create(client)
+    stamp = repo_checkout.stamp_path(get_settings().data_dir, server_id)
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text("commit+script\n")
+
+    def broken(data_dir, sid):
+        raise OSError("device busy")
+
+    monkeypatch.setattr(server_cache, "clear_cache", broken)
+    r = client.post(f"/api/servers/{server_id}/cache/clear", headers=LOOPBACK)
+    assert r.status_code == 500
+    assert "device busy" in r.json()["detail"]
+    assert not stamp.exists()
+
+
 def test_clear_refuses_runners_without_a_cache_and_unknown_servers(client):
     remote = _create(client, runner="remote", command="https://up.example/mcp")
     r = client.post(f"/api/servers/{remote}/cache/clear", headers=LOOPBACK)

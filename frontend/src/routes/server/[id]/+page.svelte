@@ -76,7 +76,9 @@
 		try {
 			const result = await getServer(requestedId);
 			if (requestedId !== id) return; // route changed mid-flight; stale response
-			if (revision !== mutationRevision) return; // an action returned newer state
+			// An action returned newer state for THIS server; one for a server the page has
+			// since left is no reason to drop it (that would strand the spinner).
+			if (revision !== mutationRevision && server?.id === requestedId) return;
 			server = result;
 			loadState = 'ready';
 			loadError = null;
@@ -581,8 +583,9 @@
 		clearingCache = true;
 		try {
 			const result = await clearServerCache(target);
-			// Same id guard as the lifecycle buttons: the page may have moved on.
-			if (server && server.id === target) {
+			// The page may have moved on: match the ROUTE too, since `server` still holds
+			// the previous server until the new route's load returns.
+			if (server && server.id === target && target === id) {
 				mutationRevision += 1;
 				server = { ...server, ...result.server };
 			}
@@ -632,6 +635,9 @@
 		oauthNonce = null;
 		clearOauthTimers();
 		oauthBusy = false;
+		// A confirmation opened for the previous server must not arm this one.
+		confirmClearCache = false;
+		confirmDelete = false;
 		void load();
 	});
 
@@ -1650,7 +1656,8 @@
 								<p class="text-sm font-medium text-[var(--color-ink)]">Clear cache</p>
 								<p class="text-xs text-[var(--color-ink-dim)]">
 									Deletes this server's own cache (downloaded models, Playwright browsers,
-									anything under its <code class="font-mono">XDG_CACHE_HOME</code>).
+									anything under its default <code class="font-mono">XDG_CACHE_HOME</code>).
+									A location its env sets instead is not touched.
 								</p>
 							</div>
 							<button
