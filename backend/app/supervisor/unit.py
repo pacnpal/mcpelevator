@@ -784,8 +784,11 @@ class ServerUnit:
             )
 
             def keep(raw: bytes) -> str:
+                # The cut is in BYTES, like ``room``: a secret starting inside the first
+                # _HEALTH_LINE_BYTES bytes ends inside ``room`` and is hidden whole. (A
+                # character cut keeps more than that bytes when the text is multibyte.)
                 text = self._redact(raw[:room].decode(errors="replace"))
-                return text[:_HEALTH_LINE_BYTES]
+                return text.encode()[:_HEALTH_LINE_BYTES].decode(errors="ignore")
 
             partial = b""
             while chunk := await proc.stdout.read(65536):

@@ -194,6 +194,24 @@ async def test_a_secret_across_an_output_line_cap_is_hidden_whole(fast_unit):
     assert not any(secret[:6] in line for line in output)
 
 
+async def test_a_secret_after_multibyte_output_is_hidden_whole(fast_unit):
+    """The output cap and the secret lookahead are both in bytes: multibyte text before a
+    secret must not let a character cut keep a prefix the byte lookahead never covered."""
+    from app import sealed
+
+    secret = "sk-live-0123456789abcdef"
+    server = _server(fast_unit)
+    server.env = {**server.env, "API_KEY": sealed.seal(secret)}
+    unit = ServerUnit(server)
+    euros = "€" * 1367  # 4,101 bytes, 1,367 characters
+    check = HealthCheck(command=f'printf "%s%s\\n" "{euros}" "$API_KEY"\nexit 2')
+    failure, output = await unit._health_check_once(check, 10)
+    assert failure is not None
+    assert secret[:6] not in failure
+    assert not any(secret[:6] in line for line in output)
+    assert all(len(line.encode()) <= unit_module._HEALTH_LINE_BYTES for line in output)
+
+
 async def test_a_passing_command_with_a_huge_output_line_still_passes(fast_unit):
     # One line past asyncio's 64 KiB StreamReader limit (a big JSON response): kept
     # truncated, never a failure of a command that exited 0.
