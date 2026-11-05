@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import collections
 import contextlib
 import json
 import logging
@@ -55,8 +54,10 @@ _FAILURE_TAIL_LINE_CHARS = 500
 _HEALTH_OUTPUT_LINES = 40
 _HEALTH_OUTPUT_LINE_CHARS = 500
 _HEALTH_FAILURE_CHARS = 280
-# Per output line kept from a health command (the rest of a longer line is dropped).
+# Per output line kept from a health command (the rest of a longer line is dropped), and
+# how many of its latest output bytes are kept at all.
 _HEALTH_LINE_BYTES = 4096
+_HEALTH_OUTPUT_BYTES = 256 * 1024
 
 # Prepended to every setup / checkout shell. A setup that installs system packages (an
 # ``apt-get install``, ``playwright install --with-deps``) and is stopped mid-run (a
@@ -757,7 +758,11 @@ class ServerUnit:
         """Run the check's shell command like the setup script: ``sh -e -c`` behind the
         dpkg preamble, with the child's scrubbed env and cwd, in its own process group
         (torn down whole on a timeout or a stop). A non-zero exit fails."""
-        output: collections.deque[str] = collections.deque(maxlen=_HEALTH_OUTPUT_LINES)
+        # The output's latest bytes, raw: secrets are hidden over the whole stream before
+        # it is split into lines or cut (sealed.hide_values), so a value spanning lines (a
+        # PEM key), read chunks, or a line cap is still matched whole.
+        buf = bytearray()
+        dropped = False
         proc = await asyncio.create_subprocess_exec(
             "/bin/sh",
             "-e",
@@ -774,30 +779,30 @@ class ServerUnit:
         async def pump() -> None:
             # Bounded chunks, not ``async for`` lines: StreamReader raises on a line past
             # its 64 KiB limit, which would fail a check whose command succeeded (a big
-            # JSON response). A long line is kept truncated, never treated as a failure.
-            # Each line has the server's secret values hidden BEFORE it is cut: keeping
-            # the longest secret's length past the cap means one that starts inside the
-            # kept part is whole when replaced, so no prefix of it survives the cut.
+            # JSON response). A long line is kept cut, never treated as a failure.
+            nonlocal buf, dropped
             assert proc.stdout is not None
-            room = _HEALTH_LINE_BYTES + max(
-                (len(v.encode()) for v in self._secret_values), default=0
-            )
-
-            def keep(raw: bytes) -> str:
-                # The cut is in BYTES, like ``room``: a secret starting inside the first
-                # _HEALTH_LINE_BYTES bytes ends inside ``room`` and is hidden whole. (A
-                # character cut keeps more than that bytes when the text is multibyte.)
-                text = self._redact(raw[:room].decode(errors="replace"))
-                return text.encode()[:_HEALTH_LINE_BYTES].decode(errors="ignore")
-
-            partial = b""
             while chunk := await proc.stdout.read(65536):
-                *lines, partial = (partial + chunk).split(b"\n")
-                for raw in lines:
-                    output.append(keep(raw))
-                partial = partial[: room + 1]
-            if partial:
-                output.append(keep(partial))
+                buf += chunk
+                if len(buf) > _HEALTH_OUTPUT_BYTES:
+                    del buf[: len(buf) - _HEALTH_OUTPUT_BYTES]
+                    dropped = True
+
+        def output() -> list[str]:
+            text = sealed.hide_values(
+                bytes(buf),
+                self._secret_values,
+                open_start=dropped,  # the head was dropped: a secret may be half kept
+                open_end=True,  # it may have stopped (or been stopped) mid-secret
+            )
+            lines = text.split("\n")
+            if lines and lines[-1] == "":
+                lines.pop()
+            # Cut in bytes, after hiding: nothing left to cut a secret out of.
+            return [
+                line.rstrip("\r").encode()[:_HEALTH_LINE_BYTES].decode(errors="ignore")
+                for line in lines[-_HEALTH_OUTPUT_LINES:]
+            ]
 
         reader = asyncio.create_task(pump())
         try:
@@ -806,17 +811,18 @@ class ServerUnit:
                     rc = await proc.wait()
                     await reader
             except (asyncio.TimeoutError, TimeoutError):
-                return f"timed out after {timeout:g}s", list(output)
+                return f"timed out after {timeout:g}s", output()
         finally:
             await self._terminate(proc, include_descendants=True)
             await self._finish_log_task(reader)
+        lines = output()
         if rc == 0:
-            return None, list(output)
+            return None, lines
         # sh -e stops at the failing command, so the end of the output says why.
-        tail = _one_line(" ".join(output))
+        tail = _one_line(" ".join(lines))
         if len(tail) > _HEALTH_FAILURE_CHARS:
             tail = "…" + tail[-_HEALTH_FAILURE_CHARS:]
-        return (f"exited with code {rc}" + (f": {tail}" if tail else "")), list(output)
+        return (f"exited with code {rc}" + (f": {tail}" if tail else "")), lines
 
     # --- periodic health check (driven by the supervisor) ------------------ #
 
@@ -867,14 +873,21 @@ class ServerUnit:
     async def _periodic_health_check(self, check: HealthCheck) -> None:
         proc = self.proc
         loop = asyncio.get_running_loop()
+        current = False
         try:
             failure, output = await self._health_check_once(check, self._start_timeout())
         finally:
-            self._health_last_at = loop.time()
-            # A pass now schedules the next check (tick_health_check arms its wakeup).
+            # Compared by value: the supervisor hands a fresh HealthCheck each pass.
+            current = self.health_check == check
+            # A replaced check's next run is due at once; this one's verdict says nothing
+            # about it. A pass now schedules it (tick_health_check arms its wakeup).
+            self._health_last_at = loop.time() if current else float("-inf")
             self._notify()
-        # The world may have moved on while the check ran: the bridge exited (the
-        # activation handles that), the unit is stopping, or a new process replaced it.
+        # The world may have moved on while the check ran: the check was edited (its
+        # result must not mark the server), the bridge exited (the activation handles
+        # that), the unit is stopping, or a new process replaced it.
+        if not current:
+            return
         if self._stopping or self.proc is not proc or not self._health_checkable():
             return
         if failure is None:

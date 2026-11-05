@@ -478,7 +478,11 @@ server's log as before. It reaches MCP clients, the REST `is_error` envelope and
 alike. Stdio runners only (`docker` too: the container's stderr); it's refused for
 `remote`, `openapi` and `graphql`, and without `serialize_client_requests`. It only helps when the
 failure comes back as a failed call: a process that crashes or hangs instead shows up in
-the server's log and status. Changing it restarts the server's bridge.
+the server's log and status. The block is everything the process wrote to stderr while
+that call held it, so a server that keeps writing in the background (late output from
+work an earlier call started, say) can land some of that in a later caller's error; turn
+it on only for servers whose stderr is fine for their callers to see. Changing it
+restarts the server's bridge.
 
 ### Usage stats (per server, per tool)
 

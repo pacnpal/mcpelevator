@@ -825,57 +825,20 @@ class _StderrTee:
             ext_lo, ext_hi = max(self._base, lo - look), min(self._read, hi + look)
             raw = bytes(self._buf[ext_lo - self._base : ext_hi - self._base])
             head_lost = self._base > 0 and ext_lo == self._base
-        text = self._redacted(raw, lo - ext_lo, hi - ext_lo)
-        if hi == ext_hi:  # the stream (so far) ends in the window: a secret may be half out
-            text = self._hide_secret_prefix(text)
-        if head_lost:  # the ring dropped what came before: a secret may be half gone
-            text = self._hide_secret_suffix(text)
+        from app import sealed
+
+        text = sealed.hide_values(
+            raw,
+            self.secrets,
+            lo - ext_lo,
+            hi - ext_lo,
+            # The stream (so far) ends in the window: a secret may be only half written.
+            open_end=hi == ext_hi,
+            # The ring dropped what came before: a secret may be only half kept.
+            open_start=head_lost,
+        )
         lines = (line.rstrip("\r")[:_STDERR_LINE_MAX] for line in text.split("\n"))
         return [line for line in lines if line.strip()]
-
-    def _redacted(self, raw: bytes, a: int, b: int) -> str:
-        """``raw[a:b]`` decoded, with every byte that belongs to a secret occurrence found
-        anywhere in ``raw`` (so one crossing ``a`` or ``b`` too) shown as ``<hidden>``."""
-        from app import sealed
-
-        spans = []
-        for value in self.secrets:
-            needle = value.encode()
-            at = raw.find(needle)
-            while at >= 0:
-                spans.append((at, at + len(needle)))
-                at = raw.find(needle, at + 1)
-        pieces, pos = [], a
-        for lo, hi in sorted(spans):
-            if hi <= pos or lo >= b:
-                continue
-            if lo > pos:
-                pieces.append(raw[pos:lo].decode("utf-8", "replace"))
-            pieces.append(sealed.HIDDEN)
-            pos = max(pos, hi)
-        if pos < b:
-            pieces.append(raw[pos:b].decode("utf-8", "replace"))
-        return "".join(pieces)
-
-    def _hide_secret_prefix(self, text: str) -> str:
-        """``text`` with a trailing proper prefix of a secret (4+ characters) hidden."""
-        from app import sealed
-
-        for value in self.secrets:
-            for k in range(min(len(value) - 1, len(text)), 3, -1):
-                if text[-1] == value[k - 1] and text.endswith(value[:k]):
-                    return text[:-k] + sealed.HIDDEN
-        return text
-
-    def _hide_secret_suffix(self, text: str) -> str:
-        """``text`` with a leading proper suffix of a secret (4+ characters) hidden."""
-        from app import sealed
-
-        for value in self.secrets:
-            for k in range(min(len(value) - 1, len(text)), 3, -1):
-                if text[0] == value[-k] and text.startswith(value[-k:]):
-                    return sealed.HIDDEN + text[k:]
-        return text
 
     def _pump(self) -> None:
         while True:
@@ -949,7 +912,10 @@ async def _with_stderr(routing: _StdioRouting, method: str, call):
     block) plus the stderr block, so both failures read the same on every surface: MCP,
     REST's ``is_error`` envelope, a group. Nothing is attached to a success, to an empty
     window, or while a call its caller abandoned still runs on the child (its lines
-    can't be told apart from this one's).
+    can't be told apart from this one's). The window is everything the child wrote while
+    this call held it, which is all the bridge can attribute: a child that writes in the
+    background (late output from work an earlier call started) can put that in it too,
+    as the README states.
     """
     tee = routing.stderr
     if tee is None or method != "tools/call" or routing.abandoned:
@@ -2218,14 +2184,14 @@ def _build_transport(spec: dict):
 
 def _secret_values(spec: dict) -> list[str]:
     """The plaintext of the server's sealed env values (``secret_env_keys``), longest
-    first so a value containing another is hidden whole; values under 4 characters are
-    skipped (hiding them would mangle the output, and they aren't credentials). The same
-    rule as the unit's failure-tail redaction (``ServerUnit._redact``)."""
+    first so a value containing another is hidden whole. Every non-empty one, however
+    short: the attached block goes to callers, and a sealed value is secret at any length
+    (a one-character one makes the block harder to read, never leaks)."""
     env = spec.get("env") or {}
     values = {
         str(env[key])
         for key in spec.get("secret_env_keys") or []
-        if key in env and len(str(env[key])) >= 4
+        if key in env and str(env[key])
     }
     return sorted(values, key=len, reverse=True)
 

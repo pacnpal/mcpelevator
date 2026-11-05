@@ -2236,6 +2236,15 @@ async def test_attached_stderr_hides_the_servers_secret_env_values():
     assert line == "upstream rejected credential <hidden> in eu-west-1"
 
 
+def test_secret_values_include_short_ones():
+    """The attached block goes to callers: a sealed value is hidden however short."""
+    spec = {
+        "env": {"PIN": "42", "EMPTY": "", "K": "longer-value"},
+        "secret_env_keys": ["PIN", "EMPTY", "K"],
+    }
+    assert host._secret_values(spec) == ["longer-value", "42"]
+
+
 def test_bridge_payload_names_secret_env_keys_only_with_attach():
     from dataclasses import replace
 

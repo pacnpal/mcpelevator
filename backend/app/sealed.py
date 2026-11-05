@@ -152,3 +152,70 @@ def resolve(
             "runs, including any other env value it starts with, needs them typed in again"
         )
     return out
+
+
+# --- hiding secret values in captured output ----------------------------------------
+#
+# Output a server's process writes (its stderr attached to a failed call, a health
+# command's output quoted into last_error) can echo a secret env value bare, where no
+# credential-shaped scrubber would recognize it. These hide the plaintext values themselves,
+# over the raw byte STREAM, before the output is split into lines or cut: a value spanning
+# lines (a PEM key), read chunks, or any later cap is still matched whole.
+
+
+def hide_values(
+    raw: bytes,
+    values,
+    start: int = 0,
+    end: int | None = None,
+    *,
+    open_start: bool = False,
+    open_end: bool = False,
+) -> str:
+    """``raw[start:end]`` decoded, with every byte belonging to an occurrence of a value
+    found anywhere in ``raw`` (so one crossing ``start`` or ``end`` too) shown as
+    :data:`HIDDEN`. ``open_end``: the stream may continue past ``end`` (or was cut there),
+    so a trailing proper prefix of a value is hidden too; ``open_start`` likewise for a
+    leading proper suffix (the stream's head was dropped). Only prefixes/suffixes of 4+
+    characters count: shorter ones are indistinguishable from ordinary text."""
+    end = len(raw) if end is None else end
+    values = [v for v in values if v]
+    spans = []
+    for value in values:
+        needle = value.encode()
+        at = raw.find(needle)
+        while at >= 0:
+            spans.append((at, at + len(needle)))
+            at = raw.find(needle, at + 1)
+    pieces, pos = [], start
+    for lo, hi in sorted(spans):
+        if hi <= pos or lo >= end:
+            continue
+        if lo > pos:
+            pieces.append(raw[pos:lo].decode("utf-8", "replace"))
+        pieces.append(HIDDEN)
+        pos = max(pos, hi)
+    if pos < end:
+        pieces.append(raw[pos:end].decode("utf-8", "replace"))
+    text = "".join(pieces)
+    if open_end:
+        text = _hide_open_end(text, values)
+    if open_start:
+        text = _hide_open_start(text, values)
+    return text
+
+
+def _hide_open_end(text: str, values) -> str:
+    for value in values:
+        for k in range(min(len(value) - 1, len(text)), 3, -1):
+            if text[-1] == value[k - 1] and text.endswith(value[:k]):
+                return text[:-k] + HIDDEN
+    return text
+
+
+def _hide_open_start(text: str, values) -> str:
+    for value in values:
+        for k in range(min(len(value) - 1, len(text)), 3, -1):
+            if text[0] == value[-k] and text.startswith(value[-k:]):
+                return HIDDEN + text[k:]
+    return text

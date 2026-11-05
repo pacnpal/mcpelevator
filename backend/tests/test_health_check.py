@@ -212,6 +212,21 @@ async def test_a_secret_after_multibyte_output_is_hidden_whole(fast_unit):
     assert all(len(line.encode()) <= unit_module._HEALTH_LINE_BYTES for line in output)
 
 
+async def test_a_multiline_secret_in_command_output_is_hidden_whole(fast_unit):
+    """A secret spanning lines (a PEM key) is hidden over the whole output before it is
+    split into lines, so neither the output nor the failure text keeps a line of it."""
+    from app import sealed
+
+    secret = "-----BEGIN KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END KEY-----"
+    server = _server(fast_unit)
+    server.env = {**server.env, "API_KEY": sealed.seal(secret)}
+    unit = ServerUnit(server)
+    check = HealthCheck(command='printf "loading\\n%s\\n" "$API_KEY"\nexit 2')
+    failure, output = await unit._health_check_once(check, 10)
+    assert output == ["loading", "<hidden>"]
+    assert "MIIEvQ" not in failure and "BEGIN KEY" not in failure
+
+
 async def test_a_passing_command_with_a_huge_output_line_still_passes(fast_unit):
     # One line past asyncio's 64 KiB StreamReader limit (a big JSON response): kept
     # truncated, never a failure of a command that exited 0.
@@ -356,6 +371,33 @@ async def test_periodic_failure_marks_unhealthy_without_restart_then_recovers(
     finally:
         await sup.shutdown()
         _delete(sid)
+
+
+async def test_a_replaced_checks_result_never_marks_the_server(fast_unit, monkeypatch):
+    """A periodic check edited while it ran must not set the state from the old check's
+    verdict; the new check is due at once instead."""
+    unit = ServerUnit(_server(fast_unit, health_check_tool="check", health_check_interval_s=10))
+    await unit.start(_port())
+    try:
+        await _wait_for(lambda: unit.state in ("running", "failed"))
+        assert unit.state == "running"
+        old = unit.health_check
+        release = asyncio.Event()
+
+        async def slow_failure(check, timeout):
+            await release.wait()
+            return "old check failed", []
+
+        monkeypatch.setattr(unit, "_health_check_once", slow_failure)
+        task = asyncio.create_task(unit._periodic_health_check(old))
+        await asyncio.sleep(0)
+        unit.health_check = HealthCheck(tool="ping", interval_s=10)  # edited meanwhile
+        release.set()
+        await task
+        assert unit.state == "running" and not unit.health_failing
+        assert unit._health_last_at == float("-inf")  # the new check is due now
+    finally:
+        await unit.stop()
 
 
 async def test_removing_the_check_while_failing_returns_to_running(fast_unit):
