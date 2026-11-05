@@ -417,6 +417,26 @@ async def test_union_members_with_clashing_field_types_get_aliases():
     assert selection == "{ __typename ... on A { value_A: value same } ... on B { value_B: value same } }"
 
 
+async def test_selection_override_never_shadows_an_api_argument():
+    schema = "type T { a: Int } type Query { t(selection_set: Int, _selection_set: Int!): T }"
+
+    def answer(request):
+        return httpx2.Response(200, json={"data": {"t": {"a": 1}}})
+
+    server = gql.build_server(
+        {"command": ENDPOINT, "document": schema.encode()}, api_transport=httpx2.MockTransport(answer)
+    )
+    async with Client(server) as client:
+        props = (await client.list_tools())[0].input_schema["properties"]
+        result = await client.call_tool(
+            "t", {"selection_set": 1, "_selection_set": 2, "__selection_set": "{ a }"}
+        )
+    assert props["selection_set"]["type"] == ["integer", "null"]
+    assert props["_selection_set"] == {"type": "integer"}  # the API's required Int!
+    assert props["__selection_set"]["type"] == "string"
+    assert result.structured_content == {"a": 1}
+
+
 def test_an_invalid_generated_selection_falls_back(monkeypatch):
     schema = build_schema("type T { a: Int b: Int } type Query { t: T }")
     field = schema.query_type.fields["t"]

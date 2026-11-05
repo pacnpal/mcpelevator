@@ -90,8 +90,8 @@ SELECTION_DEPTH = 2
 MAX_SELECTION_FIELDS = 300
 # The raw-operation tool's name (an API field with the same name keeps it; this one moves).
 RAW_TOOL = "graphql_query"
-# The argument that overrides a tool's selection set (``_selection_set`` if an API field
-# already takes an argument by that name).
+# The argument that overrides a tool's selection set (underscore-prefixed until it's free
+# when an API field already takes an argument by that name).
 SELECTION_ARG = "selection_set"
 ACCEPT = "application/graphql-response+json, application/json;q=0.9"
 
@@ -582,7 +582,9 @@ class GraphQLFieldTool(Tool):
         }
         required = [n for n, a in field.args.items() if is_required_argument(a)]
         selection = default_selection(field, executor.schema, operation, field_name)
-        selection_arg = SELECTION_ARG if SELECTION_ARG not in field.args else f"_{SELECTION_ARG}"
+        selection_arg = SELECTION_ARG
+        while selection_arg in field.args:  # never shadow one of the API's own arguments
+            selection_arg = "_" + selection_arg
         if selection:
             preview = selection if len(selection) <= 400 else selection[:400] + " …"
             properties[selection_arg] = {
