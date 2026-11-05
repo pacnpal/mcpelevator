@@ -115,7 +115,8 @@ def checkout_script(
     url: str, ref: str, post_clone_script: str, directory: Path, stamp: Path
 ) -> str:
     """The POSIX script (run as ``sh -e -c``) that brings ``directory`` to ``ref`` of ``url``
-    and runs ``post_clone_script`` there when the commit or the script changed. Pure."""
+    and runs ``post_clone_script`` there when the commit, the script, or the cache location
+    it sees (``XDG_CACHE_HOME`` / ``PLAYWRIGHT_BROWSERS_PATH``) changed. Pure."""
     q = shlex.quote
     script_hash = hashlib.sha256(post_clone_script.encode()).hexdigest()[:16]
     post = (
@@ -145,7 +146,10 @@ fi
 if [ "$(git -C "$dir" rev-parse -q --verify HEAD || true)" != "$sha" ]; then
   git -C "$dir" checkout -q --force --detach "$sha"
 fi
-want="$sha {script_hash}"
+# The cache paths are part of what was built: a post-clone script that installs into the
+# per-server cache (browsers, models) must rerun when that location changes, including the
+# first start after it was introduced, whose stamp predates it (app.runners.cache).
+want="$sha {script_hash} ${{XDG_CACHE_HOME:-}} ${{PLAYWRIGHT_BROWSERS_PATH:-}}"
 if [ "$(cat "$stamp" 2>/dev/null || true)" = "$want" ]; then
   echo "[mcpelevator] checkout $sha is already built"
   exit 0
