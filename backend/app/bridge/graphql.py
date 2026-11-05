@@ -390,11 +390,23 @@ def _union_conflicts(union: GraphQLUnionType) -> set[str]:
     return {name for name, types in seen.items() if len(types) > 1}
 
 
+# Connection plumbing hops (see _is_connection_plumbing) allowed in a row without using
+# up depth: edges → node is two. More than that is a connection type that leads back to
+# itself (`TreeConnection.nodes: [TreeConnection]`), which would otherwise never end.
+FREE_HOPS = 2
+
+
 def selection_for(
-    type_, depth: int, counter: list[int], *, conflicts: frozenset[str] = frozenset()
+    type_,
+    depth: int,
+    counter: list[int],
+    *,
+    conflicts: frozenset[str] = frozenset(),
+    free: int = FREE_HOPS,
 ) -> str:
     """The generated selection set for an output type (empty for a leaf). ``conflicts``
-    names fields to alias as ``<name>_<Type>`` (see :func:`_union_conflicts`)."""
+    names fields to alias as ``<name>_<Type>`` (see :func:`_union_conflicts`); ``free`` is
+    how many more connection hops may skip using up depth."""
     named = get_named_type(type_)
     if is_leaf_type(named):
         return ""
@@ -402,7 +414,7 @@ def selection_for(
         clashing = frozenset(_union_conflicts(named))
         parts = ["__typename"]
         for member in named.types:
-            sub = selection_for(member, depth, counter, conflicts=clashing)
+            sub = selection_for(member, depth, counter, conflicts=clashing, free=free)
             if sub:
                 parts.append(f"... on {member.name} {sub}")
         return "{ " + " ".join(parts) + " }"
@@ -421,10 +433,13 @@ def selection_for(
             parts.append(selected)
             counter[0] += 1
             continue
-        next_depth = depth if _is_connection_plumbing(named, name) else depth - 1
+        if free > 0 and _is_connection_plumbing(named, name):
+            next_depth, next_free = depth, free - 1
+        else:
+            next_depth, next_free = depth - 1, FREE_HOPS
         if next_depth <= 0:
             continue
-        sub = selection_for(field.type, next_depth, counter)
+        sub = selection_for(field.type, next_depth, counter, free=next_free)
         if sub:
             parts.append(f"{selected} {sub}")
             counter[0] += 1

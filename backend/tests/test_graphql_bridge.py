@@ -351,6 +351,21 @@ def test_default_selection_walks_connections_and_skips_what_it_cant_ask_for():
     assert union.startswith("{ __typename ... on User {") and "... on Post {" in union
 
 
+def test_a_connection_that_leads_back_to_itself_still_ends():
+    """Connection plumbing doesn't use up depth, but only for so many hops in a row: a
+    connection type whose `nodes` are itself must not recurse until the bridge can't start."""
+    sdl = (
+        "type TreeConnection { id: ID nodes: [TreeConnection] edges: [TreeEdge] } "
+        "type TreeEdge { node: TreeConnection } type Query { root: TreeConnection }"
+    )
+    schema = build_schema(sdl)
+    selection = gql.default_selection(schema.query_type.fields["root"], schema, "query", "root")
+    assert selection.startswith("{ id nodes { id nodes {")
+    assert len(selection) < 2000
+    server = gql.build_server({"command": ENDPOINT, "document": sdl.encode()})  # starts at all
+    assert server is not None
+
+
 def test_default_selection_drops_a_level_when_too_wide(monkeypatch):
     monkeypatch.setattr(gql, "MAX_SELECTION_FIELDS", 5)
     selection = gql.default_selection(SCHEMA.query_type.fields["user"])
