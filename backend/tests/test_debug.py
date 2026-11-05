@@ -200,6 +200,27 @@ def test_handlers_installed_before_debug_mode_are_scrubbed():
     assert "q" * 30 not in stream.getvalue()
 
 
+def test_debug_mode_replaces_the_standard_handler(monkeypatch):
+    # Standard logging (app.logconfig) installs a handler on the `app` logger; debug mode
+    # takes over from the root, so that handler must go or every line prints twice.
+    from types import SimpleNamespace
+
+    from app import logconfig
+
+    off = SimpleNamespace(debug=False, log_level="INFO")
+    monkeypatch.setattr(logconfig, "get_settings", lambda: off)
+    monkeypatch.setattr(debug, "get_settings", lambda: off)
+    app_log = logging.getLogger("app")
+    monkeypatch.setattr(
+        app_log, "handlers", [h for h in app_log.handlers if not logconfig.is_standard(h)]
+    )
+    logconfig.configure()
+    assert any(logconfig.is_standard(h) for h in app_log.handlers)
+
+    debug.configure_logging(keep=False)
+    assert not any(logconfig.is_standard(h) for h in app_log.handlers)
+
+
 def test_scrub_filter_covers_tracebacks_and_rpc_targets():
     import io
 

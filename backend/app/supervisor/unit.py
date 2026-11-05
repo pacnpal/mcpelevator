@@ -31,6 +31,7 @@ from app.config import (
     is_control_plane_secret_env_var,
 )
 from app.db.models import Server, utcnow
+from app import sealed
 from app.runners import build_spec
 from app.runners import repo as repo_checkout
 from app.runners.base import ProcessSpec
@@ -136,6 +137,21 @@ class ServerUnit:
         self.pin_mcp1 = bool(server.pin_mcp1)
         self.spec = _with_checkout_cwd(build_spec(server), server.id)
         self.exposure = {"mcp_http": server.mcp_http, "rest_openapi": server.rest_openapi}
+        # The plaintext of this server's secret env (headers too, for remote/openapi), so a
+        # failure tail quoted into the standard log can't carry one: debug.scrub only
+        # recognizes labelled secrets, and a child may echo a bare value. Longest first, so
+        # a value containing another is hidden whole. Very short values are skipped —
+        # replacing them would mangle the output and they aren't credentials anyway.
+        stored = server.env or {}
+        self._secret_values = sorted(
+            {
+                value
+                for key, value in self.spec.env.items()
+                if sealed.is_sealed(stored.get(key)) and len(value) >= 4
+            },
+            key=len,
+            reverse=True,
+        )
         # Per-server startup deadlines; None = the instance default (read per attempt).
         self.start_timeout_s: Optional[int] = getattr(server, "start_timeout_s", None)
         self.repo_build_timeout_s: Optional[int] = getattr(server, "repo_build_timeout_s", None)
@@ -191,7 +207,11 @@ class ServerUnit:
 
     def _failure_tail(self) -> str:
         """The last lines of this server's log, indented for the standard log."""
-        lines = [line for line in list(self.logs.lines)[-_FAILURE_TAIL_LINES:] if line.strip()]
+        lines = [
+            self._redact(line)
+            for line in list(self.logs.lines)[-_FAILURE_TAIL_LINES:]
+            if line.strip()
+        ]
         if not lines:
             return ""
         body = "\n".join(
@@ -200,6 +220,11 @@ class ServerUnit:
             for line in lines
         )
         return f"\n  last {len(lines)} log line(s):\n{body}"
+
+    def _redact(self, line: str) -> str:
+        for value in self._secret_values:
+            line = line.replace(value, sealed.HIDDEN)
+        return line
 
     async def stop(self) -> None:
         was = self.state

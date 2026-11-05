@@ -457,15 +457,24 @@ async def test_failing_attempt_sets_last_error_and_logs_why(tmp_path, monkeypatc
 
 
 async def test_running_clears_last_error_and_logs_ready(tmp_path, monkeypatch, caplog):
+    # Fail once, then succeed: the first attempt's failure stays on last_error through
+    # the retry wait and the next attempt, and clears only once the server runs.
     from app.supervisor import unit as unit_module
 
     monkeypatch.setattr(
         unit_module, "get_settings", lambda: _settings(tmp_path, start_timeout_s=10.0)
     )
     caplog.set_level("INFO", logger="app.supervisor.unit")
-    unit = ServerUnit(_server(tmp_path, setup_script="true"))
+    unit = ServerUnit(
+        _server(tmp_path, setup_script="[ -f ok ] || { touch ok; exit 3; }\n")
+    )
     try:
         await unit.start(_port())
+        await _wait_for(
+            lambda: unit.startup_status is not None
+            and unit.startup_status.phase == "retry_wait"
+        )
+        assert unit.last_error == "attempt 1/2 failed: setup exited with code 3"
         await _wait_for(lambda: unit.state == "running", timeout=15)
         assert unit.last_error is None
         assert any(
@@ -499,12 +508,14 @@ def _fake_dpkg_bin(tmp_path: Path, *, uid: str, audit: str) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "id").write_text(f"#!/bin/sh\necho {uid}\n")
+    # The preamble's `ls -A /var/lib/dpkg/updates` must not see the host's own journal.
+    (bin_dir / "ls").write_text("#!/bin/sh\n")
     (bin_dir / "dpkg").write_text(
         "#!/bin/sh\n"
         f'if [ "$1" = --audit ]; then printf %s "{audit}"; exit 0; fi\n'
         'echo "dpkg called: $*" >> "$DPKG_CALLS"\n'
     )
-    for tool in ("id", "dpkg"):
+    for tool in ("id", "dpkg", "ls"):
         (bin_dir / tool).chmod(0o755)
     return bin_dir
 
@@ -541,3 +552,27 @@ def test_setup_preamble_repairs_an_interrupted_dpkg(tmp_path, uid, audit, repair
     else:
         assert not calls.exists()
         assert result.stdout.strip() == "setup ran"
+
+
+async def test_failure_tail_hides_the_servers_secret_env_values(tmp_path, monkeypatch, caplog):
+    # debug.scrub only recognizes labelled secrets; a child echoing a bare secret value
+    # must not put it in the container log through the failure tail.
+    from app import sealed
+    from app.supervisor import unit as unit_module
+
+    monkeypatch.setattr(
+        unit_module, "get_settings", lambda: _settings(tmp_path, restart_budget=1)
+    )
+    caplog.set_level("INFO", logger="app.supervisor.unit")
+    server = _server(tmp_path, setup_script='echo "upstream said: $UPSTREAM_KEY"\nexit 1\n')
+    server.env = {**server.env, "UPSTREAM_KEY": sealed.seal("plain-secret-value-123")}
+    unit = ServerUnit(server)
+
+    await unit.start(_port())
+    await _wait_for(lambda: unit.state == "failed")
+    await unit.stop()
+
+    failed = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert len(failed) == 1
+    assert "upstream said: <hidden>" in failed[0]
+    assert "plain-secret-value-123" not in failed[0]
