@@ -106,7 +106,9 @@ ENV PATH="/app/backend/.venv/bin:${PATH}" \
     MCPE_DATA_DIR=/data \
     MCPE_FRONTEND_DIR=/app/frontend/build \
     npm_config_cache=/data/.npm-cache \
-    UV_CACHE_DIR=/data/.uv-cache
+    UV_CACHE_DIR=/data/.uv-cache \
+    XDG_CACHE_HOME=/data/.cache \
+    PLAYWRIGHT_BROWSERS_PATH=/data/.cache/ms-playwright
 
 VOLUME ["/data"]
 EXPOSE 8080

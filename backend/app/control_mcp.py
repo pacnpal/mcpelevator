@@ -209,19 +209,44 @@ def build(app: FastAPI) -> "_Gate":
         introspection JSON), or the schema itself in ``graphql_schema``). Created
         disabled unless ``enabled`` is true. A local runner can launch from a git checkout:
         ``repo_url`` (+ optional ``repo_ref``) is cloned, ``post_clone_script`` runs in it
-        when the commit or script changes, and the command runs inside it.
+        when the commit or script changes, and the command runs inside it. A local
+        (npx/uvx/command) server's ``setup_script``, post-clone script and launch all get
+        its own persistent cache: ``XDG_CACHE_HOME`` and ``PLAYWRIGHT_BROWSERS_PATH`` point
+        under ``<data_dir>/cache/<server id>`` (so ``npx playwright install chromium`` in a
+        setup script lands where the server looks; ``env`` overrides either), and
+        clear_server_cache empties it.
         ``secret_env`` names the ``env`` keys (headers too, for remote, openapi and graphql) whose
         values are stored encrypted and never returned: each reads "<hidden>".
         ``start_timeout_s`` (setup and readiness, each per attempt) and
         ``repo_build_timeout_s`` (checkout + post-clone build) override the instance's
         startup deadlines in seconds (1 to 86400; null inherits); raise them for a setup
-        that installs system packages or a browser."""
+        that installs system packages or a browser.
+        For a stdio runner (npx, uvx, command, docker), ``serialize_client_requests``
+        serves one request at a time so the server's roots/sampling/elicitation requests
+        reach their caller, and ``attach_stderr_on_error`` (only with it; refused
+        otherwise, and for remote/openapi/graphql) appends what the server wrote to stderr during
+        a failed tool call to that call's error result, scrubbed and capped. It only
+        helps when the failure comes back as a failed call.
+        An optional health check proves more than "it lists its tools": either
+        ``health_check_tool`` (an exposed tool name, called through the server with
+        ``health_check_arguments``; fails on an error result; any runner but the built-in
+        mcpelevator server) or
+        ``health_check_command`` (npx/uvx/command only: a shell command run like the setup
+        script, with the server's env and working directory; fails on a non-zero exit),
+        not both. It runs once the server answers, inside the startup deadline, and a
+        failure fails that start attempt (retried, then "failed" with "health check
+        failed: ..." in last_error). ``health_check_interval_s`` (10 to 86400; null = at
+        startup only) also runs it periodically while the server runs: a failure marks it
+        "unhealthy" (no restart, /api/health/<slug> answers 503) until a check passes.
+        Health checks are not counted as usage and never wake an idle server."""
         return await api("POST", "/api/servers", json=spec.model_dump(exclude_unset=True))
 
     @mcp.tool(annotations=_WRITE)
     async def update_server(server_id: str, changes: ServerUpdate) -> Any:
         """Edit a server; only the fields given change (an explicit null resets the
         nullable ones to inherit). A launch-spec change restarts its bridge. That includes
+        ``serialize_client_requests`` and ``attach_stderr_on_error`` (the latter needs the
+        former, so turn both off together), and
         ``repo_url``/``repo_ref``/``post_clone_script`` (a changed script or commit
         rebuilds on the next start; ``repo_url: ""`` drops the checkout). For an
         openapi server, ``command`` / ``args`` / ``env`` are the document URL, base-URL
@@ -235,8 +260,13 @@ def build(app: FastAPI) -> "_Gate":
         "<hidden>" keeps it and any other value replaces it. ``secret_env`` lists the
         secret keys (omit it to leave each key as it is). Making a secret visible, or
         changing what the server runs (runner, command, args, run_args, cwd,
-        setup_script, the repo fields, openapi_document, graphql_schema, and for a local
-        server any other env value), needs those secret values sent in full in the same call."""
+        setup_script, the repo fields, openapi_document, graphql_schema,
+        health_check_command, and for a local server any other env value), needs those
+        secret values sent in full in the same call. The health check fields
+        (``health_check_tool`` / ``health_check_arguments``, or ``health_check_command``,
+        and ``health_check_interval_s``; see create_server) never restart the bridge: a
+        change applies from the next start or periodic check, and an explicit null clears
+        one (all null = no check)."""
         if changes.model_fields_set & _RESTARTING_FIELDS:
             _refuse_self(server_id, "change its exposure or tool policy")
         return await api(
@@ -280,6 +310,16 @@ def build(app: FastAPI) -> "_Gate":
         """Restart an enabled server's bridge from unchanged config (re-discovers tools)."""
         _refuse_self(server_id, "restart")
         return await api("POST", f"/api/servers/{_seg(server_id)}/restart")
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def clear_server_cache(server_id: str) -> Any:
+        """Delete a local (npx/uvx/command) server's cache directory
+        (``<data_dir>/cache/<server id>``: its downloaded models, Playwright browsers and
+        anything else under its default XDG_CACHE_HOME) — e.g. to drop a download that was
+        cached corrupt. A location the server's ``env`` sets instead (XDG_CACHE_HOME /
+        PLAYWRIGHT_BROWSERS_PATH) is never touched. An enabled server is stopped first and
+        restarted after (it re-downloads on start); returns ``freed_bytes``."""
+        return await api("POST", f"/api/servers/{_seg(server_id)}/cache/clear")
 
     # No destructiveHint: whether a call destroys anything depends on the tool chosen,
     # and an absent hint means "may be destructive" to the client.

@@ -155,6 +155,13 @@ class Server(SQLModel, table=True):
     # the bridge.
     serialize_client_requests: bool = False
 
+    # Stdio runners with ``serialize_client_requests`` only (the service rejects it
+    # otherwise): when a tool call fails, append the child's stderr from that call's
+    # window (scrubbed, last lines, capped) to the error result (issue #227). Serializing
+    # is what makes the window attributable: one request holds the child at a time. Part
+    # of the launch spec (config_hash, only when on), so a change restarts the bridge.
+    attach_stderr_on_error: bool = False
+
     # uvx runner only: launch with the Python mcp SDK held below 2.0
     # (``uvx --with "mcp<2" <package>``) — a compatibility escape hatch for servers
     # that haven't caught up with the SDK's 2.x line. The runner injects the pin at
@@ -199,6 +206,20 @@ class Server(SQLModel, table=True):
     # concerns, not launch config: outside config_hash, read when an activation starts.
     start_timeout_s: Optional[int] = None
     repo_build_timeout_s: Optional[int] = None
+
+    # Optional health check, one form per server (issue #225): a TOOL call through the
+    # bridge's own /mcp (``health_check_tool`` = the exposed name, with
+    # ``health_check_arguments``; fails on an exception or isError), or — local runners
+    # only — a shell COMMAND run like the setup script, with the child's env and cwd (fails
+    # on a non-zero exit). It runs at readiness, inside the startup deadline, and every
+    # ``health_check_interval_s`` seconds against a running unit (NULL = readiness only),
+    # where a failure marks the unit unhealthy until a later check passes. Supervisor
+    # concerns, like the startup deadlines: outside config_hash, so an edit never bounces
+    # a healthy bridge. NULL/blank = no check.
+    health_check_tool: Optional[str] = None
+    health_check_arguments: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    health_check_command: Optional[str] = None
+    health_check_interval_s: Optional[int] = None
 
     # desired runtime
     enabled: bool = False

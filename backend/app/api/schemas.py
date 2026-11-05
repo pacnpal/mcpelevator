@@ -19,7 +19,9 @@ AuthProvider = Literal["inherit", "none", "bearer", "oauth"]
 # ('auto' = self-probe CIMD with DCR fallback, 'cimd'/'dcr' = explicit, probe-free).
 OauthClientMode = Literal["inherit", "auto", "cimd", "dcr"]
 EffectiveAuthProvider = Literal["none", "bearer", "oauth"]
-StartupPhase = Literal["queued", "checkout", "setup", "bridge", "readiness", "retry_wait"]
+StartupPhase = Literal[
+    "queued", "checkout", "setup", "bridge", "readiness", "health", "retry_wait"
+]
 
 
 class Transports(BaseModel):
@@ -292,6 +294,12 @@ class ServerDetail(ServerSummary):
     # MCPE_REPO_BUILD_TIMEOUT_S.
     start_timeout_s: Optional[int] = None
     repo_build_timeout_s: Optional[int] = None
+    # Health check (issue #225): a tool call or (local runners) a shell command, run at
+    # readiness and, with an interval, periodically. All null = no check. See ServerCreate.
+    health_check_tool: Optional[str] = None
+    health_check_arguments: Optional[dict] = None
+    health_check_command: Optional[str] = None
+    health_check_interval_s: Optional[int] = None
     # Upstream tool names hidden from every exposed surface. Empty = expose all (default).
     disabled_tools: list[str] = []
     # Upstream tool name -> replacement name/description. Empty = serve tools as declared.
@@ -303,6 +311,9 @@ class ServerDetail(ServerSummary):
     # Stdio runners: forward the child's roots/sampling/elicitation requests to the calling
     # client, serving one request at a time (issue #143). Default false refuses them.
     serialize_client_requests: bool = False
+    # Stdio runners with serialize_client_requests: append the child's stderr from a failed
+    # tool call's window to its error result (issue #227). Default false.
+    attach_stderr_on_error: bool = False
     config_hash: str = ""
     source: str = "manual"
     # Whether GET /servers/{id}/mcpb would produce a bundle (app.mcpb.exportable);
@@ -357,6 +368,9 @@ class ServerCreate(BaseModel):
     # Stdio runners: forward the child's roots/sampling/elicitation requests to the calling
     # client, serving one request at a time (issue #143). Opt-in; ignored for `remote`.
     serialize_client_requests: bool = False
+    # Stdio runners only, and only with serialize_client_requests (refused otherwise):
+    # append the child's stderr from a failed tool call to its error result (issue #227).
+    attach_stderr_on_error: bool = False
     auth_provider: AuthProvider = "inherit"
     # Upstream OAuth (remote runner only; forced off elsewhere server-side).
     oauth: bool = False
@@ -373,6 +387,17 @@ class ServerCreate(BaseModel):
     # ``repo_build_timeout_s`` the checkout + post-clone build. None = the instance default.
     start_timeout_s: Optional[StrictInt] = None
     repo_build_timeout_s: Optional[StrictInt] = None
+    # Optional health check, one form: ``health_check_tool`` (an exposed tool name, called
+    # through the bridge with ``health_check_arguments``; fails on an error result) or
+    # ``health_check_command`` (npx/uvx/command only: a shell command run like the setup
+    # script, with the server's env and cwd; fails on a non-zero exit). It runs once the
+    # server answers, inside the startup deadline (a failure fails the attempt), and every
+    # ``health_check_interval_s`` seconds (≥ 10; null = at startup only) while it runs,
+    # where a failure marks it unhealthy until a check passes. Never counted as usage.
+    health_check_tool: Optional[StrictStr] = None
+    health_check_arguments: Optional[dict] = None
+    health_check_command: Optional[StrictStr] = None
+    health_check_interval_s: Optional[StrictInt] = None
     enabled: bool = False
     # Provenance. Only a "catalog:<id>" (registry install) or "github:<owner>/<repo>"
     # (repository install) value is honored; anything else falls back to "manual"
@@ -418,6 +443,8 @@ class ServerUpdate(BaseModel):
     normalize_schema_dialect: Optional[bool] = None
     # Omitted (null) = unchanged.
     serialize_client_requests: Optional[bool] = None
+    # Omitted (null) = unchanged.
+    attach_stderr_on_error: Optional[bool] = None
     auth_provider: Optional[AuthProvider] = None
     # StrictBool (unlike mcp_http/rest_openapi above): oauth gates a security-sensitive
     # upstream-auth mode, so a truthy-coerced "yes"/1 must never silently flip it on — the
@@ -436,6 +463,12 @@ class ServerUpdate(BaseModel):
     # idle_timeout_s.
     start_timeout_s: Optional[StrictInt] = None
     repo_build_timeout_s: Optional[StrictInt] = None
+    # Health check; an explicit null clears the field (all null = no check), like the
+    # startup deadlines. Outside config_hash: never restarts a running bridge.
+    health_check_tool: Optional[StrictStr] = None
+    health_check_arguments: Optional[dict] = None
+    health_check_command: Optional[StrictStr] = None
+    health_check_interval_s: Optional[StrictInt] = None
     # Admin-only reassignment; explicit null = make it admin-owned. Ignored (403)
     # for members. Preserved-on-null like the OAuth client fields.
     owner_id: Optional[str] = None
@@ -496,6 +529,14 @@ class ImportResult(BaseModel):
     created: list[ServerSummary]
     skipped: list[ImportSkipped]
     warnings: list[ImportWarning] = []
+
+
+class CacheCleared(BaseModel):
+    """``POST /servers/{id}/cache/clear``: what the clear freed, and the server after it
+    (an enabled one was restarted, so it reads as a queued start)."""
+    freed_bytes: int
+    restarted: bool
+    server: ServerSummary
 
 
 ControlPlaneAuthMode = Literal["auto", "always"]

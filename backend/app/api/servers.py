@@ -22,6 +22,7 @@ from sqlmodel import Session
 from starlette.responses import Response, StreamingResponse
 
 from app.api.schemas import (
+    CacheCleared,
     ImportResult,
     ImportSkipped,
     ImportWarning,
@@ -51,6 +52,7 @@ from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
 from app.db import get_engine, get_session, repo
 from app.db.models import BUILTIN_RUNNER, Server
+from app.runners import cache as server_cache
 from app.runners import repo as repo_checkout
 from app.runners.builtin import ORIGINAL_HOST_HEADER
 from app.groups import registry as group_registry
@@ -138,6 +140,9 @@ def _visible(
 _LAUNCH_FIELDS = {
     "runner", "command", "args", "run_args", "env", "cwd", "setup_script", "pin_mcp1",
     "repo_url", "repo_ref", "post_clone_script", "openapi_document", "graphql_schema",
+    # Not launch config (outside config_hash), but it executes on the host like the
+    # setup script, so shaping it takes the same local-runner permission.
+    "health_check_command",
 }
 
 
@@ -152,6 +157,8 @@ def _row_launch_value(row: Server, key: str):
         return sealed.masked(row.env or {})
     if key in ("repo_url", "repo_ref", "post_clone_script", "openapi_document", "graphql_schema"):
         return getattr(row, key) or ""
+    if key == "health_check_command":
+        return (getattr(row, key) or "").strip() or None
     return getattr(row, key)
 
 
@@ -162,9 +169,16 @@ def _launch_touched(row: Server, changes: dict) -> bool:
     nullable in storage (legacy rows hold NULL, read as [] / false) while the form
     always sends a value — normalized so NULL vs the empty value isn't a "change"."""
     return any(
-        changes[k] != _row_launch_value(row, k)
+        _sent_launch_value(changes, k) != _row_launch_value(row, k)
         for k in changes.keys() & _LAUNCH_FIELDS
     )
+
+
+def _sent_launch_value(changes: dict, key: str):
+    # A blank health check command and none at all are the same thing (no check).
+    if key == "health_check_command":
+        return (changes[key] or "").strip() or None
+    return changes[key]
 
 
 def _fresh(session: Session, principal: Principal) -> Principal:
@@ -312,10 +326,15 @@ def _detail(
         idle_timeout_s=server.idle_timeout_s,
         start_timeout_s=server.start_timeout_s,
         repo_build_timeout_s=server.repo_build_timeout_s,
+        health_check_tool=server.health_check_tool,
+        health_check_arguments=server.health_check_arguments,
+        health_check_command=server.health_check_command,
+        health_check_interval_s=server.health_check_interval_s,
         disabled_tools=list(server.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),
         serialize_client_requests=bool(server.serialize_client_requests),
+        attach_stderr_on_error=bool(server.attach_stderr_on_error),
         config_hash=server.config_hash,
         source=server.source,
         mcpb_exportable=mcpb.exportable(server),
@@ -486,13 +505,18 @@ async def update_server(
     # null on the nullable OAuth client fields — so clearing a static client id/secret to
     # fall back to Dynamic Client Registration would be silently ignored. Preserve those
     # when the client actually sent them (model_fields_set) so null means "clear" (and,
-    # for idle_timeout_s and the startup timeouts, "inherit the global default").
+    # for idle_timeout_s and the startup timeouts, "inherit the global default"; for the
+    # health check fields, "no check").
     for key in (
         "oauth_client_id",
         "oauth_client_secret",
         "idle_timeout_s",
         "start_timeout_s",
         "repo_build_timeout_s",
+        "health_check_tool",
+        "health_check_arguments",
+        "health_check_command",
+        "health_check_interval_s",
     ):
         if key in payload.model_fields_set:
             changes[key] = provided[key]
@@ -705,6 +729,8 @@ async def delete_server(
         # deleted id, so nothing else would ever reuse or remove it. Last, and best-effort,
         # so a filesystem hiccup can't skip the group resync above.
         await run_in_threadpool(repo_checkout.remove_checkout, get_settings().data_dir, server_id)
+        # Same for its cache directory (models, browsers): keyed by the id, so orphaned.
+        await run_in_threadpool(server_cache.remove_cache, get_settings().data_dir, server_id)
     return Response(status_code=204)
 
 
@@ -1092,6 +1118,93 @@ async def restart_server(
 
     await sup.restart(server_id, authorized=_authorize)
     return _summary(server, sup, session, base_url(request))
+
+
+@router.post("/servers/{server_id}/cache/clear", response_model=CacheCleared)
+async def clear_server_cache(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    """Delete a local server's cache directory (``<data_dir>/cache/<id>``: its
+    XDG_CACHE_HOME and Playwright browsers, app.runners.cache) — e.g. a model download
+    cached corrupt. The directory is deleted while the server is stopped, inside the
+    supervisor's unit lock, so neither the bridge's child nor a setup script is writing
+    into it: an enabled server goes through ``Supervisor.restart`` (stop, delete, queue a
+    fresh activation, which re-downloads), a disabled one is only stopped-and-deleted.
+    Same authorization as restart; 400 for a runner without a per-server cache."""
+    server = _visible(principal, session, server_id)
+    if not server_cache.has_cache(server.runner):
+        raise HTTPException(
+            status_code=400,
+            detail="only local servers (npx, uvx, command) have a per-server cache",
+        )
+    sup = request.app.state.supervisor
+    data_dir = get_settings().data_dir
+    freed = 0
+
+    async def _wipe() -> None:
+        nonlocal freed
+        try:
+            # A repo server's post-clone script may be what filled the cache (e.g.
+            # `npx playwright install chromium`); drop its build stamp so the next
+            # activation reruns it instead of skipping an unchanged commit + script.
+            # First: a delete that then fails partway must still leave it rerunning.
+            await run_in_threadpool(
+                repo_checkout.stamp_path(data_dir, server_id).unlink, missing_ok=True
+            )
+            freed = await run_in_threadpool(server_cache.clear_cache, data_dir, server_id)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail=f"cache could not be cleared: {exc}")
+
+    restarted = bool(server.enabled)
+    if restarted:
+        # The restart route's own re-validation, at the supervisor's decision points.
+        def _authorize() -> None:
+            visible, enabled = _visible_enabled_now(server_id, principal)
+            if not visible:
+                raise HTTPException(status_code=404, detail="server not found")
+            if not enabled:
+                # Disabled while the stop awaited teardown: the stop stands (it's the
+                # desired state now) and the clear goes ahead without a restart.
+                raise _DisabledMidway()
+
+        try:
+            await sup.restart(server_id, authorized=_authorize, while_stopped=_wipe)
+        except _DisabledMidway:
+            restarted = False
+    if not restarted:
+        async def _wipe_if_visible() -> None:
+            if not _visible_now(server_id, principal):
+                raise HTTPException(status_code=404, detail="server not found")
+            await _wipe()
+
+        def _authorize_stop() -> None:
+            # Before the stop, inside the unit lock: an owner reassignment, or the server
+            # being enabled and started, while this waited must not let the clear
+            # interrupt a unit it no longer has the right to (or would leave stopped).
+            visible, enabled = _visible_enabled_now(server_id, principal)
+            if not visible:
+                raise HTTPException(status_code=404, detail="server not found")
+            if enabled:
+                raise HTTPException(
+                    status_code=409,
+                    detail="the server was enabled meanwhile; clear its cache again",
+                )
+
+        await sup.stop(server_id, while_stopped=_wipe_if_visible, authorized=_authorize_stop)
+    session.expire_all()
+    current = _visible(principal, session, server_id)
+    return CacheCleared(
+        freed_bytes=freed,
+        restarted=restarted,
+        server=_summary(current, sup, session, base_url(request)),
+    )
+
+
+class _DisabledMidway(Exception):
+    """A cache clear's server was disabled while its unit stopped (see above)."""
 
 
 @router.post("/servers/import", response_model=ImportResult, status_code=201)

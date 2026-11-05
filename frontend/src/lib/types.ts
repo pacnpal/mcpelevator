@@ -29,6 +29,7 @@ export type StartupPhase =
 	| 'setup'
 	| 'bridge'
 	| 'readiness'
+	| 'health'
 	| 'retry_wait';
 
 export interface StartupStatus {
@@ -270,6 +271,15 @@ export interface ServerDetail extends ServerSummary {
 	/** Deadline in seconds for a repository checkout + post-clone build; null = inherit
 	 * MCPE_REPO_BUILD_TIMEOUT_S. */
 	repo_build_timeout_s: number | null;
+	/** Health check (one form, both optional): a tool called through the server with
+	 * these arguments, or — npx/uvx/command only — a shell command run like the setup
+	 * script. Runs at readiness (a failure fails the start attempt) and, when
+	 * `health_check_interval_s` is set, periodically while running (a failure marks the
+	 * server unhealthy until a check passes). All null = no check. */
+	health_check_tool: string | null;
+	health_check_arguments: Record<string, unknown> | null;
+	health_check_command: string | null;
+	health_check_interval_s: number | null;
 	/** Whether GET /servers/{id}/mcpb would produce a bundle — the backend's
 	 * eligibility verdict, so the UI carries no mirrored rule. */
 	mcpb_exportable: boolean;
@@ -290,6 +300,9 @@ export interface ServerDetail extends ServerSummary {
 	 * calling client, serving one request at a time. Default false refuses them, since one
 	 * child serves every client (issue #143). Ignored for `remote`. */
 	serialize_client_requests: boolean;
+	/** Stdio runners with `serialize_client_requests`: append what the child wrote to
+	 * stderr during a failed tool call to its error result (issue #227). Default false. */
+	attach_stderr_on_error: boolean;
 	config_hash: string;
 	source: string;
 	tools: ServerTool[];
@@ -351,6 +364,12 @@ export interface ServerCreate {
 	/** Startup deadlines in seconds, 1..86400 (null = inherit the instance default). */
 	start_timeout_s?: number | null;
 	repo_build_timeout_s?: number | null;
+	/** Health check: a tool call (+ arguments) or a shell command (local runners), not
+	 * both; interval in seconds ≥ 10 (null = readiness only). null clears a field. */
+	health_check_tool?: string | null;
+	health_check_arguments?: Record<string, unknown> | null;
+	health_check_command?: string | null;
+	health_check_interval_s?: number | null;
 	/** Upstream tool names to hide from every exposed surface. [] re-exposes all. */
 	disabled_tools?: string[];
 	/** Upstream tool name -> replacement name/description. Replaces the whole map;
@@ -362,6 +381,9 @@ export interface ServerCreate {
 	/** Stdio runners: forward the child's roots/sampling/elicitation requests to the
 	 * calling client, one request at a time (issue #143). Ignored for `remote`. */
 	serialize_client_requests?: boolean;
+	/** Append the child's stderr to a failed tool call's result (issue #227). Needs
+	 * `serialize_client_requests`; refused for `remote`/`openapi`. */
+	attach_stderr_on_error?: boolean;
 	enabled?: boolean;
 	/** Provenance. Only a `catalog:<id>` value is honored server-side (a registry install). */
 	source?: string | null;
@@ -581,6 +603,14 @@ export interface GroupInfo {
  * restarting it restarts each ENABLED member. `skipped` carries the members with no
  * bridge to bounce (disabled before or during the batch) and `failed` those whose
  * teardown raised — reported rather than aborting the rest. All three hold server ids. */
+/** POST /api/servers/{id}/cache/clear: what the clear freed, and the server after it
+ *  (an enabled one is restarted, so it reads as a queued start). */
+export interface CacheClearResult {
+	freed_bytes: number;
+	restarted: boolean;
+	server: ServerSummary;
+}
+
 export interface GroupRestartResult {
 	name: string;
 	restarted: string[];

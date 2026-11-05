@@ -184,6 +184,55 @@ def test_serialize_client_requests_api_round_trip():
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
+def test_attach_stderr_on_error_api_round_trip():
+    """attach_stderr_on_error defaults false, needs serialize_client_requests (a 400
+    without it), is echoed on GET and PATCH-able (issue #227)."""
+    with TestClient(app) as c:
+        refused = c.post(
+            "/api/servers",
+            json={
+                "name": "Loud",
+                "runner": "command",
+                "command": "/bin/true",
+                "attach_stderr_on_error": True,
+            },
+            headers=LOOPBACK,
+        )
+        assert refused.status_code == 400, refused.text
+        assert "serialize_client_requests" in refused.text
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "Loud",
+                "runner": "command",
+                "command": "/bin/true",
+                "serialize_client_requests": True,
+            },
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["attach_stderr_on_error"] is False
+            patched = c.patch(
+                f"/api/servers/{server_id}",
+                json={"attach_stderr_on_error": True},
+                headers=LOOPBACK,
+            )
+            assert patched.status_code == 200, patched.text
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["attach_stderr_on_error"] is True
+            refused = c.patch(
+                f"/api/servers/{server_id}",
+                json={"serialize_client_requests": False},
+                headers=LOOPBACK,
+            )
+            assert refused.status_code == 400, refused.text
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
 def test_tool_overrides_api_round_trip():
     """tool_overrides is accepted on create, normalized, echoed on GET, replaceable via
     PATCH ({} restores the upstream labels), and an unusable rename is a 400."""

@@ -229,6 +229,26 @@ package caches configured on those paths survive. `MCPE_APT_PACKAGES` is differe
 is global container bootstrap for extra Debian packages before mcpelevator starts, not
 per-server setup.
 
+#### Per-server cache
+
+Each local (`npx`, `uvx`, `command`) server gets its own cache directory,
+`<data_dir>/cache/<server id>` (`/data/cache/<id>` in Docker). Its setup script, its
+post-clone script and the launched server all see `XDG_CACHE_HOME` set to it and
+`PLAYWRIGHT_BROWSERS_PATH` set to its `ms-playwright` subdirectory, so Hugging Face models,
+fastembed/onnx caches, anything else following `XDG_CACHE_HOME`, and Playwright browsers
+land on the data volume and survive a container recreate. A setup script's
+`npx playwright install chromium` installs where the server will look. Setting either
+variable in the server's `env` overrides it for that server. The npm and uv caches stay
+shared across servers (`npm_config_cache` / `UV_CACHE_DIR` under `/data` in the image).
+Docker-runner servers keep their own filesystem and are unaffected.
+
+When a download was cached corrupt (an embedding model failing with `TAR_BAD_ARCHIVE`, say),
+**Clear cache** on the server page (or `POST /api/servers/{id}/cache/clear`, or the built-in
+server's `clear_server_cache` tool) deletes that server's directory and returns the bytes
+freed. A location set by the server's own `env` override is not cleared. It needs the same access as restart. An enabled server is stopped first and
+restarted after the delete, so it downloads afresh; a disabled one is only cleared.
+Deleting a server deletes its cache directory.
+
 Each startup attempt runs setup, launches the bridge, and checks readiness. Setup and
 readiness each get a separate `MCPE_START_TIMEOUT_S` window. A server can set its own
 **startup timeout** (`start_timeout_s`, and `repo_build_timeout_s` for a repository
@@ -243,6 +263,21 @@ of uninterrupted running, the retry budget is restored. Stop cancels startup and
 pending retry. While attempts are failing, the server's `last_error` carries the latest
 one (`attempt 1/5 failed: setup exited with code 100`), and it clears once the server is
 running.
+
+Readiness only proves the bridge answers `tools/list`. An optional per-server **health
+check** proves more: either a **tool call** (`health_check_tool` plus
+`health_check_arguments`, called through the bridge as clients see it; fails on an error
+result; any runner) or, for npx/uvx/command servers, a **shell command**
+(`health_check_command`, run like the setup script with the server's environment and
+working directory; fails on a non-zero exit). It runs once the server answers, inside the
+startup timeout, and a failure fails that attempt (`health check failed: …` in
+`last_error`, its output in the server's log under an `attempt N/M: health` marker).
+With `health_check_interval_s` (10 seconds or more; blank = at startup only) it also runs
+while the server is running: a failure marks the server `unhealthy` — `/api/health/{slug}`
+answers 503 and `/s/<slug>` stops routing to it — without restarting it, and a later
+passing check returns it to `running`. Checks are never counted as usage, never run
+against an idle server, and never keep one awake. A change applies from the next start or
+check and never restarts a running server.
 
 Stopping a server mid-setup (a disable, a restart, or the setup's own timeout) kills the
 script. A package install killed part-way leaves dpkg interrupted, and from then on
@@ -428,6 +463,26 @@ client it's for.
 
 Over the API: `PATCH /api/servers/<id>` with `{"serialize_client_requests": true}`.
 Changing it restarts the server's bridge.
+
+**Upstream stderr on failed calls.** When a stdio server's tool call fails, the real
+cause (a traceback, a diagnostic) usually goes to the process's stderr, which only lands
+in the server's log. With **Client requests** on, one call holds the process at a time,
+so what it writes to stderr meanwhile belongs to that call. Turn on **Attach stderr to
+failed calls** (`attach_stderr_on_error`, which needs `serialize_client_requests`) and a
+failed tool call (`isError`, or an error the bridge turns into one) gets one more text
+block: `[mcpelevator] upstream stderr during this call:` followed by the last 20 lines
+the process wrote during that call, at most 2 KB. The server's own secret env values
+are replaced with `<hidden>` first (whole, even one spanning lines such as a PEM key),
+then each line is scrubbed of credentials the way debug logs are. A successful call gets nothing, and the lines still go to the
+server's log as before. It reaches MCP clients, the REST `is_error` envelope and groups
+alike. Stdio runners only (`docker` too: the container's stderr); it's refused for
+`remote`, `openapi` and `graphql`, and without `serialize_client_requests`. It only helps when the
+failure comes back as a failed call: a process that crashes or hangs instead shows up in
+the server's log and status. The block is everything the process wrote to stderr while
+that call held it, so a server that keeps writing in the background (late output from
+work an earlier call started, say) can land some of that in a later caller's error; turn
+it on only for servers whose stderr is fine for their callers to see. Changing it
+restarts the server's bridge.
 
 ### Usage stats (per server, per tool)
 
@@ -745,7 +800,7 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_LOG_LEVEL` | `INFO` | Level of mcpelevator's own log lines when debug mode is off: server starts, failures with the reason and the server's last output lines, crashes, idle stops. `WARNING` keeps only failures |
 | `MCPE_DEBUG` | `false` | Debug mode: TRACE-level logs everywhere (bridges too), a full trace of every request with secrets scrubbed, crash reporting, and `GET /api/debug`; see **Debug mode** |
 | `MCPE_APT_PACKAGES` | _(none)_ | Global, space-separated extra Debian packages installed before mcpelevator starts (Docker image only), not per-server `setup_script`. A failed install warns and boot continues; packages must be reinstalled after container replacement |
-| `MCPE_DATA_DIR` | `./data` | SQLite + caches |
+| `MCPE_DATA_DIR` | `./data` | SQLite + caches, including each local server's own `cache/<server id>` (`XDG_CACHE_HOME` / `PLAYWRIGHT_BROWSERS_PATH` for its setup script and child; see **Per-server cache**) |
 | `MCPE_FRONTEND_DIR` | `../frontend/build` | Built SPA to serve |
 | `MCPE_PORT_RANGE_START` / `_END` | `49200` / `49400` | Loopback ports for bridge processes |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrent running servers |
@@ -754,6 +809,14 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_RESTART_BUDGET` | `5` | Startup attempts before `failed`; retry waits are 2/4/8/16 seconds and cap at 16 |
 | `MCPE_RESTART_STABLE_S` | `60` | Uninterrupted running time before the retry budget is restored |
 | `MCPE_VERSION` | _(image: release tag)_ | Version the instance reports (`/api/health`, UI badge). Set by the published image from the release tag; you don't normally set it. Unset → derived from the adjacent `pyproject.toml` (source tree), else installed package metadata |
+
+The Docker image also points every cache at the `/data` volume, so a container recreate
+doesn't throw downloads away: `npm_config_cache=/data/.npm-cache`,
+`UV_CACHE_DIR=/data/.uv-cache`, `XDG_CACHE_HOME=/data/.cache` and
+`PLAYWRIGHT_BROWSERS_PATH=/data/.cache/ms-playwright`. Local servers get their own
+`XDG_CACHE_HOME` / `PLAYWRIGHT_BROWSERS_PATH` under `/data/cache/<id>` on top of that (see
+**Per-server cache**). The volume grows with the models and browsers servers download; all
+of it is regenerable.
 
 ## Debug mode
 

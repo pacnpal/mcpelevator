@@ -10,7 +10,7 @@ import os
 import signal
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -33,6 +33,7 @@ from app.config import (
 from app.db.models import Server, utcnow
 from app import sealed
 from app.runners import build_spec
+from app.runners import cache as server_cache
 from app.runners import repo as repo_checkout
 from app.runners.base import ProcessSpec
 from app.runners.docker import DOCKER_BIN, server_label
@@ -48,6 +49,15 @@ _READINESS_RETRY_SECONDS = 2.0
 # terminally or a running bridge dies, so the reason is there without opening the UI.
 _FAILURE_TAIL_LINES = 20
 _FAILURE_TAIL_LINE_CHARS = 500
+# A health check's output kept for the server's log (its last lines) and quoted into
+# the failure (about this many characters).
+_HEALTH_OUTPUT_LINES = 40
+_HEALTH_OUTPUT_LINE_CHARS = 500
+_HEALTH_FAILURE_CHARS = 280
+# Per output line kept from a health command (the rest of a longer line is dropped), and
+# how many of its latest output bytes are kept at all.
+_HEALTH_LINE_BYTES = 4096
+_HEALTH_OUTPUT_BYTES = 256 * 1024
 
 # Prepended to every setup / checkout shell. A setup that installs system packages (an
 # ``apt-get install``, ``playwright install --with-deps``) and is stopped mid-run (a
@@ -81,6 +91,59 @@ class StartupSnapshot:
 
 class _AttemptFailed(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class HealthCheck:
+    """A server's health check (issue #225), snapshotted from its row: a ``tool`` called
+    through the bridge with ``arguments``, or a shell ``command`` (local runners). It runs
+    at readiness, and every ``interval_s`` seconds while the unit runs when that is set.
+    Outside config_hash: the supervisor hands a running unit the current one each pass
+    (:meth:`ServerUnit.tick_health_check`), so an edit lands without a restart."""
+
+    tool: Optional[str] = None
+    arguments: dict = field(default_factory=dict)
+    command: Optional[str] = None
+    interval_s: Optional[int] = None
+
+    @classmethod
+    def from_server(cls, server) -> Optional["HealthCheck"]:
+        tool = (getattr(server, "health_check_tool", None) or "").strip() or None
+        command = getattr(server, "health_check_command", None) or None
+        if command is not None and not command.strip():
+            command = None
+        if tool is None and command is None:
+            return None
+        interval = getattr(server, "health_check_interval_s", None)
+        arguments = getattr(server, "health_check_arguments", None) or {}
+        return cls(
+            tool=tool,
+            arguments=dict(arguments) if tool else {},
+            # The service refuses both at once; should a row hold both, the tool wins.
+            command=None if tool else command,
+            interval_s=interval if isinstance(interval, int) and interval > 0 else None,
+        )
+
+    @property
+    def label(self) -> str:
+        return f"tool {self.tool}" if self.tool else "command"
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _tool_result_text(result) -> str:
+    """The readable part of a tool result: its text blocks, else its structured content."""
+    parts = [
+        block.text
+        for block in (result.content or [])
+        if isinstance(getattr(block, "text", None), str)
+    ]
+    if not parts and result.structured_content is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(json.dumps(result.structured_content))
+    return "\n".join(parts)
 
 
 def tool_summary(tool) -> dict:
@@ -136,6 +199,13 @@ class ServerUnit:
         self.runner = server.runner
         self.pin_mcp1 = bool(server.pin_mcp1)
         self.spec = _with_checkout_cwd(build_spec(server), server.id)
+        # A local child's own cache directory (app.runners.cache), resolved here for the
+        # same reason as the checkout cwd: the builders never see the data dir.
+        self.cache_dir: Optional[Path] = (
+            server_cache.cache_dir(get_settings().data_dir, server.id)
+            if server_cache.has_cache(server.runner)
+            else None
+        )
         self.exposure = {"mcp_http": server.mcp_http, "rest_openapi": server.rest_openapi}
         # The plaintext of this server's secret env (headers too, for remote/openapi/graphql), so a
         # failure tail quoted into the standard log can't carry one: debug.scrub only
@@ -155,6 +225,12 @@ class ServerUnit:
         # Per-server startup deadlines; None = the instance default (read per attempt).
         self.start_timeout_s: Optional[int] = getattr(server, "start_timeout_s", None)
         self.repo_build_timeout_s: Optional[int] = getattr(server, "repo_build_timeout_s", None)
+        # The health check; refreshed by the supervisor each pass (tick_health_check).
+        self.health_check: Optional[HealthCheck] = HealthCheck.from_server(server)
+        # True while the bridge runs but its periodic health check fails: the unit reads
+        # "unhealthy" yet is not a crashed one, so the supervisor leaves it be (no restart)
+        # and keeps checking it until a check passes. Cleared by any other state change.
+        self.health_failing = False
 
         self.host = get_settings().bridge_host
         self.port: Optional[int] = None
@@ -172,6 +248,10 @@ class ServerUnit:
         self._activation_task: Optional[asyncio.Task[None]] = None
         self._log_task: Optional[asyncio.Task[None]] = None
         self._setup_log_task: Optional[asyncio.Task[None]] = None
+        self._health_task: Optional[asyncio.Task[None]] = None
+        self._health_wakeup: Optional[asyncio.TimerHandle] = None
+        # Loop time the periodic clock counts from: reaching running, then each check's end.
+        self._health_last_at: Optional[float] = None
         self._stopping = False
         self._port_released = True
         self._on_state_change = on_state_change
@@ -189,6 +269,7 @@ class ServerUnit:
         self.tools = []
         self.restart_count = 0
         self.last_health = None
+        self._health_last_at = None
         self._activation_started_at = activation_started_at or utcnow()
         self._set_state("starting")
         self._set_status("queued", attempt=1, max_attempts=max_attempts)
@@ -374,6 +455,13 @@ class ServerUnit:
     async def _run_attempt(self, attempt: int, max_attempts: int) -> tuple[bool, int]:
         # last_error keeps the previous attempt's failure until this one reaches running.
         self.tools = []
+        if self.cache_dir is not None:
+            try:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                # Best effort: tools create their cache dir themselves; this only spares
+                # the ones that don't.
+                self.logs.append(f"[mcpelevator] cache directory not created: {exc}")
         if self.spec.repo:
             await self._run_checkout(attempt, max_attempts)
         if self.spec.setup_script:
@@ -381,6 +469,7 @@ class ServerUnit:
         await self._launch_bridge(attempt, max_attempts)
         await self._await_ready(attempt, max_attempts)
 
+        self._health_last_at = asyncio.get_running_loop().time()
         self.last_health = utcnow()
         self.restart_count = 0
         self.last_error = None
@@ -579,7 +668,263 @@ class ServerUnit:
                 )
                 continue
             self.tools = [tool_summary(tool) for tool in tools]
+            await self._readiness_health_check(attempt, max_attempts, deadline)
             return
+
+    async def _readiness_health_check(
+        self, attempt: int, max_attempts: int, deadline: float
+    ) -> None:
+        """Run the server's health check once the bridge answers, inside the same startup
+        deadline. A failure fails the attempt, so it takes the ordinary retry/backoff path
+        and its reason reaches ``last_error``, the container log and ``startup_hint`` (the
+        output is logged under this phase's marker)."""
+        check = self.health_check
+        if check is None:
+            return
+        remaining = deadline - asyncio.get_running_loop().time()
+        self._set_status(
+            "health",
+            attempt=attempt,
+            max_attempts=max_attempts,
+            deadline_at=utcnow() + timedelta(seconds=max(0.0, remaining)),
+        )
+        self.logs.append(f"[mcpelevator] attempt {attempt}/{max_attempts}: health")
+        if remaining <= 0:
+            raise _AttemptFailed(
+                "health check failed: no time left before the startup deadline"
+            )
+        failure, output = await self._health_check_once(check, remaining)
+        self._log_health_output(output)
+        if failure is not None:
+            raise _AttemptFailed(f"health check failed: {failure}")
+        self.logs.append(f"[mcpelevator] health check passed ({check.label})")
+
+    def _log_health_output(self, output: list[str]) -> None:
+        # Prefixed, so a line of untrusted output can never pose as one of the unit's
+        # own phase markers (hints.startup_hint sections the log by them).
+        for line in output:
+            if len(line) > _HEALTH_OUTPUT_LINE_CHARS:
+                line = line[:_HEALTH_OUTPUT_LINE_CHARS] + "…"
+            self.logs.append(f"[health] {line}")
+
+    async def _health_check_once(
+        self, check: HealthCheck, timeout: float
+    ) -> tuple[Optional[str], list[str]]:
+        """Run ``check`` once: ``(None, output)`` when it passes, else ``(why, output)``.
+        Never raises (but for cancellation): any error is the check failing. ``why`` quotes
+        the output and lands in ``last_error`` and the container log, so the server's
+        secret env values are hidden in it (the log buffer, like setup output, keeps the
+        output as printed)."""
+        try:
+            if check.tool is not None:
+                failure, output = await self._health_tool_call(check, timeout)
+            else:
+                failure, output = await self._health_command(check.command or "", timeout)
+        except asyncio.CancelledError:
+            raise
+        except (asyncio.TimeoutError, TimeoutError):
+            return f"timed out after {timeout:g}s", []
+        except Exception as exc:
+            # Hidden BEFORE normalizing and cutting: a cut through a secret would leave a
+            # prefix that the full-value replacement no longer matches.
+            reason = _one_line(self._redact(str(exc))) or type(exc).__name__
+            failure, output = reason[:_HEALTH_FAILURE_CHARS], [reason]
+        return (self._redact(failure) if failure is not None else None), output
+
+    async def _health_tool_call(
+        self, check: HealthCheck, timeout: float
+    ) -> tuple[Optional[str], list[str]]:
+        """Call the check's tool through the bridge's own loopback /mcp — the surface
+        every client reaches, so a hidden or renamed tool behaves as it does for them. Not
+        through the /s proxy: it is neither usage nor traffic that keeps a server awake."""
+        if self.port is None:
+            return "the bridge is not running", []
+        url = f"http://{self.host}:{self.port}/mcp"
+        async with asyncio.timeout(timeout):
+            async with Client(url, timeout=timeout) as client:
+                result = await client.call_tool(
+                    check.tool, dict(check.arguments), timeout=timeout, raise_on_error=False
+                )
+        text = self._redact(_tool_result_text(result))  # before any line or length cut
+        output = text.splitlines()[-_HEALTH_OUTPUT_LINES:]
+        if result.is_error:
+            reason = _one_line(text) or f"tool {check.tool} returned an error"
+            return reason[:_HEALTH_FAILURE_CHARS], output
+        return None, output
+
+    async def _health_command(
+        self, command: str, timeout: float
+    ) -> tuple[Optional[str], list[str]]:
+        """Run the check's shell command like the setup script: ``sh -e -c`` behind the
+        dpkg preamble, with the child's scrubbed env and cwd, in its own process group
+        (torn down whole on a timeout or a stop). A non-zero exit fails."""
+        # The output's latest bytes, raw: secrets are hidden over the whole stream before
+        # it is split into lines or cut (sealed.hide_values), so a value spanning lines (a
+        # PEM key), read chunks, or a line cap is still matched whole.
+        buf = bytearray()
+        dropped = False
+        proc = await asyncio.create_subprocess_exec(
+            "/bin/sh",
+            "-e",
+            "-c",
+            DPKG_REPAIR_PREAMBLE + command,
+            cwd=self._effective_child_cwd(),
+            env=self._effective_child_env(),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+        async def pump() -> None:
+            # Bounded chunks, not ``async for`` lines: StreamReader raises on a line past
+            # its 64 KiB limit, which would fail a check whose command succeeded (a big
+            # JSON response). A long line is kept cut, never treated as a failure.
+            nonlocal buf, dropped
+            assert proc.stdout is not None
+            while chunk := await proc.stdout.read(65536):
+                buf += chunk
+                if len(buf) > _HEALTH_OUTPUT_BYTES:
+                    del buf[: len(buf) - _HEALTH_OUTPUT_BYTES]
+                    dropped = True
+
+        def output() -> list[str]:
+            text = sealed.hide_values(
+                bytes(buf),
+                self._secret_values,
+                open_start=dropped,  # the head was dropped: a secret may be half kept
+                open_end=True,  # it may have stopped (or been stopped) mid-secret
+            )
+            lines = text.split("\n")
+            if lines and lines[-1] == "":
+                lines.pop()
+            # Cut in bytes, after hiding: nothing left to cut a secret out of.
+            return [
+                line.rstrip("\r").encode()[:_HEALTH_LINE_BYTES].decode(errors="ignore")
+                for line in lines[-_HEALTH_OUTPUT_LINES:]
+            ]
+
+        reader = asyncio.create_task(pump())
+        try:
+            try:
+                async with asyncio.timeout(timeout):
+                    rc = await proc.wait()
+                    await reader
+            except (asyncio.TimeoutError, TimeoutError):
+                return f"timed out after {timeout:g}s", output()
+        finally:
+            await self._terminate(proc, include_descendants=True)
+            await self._finish_log_task(reader)
+        lines = output()
+        if rc == 0:
+            return None, lines
+        # sh -e stops at the failing command, so the end of the output says why.
+        tail = _one_line(" ".join(lines))
+        if len(tail) > _HEALTH_FAILURE_CHARS:
+            tail = "…" + tail[-_HEALTH_FAILURE_CHARS:]
+        return (f"exited with code {rc}" + (f": {tail}" if tail else "")), lines
+
+    # --- periodic health check (driven by the supervisor) ------------------ #
+
+    def _bridge_alive(self) -> bool:
+        return self.proc is not None and self.proc.returncode is None and self.port is not None
+
+    def _health_checkable(self) -> bool:
+        return self._bridge_alive() and (
+            self.state == "running" or (self.state == "unhealthy" and self.health_failing)
+        )
+
+    def tick_health_check(self, check: Optional[HealthCheck]) -> bool:
+        """Called by the supervisor on every reconcile pass with the server's current
+        health check. Starts a periodic check when one is due — only against a live bridge
+        that is running (or failing its check), never during startup, while stopping, or
+        for an idle server (which has no unit). Returns True when a check was started.
+
+        A check removed while the unit is failing it returns the unit to running: nothing
+        says it is unhealthy any more."""
+        self.health_check = check
+        interval = check.interval_s if check is not None else None
+        if interval is None:
+            if self.health_failing and not self._stopping and self._health_checkable():
+                self._health_recovered("health check removed")
+            return False
+        if self._stopping or (self._health_task is not None and not self._health_task.done()):
+            return False
+        if not self._health_checkable():
+            return False
+        if self._health_last_at is None:
+            return False
+        loop = asyncio.get_running_loop()
+        due_at = self._health_last_at + interval
+        if loop.time() < due_at:
+            # Not yet: ask for a pass when it is, rather than waiting out the rest of the
+            # supervisor's interval on top of the check's own.
+            wakeup = self._health_wakeup
+            if wakeup is None or wakeup.cancelled() or wakeup.when() > due_at + 0.5 or (
+                wakeup.when() <= loop.time()
+            ):
+                if wakeup is not None:
+                    wakeup.cancel()
+                self._health_wakeup = loop.call_at(due_at, self._notify)
+            return False
+        self._health_task = asyncio.create_task(self._periodic_health_check(check))
+        return True
+
+    async def _periodic_health_check(self, check: HealthCheck) -> None:
+        proc = self.proc
+        loop = asyncio.get_running_loop()
+        current = False
+        try:
+            failure, output = await self._health_check_once(check, self._start_timeout())
+        finally:
+            # Compared by value: the supervisor hands a fresh HealthCheck each pass.
+            current = self.health_check == check
+            # A replaced check's next run is due at once; this one's verdict says nothing
+            # about it. A pass now schedules it (tick_health_check arms its wakeup).
+            self._health_last_at = loop.time() if current else float("-inf")
+            self._notify()
+        # The world may have moved on while the check ran: the check was edited (its
+        # result must not mark the server), the bridge exited (the activation handles
+        # that), the unit is stopping, or a new process replaced it.
+        if not current:
+            return
+        if self._stopping or self.proc is not proc or not self._health_checkable():
+            return
+        if failure is None:
+            self.last_health = utcnow()
+            if self.health_failing:
+                self._health_recovered(f"health check passed ({check.label})")
+            return
+        detail = f"health check failed: {failure}"[:300]
+        if not self.health_failing:
+            # The output once, on the transition; a server that stays unhealthy logs one
+            # line per check rather than repeating it.
+            self._log_health_output(output)
+        self.logs.append(f"[mcpelevator] periodic {detail}")
+        error = self._with_hint(detail)
+        if not self.health_failing:
+            logger.warning(
+                "server %s: %s; marked unhealthy until a check passes", self.slug, error
+            )
+        self.last_error = error
+        self._set_state("unhealthy", health_failing=True)
+
+    def _health_recovered(self, why: str) -> None:
+        self.last_error = None
+        self.last_health = utcnow()
+        self.logs.append(f"[mcpelevator] {why}; back to running")
+        logger.info("server %s: %s; running again", self.slug, why)
+        self._set_state("running")
+
+    async def _cancel_health_check(self) -> None:
+        if self._health_wakeup is not None:
+            self._health_wakeup.cancel()
+            self._health_wakeup = None
+        task = self._health_task
+        self._health_task = None
+        if task is not None and not task.done():
+            task.cancel()
+        await self._await_task(task)
 
     async def _probe(self, url: str, timeout: float):
         async with asyncio.timeout(timeout):
@@ -618,6 +963,7 @@ class ServerUnit:
 
     async def _cleanup_attempt(self) -> None:
         had_bridge = self.proc is not None
+        await self._cancel_health_check()
         await self._terminate(self.setup_proc, include_descendants=True)
         await self._terminate(self.proc)
         await self._finish_log_task(self._setup_log_task)
@@ -700,7 +1046,7 @@ class ServerUnit:
                 f"({size} bytes; max {BRIDGE_SPEC_MAX_BYTES}) — "
                 f"shorten the server's env, setup script, or tool overrides"
             )
-        return {
+        env = {
             **inherited,
             BRIDGE_SPEC_ENV_KEY: spec,
             "MCPE_BRIDGE_HOST": self.host,
@@ -708,6 +1054,11 @@ class ServerUnit:
             "MCPE_DATA_DIR": str(settings.data_dir.resolve()),
             "PYTHONPATH": str(settings.backend_root),
         }
+        # Never inherited: only a unit with a cache hands the bridge one.
+        env.pop(server_cache.BRIDGE_ENV_KEY, None)
+        if self.cache_dir is not None:
+            env[server_cache.BRIDGE_ENV_KEY] = str(self.cache_dir)
+        return env
 
     def _effective_child_env(self) -> dict[str, str]:
         # Setup is local-runner only and runs as ``/bin/sh -e -c <script>``, so it gets the SAME
@@ -719,7 +1070,10 @@ class ServerUnit:
             # Same as the launch (bridge.host._child_env): the checkout's own .venv only.
             for key in repo_checkout.FOREIGN_ENV:
                 base.pop(key, None)
-        return {**base, **self.spec.env}
+        # Same cache as the launched child, so a setup script's `npx playwright install` or
+        # model download lands where the server will look. The server's env still wins.
+        cache = server_cache.cache_env(self.cache_dir) if self.cache_dir is not None else {}
+        return {**base, **cache, **self.spec.env}
 
     def _effective_child_cwd(self) -> str:
         settings = get_settings()
@@ -751,8 +1105,9 @@ class ServerUnit:
         )
         self._notify()
 
-    def _set_state(self, state: str) -> None:
+    def _set_state(self, state: str, *, health_failing: bool = False) -> None:
         self.state = state
+        self.health_failing = health_failing
         self._notify()
 
     def _notify(self) -> None:

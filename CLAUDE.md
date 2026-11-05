@@ -54,6 +54,11 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   declined, logs to the bridge log); the per-server `serialize_client_requests` flag runs one
   proxied request at a time (`_SerializeClientRequests` middleware) and fills the slot, so the
   child can only be asking that caller (issue #143). Progress is bound per call by its token.
+  With serialization on, the opt-in `attach_stderr_on_error` tees the child's stderr
+  (`_StderrTee`: a raw byte ring addressed by stream offset, so a window is exact, with the
+  server's secret values hidden over the window's bytes before it is split into lines) and
+  appends the lines a failed `tools/call` window saw to its error result, scrubbed
+  (`_with_stderr`, issue #227).
   Pushing needs a back-channel, which only handshake-era client connections have. An
   interactive request (`tools/call`, `resources/read`, `prompts/get`) from a client on the
   sessionless `2026-07-28` protocol (FastMCP 4's default) runs as a `_Turn` instead: the
@@ -90,6 +95,14 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   (and the control MCP's `get_repository_draft` / `install_from_repository`) detect the
   steps from a GitHub repo's manifests; detection is best effort and every field stays
   editable.
+- **Per-server cache** (`runners/cache.py`): each local (`npx`/`uvx`/`command`) server's
+  setup/checkout shells and child see `XDG_CACHE_HOME` = `<data_dir>/cache/<id>` and
+  `PLAYWRIGHT_BROWSERS_PATH` under it (server `env` wins). The unit resolves the dir (like
+  the checkout cwd, builders stay pure) and hands it to the bridge in its own env
+  (`MCPE_BRIDGE_CACHE_DIR`), not the size-capped spec; not in `config_hash`.
+  `POST /api/servers/{id}/cache/clear` deletes it inside `Supervisor.restart`'s
+  `while_stopped` hook (or `stop`'s, when disabled), so nothing writes into it meanwhile;
+  delete removes it too.
 - **Upstream OAuth** (`auth/oauth_store.py`, `auth/oauth_flow.py`): a `remote` server can
   authenticate to its upstream via OAuth instead of static `env` headers. The interactive
   authorization-code grant (DCR + PKCE) runs in the control plane (`/api/servers/{id}/oauth/authorize`
@@ -153,6 +166,17 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   an interrupted run (a setup killed mid-apt otherwise breaks every later attempt).
   Per-server `start_timeout_s` / `repo_build_timeout_s` override the instance deadlines,
   outside `config_hash`.
+- **Health checks** (`supervisor.unit.HealthCheck`, issue #225): an optional per-server
+  tool call (through the bridge's loopback `/mcp`, so never usage or idle traffic) or,
+  for npx/uvx/command, a shell command run like setup (`DPKG_REPAIR_PREAMBLE`, child env
+  and cwd). It runs at the end of `_await_ready` as its own `health` phase under the same
+  deadline (a failure is an ordinary `_AttemptFailed`), and, with
+  `health_check_interval_s`, the reconcile sweep hands each unit its current check
+  (`tick_health_check`), which runs a due one against a live running unit off the sweep.
+  A periodic failure sets `unhealthy` with `health_failing` (no restart: the sweep only
+  re-derives a crashed `unhealthy`), and a passing check returns it to `running`. Outside
+  `config_hash`; `health_check_command` is a retarget field for sealed env and needs the
+  local-runner permission.
 - **Debug mode** (`debug.py`, `MCPE_DEBUG=true`): deliberately maximal. TRACE logging for every
   logger in the control plane and every bridge (they inherit the env; bridges also run uvicorn at
   `trace`), every SQL statement (values hidden by `hide_parameters`), `TraceMiddleware` logging each request's arrival and headers, its body as the app reads it,

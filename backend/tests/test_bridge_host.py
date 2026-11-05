@@ -2072,3 +2072,345 @@ def test_serialize_flag_installs_the_request_lock_for_stdio():
     proxy, transport = _asker_proxy()
     assert transport.routing.serialize is False
     assert not any(isinstance(m, host._SerializeClientRequests) for m in proxy.middleware)
+
+
+# --- a failed call's upstream stderr (attach_stderr_on_error, issue #227) ------------
+#
+# A stdio child's traceback goes to its stderr, which by default only reaches the bridge's
+# log: the caller gets a bare error. With serialize_client_requests one request holds the
+# child at a time, so what it writes to stderr meanwhile is that request's, and the opt-in
+# attach_stderr_on_error appends it to a failed call (tests/stderr_stdio_server_fixture.py).
+
+_STDERR_FIXTURE = str(Path(__file__).with_name("stderr_stdio_server_fixture.py"))
+
+
+def _stderr_proxy(serialize: bool = True, attach: bool = True, **extra):
+    spec = {"command": sys.executable, "args": [_STDERR_FIXTURE], "name": "stderr", **extra}
+    if serialize:
+        spec["serialize_client_requests"] = True
+    if attach:
+        spec["attach_stderr_on_error"] = True
+    transport = host._build_transport(spec)
+    with patch.object(host, "_build_transport", return_value=transport):
+        return host.build_proxy(spec), transport
+
+
+def _texts(result) -> list[str]:
+    return [block.text for block in result.content]
+
+
+def _stderr_of(result) -> list[str]:
+    """The lines of the appended stderr block ([] when there is none)."""
+    blocks = [t for t in _texts(result) if t.startswith(host.STDERR_MARKER)]
+    assert len(blocks) <= 1
+    return blocks[0].splitlines()[1:] if blocks else []
+
+
+@pytest.mark.asyncio
+async def test_failed_call_carries_its_upstream_stderr(capsys):
+    """Opt-in: an ``isError`` result gains one block, under the marker, with what the child
+    wrote to stderr during the call; the line still reaches the bridge's own stderr (the
+    server's log) as before."""
+    proxy, transport = _stderr_proxy()
+    try:
+        async with Client(proxy, mode="legacy") as client:
+            result = await client.call_tool_mcp("fail", {"line": "Traceback: kaboom at line 7"})
+    finally:
+        await transport.disconnect()
+    assert result.is_error
+    assert _texts(result)[0] == "boom"
+    assert _stderr_of(result) == ["Traceback: kaboom at line 7"]
+    assert "Traceback: kaboom at line 7" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_stderr_is_not_attached_when_the_flag_is_off():
+    proxy, transport = _stderr_proxy(attach=False)
+    assert transport.routing.stderr is None
+    try:
+        async with Client(proxy, mode="legacy") as client:
+            result = await client.call_tool_mcp("fail", {"line": "Traceback: kaboom"})
+    finally:
+        await transport.disconnect()
+    assert result.is_error and _texts(result) == ["boom"]
+
+
+def test_stderr_is_not_teed_without_serialization():
+    """Unattributable without serialization, so the child's stderr isn't even teed."""
+    proxy, transport = _stderr_proxy(serialize=False)
+    assert transport.routing.stderr is None and transport.log_file is None
+
+
+@pytest.mark.asyncio
+async def test_successful_call_carries_no_stderr():
+    proxy, transport = _stderr_proxy()
+    try:
+        async with Client(proxy, mode="legacy") as client:
+            result = await client.call_tool_mcp("ok", {"line": "just chatting on stderr"})
+    finally:
+        await transport.disconnect()
+    assert not result.is_error and _texts(result) == ["fine"]
+
+
+@pytest.mark.asyncio
+async def test_failed_call_with_a_silent_stderr_is_unchanged():
+    proxy, transport = _stderr_proxy()
+    try:
+        async with Client(proxy, mode="legacy") as client:
+            result = await client.call_tool_mcp("fail", {})
+    finally:
+        await transport.disconnect()
+    assert result.is_error and _texts(result) == ["boom"]
+
+
+@pytest.mark.asyncio
+async def test_raised_tool_error_becomes_an_error_result_with_stderr():
+    """A JSON-RPC error from the child (raised as a ToolError in the proxy) reads like an
+    ``isError`` result: FastMCP's message first, then the stderr block."""
+    proxy, transport = _stderr_proxy()
+    try:
+        async with Client(proxy, mode="legacy") as client:
+            result = await client.call_tool_mcp("rpc_error", {"line": "ValueError: no such row"})
+    finally:
+        await transport.disconnect()
+    assert result.is_error
+    assert "exploded" in _texts(result)[0]
+    assert _stderr_of(result) == ["ValueError: no such row"]
+
+
+@pytest.mark.asyncio
+async def test_queued_call_never_carries_the_previous_calls_stderr():
+    """Two callers on one child: each failure carries its own stderr only — the second,
+    queued behind the first, never sees the first's lines (nor the reverse)."""
+    proxy, transport = _stderr_proxy()
+    try:
+        async with (
+            Client(proxy, mode="legacy") as alice,
+            Client(proxy, mode="legacy") as bob,
+        ):
+            await alice.call_tool_mcp("ok", {})  # connect the child first
+            first = asyncio.create_task(
+                alice.call_tool_mcp("fail", {"line": "alice's traceback", "delay": 0.4})
+            )
+            await asyncio.sleep(0.1)
+            second = await bob.call_tool_mcp("fail", {"line": "bob's traceback"})
+            first = await first
+    finally:
+        await transport.disconnect()
+    assert _stderr_of(first) == ["alice's traceback"]
+    assert _stderr_of(second) == ["bob's traceback"]
+
+
+@pytest.mark.asyncio
+async def test_attached_stderr_is_scrubbed():
+    proxy, transport = _stderr_proxy()
+    secret = "sk-live-0123456789abcdef"
+    try:
+        async with Client(proxy, mode="legacy") as client:
+            result = await client.call_tool_mcp(
+                "fail", {"line": f"request failed: Authorization: Bearer {secret}"}
+            )
+    finally:
+        await transport.disconnect()
+    (line,) = _stderr_of(result)
+    assert secret not in line and "<redacted>" in line
+
+
+@pytest.mark.asyncio
+async def test_attached_stderr_hides_the_servers_secret_env_values():
+    """A child can echo a bare secret value that debug.scrub doesn't recognize; the
+    server's sealed env values (``secret_env_keys``) are hidden before attaching."""
+    secret = "sk-live-0123456789abcdef"
+    proxy, transport = _stderr_proxy(
+        env={"API_KEY": secret, "REGION": "eu-west-1"}, secret_env_keys=["API_KEY"]
+    )
+    try:
+        async with Client(proxy, mode="legacy") as client:
+            result = await client.call_tool_mcp(
+                "fail", {"line": f"upstream rejected credential {secret} in eu-west-1"}
+            )
+    finally:
+        await transport.disconnect()
+    (line,) = _stderr_of(result)
+    assert secret not in line
+    assert line == "upstream rejected credential <hidden> in eu-west-1"
+
+
+def test_secret_values_include_short_ones():
+    """The attached block goes to callers: a sealed value is hidden however short."""
+    spec = {
+        "env": {"PIN": "42", "EMPTY": "", "K": "longer-value"},
+        "secret_env_keys": ["PIN", "EMPTY", "K"],
+    }
+    assert host._secret_values(spec) == ["longer-value", "42"]
+
+
+def test_bridge_payload_names_secret_env_keys_only_with_attach():
+    from dataclasses import replace
+
+    from app.bridge.spec import bridge_payload
+    from app.runners.base import ProcessSpec
+
+    spec = ProcessSpec(command="x", env={"K": "v"}, secret_env_keys=["K"])
+    assert "secret_env_keys" not in bridge_payload(spec, "n", mcp_http=True, rest_openapi=False)
+    spec = replace(spec, serialize_client_requests=True, attach_stderr_on_error=True)
+    payload = bridge_payload(spec, "n", mcp_http=True, rest_openapi=False)
+    assert payload["secret_env_keys"] == ["K"]
+
+
+@pytest.mark.asyncio
+async def test_modern_caller_failure_carries_its_upstream_stderr():
+    """A 2026-07-28 caller's tools/call runs as a turn; its window is the turn's."""
+    proxy, transport = _stderr_proxy()
+    try:
+        async with Client(proxy) as client:
+            assert client.protocol_version in host.MODERN_PROTOCOL_VERSIONS
+            result = await client.call_tool_mcp("fail", {"line": "modern traceback"})
+            routing = transport.routing
+            assert not routing.lock.locked() and routing.turn is None
+    finally:
+        await transport.disconnect()
+    assert result.is_error and _stderr_of(result) == ["modern traceback"]
+
+
+@pytest.mark.asyncio
+async def test_rest_surface_failure_carries_upstream_stderr():
+    """REST resolves through the same proxy, so its ``is_error`` envelope gets it too."""
+    proxy, transport = _stderr_proxy()
+    try:
+        routes = host.build_rest_routes(proxy, {"name": "stderr"})
+        call = next(r for r in routes if r.path == "/rest/{tool}")
+        request = MagicMock()
+        request.path_params = {"tool": "fail"}
+        request.body = AsyncMock(return_value=b'{"line": "rest traceback"}')
+        with anyio.fail_after(10):
+            envelope = json.loads((await call.endpoint(request)).body)
+    finally:
+        await transport.disconnect()
+    assert envelope["is_error"] is True
+    texts = [block["text"] for block in envelope["content"]]
+    assert texts == ["boom", f"{host.STDERR_MARKER}\nrest traceback"]
+
+
+def test_stderr_block_keeps_the_last_lines_within_the_cap():
+    lines = [f"line {i}" for i in range(100)]
+    block = host._stderr_block(lines).text.splitlines()
+    assert block[0] == host.STDERR_MARKER
+    assert block[1:] == [f"line {i}" for i in range(80, 100)]  # the last 20
+    big = host._stderr_block(["x" * 1500, "y" * 1500]).text
+    assert len(big.encode()) <= len(host.STDERR_MARKER) + 1 + host._STDERR_ATTACH_BYTES
+    assert big.splitlines()[1:] == ["y" * 1500]  # the older line doesn't fit
+    huge = host._stderr_block(["z" * 10_000]).text.splitlines()[1]
+    assert huge.startswith("…") and len(huge.encode()) <= host._STDERR_ATTACH_BYTES
+
+
+def test_stderr_tee_hides_a_secret_before_the_line_cap():
+    """The tee caps a line at _STDERR_LINE_MAX; a secret straddling that cap must be
+    hidden whole first, never left as a visible prefix — at a newline-terminated line's
+    cap, and at a newline-less flood's cut, across chunk boundaries too."""
+    secret = "S" * 32 + "0123456789abcdef0123456789abcdef"  # 64 chars
+    cap = host._STDERR_LINE_MAX
+
+    tee = host._StderrTee()
+    tee.secrets = [secret]
+    tee._file(("x" * (cap - 16) + secret + "\n").encode())
+    (line,) = tee.window(0, tee._read)
+    assert line == "x" * (cap - 16) + "<hidden>"
+
+    flood = host._StderrTee()
+    flood.secrets = [secret]
+    data = ("y" * (cap - 10) + secret + "y" * 50).encode()
+    for at in range(0, len(data), 1000):  # arrives in pieces, no newline at all
+        flood._file(data[at : at + 1000])
+    lines = flood.window(0, flood._read)
+    assert all(secret[:8] not in text for text in lines), lines
+    assert any("<hidden>" in text for text in lines)
+    tee.writer.close()
+    flood.writer.close()
+
+
+def test_stderr_tee_hides_a_secret_longer_than_the_line_cap():
+    """A secret longer than _STDERR_LINE_MAX (a PEM key, say) arriving across chunks is
+    held whole until it can be hidden, never filed in pieces; and a line still waiting
+    for the rest of a secret shows no prefix of it."""
+    secret = "K" + "".join(chr(ord("a") + i % 26) for i in range(5993))  # 5,994 chars
+    tee = host._StderrTee()
+    tee.secrets = [secret]
+    data = (secret + "\n").encode()
+    tee._file(data[:5000])
+    assert all(secret[:16] not in text for text in tee.window(0, tee._read))
+    tee._file(data[5000:])
+    lines = tee.window(0, tee._read)
+    assert lines == ["<hidden>"], [line[:40] for line in lines]
+
+    pending = host._StderrTee()
+    pending.secrets = ["sk-live-0123456789abcdef"]
+    pending._file(b"auth failed with sk-live-0123")  # the rest never came
+    assert pending.window(0, pending._read) == ["auth failed with <hidden>"]
+    tee.writer.close()
+    pending.writer.close()
+
+
+def test_stderr_tee_hides_a_secret_split_inside_a_multibyte_character():
+    """A ring edge that splits a multibyte character inside a secret must not turn its
+    bytes into replacement characters the partial match no longer recognizes: the
+    matching is on raw bytes, before decoding."""
+    secret = "密碼-super-secret-0123456789"
+    ring = host._StderrTee()
+    ring.secrets = [secret]
+    data = secret.encode() + b"\n" + b" " * host._STDERR_RING_BYTES
+    ring._file(data[: host._STDERR_RING_BYTES + 1])  # overflow by one: drops the 1st byte
+    assert ring._base == 1
+    lines = ring.window(0, ring._read)
+    assert lines == ["<hidden>"], lines
+    ring.writer.close()
+
+
+def test_stderr_tee_hides_a_multiline_secret():
+    """A secret spanning lines (a PEM key) is hidden over the raw stream before it is split
+    into lines, so neither of its lines reaches the block."""
+    secret = "-----BEGIN KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END KEY-----"
+    tee = host._StderrTee()
+    tee.secrets = [secret]
+    tee._file(f"loading key\n{secret}\nfailed\n".encode())
+    assert tee.window(0, tee._read) == ["loading key", "<hidden>", "failed"]
+    tee.writer.close()
+
+
+def test_stderr_tee_hides_a_secret_cut_by_the_window_or_the_ring():
+    """A secret crossing a window edge is found by looking past it, and one whose head the
+    ring already dropped has its visible tail hidden: no part of it is shown."""
+    secret = "sk-live-0123456789abcdef"
+    tee = host._StderrTee()
+    tee.secrets = [secret]
+    tee._file(f"before {secret} after\n".encode())
+    mid = len("before sk-live-0123")
+    assert tee.window(mid, tee._read) == ["<hidden> after"]
+    assert tee.window(0, mid) == ["before <hidden>"]
+
+    ring = host._StderrTee()
+    ring.secrets = [secret]
+    # 15 bytes overflow the ring: "yyyyy" and the secret's first 10 characters drop out.
+    ring._file(b"yyyyy" + secret.encode() + b" tail\n" + b"x" * (host._STDERR_RING_BYTES - 20))
+    assert ring._base == 15
+    assert ring.window(0, ring._read)[0] == "<hidden> tail"
+    tee.writer.close()
+    ring.writer.close()
+
+
+@pytest.mark.asyncio
+async def test_stderr_tee_windows_lines_by_stream_position(capsys):
+    """A window is a range of stream positions: a line written before the window opened
+    stays out of it even when the pump files it later, a newline-less tail counts, and
+    every byte still reaches the bridge's stderr."""
+    tee = host._StderrTee()
+    tee.writer.write("before\n")
+    tee.writer.flush()
+    start = tee.mark()  # "before" still sits unread in the pipe
+    tee.start()
+    tee.writer.write("during one\n\nduring two\npartial")
+    tee.writer.flush()
+    end = await tee.settled_mark()
+    assert tee.window(start, end) == ["during one", "during two", "partial"]
+    assert tee.window(0, start) == ["before"]
+    assert "before\nduring one\n\nduring two\npartial" in capsys.readouterr().err

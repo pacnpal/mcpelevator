@@ -381,6 +381,16 @@ def test_serialize_client_requests_lands_in_payload_only_when_on(tmp_path):
     assert ServerUnit(server)._bridge_payload()["serialize_client_requests"] is True
 
 
+def test_attach_stderr_on_error_lands_in_payload_only_when_on(tmp_path):
+    """Same rule as `serialize_client_requests`: a new key, present only when on."""
+    server = _server(tmp_path, setup_script="")
+    server.serialize_client_requests = True
+    assert "attach_stderr_on_error" not in ServerUnit(server)._bridge_payload()
+
+    server.attach_stderr_on_error = True
+    assert ServerUnit(server)._bridge_payload()["attach_stderr_on_error"] is True
+
+
 def test_tool_summary_lifts_the_upstream_name_out_of_meta():
     """A renamed tool's cached entry carries `upstream_name` so the UI has a stable
     identity for it; an un-renamed tool carries none (its `name` IS the upstream name)."""

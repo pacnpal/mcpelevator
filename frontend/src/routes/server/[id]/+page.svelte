@@ -2,6 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import {
+		clearServerCache,
 		cloneServer,
 		deleteServer,
 		disconnectOauth,
@@ -53,6 +54,10 @@
 	let oauthBusy = $state(false); // authorize / disconnect in flight
 	let deleting = $state(false);
 	let confirmDelete = $state(false);
+	// Clearing the cache stops (and, if enabled, restarts) the server, so it sits in the
+	// same interlock as the other bridge-bouncing ops.
+	let clearingCache = $state(false);
+	let confirmClearCache = $state(false);
 	let cloning = $state(false);
 
 	let loadingId: string | null = null;
@@ -71,7 +76,18 @@
 		try {
 			const result = await getServer(requestedId);
 			if (requestedId !== id) return; // route changed mid-flight; stale response
-			if (revision !== mutationRevision) return; // an action returned newer state
+			// An action returned newer state for THIS server; one for a server the page has
+			// since left is no reason to drop it (that would strand the spinner).
+			if (revision !== mutationRevision && server?.id === requestedId) {
+				// That newer state is on screen already, so the page is ready: a discarded
+				// non-silent load must not leave the spinner up (e.g. A -> B -> A while A's
+				// cache clear was in flight, which then landed before A's reload).
+				if (!silent) {
+					loadState = 'ready';
+					loadError = null;
+				}
+				return;
+			}
 			server = result;
 			loadState = 'ready';
 			loadError = null;
@@ -287,7 +303,7 @@
 	// Local-only edits: stage the change, don't touch the server until Apply. Skipped while
 	// an Apply or a lifecycle op (start/stop/delete/clone) is in flight.
 	const toolEditsBlocked = $derived(
-		applyingTools || busy || restarting || deleting || cloning || oauthBusy
+		applyingTools || busy || restarting || deleting || cloning || oauthBusy || clearingCache
 	);
 
 	// Delete waits for every other op in flight. The one that bites is an OAuth
@@ -295,7 +311,9 @@
 	// re-reading the row — so a delete landing mid-flight turns it into a 404 the
 	// operator never asked for. The others (a start/stop, a restart, an Apply, a clone)
 	// would likewise be acting on a server that is about to stop existing.
-	const deleteBlocked = $derived(applyingTools || busy || restarting || cloning || oauthBusy);
+	const deleteBlocked = $derived(
+		applyingTools || busy || restarting || cloning || oauthBusy || clearingCache
+	);
 
 	function toggleToolPending(key: string, enable: boolean) {
 		if (!server || toolEditsBlocked) return;
@@ -373,7 +391,8 @@
 		// flight — the toggle response is id-guarded above, but blocking here keeps the source
 		// page from kicking off conflicting actions right before it navigates away (and a
 		// navigate mid-apply is exactly what would strand the apply flag on the next view).
-		if (!server || cloning || busy || restarting || deleting || applyingTools) return;
+		if (!server || cloning || busy || restarting || deleting || applyingTools || clearingCache)
+			return;
 		// Capture the route + target id: if the user leaves this page before the
 		// clone resolves, don't navigate to the copy or toast on the wrong route.
 		const requestedId = id;
@@ -518,7 +537,8 @@
 		// other bridge-bouncing action: a tool Apply, a start/stop/retry, a restart, a
 		// delete. The gate runs both ways — the lifecycle controls below take `oauthBusy`
 		// for the same reason.
-		if (!server || oauthBusy || applyingTools || busy || restarting || deleting) return;
+		if (!server || oauthBusy || applyingTools || busy || restarting || deleting || clearingCache)
+			return;
 		oauthBusy = true;
 		try {
 			const updated = await disconnectOauth(server.id);
@@ -547,6 +567,46 @@
 			flashToast(reason ? `OAuth failed: ${reason}` : 'OAuth sign-in failed.');
 		}
 		void goto(`/server/${id}`, { replaceState: true, reset: false });
+	}
+
+	// Only local runners have a per-server cache directory (the backend 400s the rest):
+	// docker keeps its own filesystem, and remote/openapi/built-in launch no child.
+	const hasCache = $derived(
+		server?.runner === 'npx' || server?.runner === 'uvx' || server?.runner === 'command'
+	);
+
+	function formatBytes(bytes: number): string {
+		const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+		let value = bytes;
+		let unit = 0;
+		while (value >= 1024 && unit < units.length - 1) {
+			value /= 1024;
+			unit += 1;
+		}
+		return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`;
+	}
+
+	async function doClearCache() {
+		if (!server || clearingCache || deleting || deleteBlocked) return;
+		const target = server.id;
+		clearingCache = true;
+		try {
+			const result = await clearServerCache(target);
+			// The page may have moved on: match the ROUTE too, since `server` still holds
+			// the previous server until the new route's load returns.
+			if (server && server.id === target && target === id) {
+				mutationRevision += 1;
+				server = { ...server, ...result.server };
+			}
+			flashToast(
+				`Cache cleared — ${formatBytes(result.freed_bytes)} freed${result.restarted ? '; restarting' : ''}.`
+			);
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			clearingCache = false;
+			confirmClearCache = false;
+		}
 	}
 
 	async function doDelete() {
@@ -584,6 +644,9 @@
 		oauthNonce = null;
 		clearOauthTimers();
 		oauthBusy = false;
+		// A confirmation opened for the previous server must not arm this one.
+		confirmClearCache = false;
+		confirmDelete = false;
 		void load();
 	});
 
@@ -594,9 +657,10 @@
 		void restarting;
 		void deleting;
 		void oauthBusy;
+		void clearingCache;
 		if (loadState !== 'ready' || !server || server.id !== id) return;
 		const timer = setTimeout(async () => {
-			if (!busy && !restarting && !deleting && !oauthBusy) await load(true);
+			if (!busy && !restarting && !deleting && !oauthBusy && !clearingCache) await load(true);
 			pollTick += 1;
 		}, pollingInterval([server]));
 		return () => clearTimeout(timer);
@@ -874,7 +938,7 @@
 				<ServerActionButton
 					{server}
 					bind:busy
-					disabled={cloning || deleting || applyingTools || restarting || oauthBusy}
+					disabled={cloning || deleting || applyingTools || restarting || oauthBusy || clearingCache}
 					onchange={(next) => {
 						// Match the response to the server on screen: this component is reused
 						// across same-route navigations (clone, sidebar), so a summary that
@@ -892,7 +956,7 @@
 					<RestartButton
 						target={{ kind: 'server', id: server.id }}
 						bind:busy={restarting}
-						disabled={busy || cloning || deleting || applyingTools || oauthBusy}
+						disabled={busy || cloning || deleting || applyingTools || oauthBusy || clearingCache}
 						onrestarted={(next) => {
 							// Same id guard as the action button: a summary that lands after a
 							// same-route navigation belongs to the server we just left.
@@ -907,7 +971,7 @@
 					<button
 						type="button"
 						onclick={doClone}
-						disabled={cloning || busy || restarting || deleting || applyingTools}
+						disabled={cloning || busy || restarting || deleting || applyingTools || clearingCache}
 						aria-busy={cloning}
 						class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3.5 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
 					>
@@ -1594,6 +1658,71 @@
 				class="flex flex-col gap-3 rounded-[var(--radius-card)] border px-5 py-4"
 				style="border-color: color-mix(in oklab, var(--color-state-failed) 25%, var(--color-line));"
 			>
+				{#if hasCache}
+					{#if !confirmClearCache}
+						<div class="flex flex-wrap items-center justify-between gap-3">
+							<div>
+								<p class="text-sm font-medium text-[var(--color-ink)]">Clear cache</p>
+								<p class="text-xs text-[var(--color-ink-dim)]">
+									Deletes this server's own cache (downloaded models, Playwright browsers,
+									anything under its default <code class="font-mono">XDG_CACHE_HOME</code>).
+									A location its env sets instead is not touched.
+								</p>
+							</div>
+							<button
+								type="button"
+								onclick={() => (confirmClearCache = true)}
+								disabled={deleteBlocked || deleting}
+								class="shrink-0 rounded-lg border px-3.5 py-2 text-sm font-medium transition active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50"
+								style="border-color: color-mix(in oklab, var(--color-state-failed) 40%, transparent); color: var(--color-state-failed);"
+							>
+								Clear cache
+							</button>
+						</div>
+					{:else}
+						<div class="flex flex-col gap-3">
+							<p class="text-sm text-[var(--color-ink)]">
+								Clear the cache of <span class="font-semibold">{server.name}</span>?
+								{#if server.enabled}
+									The server stops, its cache directory is deleted, and it restarts and
+									downloads what it needs again.
+								{:else}
+									Its cache directory is deleted; it downloads what it needs again on its
+									next start.
+								{/if}
+							</p>
+							<div class="flex items-center gap-2">
+								<button
+									type="button"
+									onclick={doClearCache}
+									disabled={clearingCache || deleteBlocked || deleting}
+									aria-busy={clearingCache}
+									class="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+									style="background-color: var(--color-state-failed);"
+								>
+									{#if clearingCache}
+										<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+											<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
+											<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+										</svg>
+										Clearing
+									{:else}
+										Yes, clear cache
+									{/if}
+								</button>
+								<button
+									type="button"
+									onclick={() => (confirmClearCache = false)}
+									disabled={clearingCache}
+									class="rounded-lg border border-[var(--color-line)] px-4 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
+								>
+									Cancel
+								</button>
+							</div>
+						</div>
+					{/if}
+					<div class="border-t border-[var(--color-line)]"></div>
+				{/if}
 				{#if !confirmDelete}
 					<div class="flex flex-wrap items-center justify-between gap-3">
 						<div>

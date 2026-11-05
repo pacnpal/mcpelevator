@@ -20,6 +20,7 @@
 	// returned as HIDDEN_ENV; while its field stays blank the save sends HIDDEN_ENV
 	// back, which keeps the stored value.
 	type EnvRow = { id: number; key: string; value: string; secret: boolean; hidden: boolean };
+	type HealthMode = 'none' | 'tool' | 'command';
 	// Where a graphql server's schema comes from.
 	type SchemaSource = 'introspect' | 'url' | 'pasted';
 	const SCHEMA_SOURCES: { value: SchemaSource; title: string; hint: string }[] = [
@@ -203,6 +204,7 @@
 			restOpenapi: init.rest_openapi ?? false,
 			normalizeSchemaDialect: init.normalize_schema_dialect ?? false,
 			serializeClientRequests: init.serialize_client_requests ?? false,
+			attachStderrOnError: init.attach_stderr_on_error ?? false,
 			// Blank = inherit the global default (null); "0" pins the server always-on.
 			idleTimeoutText:
 				init.idle_timeout_s === null || init.idle_timeout_s === undefined
@@ -212,6 +214,20 @@
 			startTimeoutText: init.start_timeout_s == null ? '' : String(init.start_timeout_s),
 			repoBuildTimeoutText:
 				init.repo_build_timeout_s == null ? '' : String(init.repo_build_timeout_s),
+			// Health check: one form (tool call or shell command), or none.
+			healthMode: (init.health_check_tool
+				? 'tool'
+				: init.health_check_command
+					? 'command'
+					: 'none') as HealthMode,
+			healthTool: init.health_check_tool ?? '',
+			healthArgsText:
+				init.health_check_arguments && Object.keys(init.health_check_arguments).length > 0
+					? JSON.stringify(init.health_check_arguments, null, 2)
+					: '',
+			healthCommand: init.health_check_command ?? '',
+			healthIntervalText:
+				init.health_check_interval_s == null ? '' : String(init.health_check_interval_s),
 			startAfter: init.enabled ?? true,
 			authProvider: init.auth_provider ?? 'inherit',
 			oauth: init.oauth ?? false,
@@ -319,9 +335,16 @@
 	let normalizeSchemaDialect = $state(seed.normalizeSchemaDialect);
 	// Stdio runners only: route the child's roots/sampling/elicitation to the caller.
 	let serializeClientRequests = $state(seed.serializeClientRequests);
+	// Needs serializeClientRequests: only then is a call's stderr its own (issue #227).
+	let attachStderrOnError = $state(seed.attachStderrOnError);
 	let idleTimeoutText = $state(seed.idleTimeoutText);
 	let startTimeoutText = $state(seed.startTimeoutText);
 	let repoBuildTimeoutText = $state(seed.repoBuildTimeoutText);
+	let healthMode = $state<HealthMode>(seed.healthMode);
+	let healthTool = $state(seed.healthTool);
+	let healthArgsText = $state(seed.healthArgsText);
+	let healthCommand = $state(seed.healthCommand);
+	let healthIntervalText = $state(seed.healthIntervalText);
 	let authProvider = $state<ServerAuthProvider>(seed.authProvider);
 	let startAfter = $state(seed.startAfter);
 	let advancedOpen = $state(seed.setupScript.trim().length > 0);
@@ -440,6 +463,40 @@
 	const parseTimeout = (text: string) => (text.trim() === '' ? null : Number(text.trim()));
 	const startTimeoutValid = $derived(startupTimeoutValid(startTimeoutText));
 	const repoBuildTimeoutValid = $derived(startupTimeoutValid(repoBuildTimeoutText));
+
+	// Health check. A shell command runs on this host like the setup script, so it is
+	// offered where a setup script is (npx/uvx/command); a tool call works for any runner.
+	const MIN_HEALTH_CHECK_INTERVAL_S = 10;
+	const healthArgs = $derived.by((): { ok: boolean; value: Record<string, unknown> | null } => {
+		const t = healthArgsText.trim();
+		if (t === '') return { ok: true, value: null };
+		try {
+			const parsed: unknown = JSON.parse(t);
+			if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+				return { ok: false, value: null };
+			}
+			const obj = parsed as Record<string, unknown>;
+			return { ok: true, value: Object.keys(obj).length > 0 ? obj : null };
+		} catch {
+			return { ok: false, value: null };
+		}
+	});
+	const healthIntervalValid = $derived.by(() => {
+		const t = healthIntervalText.trim();
+		if (t === '') return true;
+		if (!/^\d+$/.test(t)) return false;
+		const n = Number(t);
+		return n >= MIN_HEALTH_CHECK_INTERVAL_S && n <= MAX_STARTUP_TIMEOUT_S;
+	});
+	const healthCommandBlocked = $derived(healthMode === 'command' && !setupAllowed);
+	const healthValid = $derived(
+		healthMode === 'none' ||
+			(healthMode === 'tool' && healthTool.trim().length > 0 && healthArgs.ok && healthIntervalValid) ||
+			(healthMode === 'command' &&
+				!healthCommandBlocked &&
+				healthCommand.trim().length > 0 &&
+				healthIntervalValid)
+	);
 
 	// The hardened `docker run …` the backend will synthesize, live as the operator types
 	// (an honest preview; the exact hardening flags are elided as […]). Mirrors the real
@@ -578,6 +635,7 @@
 			idleTimeoutValid &&
 			startTimeoutValid &&
 			(!hasCheckout || repoBuildTimeoutValid) &&
+			(isBuiltin || healthValid) &&
 			!dockerBlocked &&
 			!setupBlocked &&
 			!repoBlocked &&
@@ -665,10 +723,19 @@
 			// Stdio runners only; a remote upstream has its own session per request, so the
 			// bridge ignores it there — keep the payload honest on a runner switch.
 			serialize_client_requests: !isHttpUpstream && serializeClientRequests,
+			attach_stderr_on_error: !isHttpUpstream && serializeClientRequests && attachStderrOnError,
 			idle_timeout_s: idleTimeoutText.trim() === '' ? null : Number(idleTimeoutText.trim()),
 			start_timeout_s: parseTimeout(startTimeoutText),
 			// Only a checkout has a build to time; dropping the repo drops its override.
 			repo_build_timeout_s: hasCheckout ? parseTimeout(repoBuildTimeoutText) : null,
+			// One form or none; the unused fields are sent as null so a switch clears them.
+			health_check_tool: !isBuiltin && healthMode === 'tool' ? healthTool.trim() : null,
+			health_check_arguments:
+				!isBuiltin && healthMode === 'tool' ? healthArgs.value : null,
+			health_check_command:
+				!isBuiltin && healthMode === 'command' && setupAllowed ? healthCommand : null,
+			health_check_interval_s:
+				!isBuiltin && healthMode !== 'none' ? parseTimeout(healthIntervalText) : null,
 			auth_provider: authProvider,
 			// Upstream OAuth only applies to remote; the backend forces it off elsewhere,
 			// but keep the payload honest so a runner switch clears it client-side too.
@@ -1966,6 +2033,33 @@
 					></span>
 				</span>
 			</label>
+			<!-- One request at a time is what makes the child's stderr this call's (issue #227). -->
+			{#if serializeClientRequests}
+				<label
+					class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
+				>
+					<span class="flex flex-col gap-0.5">
+						<span class="text-sm font-medium text-[var(--color-ink)]">
+							Attach stderr to failed calls
+						</span>
+						<span class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+							When a tool call fails, add what this server wrote to stderr during that call (the
+							last 20 lines, scrubbed of credentials) to the error the client sees. Only helps when
+							the failure comes back as a failed call; the lines still go to the server's log.
+						</span>
+					</span>
+					<input type="checkbox" bind:checked={attachStderrOnError} class="peer sr-only" />
+					<span
+						class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
+						style="background-color: {attachStderrOnError ? '' : 'var(--color-line-strong)'};"
+					>
+						<span
+							class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
+							style={attachStderrOnError ? 'transform: translateX(16px);' : ''}
+						></span>
+					</span>
+				</label>
+			{/if}
 		{/if}
 
 		<!-- Idle shutdown (wake-on-request) -->
@@ -2063,6 +2157,124 @@
 					Raise it for a setup that installs system packages or downloads a browser, so it
 					isn't cut off part-way. Blank inherits the instance default. Takes effect on the next
 					start.
+				</p>
+			</div>
+
+			<!-- Health check -->
+			<div class="flex flex-col gap-1.5">
+				<label for="srv-health-mode" class="text-xs font-medium text-[var(--color-ink-muted)]">
+					Health check <span class="text-[var(--color-ink-dim)]">(optional)</span>
+				</label>
+				<select
+					id="srv-health-mode"
+					bind:value={healthMode}
+					class="w-48 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+				>
+					<option value="none">None</option>
+					<option value="tool">Call a tool</option>
+					{#if setupAllowed || healthMode === 'command'}
+						<option value="command">Run a shell command</option>
+					{/if}
+				</select>
+
+				{#if healthMode === 'tool'}
+					<div class="flex flex-col gap-1.5">
+						<label for="srv-health-tool" class="text-xs font-medium text-[var(--color-ink-muted)]">
+							Tool name
+						</label>
+						<input
+							id="srv-health-tool"
+							type="text"
+							bind:value={healthTool}
+							maxlength={256}
+							autocomplete="off"
+							spellcheck="false"
+							placeholder="e.g. ping"
+							aria-invalid={healthTool.trim() === ''}
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+						<label for="srv-health-args" class="text-xs font-medium text-[var(--color-ink-muted)]">
+							Arguments <span class="text-[var(--color-ink-dim)]">(JSON object, optional)</span>
+						</label>
+						<textarea
+							id="srv-health-args"
+							bind:value={healthArgsText}
+							rows="3"
+							spellcheck="false"
+							placeholder={'{"url": "https://example.com"}'}
+							aria-invalid={!healthArgs.ok}
+							class="resize-y rounded-md border bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+							style={healthArgs.ok
+								? 'border-color: var(--color-line);'
+								: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+						></textarea>
+						{#if !healthArgs.ok}
+							<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+								Enter a JSON object (or leave blank for no arguments).
+							</p>
+						{/if}
+					</div>
+				{:else if healthMode === 'command'}
+					<div class="flex flex-col gap-1.5">
+						<label for="srv-health-command" class="text-xs font-medium text-[var(--color-ink-muted)]">
+							Command
+						</label>
+						<textarea
+							id="srv-health-command"
+							bind:value={healthCommand}
+							rows="3"
+							spellcheck="false"
+							placeholder="curl -fsS http://127.0.0.1:3000/health"
+							aria-invalid={healthCommandBlocked || healthCommand.trim() === ''}
+							class="resize-y rounded-md border bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+							style={healthCommandBlocked
+								? 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'
+								: 'border-color: var(--color-line);'}
+						></textarea>
+						{#if healthCommandBlocked}
+							<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+								Health check commands run on this host, so they're supported only for npx, uvx and
+								command servers. Call a tool instead.
+							</p>
+						{/if}
+					</div>
+				{/if}
+
+				{#if healthMode !== 'none'}
+					<div class="flex flex-col gap-1.5">
+						<label for="srv-health-interval" class="text-xs font-medium text-[var(--color-ink-muted)]">
+							Re-check every <span class="text-[var(--color-ink-dim)]">(seconds, optional)</span>
+						</label>
+						<input
+							id="srv-health-interval"
+							type="text"
+							inputmode="numeric"
+							bind:value={healthIntervalText}
+							autocomplete="off"
+							spellcheck="false"
+							placeholder="only at startup"
+							aria-invalid={!healthIntervalValid}
+							class="w-48 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							style={healthIntervalValid
+								? 'border-color: var(--color-line);'
+								: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+						/>
+						{#if !healthIntervalValid}
+							<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+								Enter a whole number of seconds from {MIN_HEALTH_CHECK_INTERVAL_S} to
+								{MAX_STARTUP_TIMEOUT_S} (or leave blank to check only at startup).
+							</p>
+						{/if}
+					</div>
+				{/if}
+				<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+					Proves the server actually works, not just that it lists its tools. It runs once the
+					server answers, within the startup timeout — a failure fails that start attempt — and,
+					with a re-check interval, while it runs: a failing check marks the server unhealthy
+					until one passes. A tool check calls the tool as clients see it and fails on an error
+					result; a command runs like the setup script and fails on a non-zero exit. Checks
+					aren't counted as usage and never wake an idle server. Changes apply from the next
+					start or check, without a restart.
 				</p>
 			</div>
 		{/if}

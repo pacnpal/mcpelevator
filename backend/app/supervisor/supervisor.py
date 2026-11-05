@@ -28,7 +28,7 @@ from app.registry import service as registry_service
 from app.registry import settings as runtime_settings
 from app.runners.docker import DOCKER_BIN, LABEL_KEY
 from app.supervisor.ports import PortAllocator
-from app.supervisor.unit import ServerUnit
+from app.supervisor.unit import HealthCheck, ServerUnit
 
 logger = logging.getLogger(__name__)
 
@@ -286,16 +286,27 @@ class Supervisor:
             return False
         return True
 
-    async def stop(self, server_id: str) -> None:
-        """Public stop (e.g. API-driven delete). Steady state is still reconciled."""
+    async def stop(self, server_id: str, while_stopped=None, authorized=None) -> None:
+        """Public stop (e.g. API-driven delete). Steady state is still reconciled.
+
+        ``while_stopped`` (an optional zero-arg coroutine function, may raise) runs after
+        the stop and still inside the unit lock, so no reconcile pass can relaunch the
+        server while it works on the server's files (a cache clear). ``authorized`` (a
+        zero-arg callable, may raise) runs inside the lock BEFORE the stop, as in
+        :meth:`restart`: a caller's entry check precedes the lock wait, and a refusal
+        afterwards could no longer undo the interruption."""
         # An operator/API stop overrides quiescence bookkeeping: the server must not
         # come back as "idle" (wakeable) after a delete/disable/disconnect.
         self._idle.discard(server_id)
         self._last_activity.pop(server_id, None)
         async with self._unit_lock:
+            if authorized is not None:
+                authorized()
             await self._stop(server_id)
+            if while_stopped is not None:
+                await while_stopped()
 
-    async def restart(self, server_id: str, authorized=None) -> None:
+    async def restart(self, server_id: str, authorized=None, while_stopped=None) -> None:
         """Bounce one desired server: stop its unit now, then queue a fresh activation.
 
         The single restart primitive — the ``/servers/{id}/restart`` endpoint and a
@@ -310,6 +321,12 @@ class Supervisor:
         inside the unit lock both before and after the stop, so an ownership
         reassignment committing in that gap can't have a former owner's queued
         activation bounce the new owner's server.
+
+        ``while_stopped`` (an optional zero-arg coroutine function, may raise) runs
+        between the stop and the queued activation, inside the same lock — the window in
+        which nothing runs for the server, which a cache clear uses to delete its files.
+        A raise leaves the server stopped with no activation queued; the reconciler then
+        converges it as usual.
         """
         async with self._unit_lock:
             if authorized is not None:
@@ -317,6 +334,8 @@ class Supervisor:
             await self._stop(server_id)
             if authorized is not None:
                 authorized()
+            if while_stopped is not None:
+                await while_stopped()
             # A quiesced server is desired-but-stopped; the activation request clears the
             # marker in reconcile, but discard it here too so nothing observes the id as
             # idle (i.e. wakeable but not starting) in the gap before the sweep runs.
@@ -412,7 +431,7 @@ class Supervisor:
             if registry_service.local_exec_invokes_docker(
                 sv.runner, sv.command, sv.args
             ) or registry_service.scripts_invoke_docker(
-                sv.runner, sv.setup_script, sv.post_clone_script
+                sv.runner, sv.setup_script, sv.post_clone_script, sv.health_check_command
             ):
                 forbidden_docker.append(
                     (sv, "Docker CLI invocations require the docker runner")
@@ -530,7 +549,13 @@ class Supervisor:
                 requested_at is None
                 and timeout > 0
                 and unit is not None
-                and unit.state == "running"
+                and (
+                    unit.state == "running"
+                    # A live bridge failing its periodic health check is still up and
+                    # still checked: unused, it must sleep like a running one (waking
+                    # re-runs the check at readiness), not stay up forever.
+                    or (unit.state == "unhealthy" and getattr(unit, "health_failing", False))
+                )
                 and self._in_flight.get(server_id, 0) == 0
             ):
                 last = self._last_activity.get(server_id)
@@ -565,7 +590,10 @@ class Supervisor:
                 # in this sweep looks at a unit whose config still matches.
                 or server_id in self._teardown_failed
                 or unit.config_hash != server.config_hash
-                or unit.state == "unhealthy"
+                # A crashed bridge's unhealthy, not one whose bridge still runs but fails
+                # its periodic health check: that one only reports (no auto-restart), is
+                # re-checked below, and returns to running when a check passes.
+                or (unit.state == "unhealthy" and not getattr(unit, "health_failing", False))
             ):
                 # Start only if the teardown actually succeeded: a failed one leaves the
                 # unit quarantined (the next pass retries it), and launching a second
@@ -586,6 +614,14 @@ class Supervisor:
                 # started here from a pre-rename snapshot). Re-reading the slug each
                 # pass guarantees ``endpoint(<new>)`` resolves within one interval.
                 unit.slug = server.slug
+                # Periodic health check: the CURRENT config each pass (it's outside
+                # config_hash, so an edit lands on the next check without a restart). The
+                # unit starts a check only when one is due against a live, running bridge;
+                # it runs off this sweep and never counts as traffic, so it can't hold an
+                # idle window open (and an idle server has no unit to check).
+                tick = getattr(unit, "tick_health_check", None)
+                if tick is not None:
+                    tick(HealthCheck.from_server(server))
                 self._write_runtime(
                     server_id,
                     state=unit.state, pid=unit.pid, port=unit.port,
