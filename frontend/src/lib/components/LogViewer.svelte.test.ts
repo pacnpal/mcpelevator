@@ -179,6 +179,40 @@ describe('LogViewer activation stream', () => {
 		expect(api.streamLogs).toHaveBeenCalledTimes(2);
 	});
 
+	it('filter hides non-matching lines and reports no matches', async () => {
+		api.streamLogs.mockImplementation(async (_id, handlers, signal: AbortSignal) => {
+			await Promise.resolve();
+			handlers.onOpen?.();
+			handlers.onLine('upstream_error: no such host');
+			handlers.onLine('INFO: 200 OK');
+			await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve()));
+		});
+
+		const target = document.createElement('div');
+		document.body.append(target);
+		const component = mount(LogViewer, {
+			target,
+			props: { serverId: 'srv-1', serverState: 'running' as const }
+		});
+		dispose = () => void unmount(component);
+		flushSync();
+		await Promise.resolve();
+		flushSync();
+
+		const input = target.querySelector('input[type="search"]') as HTMLInputElement;
+		input.value = 'error';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		const shown = [...target.querySelectorAll('.whitespace-pre-wrap')].map((n) => n.textContent);
+		expect(shown).toEqual(['upstream_error: no such host']);
+
+		input.value = 'nomatch-zzz';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		expect(target.querySelectorAll('.whitespace-pre-wrap')).toHaveLength(0);
+		expect(target.textContent).toContain('No lines match');
+	});
+
 	it('keeps one stream open while the page polls in fresh but equal props', async () => {
 		// The server page re-fetches the server every second during startup and passes
 		// each response down. Equal values must not abort and reopen the stream: on a

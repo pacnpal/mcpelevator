@@ -29,7 +29,16 @@
 	let conn = $state<Conn>('idle');
 	let notRunning = $state(false);
 	let paused = $state(false);
+	let filter = $state('');
 	let stuckToBottom = $state(true);
+
+	// Filter hides non-matching lines (case-insensitive substring). We render the
+	// whole buffer, so the browser's own Find still works on the unfiltered view;
+	// this is the "hide the noise" cut that native find can't do.
+	const visible = $derived.by(() => {
+		const q = filter.trim().toLowerCase();
+		return q ? lines.filter((l) => l.toLowerCase().includes(q)) : lines;
+	});
 	let pane = $state<HTMLDivElement | undefined>(undefined);
 	let seenServerId = '';
 	let seenActivation: string | null = null;
@@ -213,11 +222,16 @@
 		};
 	});
 
-	// Auto-scroll to the newest line unless the user has scrolled up.
+	// Auto-scroll ("follow") to the newest line unless the user has scrolled up.
 	$effect(() => {
-		void lines.length;
+		void visible.length;
 		if (pane && stuckToBottom) pane.scrollTop = pane.scrollHeight;
 	});
+
+	function toggleFollow() {
+		stuckToBottom = !stuckToBottom;
+		if (stuckToBottom && pane) pane.scrollTop = pane.scrollHeight;
+	}
 </script>
 
 <div
@@ -235,7 +249,24 @@
 				{dot.label}
 			</span>
 		</div>
-		<div class="flex items-center gap-2">
+		<div class="flex flex-wrap items-center justify-end gap-2">
+			<input
+				type="search"
+				bind:value={filter}
+				placeholder="Filter…"
+				aria-label="Filter logs"
+				class="h-[26px] w-28 rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2 text-xs text-[var(--color-ink)] placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-accent)] focus:outline-none"
+			/>
+			<button
+				type="button"
+				onclick={toggleFollow}
+				title={stuckToBottom ? 'Following new output' : 'Jump to latest and follow'}
+				class="rounded-md border px-2.5 py-1 text-xs font-medium transition {stuckToBottom
+					? 'border-[var(--color-accent)] text-[var(--color-accent)]'
+					: 'border-[var(--color-line)] text-[var(--color-ink-muted)] hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]'}"
+			>
+				Follow
+			</button>
 			<button
 				type="button"
 				onclick={() => (paused = !paused)}
@@ -278,10 +309,12 @@
 		aria-label="Server logs"
 		class="overflow-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] p-3 font-mono text-xs leading-relaxed {compact ? 'h-44' : 'h-72'}"
 	>
-		{#if lines.length > 0}
-			{#each lines as line}
+		{#if visible.length > 0}
+			{#each visible as line}
 				<div class="whitespace-pre-wrap break-all text-[var(--color-ink-muted)]">{line}</div>
 			{/each}
+		{:else if lines.length > 0}
+			<p class="text-[var(--color-ink-dim)]">No lines match “{filter.trim()}”.</p>
 		{:else if notRunning}
 			<p class="text-[var(--color-ink-dim)]">Server isn't running — no live logs.</p>
 		{:else}
