@@ -13,7 +13,7 @@ FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b98
 
 # Stage 2: runtime — Python control plane + Node/npx + uv/uvx so npx/uvx MCP
 # servers run with zero local setup (batteries-included).
-FROM python:3.15-slim-bookworm@sha256:4e03260adeeebafccd084f3584e6b84823aba5651cfb53ef8a078ed441ddf9cd AS runtime
+FROM python:3.15-slim-bookworm@sha256:96599df822d0e1c6bb700014a05c7f3c8cabc6e0f7ff3c4f9f69cee033b4b5d9 AS runtime
 
 # pipefail so a failure in the piped NodeSource setup below aborts the RUN (DL4006).
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -86,9 +86,8 @@ ARG APP_VERSION=0.0.0-dev
 # Every release build carries a fresh APP_VERSION, so this layer always re-runs and reinstalls
 # the LATEST published docker-ce-cli .deb — picking up a Go-patched rebuild the moment Docker
 # ships one — without invalidating the expensive uv-sync/arm64 layers before it. That is what
-# lets the Go stdlib CVEs suppressed in .trivyignore.yaml clear automatically on the next
-# release once a fixed .deb exists, instead of a durably-cached layer re-shipping a
-# now-fixable binary while the suppression hides it.
+# lets Go stdlib CVEs in the docker binary clear automatically on the next release once a
+# fixed .deb exists, instead of a durably-cached layer re-shipping a now-fixable binary.
 RUN echo "docker-ce-cli refresh for mcpelevator ${APP_VERSION}" \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
