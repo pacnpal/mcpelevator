@@ -1067,6 +1067,7 @@
 				serverId={server.id}
 				serverState={server.state}
 				startupStatus={startup}
+				slug={server.slug}
 				compact
 			/>
 		{/if}
@@ -1649,6 +1650,7 @@
 				serverId={server.id}
 				serverState={server.state}
 				startupStatus={startup}
+				slug={server.slug}
 			/>
 		{/if}
 

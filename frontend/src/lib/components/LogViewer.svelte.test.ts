@@ -139,6 +139,46 @@ describe('LogViewer activation stream', () => {
 		expect(target.textContent).not.toContain('first activation');
 	});
 
+	it('pause drops the live stream and resume reopens it', async () => {
+		api.streamLogs.mockImplementation(async (_id, handlers, signal: AbortSignal) => {
+			await Promise.resolve();
+			handlers.onOpen?.();
+			handlers.onLine('live output');
+			await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve()));
+		});
+
+		const target = document.createElement('div');
+		document.body.append(target);
+		const component = mount(LogViewer, {
+			target,
+			props: { serverId: 'srv-1', serverState: 'running' as const }
+		});
+		dispose = () => void unmount(component);
+		flushSync();
+		await Promise.resolve();
+		flushSync();
+		expect(api.streamLogs).toHaveBeenCalledTimes(1);
+		expect(target.textContent).toContain('live output');
+
+		const button = (label: string) =>
+			[...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === label);
+
+		button('Pause')!.click();
+		flushSync();
+		await Promise.resolve();
+		flushSync();
+		// Stream aborted, not reopened, and the backlog stays frozen on screen.
+		expect(api.streamLogs).toHaveBeenCalledTimes(1);
+		expect(target.textContent).toContain('paused');
+		expect(target.textContent).toContain('live output');
+
+		button('Resume')!.click();
+		flushSync();
+		await Promise.resolve();
+		flushSync();
+		expect(api.streamLogs).toHaveBeenCalledTimes(2);
+	});
+
 	it('keeps one stream open while the page polls in fresh but equal props', async () => {
 		// The server page re-fetches the server every second during startup and passes
 		// each response down. Equal values must not abort and reopen the stream: on a
