@@ -6,38 +6,54 @@ name: Build and Push Docker Image
 # pre-installed on GitHub-hosted runners, and arm64 layers are built via QEMU.
 #
 # Triggers:
-#   - A published GitHub release whose tag is a full semver (vX.Y.Z, optionally
-#     -prerelease). The release tag is the image version.
-#   - Manual workflow_dispatch, for dev/beta builds of any branch, tag, or
-#     commit: requires a full-semver `version` input and a `channel` (dev or
-#     beta). The image is published ONLY under channel-prefixed tags
-#     (<channel>-<version> plus <channel>-sha-<short>) — the release namespace
-#     (X.Y.Z, X.Y, X, latest, beta) is never created or moved by a manual run,
-#     so a manual build can't clobber or impersonate a release.
+#   - A pushed version tag (vX.Y.Z, optionally -prerelease) cuts a RELEASE.
+#   - Manual workflow_dispatch with channel `release` cuts a release too: the
+#     tag v<version> is created on the commit the run was dispatched from. If
+#     the tag already exists it must point at that commit (dispatch from the tag
+#     itself to regenerate an existing release's notes and rebuild its image).
+#   - Manual workflow_dispatch with channel `dev` or `beta` builds any branch,
+#     tag, or commit WITHOUT releasing. The image is published ONLY under
+#     channel-prefixed tags (<channel>-<version> plus <channel>-sha-<short>) —
+#     the release namespace (X.Y.Z, X.Y, X, latest, beta) is never created or
+#     moved by those runs, so a dev/beta build can't clobber or impersonate a
+#     release.
 #
-# In both cases every published image is stamped with a real semver version
-# (APP_VERSION), so the running instance reports e.g. `v1.2.3` — never
-# `latest`/`dev`/a bare image tag. Anything that isn't full semver fails the build.
+# A release first creates (or updates) the GitHub release, titled
+# "vX.Y.Z - <title>", with a title and notes written by an OpenRouter free
+# model from every commit since the previous v* tag
+# (pacnpal/free-ai-release-notes), then builds the image. A version with a
+# -prerelease part is published as a GitHub prerelease and moves `beta`
+# instead of `latest`. A tag push for a release that already has notes (one
+# published by hand from the UI) keeps them; a manual `release` run always
+# rewrites them.
 #
-# No secrets required: GHCR auth uses the automatic GITHUB_TOKEN.
+# Every published image is stamped with a real semver version (APP_VERSION),
+# so the running instance reports e.g. `v1.2.3` — never `latest`/`dev`/a bare
+# image tag. Anything that isn't full semver fails the run.
+#
+# Secrets: OPENROUTER_API_KEY (releases only; https://openrouter.ai/keys).
+# GHCR auth and the GitHub release use the automatic GITHUB_TOKEN.
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Image version to build (full semver, e.g. 1.2.3 or v1.2.3-rc.1)"
+        description: "Version (full semver, e.g. 1.2.3 or v1.2.3-rc.1). For a release, the tag is v<version>"
         required: true
         type: string
       channel:
-        description: "Publish channel: the image is tagged <channel>-<version>; release tags are never touched"
+        description: "release = tag + GitHub release with AI notes + release image tags; dev/beta = image tagged <channel>-<version> only"
         required: true
         default: dev
         type: choice
         options:
           - dev
           - beta
+          - release
 
 concurrency:
   # Releases and manual builds live in disjoint groups. ALL releases share one
@@ -52,20 +68,213 @@ concurrency:
   # just ONE pending run per group, so a burst of 3+ releases inside a single
   # build window can drop a middle release's queued build — recoverable by
   # re-running that release, whereas an inverted `latest` would be silent
-  # corruption, so serialization is the safer default.) Manual builds serialize
-  # per channel — keyed on the channel, not the free-typed version, so `v1.2.3`
-  # and `1.2.3` dispatches can't race the same image tag from different groups.
-  # `cancel-in-progress: false` means a run never cancels an in-flight run in
-  # its group: dispatching dev-1.2.4 must not kill an in-flight dev-1.2.3 (each
-  # publishes a distinct tag).
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.channel) || 'release' }}
+  # corruption, so serialization is the safer default.) A tag push and a manual
+  # `release` dispatch are both releases and share the `release` group. dev/beta
+  # builds serialize per channel — keyed on the channel, not the free-typed
+  # version, so `v1.2.3` and `1.2.3` dispatches can't race the same image tag
+  # from different groups. `cancel-in-progress: false` means a run never
+  # cancels an in-flight run in its group: dispatching dev-1.2.4 must not kill
+  # an in-flight dev-1.2.3 (each publishes a distinct tag).
+  group: ${{ github.workflow }}-${{ (github.event_name == 'push' || inputs.channel == 'release') && 'release' || format('dispatch-{0}', inputs.channel) }}
   cancel-in-progress: false
 
 env:
   GHCR_IMAGE: ghcr.io/${{ github.repository }}
   PLATFORMS: linux/amd64,linux/arm64
+  # Strict full SemVer (X.Y.Z, optionally -prerelease), using the official
+  # SemVer grammar for the prerelease part (non-empty dot-separated
+  # identifiers; numeric identifiers can't have leading zeroes — 1.2.3-01 and
+  # 1.2.3-. are invalid). Shared by "Resolve version" and the release
+  # comparison set in "Check newest release".
+  SEMVER_RE: '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
 
 jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image-tag: ${{ steps.version.outputs.image_tag }}
+      release: ${{ steps.version.outputs.release }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+        run: |
+          # Tag push: the version is the tag. Manual dispatch: the version is the
+          # required `version` input. Either way any leading `v` is stripped
+          # (v1.2.3 -> 1.2.3).
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${INPUT_VERSION#v}"
+            CHANNEL="$INPUT_CHANNEL"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+            CHANNEL=release
+          fi
+          # Reject anything outside a safe tag charset before it reaches later steps.
+          case "$VERSION" in
+            ''|*[!A-Za-z0-9_.-]*)
+              echo "Invalid image tag: $VERSION" >&2
+              exit 1
+              ;;
+          esac
+          # A loose pattern is not enough now that the free-typed manual input
+          # feeds the image tag (and, for a release, the git tag) directly:
+          # 1.2.3.4 or 1.2.3foo must not publish. +build metadata is rejected
+          # too ('+' can't appear in a docker tag; the charset check above
+          # already refuses it). Every image has to carry a real version in
+          # APP_VERSION so the running instance reports the version, never a
+          # bare tag like "latest".
+          if ! printf '%s' "$VERSION" | grep -Eq "$SEMVER_RE"; then
+            echo "Refusing to build: version '$VERSION' is not a full semver (X.Y.Z[-prerelease])." >&2
+            exit 1
+          fi
+          if [ "$CHANNEL" = "release" ]; then
+            RELEASE=true
+            TAG="v${VERSION}"
+            IMAGE_TAG="${VERSION}"
+          else
+            # A dev/beta build may be of any ref, so its image tag is
+            # namespaced by the channel (dev-1.2.3 / beta-1.2.3): it can never
+            # collide with — or impersonate — a release's version tag.
+            RELEASE=false
+            TAG=""
+            IMAGE_TAG="${CHANNEL}-${VERSION}"
+          fi
+          # SemVer: a version is a prerelease exactly when it has a -suffix.
+          case "$VERSION" in
+            *-*) PRERELEASE=true ;;
+            *) PRERELEASE=false ;;
+          esac
+          {
+            echo "version=${VERSION}"
+            echo "image_tag=${IMAGE_TAG}"
+            echo "release=${RELEASE}"
+            echo "tag=${TAG}"
+            echo "prerelease=${PRERELEASE}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version ${VERSION} (image tag: ${IMAGE_TAG}, release: ${RELEASE}, prerelease: ${PRERELEASE})"
+
+  release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    needs: [lint, version]
+    if: needs.version.outputs.release == 'true'
+    permissions:
+      # Create the tag and release, and read GitHub's generated notes as context.
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history and tags: the notes cover every commit since the
+          # previous v* tag.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check tag and existing release
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          # A manual release tags the dispatched commit, and that commit is what
+          # the image is built from. A tag that already exists elsewhere would
+          # publish a release whose source and image disagree, so refuse it.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            TAG_SHA=$(git rev-parse "refs/tags/${TAG}^{commit}")
+            if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag ${TAG} already exists at ${TAG_SHA}, not at the dispatched commit ${GITHUB_SHA}. Dispatch from the tag itself (Use workflow from: ${TAG}) or pick a new version."
+              exit 1
+            fi
+          fi
+          # A tag push for a release already published by hand keeps its
+          # notes. A manual `release` run always (re)writes them.
+          BODY=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body 2>/dev/null || true)
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ -n "$BODY" ]; then
+            echo "Release ${TAG} already has notes; keeping them."
+            echo "generate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "generate=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write release notes and publish the release
+        if: steps.existing.outputs.generate == 'true'
+        uses: pacnpal/free-ai-release-notes@76e53c73233b9dfc37cb0aff5ed6359d139b4c7c # v1.0.0
+        with:
+          openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+          tag: ${{ needs.version.outputs.tag }}
+          target: ${{ github.sha }}
+          # Only v* tags count as the previous release.
+          tag-pattern: "v*"
+          model: openrouter/free
+          title-template: "{tag} - {title}"
+          prerelease: ${{ needs.version.outputs.prerelease }}
+          create-release: true
+          instructions: |
+            Write these notes in mcpelevator's house style. This style REPLACES the default
+            layout, headings and emoji described above. Keep only the JSON response format,
+            the rule that breaking changes come first, and the rule against inventing changes.
+
+            Title: the release's two to four biggest user-facing changes as a short phrase or
+            comma-separated list in plain words, e.g. "GraphQL runner, health checks,
+            per-server caches, a better log viewer" or "Paste or upload an OpenAPI document".
+            No version number, no emoji.
+
+            Notes, in this order:
+
+            1. Only if something breaks: the line `# ⚠️ **BREAKING CHANGES**`, a blank line,
+               then the paragraph "**Read this before upgrading.** Each item says what
+               changed, who it affects, and what to do instead. If nothing here describes
+               your setup, the upgrade needs no action.", then `### **In X.Y.Z**` (this
+               release's version without the leading v), then numbered items:
+               **1. <One-sentence summary> (#PR).**
+               - **What changed:** <the change, and why it was made>
+               - **Affects you if:** <who will notice>
+               - **Replace with:** <the exact setting, env var, command or step that keeps
+                 them working>
+               Then a line containing only `---`.
+            2. `## vX.Y.Z - <the title>`, then one or two short paragraphs saying what the
+               release adds or fixes and why it matters to someone running mcpelevator.
+            3. One `## <Feature or fix name> (#PR, #PR)` section per significant change,
+               biggest first. Explain it for the person running mcpelevator: where it is in
+               the UI (bold labels, paths like **Settings → Idle shutdown**), the API route
+               or field (`POST /api/servers/{id}/...`, `field_name`), the control MCP tool,
+               and any env var with its default. For a fix, say what went wrong, the root
+               cause, and what happens now. Use `###` subsections and bullets with a bold
+               lead-in for long sections.
+            4. `## Fixes`: smaller fixes, one bullet each with a bold lead-in sentence.
+            5. `## Security`: security-relevant changes, and dependency bumps that fix an
+               advisory (link GHSA or CVE ids only when the input names them).
+            6. `## Dependencies`: bullets **Backend:**, **Frontend:** and **CI and image:**,
+               each a comma-separated list like `fastmcp` 4.1.0 → 4.2.0 (#240), or just the
+               new version when the old one isn't in the input. Every Renovate or
+               dependency bump goes here and nowhere else.
+            7. `## Upgrade notes for X.Y.Z`: bullets with a bold lead-in, e.g. **No migration
+               step.** or **New environment variables:** `MCPE_...` (default `...`).
+
+            Put a line containing only `---` between every two `##` sections. Leave out any
+            section that would be empty. Do not add a "Full Changelog" link or a License
+            section.
+
+            Voice:
+            - Plain and direct, second person ("you"), short declarative sentences.
+            - No marketing words (powerful, seamless, robust, enhanced, exciting), no
+              exclamation marks, no emoji other than the breaking-changes heading.
+            - Concrete over vague: name the setting, field, env var, route, runner or file,
+              in backticks.
+            - Cite pull requests as (#123) after the heading or bullet they back, using only
+              numbers that appear in the input.
+            - Wrap prose at about 90 characters per line.
+            - Leave out what users can't see (CI-only changes, refactors, tests, typo
+              fixes) unless nothing else changed.
+
   lint:
     name: Lint Dockerfile
     runs-on: ubuntu-latest
@@ -85,7 +294,12 @@ jobs:
   build:
     name: Build and Push
     runs-on: ubuntu-latest
-    needs: lint
+    needs: [lint, version, release]
+    # A dev/beta build skips the release job; a release builds only once its
+    # GitHub release exists.
+    if: >-
+      !cancelled() && needs.lint.result == 'success' && needs.version.result == 'success'
+      && (needs.release.result == 'success' || needs.release.result == 'skipped')
     permissions:
       contents: read
       packages: write
@@ -94,8 +308,6 @@ jobs:
 
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
-      version: ${{ steps.version.outputs.version }}
-      image-tag: ${{ steps.version.outputs.image_tag }}
 
     steps:
       - name: Checkout
@@ -122,64 +334,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve version
-        id: version
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-          INPUT_CHANNEL: ${{ inputs.channel }}
-        run: |
-          # Release: the version is the release tag. Manual dispatch: the version
-          # is the required `version` input. Either way any leading `v` is
-          # stripped (v1.2.3 -> 1.2.3).
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            VERSION="${INPUT_VERSION#v}"
-          else
-            VERSION="${GITHUB_REF_NAME#v}"
-          fi
-          # Reject anything outside a safe tag charset before it reaches later steps.
-          case "$VERSION" in
-            ''|*[!A-Za-z0-9_.-]*)
-              echo "Invalid image tag: $VERSION" >&2
-              exit 1
-              ;;
-          esac
-          # Require a strict full semver (X.Y.Z, optionally -prerelease), using
-          # the official SemVer grammar for the prerelease part (non-empty
-          # dot-separated identifiers; numeric identifiers can't have leading
-          # zeroes — 1.2.3-01 and 1.2.3-. are invalid). A loose pattern is not
-          # enough now that the free-typed manual input feeds the image tag
-          # directly: 1.2.3.4 or 1.2.3foo must not publish. +build metadata is
-          # rejected too ('+' can't appear in a docker tag; the charset check
-          # above already refuses it). Every image has to carry a real version
-          # in APP_VERSION so the running instance reports the version, never a
-          # bare tag like "latest".
-          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
-          if ! printf '%s' "$VERSION" | grep -Eq "$SEMVER_RE"; then
-            echo "Refusing to build: version '$VERSION' is not a full semver (X.Y.Z[-prerelease])." >&2
-            exit 1
-          fi
-          # Shared with the "Check newest release" step, which filters the
-          # release comparison set through the same grammar.
-          echo "SEMVER_RE=${SEMVER_RE}" >> "$GITHUB_ENV"
-          # A manual build may be of any ref, so its image tag is namespaced by
-          # the required channel (dev-1.2.3 / beta-1.2.3): it can never collide
-          # with — or impersonate — a release's version tag.
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            IMAGE_TAG="${INPUT_CHANNEL}-${VERSION}"
-          else
-            IMAGE_TAG="${VERSION}"
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "Building version ${VERSION} (image tag: ${IMAGE_TAG})"
-
       - name: Check newest release
         id: newest
-        if: github.event_name == 'release'
+        if: needs.version.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
-          IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.version.outputs.prerelease }}
         run: |
           # Floating tags must only ever move forward. Queued release runs can
           # execute out of publish order (queue order is not guaranteed) and a
@@ -203,11 +365,11 @@ jobs:
             [ "$COUNT" -lt 100 ] && break
             PAGE=$((PAGE + 1))
           done
-          # The list API can lag the release event, so make sure this run's
+          # The list API can lag the release job, so make sure this run's
           # own release is always in the comparison set.
-          printf '%s %s\n' "$GITHUB_REF_NAME" "$IS_PRERELEASE" >> "$RELEASES"
-          # Only strictly-SemVer tags compete (SEMVER_RE comes from the
-          # "Resolve version" step): a stray non-SemVer release like
+          printf '%s %s\n' "$TAG" "$IS_PRERELEASE" >> "$RELEASES"
+          # Only strictly-SemVer tags compete (SEMVER_RE is the workflow-level
+          # grammar "Resolve version" also enforces): a stray non-SemVer release like
           # "docs-2026" — which this workflow refuses to build — must not sit
           # in the set and block the channels forever.
           STABLE=$(awk '$2 == "false" { sub(/^v/, "", $1); print $1 }' "$RELEASES" | grep -E "$SEMVER_RE" || true)
@@ -265,29 +427,29 @@ jobs:
             latest=false
           tags: |
             # The primary tag: the bare version on a release (1.2.3), the
-            # channel-prefixed version on a manual run (dev-1.2.3 / beta-1.2.3).
-            type=raw,value=${{ steps.version.outputs.image_tag }}
+            # channel-prefixed version on a dev/beta run (dev-1.2.3 / beta-1.2.3).
+            type=raw,value=${{ needs.version.outputs.image-tag }}
             # The release namespace — floating X.Y/X plus latest (stable) and
-            # beta (prerelease) — moves ONLY on a published release; a manual
-            # build never creates or moves any of these. Each floating tag
+            # beta (prerelease) — moves ONLY on a release; a dev/beta build
+            # never creates or moves any of these. Each floating tag
             # further requires this version to be the highest in its channel
             # (see "Check newest release"), so floating tags only ever move
             # forward regardless of run order or backports.
-            type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' && steps.newest.outputs.minor == 'true' }}
-            type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' && steps.newest.outputs.major == 'true' && !startsWith(steps.version.outputs.version, '0.') }}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease && steps.newest.outputs.latest == 'true' }}
-            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease && steps.newest.outputs.beta == 'true' }}
-            # always a git short SHA tag; on manual runs it carries the channel
+            type=semver,pattern={{major}}.{{minor}},value=v${{ needs.version.outputs.version }},enable=${{ needs.version.outputs.release == 'true' && steps.newest.outputs.minor == 'true' }}
+            type=semver,pattern={{major}},value=v${{ needs.version.outputs.version }},enable=${{ needs.version.outputs.release == 'true' && steps.newest.outputs.major == 'true' && !startsWith(needs.version.outputs.version, '0.') }}
+            type=raw,value=latest,enable=${{ needs.version.outputs.release == 'true' && needs.version.outputs.prerelease != 'true' && steps.newest.outputs.latest == 'true' }}
+            type=raw,value=beta,enable=${{ needs.version.outputs.release == 'true' && needs.version.outputs.prerelease == 'true' && steps.newest.outputs.beta == 'true' }}
+            # always a git short SHA tag; on dev/beta runs it carries the channel
             # AND version (dev-1.2.3-sha-abc1234) so it can't overwrite the
             # release's sha tag, and re-dispatching the same commit with a
             # different version can't silently repoint one sha tag at images
             # stamped with different APP_VERSIONs
-            type=sha,prefix=${{ github.event_name == 'workflow_dispatch' && format('{0}-{1}-sha-', inputs.channel, steps.version.outputs.version) || 'sha-' }},format=short
+            type=sha,prefix=${{ needs.version.outputs.release != 'true' && format('{0}-{1}-sha-', inputs.channel, needs.version.outputs.version) || 'sha-' }},format=short
           labels: |
             org.opencontainers.image.title=mcpelevator
             org.opencontainers.image.description=Elevate stdio MCP servers into authenticated HTTP endpoints
             org.opencontainers.image.vendor=${{ github.repository_owner }}
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
 
       - name: Build and push
         id: build
@@ -299,7 +461,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: APP_VERSION=${{ steps.version.outputs.version }}
+          build-args: APP_VERSION=${{ needs.version.outputs.version }}
           # gha cache is fast (capped/evicted ~7 days); the GHCR :buildcache tag is
           # durable so a build after eviction still skips the slow QEMU arm64 layers.
           cache-from: |
@@ -321,7 +483,7 @@ jobs:
   scan:
     name: Security Scan
     runs-on: ubuntu-latest
-    needs: build
+    needs: [version, build]
     continue-on-error: true
     permissions:
       security-events: write
@@ -362,11 +524,11 @@ jobs:
 
       - name: Upload Trivy results to the Security tab
         uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
-        # Releases only: manual dev/beta builds may be of any ref (possibly far
+        # Releases only: dev/beta builds may be of any ref (possibly far
         # behind main), and pinning their stale results to main below would
         # corrupt the default-branch alert set. Their scan still runs above —
         # the results just stay in the job log instead of code scanning.
-        if: always() && github.event_name == 'release' && hashFiles('trivy-results.sarif') != ''
+        if: always() && needs.version.outputs.release == 'true' && hashFiles('trivy-results.sarif') != ''
         with:
           sarif_file: trivy-results.sarif
           # On a release, GITHUB_REF is the tag (refs/tags/vX.Y.Z). Code-scanning
@@ -391,7 +553,7 @@ jobs:
   summary:
     name: Build Summary
     runs-on: ubuntu-latest
-    needs: [build, scan]
+    needs: [version, build, scan]
     if: always()
     permissions: {}
 
@@ -401,10 +563,10 @@ jobs:
           {
             echo "## mcpelevator image"
             echo ""
-            echo "- **Version:** \`${{ needs.build.outputs.version }}\`"
+            echo "- **Version:** \`${{ needs.version.outputs.version }}\`"
             echo "- **Image:** \`${{ env.GHCR_IMAGE }}\`"
             echo "- **Digest:** \`${{ needs.build.outputs.image-digest }}\`"
             echo "- **Platforms:** \`${{ env.PLATFORMS }}\`"
             echo ""
-            echo "Pull: \`docker pull ${{ env.GHCR_IMAGE }}:${{ needs.build.outputs.image-tag }}\`"
+            echo "Pull: \`docker pull ${{ env.GHCR_IMAGE }}:${{ needs.version.outputs.image-tag }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

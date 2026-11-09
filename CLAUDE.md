@@ -264,6 +264,17 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   first, then the adjacent `pyproject.toml` (source tree), then installed metadata. `backend/pyproject.toml` /
   `frontend/package.json` versions are source metadata that only track the dev line (the tag wins
   at deploy); bump them when cutting a release and run `uv lock`.
+- Cutting a release: ONLY when the user explicitly asks for one — never on your own, never as
+  the follow-up to a merge or a version bump. Dispatch the release workflow (it's an outward,
+  hard-to-undo action: it creates the `v<version>` tag, publishes the GitHub release and moves
+  the image's `latest`/`beta`/`X.Y`/`X` tags) with the version the user names, from the ref
+  they name (default `main`): `gh workflow run docker-image.yml --ref main -f version=X.Y.Z
+  -f channel=release`, or the GitHub MCP `actions_run_trigger` with the same workflow, ref and
+  inputs. The workflow writes the title and notes itself (an OpenRouter free model via
+  `pacnpal/free-ai-release-notes`, from every commit since the previous `v*` tag, in this
+  repo's house style; needs the `OPENROUTER_API_KEY` repo secret), so don't write or edit
+  notes unless asked. A pushed `vX.Y.Z` tag does the same, so don't push version tags either
+  unless asked. `channel=dev`/`beta` only builds a channel-tagged image and releases nothing.
 - A new runner, or a new meaning for a launch field, updates the control MCP in the same PR:
   the `create_server` / `update_server` descriptions (`backend/app/control_mcp.py`) and the
   `INSTRUCTIONS` flows (`backend/app/runners/builtin.py`) are the only docs an agent sees.
