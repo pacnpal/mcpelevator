@@ -139,6 +139,7 @@ async def lifespan(app: FastAPI):
         debug.log_startup()
     else:
         logconfig.configure()
+    logconfig.quiet_client_disconnects()
     init_db()
     cf_access.prewarm()
     with Session(get_engine()) as session:

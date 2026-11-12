@@ -79,3 +79,42 @@ def test_debug_mode_leaves_the_access_log_alone(app_logger, monkeypatch):
     access.setLevel(logging.INFO)
     logconfig.configure()
     assert access.isEnabledFor(logging.INFO)
+
+
+def test_client_disconnect_is_not_logged_as_a_server_error(capsys):
+    """The MCP SDK logs a client that hangs up mid-POST (a cancelled call, a closed
+    laptop) as "Error handling POST request" plus a traceback. Nothing failed on this
+    side, so it drops to a one-line DEBUG record; any other exception stays an ERROR."""
+    from starlette.requests import ClientDisconnect
+
+    logconfig.quiet_client_disconnects()
+    logconfig.quiet_client_disconnects()  # idempotent
+    log = logging.getLogger(logconfig.MCP_HTTP_LOGGER)
+    assert sum(isinstance(f, logconfig._ClientDisconnects) for f in log.filters) == 1
+
+    records: list[logging.LogRecord] = []
+
+    class Keep(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    keep = Keep(level=logging.DEBUG)
+    log.addHandler(keep)
+    try:
+        try:
+            raise ClientDisconnect()
+        except ClientDisconnect:
+            log.exception("Error handling POST request")
+        try:
+            raise RuntimeError("real failure")
+        except RuntimeError:
+            log.exception("Error handling POST request")
+    finally:
+        log.removeHandler(keep)
+
+    disconnect, failure = records
+    assert disconnect.levelno == logging.DEBUG and not disconnect.exc_info
+    assert "client disconnected" in disconnect.getMessage()
+    assert failure.levelno == logging.ERROR and failure.exc_info
+    # The demoted record falls below Python's last-resort handler (WARNING): no traceback.
+    assert "ClientDisconnect" not in capsys.readouterr().err

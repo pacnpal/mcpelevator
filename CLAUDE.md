@@ -160,7 +160,9 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   `MCPE_ACCESS_LOG` (debug re-opens it). The supervisor logs each server's start, failed
   attempts, terminal failure (hint + the tail of its own log), crash, idle stop and stop
   there, so a failure's reason reaches the container log without debug mode; debug mode
-  removes that handler and takes over. A startup attempt's failure also lands in
+  removes that handler and takes over. A client hanging up mid-POST, which the MCP SDK
+  logs as an ERROR traceback, is demoted to one DEBUG line in the control plane and every
+  bridge (`logconfig.quiet_client_disconnects`). A startup attempt's failure also lands in
   `last_error` while retrying (cleared on running). Setup/checkout shells run behind
   `unit.DPKG_REPAIR_PREAMBLE`, which runs `dpkg --configure -a` as root when dpkg reports
   an interrupted run (a setup killed mid-apt otherwise breaks every later attempt).

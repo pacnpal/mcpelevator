@@ -64,3 +64,39 @@ def configure() -> None:
 
 def is_standard(handler: logging.Handler) -> bool:
     return bool(getattr(handler, _MARK, False))
+
+
+MCP_HTTP_LOGGER = "mcp.server.streamable_http"
+
+
+class _ClientDisconnects(logging.Filter):
+    """Demote the MCP SDK's report of a client hanging up mid-POST to one DEBUG line.
+
+    ``StreamableHTTPServerTransport`` logs ``ClientDisconnect`` like any other failure —
+    "Error handling POST request" plus a traceback, at ERROR — though nothing failed on
+    this side: the caller cancelled, timed out or closed its connection while the request
+    body was arriving. With no handler of the SDK's own that went straight to stderr
+    through Python's last-resort handler, flooding the container log. Demoted below
+    WARNING it no longer reaches that handler; debug mode, which logs everything, still
+    shows the one line."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        from starlette.requests import ClientDisconnect
+
+        exc = record.exc_info[1] if record.exc_info else None
+        if isinstance(exc, ClientDisconnect):
+            record.levelno, record.levelname = logging.DEBUG, "DEBUG"
+            record.msg, record.args = "%s: client disconnected before it finished", (
+                record.getMessage(),
+            )
+            record.exc_info = record.exc_text = None
+        return True
+
+
+def quiet_client_disconnects() -> None:
+    """Install :class:`_ClientDisconnects` on the SDK's HTTP transport logger, in the
+    control plane (the ``/api/mcp`` and ``/g`` endpoints) and in every bridge. Idempotent,
+    and installed in debug mode too: it changes the record's level, not whether it's kept."""
+    log = logging.getLogger(MCP_HTTP_LOGGER)
+    if not any(isinstance(f, _ClientDisconnects) for f in log.filters):
+        log.addFilter(_ClientDisconnects())
