@@ -1928,8 +1928,9 @@
 					The lock marks a value secret: it's stored encrypted and never shown again, in this
 					form, the API, or a .mcpb export.
 					{#if envRows.some((r) => r.hidden)}
-						Leave a hidden value blank to keep it, whatever else you change; type a new value to
-						replace it.
+						A locked value left blank keeps what's stored, whatever else you change. Type a new
+						value to replace it; unlocking one needs a new value too, since the stored one is
+						never shown.
 					{/if}
 				</p>
 			{/if}
