@@ -2322,9 +2322,17 @@ def _require_builtin_editable(server: Server, changes: dict[str, Any]) -> None:
 _DESTINATION_FIELDS = ("runner", "command", "args", "openapi_document")
 
 
-def _destination(server: Server) -> tuple:
-    host = next((v for k, v in (server.env or {}).items() if k.lower() == "host"), None)
-    return (*((getattr(server, f) or None) for f in _DESTINATION_FIELDS), host)
+def _destination(server: Server, stored_env: dict[str, str] | None = None) -> tuple:
+    """Where ``server`` sends its headers: the destination fields plus EVERY header named
+    ``Host`` in any case, since headers keep each spelling and send them all. With
+    ``stored_env``, a ``Host`` sent back as "<hidden>" reads as the value stored under it."""
+    stored_env = stored_env or {}
+    hosts = tuple(sorted(
+        (key, stored_env.get(key) if value == sealed.HIDDEN else value)
+        for key, value in (server.env or {}).items()
+        if key.lower() == "host"
+    ))
+    return (*((getattr(server, f) or None) for f in _DESTINATION_FIELDS), hosts)
 
 
 @_serialized_write
@@ -2511,9 +2519,7 @@ def update_server(
         )
         # Compared after normalization, so the form resending the same config doesn't
         # count as a move; a hidden `Host` sent back as "<hidden>" is the stored one.
-        destination_after = _destination(server)
-        if destination_after[-1] == sealed.HIDDEN:
-            destination_after = (*destination_after[:-1], destination_before[-1])
+        destination_after = _destination(server, env_before)
         secret = changes.get("secret_env")
         server.env = sealed.resolve(
             env_before,

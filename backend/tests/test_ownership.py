@@ -17,6 +17,7 @@ from app.db import get_engine
 from app.db.models import Server, Token, User
 from app.main import app
 from app.registry import settings as runtime_settings
+from app.runners import build_spec
 
 REMOTE = {"runner": "remote", "command": "http://127.0.0.1:9/mcp"}
 
@@ -392,9 +393,21 @@ def test_member_without_local_runners_cannot_retarget_a_kept_secret():
                 r = client.patch(path, json=change, headers=member)
                 assert r.status_code == 400, (change, r.text)
                 assert "Authorization" in r.json()["detail"]
-            # Other edits keep the secret without asking.
-            r = client.patch(path, json={"name": "renamed", "env": {**kept, "X-Team": "dev"}},
-                             headers=member)
+            # A second Host header in another case is a move too, not just the first one.
+            r = client.patch(path, json={"env": {**kept, "Host": "a.example"}}, headers=admin)
+            assert r.status_code == 200, r.text
+            for change in (
+                {"env": {**kept, "Host": "a.example", "host": "attacker.example"}},
+                {"env": {**kept, "host": "attacker.example", "Host": "a.example"}},
+            ):
+                r = client.patch(path, json=change, headers=member)
+                assert r.status_code == 400, (change, r.text)
+                assert "Authorization" in r.json()["detail"]
+            # Other edits keep the secret without asking (dropping the Host would be a move).
+            r = client.patch(
+                path, json={"name": "renamed", "env": {**kept, "X-Team": "dev", "Host": "a.example"}},
+                headers=member,
+            )
             assert r.status_code == 200, r.text
             # Typing the value in again allows the move: the member then knows it anyway.
             r = client.patch(
@@ -416,10 +429,13 @@ def test_editors_who_can_run_code_retarget_without_reentry():
             admin, member, uid = _setup(client, local_runners=True)
             server = _member_secret_server(client, admin, uid)
             path = f"/api/servers/{server['id']}"
-            r = client.patch(path, json={"command": "https://elsewhere.example/mcp"},
-                             headers=member)
-            assert r.status_code == 200, r.text
-            r = client.patch(path, json={"command": "https://third.example/mcp"}, headers=admin)
-            assert r.status_code == 200, r.text
+            for headers, url in ((member, "https://elsewhere.example/mcp"),
+                                 (admin, "https://third.example/mcp")):
+                r = client.patch(path, json={"command": url}, headers=headers)
+                assert r.status_code == 200, r.text
+                with Session(get_engine()) as s:
+                    row = s.get(Server, server["id"])
+                    assert row.command == url
+                    assert build_spec(row).env["Authorization"] == "Bearer admin-key"
         finally:
             _reset()
