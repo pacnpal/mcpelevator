@@ -2459,3 +2459,17 @@ async def test_a_live_tool_beats_an_alias_of_its_name():
     proxy = _proxy_with(tool_overrides={"add": {"aliases": ["echo"]}})
     async with Client(proxy) as client:
         assert (await client.call_tool("echo", {"s": "hi"})).data == "hi"
+
+
+@pytest.mark.asyncio
+async def test_an_alias_never_reaches_a_tool_renamed_onto_its_sources_name():
+    """Codex on #246: with `secret` hidden and `add` renamed onto its name, the alias of
+    `secret` must stay refused, not run `add`, which now answers to that name."""
+    proxy = _proxy_with(
+        disabled_tools=["secret"],
+        tool_overrides={"add": {"name": "secret"}, "secret": {"aliases": ["peek"]}},
+    )
+    async with Client(proxy) as client:
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("peek", {})
+        assert (await client.call_tool("secret", {"a": 1, "b": 2})).data == 3  # `add`

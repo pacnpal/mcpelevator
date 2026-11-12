@@ -1873,6 +1873,13 @@ def _has_incompatible_draft07_construct(
     )
 
 
+def represents(tool: Tool, upstream: str) -> bool:
+    """Whether ``tool`` is the upstream tool named ``upstream``: by the identity a rename
+    stamps in its ``_meta``, or, unrenamed, by its own name."""
+    stamped = (tool.meta or {}).get(UPSTREAM_META_KEY)
+    return stamped == {"name": upstream} if stamped else tool.name == upstream
+
+
 class _ToolTransform(ToolTransform):
     """FastMCP's ``ToolTransform`` with the gaps that matter to elevation closed.
 
@@ -2066,16 +2073,18 @@ class _ToolTransform(ToolTransform):
             return tool
         # An alias: an extra name that calls its tool but is never listed. It applies only
         # when nothing else answers to the name (a live tool of that name, or a rename onto
-        # it, wins, as above), and resolves the tool exactly as clients see it listed: a
-        # hidden one stays refused, a renamed one runs under its new name.
-        exposed = self._renames_to(source)
-        if exposed is not None:
-            renamed = await self._get_tool(exposed, call_next, version=version)
-            if renamed is not None and (renamed.meta or {}).get(UPSTREAM_META_KEY) == {
-                "name": source
-            }:
-                return renamed
-        return await self._get_tool(source, call_next, version=version)
+        # it, wins, as above), and resolves the tool exactly as clients see it listed,
+        # under its rename or its own name. What answers there must BE the source: another
+        # tool renamed onto a hidden or vanished source's name is not it.
+        if self._hides(source):
+            return None
+        for candidate in (self._renames_to(source), source):
+            if candidate is None:
+                continue
+            found = await self._get_tool(candidate, call_next, version=version)
+            if found is not None and represents(found, source):
+                return found
+        return None
 
     async def _get_tool(self, name: str, call_next, *, version=None) -> Tool | None:
         # Whoever natively answers to this name wins it — that settles the misrouting

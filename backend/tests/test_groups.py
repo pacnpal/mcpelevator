@@ -1808,3 +1808,28 @@ async def test_a_members_tool_alias_answers_through_the_group(clean_settings):
     finally:
         with Session(get_engine()) as session:
             repo.delete_server(session, a.id)
+
+
+async def test_a_member_alias_never_reaches_a_tool_renamed_onto_its_sources_name():
+    """The group's alias lookup checks identity too: when the alias's source is gone and
+    another tool is listed under its name (renamed onto it), the alias is refused."""
+    from fastmcp.tools import Tool as _Tool
+
+    from app.bridge.host import UPSTREAM_META_KEY
+    from app.groups.hub import _MemberAliases
+
+    other = _Tool(name="b", parameters={"type": "object"},
+                  meta={UPSTREAM_META_KEY: {"name": "a"}})
+
+    async def call_next(name, version=None):
+        return other if name == "b" else None
+
+    transform = _MemberAliases((("old_b", "b", None),))
+    assert await transform.get_tool("old_b", call_next) is None
+    # The genuine tool under its own name still resolves.
+    genuine = _Tool(name="b", parameters={"type": "object"})
+
+    async def call_genuine(name, version=None):
+        return genuine if name == "b" else None
+
+    assert await transform.get_tool("old_b", call_genuine) is genuine

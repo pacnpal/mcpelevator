@@ -66,11 +66,11 @@ from starlette.types import ASGIApp
 # the group bundle) to list filesystem roots, and clients without roots support
 # must get [] instead of a noisy -32603 (see app.bridge.host._forward_roots).
 from app.bridge.host import (
-    UPSTREAM_META_KEY,
     _forward_roots,
     _is_modern,
     _ModernTurns,
     _TurnAwareProxyClient,
+    represents,
 )
 from app.db import get_engine, repo
 from app.db.models import BUILTIN_RUNNER, Server
@@ -651,10 +651,12 @@ class _MemberAliases(Transform):
         if found is not None or target is None:
             return found
         tool, renamed = target
-        if renamed:
-            listed = await call_next(renamed, version=version)
-            if listed is not None and (listed.meta or {}).get(UPSTREAM_META_KEY) == {
-                "name": tool
-            }:
+        # What the member lists under the name must BE the alias's tool: another tool
+        # renamed onto a hidden or vanished one's name is not it.
+        for candidate in (renamed, tool):
+            if not candidate:
+                continue
+            listed = await call_next(candidate, version=version)
+            if listed is not None and represents(listed, tool):
                 return listed
-        return await call_next(tool, version=version)
+        return None
