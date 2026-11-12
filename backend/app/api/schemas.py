@@ -418,7 +418,7 @@ class ServerUpdate(BaseModel):
     # A secret value of "<hidden>" keeps the stored one; anything else replaces it.
     env: Optional[dict[str, str]] = None
     # The secret keys of ``env``. Omitted (null) = each key keeps its current secrecy.
-    # Making a secret visible, or changing what the server runs, needs its value sent again.
+    # A kept secret survives any other change; making one visible needs a new value sent.
     secret_env: Optional[list[StrictStr]] = None
     cwd: Optional[str] = None
     setup_script: Optional[str] = None

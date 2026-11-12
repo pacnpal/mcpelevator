@@ -126,13 +126,11 @@ database backup without that file doesn't expose them, and no API, form, or `.mc
 returns them. That protects against a leaked database or a shoulder-surfed screen, not
 against someone who can read the whole data directory, since the key sits beside it. The
 bridge needs the plaintext, so the control plane decrypts them into the bridge's launch
-spec. Anyone who can edit a server could point it at `printenv` or at a URL they control
-and capture its env, so a save that changes what a server runs, or makes a secret
-visible, has to supply those secret values again (`app.sealed.resolve`). For a local
-server any added, changed or removed env value counts as changing what it runs: `NODE_OPTIONS`,
-`PYTHONSTARTUP`, `LD_PRELOAD` and similar variables execute code, and a list of them
-would never be complete. Headers on remote and openapi servers are exempt, except `Host`,
-which picks the virtual host the credentials reach behind the same URL.
+spec. A secret is write-only, not editor-proof: a save keeps a hidden value through any
+other change, and refuses only to make one visible without a new value
+(`app.sealed.resolve`). Anyone who can edit a server could point it at `printenv` or at a
+URL they control and capture its env, and anyone with the local-runner permission can run
+code that reads `env.key`, so treat edit rights on a server as access to its secrets.
 The one exception is data-plane and admin **bearer tokens**, which are SHA-256-hashed and
 never stored in the clear (§ Data plane). Consequently, anyone who can read the data
 directory — host root, a compromised control-plane process, an unprotected volume mount,

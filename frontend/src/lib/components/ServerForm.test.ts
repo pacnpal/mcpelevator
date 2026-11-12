@@ -420,6 +420,38 @@ describe('ServerForm secret env', () => {
 			})
 		);
 	});
+	it('warns, without blocking, when a value is being made secret', () => {
+		const onsubmit = vi.fn();
+		const target = render({
+			mode: 'edit',
+			initial: {
+				name: 'api',
+				runner: 'command',
+				command: '/usr/bin/server',
+				args: [],
+				env: { API_KEY: '<hidden>', REGION: 'eu' },
+				secret_env: ['API_KEY']
+			},
+			onsubmit
+		});
+		const notes = () => target.querySelectorAll('[data-testid="secret-warning"]');
+		// An already-stored secret needs no warning: it is locked already.
+		expect(notes()).toHaveLength(0);
+
+		const locks = target.querySelectorAll<HTMLButtonElement>('button[aria-label="Make secret"]');
+		locks[0].click();
+		flushSync();
+		expect(notes()).toHaveLength(1);
+		expect(notes()[0].textContent).toContain('REGION');
+		expect(notes()[0].textContent).toContain('never shown again');
+
+		target.querySelector('form')?.dispatchEvent(
+			new SubmitEvent('submit', { bubbles: true, cancelable: true })
+		);
+		expect(onsubmit).toHaveBeenCalledWith(
+			expect.objectContaining({ secret_env: ['API_KEY', 'REGION'] })
+		);
+	});
 });
 
 describe('ServerForm OpenAPI base URL preview', () => {

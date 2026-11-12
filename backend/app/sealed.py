@@ -7,11 +7,13 @@ in the DB). The API never hands a secret value back: it reads ``HIDDEN``, and a 
 sends ``HIDDEN`` to keep what's stored. ``runners.build_spec`` unseals them for the
 bridge, the only consumer of the plaintext.
 
-Anyone who can edit a server could point it somewhere that captures its env (a
-``printenv`` command, a URL on their own host), so ``resolve`` refuses to carry a hidden
-value through a change of what the server runs, or through making it visible: the save
-has to type those values in again. Losing ``env.key`` leaves the stored values
-unreadable; the server then fails to start with an error naming the keys to re-enter.
+A hidden value is locked, not frozen: ``resolve`` keeps it through any other edit of the
+server and refuses only to make it visible without a new value, since that would show the
+stored one. This guards against a leaked database or a shoulder-surfed screen, not against
+an editor: anyone who may edit a server can point it somewhere that reads its env, and
+anyone with the local-runner permission can read ``env.key`` itself. Losing ``env.key``
+leaves the stored values unreadable; the server then fails to start with an error naming
+the keys to re-enter.
 """
 
 from __future__ import annotations
@@ -93,21 +95,18 @@ def resolve(
     incoming: dict[str, str],
     *,
     secret: set[str] | None,
-    retargeted: bool,
-    env_runs_code: bool,
 ) -> dict[str, str]:
     """The env to store after a save.
 
     ``stored`` is the row's env before the save, ``incoming`` what the save sends: a
     value equal to ``HIDDEN`` (or to the stored token, when the save didn't send env at
     all) keeps that key's sealed value. Everything else is plaintext, sealed when its key
-    is in ``secret`` (``None``: each key stays as secret as it already was). A kept hidden
-    value is refused when the save makes it visible, or ``retargeted`` the server (changed
-    what it runs), so it can't be carried somewhere that reads it back out. When
-    ``env_runs_code`` (a local process reads this env at startup), adding, changing or
-    removing any other value counts as retargeting too: ``NODE_OPTIONS``, ``PYTHONSTARTUP``,
-    ``LD_PRELOAD`` and their many cousins change what runs as surely as the command does,
-    and no list of such names would be complete.
+    is in ``secret`` (``None``: each key stays as secret as it already was).
+
+    A hidden value is locked: it can be kept or replaced, never shown. So a kept one
+    rides through any other edit of the server untouched (its command, its other env
+    values, the other secrets), and the one thing refused is unlocking it without typing
+    a replacement, since that would show the stored value.
     """
     unknown = sorted((secret or set()) - incoming.keys())
     if unknown:
@@ -115,14 +114,11 @@ def resolve(
         # "Authorization" header would look secret to the caller and be readable.
         raise ValueError(f"secret_env names keys that aren't in env: {', '.join(unknown)}")
     out: dict[str, str] = {}
-    kept: list[str] = []
     shown: list[str] = []
-    changed = False
     for key, value in incoming.items():
         old = stored.get(key)
         is_secret = key in secret if secret is not None else is_sealed(old)
         if is_sealed(old) and value in (HIDDEN, old):
-            kept.append(key)
             if not is_secret:
                 shown.append(key)
             out[key] = old
@@ -136,20 +132,11 @@ def resolve(
             # fresh one would change config_hash and restart the server for nothing.
             out[key] = old
             continue
-        changed = changed or is_sealed(old) or value != old
         out[key] = seal(value) if is_secret else value
-    # Removing a key changes what runs as well: code that falls back to a default when
-    # API_URL is unset would carry the kept secret to that default.
-    changed = changed or bool(stored.keys() - incoming.keys())
     if shown:
         raise ValueError(
-            f"re-enter {', '.join(shown)}: making a secret env value visible needs it "
-            "typed in again"
-        )
-    if kept and (retargeted or (env_runs_code and changed)):
-        raise ValueError(
-            f"re-enter the secret env values {', '.join(kept)}: changing what this server "
-            "runs, including any other env value it starts with, needs them typed in again"
+            f"{', '.join(shown)}: a secret value is never shown again, so making it "
+            "visible needs a new value typed in"
         )
     return out
 

@@ -258,11 +258,9 @@ def build(app: FastAPI) -> "_Gate":
         ``openapi_document`` (with ``command`` ""); switching between the two sends both
         fields, the unused one blank. A secret ``env`` value reads "<hidden>"; sending
         "<hidden>" keeps it and any other value replaces it. ``secret_env`` lists the
-        secret keys (omit it to leave each key as it is). Making a secret visible, or
-        changing what the server runs (runner, command, args, run_args, cwd,
-        setup_script, the repo fields, openapi_document, graphql_schema,
-        health_check_command, and for a local server any other env value), needs those
-        secret values sent in full in the same call. The health check fields
+        secret keys (omit it to leave each key as it is). A kept secret survives any
+        other change to the server; only making one visible needs a new value sent in
+        full in the same call (the stored value is never shown). The health check fields
         (``health_check_tool`` / ``health_check_arguments``, or ``health_check_command``,
         and ``health_check_interval_s``; see create_server) never restart the bridge: a
         change applies from the next start or periodic check, and an explicit null clears

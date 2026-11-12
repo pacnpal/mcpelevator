@@ -667,9 +667,8 @@ def test_converting_to_a_remote_runner_refuses_a_leftover_command():
             client.delete(f"/api/servers/{sid}", headers=LOOPBACK)
 
 
-def test_a_health_command_is_a_retarget_for_hidden_env():
-    """The command runs with the server's decrypted env and its output reaches the log,
-    so adding or changing one must re-enter the hidden values, like a setup script."""
+def test_a_health_command_keeps_unchanged_hidden_env():
+    """Adding a health command leaves the server's secret values as they are."""
     with Session(get_engine()) as session:
         server = service.create_server(
             session, name="Sealed", runner="command", command="server",
@@ -678,17 +677,15 @@ def test_a_health_command_is_a_retarget_for_hidden_env():
     sid = server.id
     try:
         with Session(get_engine()) as session:
-            with pytest.raises(ValueError):
-                service.update_server(
-                    session, sid,
-                    {"health_check_command": "printenv API_KEY", "env": {"API_KEY": "<hidden>"}},
-                )
-        with Session(get_engine()) as session:
-            assert repo.get_server(session, sid).health_check_command is None
-            # A tool check runs nothing on the host: no secret needs re-entering.
+            sealed_value = repo.get_server(session, sid).env["API_KEY"]
             service.update_server(
-                session, sid, {"health_check_tool": "ping", "env": {"API_KEY": "<hidden>"}}
+                session, sid,
+                {"health_check_command": "true", "env": {"API_KEY": "<hidden>"}},
             )
+        with Session(get_engine()) as session:
+            row = repo.get_server(session, sid)
+            assert row.health_check_command == "true"
+            assert row.env["API_KEY"] == sealed_value
     finally:
         _delete(sid)
 
