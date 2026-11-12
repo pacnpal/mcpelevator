@@ -2414,3 +2414,48 @@ async def test_stderr_tee_windows_lines_by_stream_position(capsys):
     assert tee.window(start, end) == ["during one", "during two", "partial"]
     assert tee.window(0, start) == ["before"]
     assert "before\nduring one\n\nduring two\npartial" in capsys.readouterr().err
+
+
+# --- tool aliases: extra names that call a tool without being listed ----------
+
+
+@pytest.mark.asyncio
+async def test_alias_calls_its_tool_without_being_listed():
+    """An alias answers calls for its tool, so a client holding an old name keeps
+    working, while tools/list shows the tool once, under its real name."""
+    proxy = _proxy_with(tool_overrides={"add": {"aliases": ["plus", "sum_two"]}})
+    async with Client(proxy) as client:
+        assert {t.name for t in await client.list_tools()} == {"add", "secret", "echo"}
+        assert (await client.call_tool("plus", {"a": 2, "b": 3})).data == 5
+        assert (await client.call_tool("sum_two", {"a": 1, "b": 1})).data == 2
+        assert (await client.call_tool("add", {"a": 1, "b": 2})).data == 3
+
+
+@pytest.mark.asyncio
+async def test_alias_keeps_a_renamed_tools_old_name_working():
+    """Renaming retires the upstream name; aliasing it back keeps callers on the old
+    name working while the tool is listed under the new one."""
+    proxy = _proxy_with(tool_overrides={"add": {"name": "sum_numbers", "aliases": ["add"]}})
+    async with Client(proxy) as client:
+        assert {t.name for t in await client.list_tools()} == {"sum_numbers", "secret", "echo"}
+        assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
+        assert (await client.call_tool("sum_numbers", {"a": 2, "b": 3})).data == 5
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_tools_aliases_are_refused():
+    proxy = _proxy_with(
+        disabled_tools=["secret"], tool_overrides={"secret": {"aliases": ["peek"]}}
+    )
+    async with Client(proxy) as client:
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("peek", {})
+
+
+@pytest.mark.asyncio
+async def test_a_live_tool_beats_an_alias_of_its_name():
+    """An upstream that gains a tool with an alias's name wins it, as with renames: the
+    alias goes inert rather than shadowing a real tool."""
+    proxy = _proxy_with(tool_overrides={"add": {"aliases": ["echo"]}})
+    async with Client(proxy) as client:
+        assert (await client.call_tool("echo", {"s": "hi"})).data == "hi"

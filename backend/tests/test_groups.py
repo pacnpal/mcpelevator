@@ -1771,3 +1771,40 @@ async def test_turn_that_parks_after_its_group_was_torn_down_does_not_wait(
         await hub.close()
         with Session(get_engine()) as session:
             repo.delete_server(session, member.id)
+
+
+async def test_a_members_tool_alias_answers_through_the_group(clean_settings):
+    """A member's alias is never listed, so the group can't find it in the member's tool
+    list; the hub resolves it from the member's own overrides, and rebuilds the group
+    when they change."""
+    with Session(get_engine()) as session:
+        a = _mk_server(session, "Aliased", tool_overrides={"t": {"aliases": ["old_t"]}})
+    _write_groups({"g": "*"})
+    hub = _hub_for({"up-aliased": _make_upstream("s", "t")})
+    try:
+        sup = _endpoints(a)
+        await hub.sync(sup)
+        app = hub.app_for("g")
+        assert await _list_tool_names(app) == [f"{a.slug}_t"]
+        _, sid = await _rpc(app, "initialize", _INIT_PARAMS)
+        payload, _ = await _rpc(
+            app, "tools/call", {"name": f"{a.slug}_old_t", "arguments": {"q": "x"}}, sid
+        )
+        assert payload["result"]["content"][0]["text"] == "s:x", payload
+
+        # A changed alias set rebuilds the group's members, so the new name answers.
+        with Session(get_engine()) as session:
+            service.update_server(
+                session, a.id, {"tool_overrides": {"t": {"aliases": ["newer_t"]}}}
+            )
+        await hub.sync(sup)
+        app = hub.app_for("g")
+        _, sid = await _rpc(app, "initialize", _INIT_PARAMS)
+        payload, _ = await _rpc(
+            app, "tools/call", {"name": f"{a.slug}_newer_t", "arguments": {"q": "y"}}, sid
+        )
+        assert payload["result"]["content"][0]["text"] == "s:y", payload
+        await hub.close()
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, a.id)

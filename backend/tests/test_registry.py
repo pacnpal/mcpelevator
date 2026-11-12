@@ -2856,3 +2856,52 @@ def test_graphql_schema_and_openapi_document_stay_with_their_runners(session):
         graphql_schema=_GQL_SCHEMA,
     )
     assert (o.openapi_document, o.graphql_schema) == (_INLINE_DOC, "")
+
+
+# --- tool aliases --------------------------------------------------------------
+
+
+def test_tool_aliases_normalized(session):
+    """Aliases are trimmed, de-duplicated and sorted, so re-saving them in another order
+    doesn't bounce the bridge; a tool can carry aliases alone."""
+    a = _mk(session, tool_overrides={"t": {"aliases": [" zeta ", "alpha", "zeta", ""]}})
+    assert a.tool_overrides == {"t": {"aliases": ["alpha", "zeta"]}}
+    before = a.config_hash
+    service.update_server(session, a.id, {"tool_overrides": {"t": {"aliases": ["zeta", "alpha"]}}})
+    assert repo.get_server(session, a.id).config_hash == before
+
+
+def test_tool_alias_of_its_own_name_needs_a_rename(session):
+    """Aliasing a tool to its own upstream name only means something once it's renamed
+    (the old name stops answering otherwise)."""
+    assert _mk(session, tool_overrides={"t": {"aliases": ["t"]}}).tool_overrides == {}
+    kept = _mk(session, tool_overrides={"t": {"name": "u", "aliases": ["t"]}})
+    assert kept.tool_overrides == {"t": {"name": "u", "aliases": ["t"]}}
+    # Its own exposed name is never an alias.
+    assert _mk(session, tool_overrides={"t": {"name": "u", "aliases": ["u"]}}).tool_overrides == {
+        "t": {"name": "u"}
+    }
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"t": {"aliases": ["has space"]}},
+        {"t": {"aliases": [".."]}},
+        {"t": {"aliases": "not-a-list"}},
+        {"t": {"aliases": [1]}},
+        {"t": {"aliases": [f"a{i}" for i in range(17)]}},
+        # Taken by another tool: its alias, its rename, or its upstream name.
+        {"a": {"aliases": ["x"]}, "b": {"aliases": ["x"]}},
+        {"a": {"aliases": ["x"]}, "b": {"name": "x"}},
+        {"a": {"aliases": ["b"]}, "b": {"description": "exists"}},
+    ],
+)
+def test_tool_aliases_refuse_unusable_or_taken_names(session, overrides):
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides=overrides)
+
+
+def test_tool_alias_cannot_take_a_hidden_tools_name(session):
+    with pytest.raises(ValueError):
+        _mk(session, disabled_tools=["b"], tool_overrides={"a": {"aliases": ["b"]}})

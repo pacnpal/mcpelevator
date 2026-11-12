@@ -184,6 +184,10 @@
 		return (a ?? '').trim() === (b ?? '').trim();
 	}
 
+	function sameAliases(a: string[] | undefined, b: string[] | undefined): boolean {
+		return [...(a ?? [])].sort().join('\n') === [...(b ?? [])].sort().join('\n');
+	}
+
 	function overridesEqual(
 		a: Record<string, ToolOverride>,
 		b: Record<string, ToolOverride>
@@ -191,7 +195,9 @@
 		const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
 		return [...keys].every(
 			(k) =>
-				sameLabel(a[k]?.name, b[k]?.name) && sameLabel(a[k]?.description, b[k]?.description)
+				sameLabel(a[k]?.name, b[k]?.name) &&
+				sameLabel(a[k]?.description, b[k]?.description) &&
+				sameAliases(a[k]?.aliases, b[k]?.aliases)
 		);
 	}
 
@@ -1384,8 +1390,9 @@
 					<p class="text-xs text-[var(--color-ink-dim)]">
 						Toggle tools off to hide them from clients (MCP, REST, and groups); hidden tools
 						are also refused if called. Use <strong>edit</strong> to <strong>rename</strong>
-						a tool or rewrite its description when the upstream's wording trips up models —
-						clients see only your version. Changes are staged — <strong>Apply</strong>
+						a tool, rewrite its description when the upstream's wording trips up models, or
+						give it aliases (extra names that still call it, unlisted) — clients see only
+						your version. Changes are staged — <strong>Apply</strong>
 						saves them all in one restart, from the bar that follows the page.
 					</p>
 					<ul class="flex flex-col divide-y divide-[var(--color-line)]">
@@ -1402,7 +1409,8 @@
 							{@const changed =
 								baseDisabled.has(key) === enabled ||
 								!sameLabel(override.name, baseOverrides[key]?.name) ||
-								!sameLabel(override.description, baseOverrides[key]?.description)}
+								!sameLabel(override.description, baseOverrides[key]?.description) ||
+								!sameAliases(override.aliases, baseOverrides[key]?.aliases)}
 							<li class="flex items-start justify-between gap-3 py-2 first:pt-0 last:pb-0">
 								<div class="flex min-w-0 flex-1 flex-col gap-0.5" class:opacity-50={!enabled}>
 									<span class="flex flex-wrap items-center gap-1.5">
@@ -1415,6 +1423,15 @@
 												title={`Upstream name: ${key}`}
 											>
 												was {key}
+											</span>
+										{/if}
+										{#if override.aliases?.length}
+											<span
+												class="font-mono text-[11px] text-[var(--color-ink-dim)]"
+												title={`Also answers to: ${override.aliases.join(', ')}`}
+											>
+												+{override.aliases.length}
+												{override.aliases.length === 1 ? 'alias' : 'aliases'}
 											</span>
 										{/if}
 										{#if !enabled}

@@ -1927,6 +1927,7 @@ class _ToolTransform(ToolTransform):
         transforms: dict[str, ToolTransformConfig],
         *,
         normalize_schema_dialect: bool = False,
+        aliases: dict[str, str] | None = None,
     ) -> None:
         # Own the reverse map rather than inheriting it: a HIDDEN tool exposes no name, so
         # it must not reserve one. FastMCP's constructor reserves a target for every entry
@@ -1943,6 +1944,8 @@ class _ToolTransform(ToolTransform):
         # exists to prevent.
         self._transforms = transforms
         self._normalize_schema_dialect = normalize_schema_dialect
+        # alias -> the UPSTREAM name of the tool it calls (see get_tool).
+        self._aliases = dict(aliases or {})
         self._name_reverse = {}
         for source, config in transforms.items():
             if not config.enabled or not config.name or config.name == source:
@@ -2057,6 +2060,24 @@ class _ToolTransform(ToolTransform):
         return self._apply(source, config, rename=True)
 
     async def get_tool(self, name: str, call_next, *, version=None) -> Tool | None:
+        tool = await self._get_tool(name, call_next, version=version)
+        source = self._aliases.get(name)
+        if tool is not None or source is None:
+            return tool
+        # An alias: an extra name that calls its tool but is never listed. It applies only
+        # when nothing else answers to the name (a live tool of that name, or a rename onto
+        # it, wins, as above), and resolves the tool exactly as clients see it listed: a
+        # hidden one stays refused, a renamed one runs under its new name.
+        exposed = self._renames_to(source)
+        if exposed is not None:
+            renamed = await self._get_tool(exposed, call_next, version=version)
+            if renamed is not None and (renamed.meta or {}).get(UPSTREAM_META_KEY) == {
+                "name": source
+            }:
+                return renamed
+        return await self._get_tool(source, call_next, version=version)
+
+    async def _get_tool(self, name: str, call_next, *, version=None) -> Tool | None:
         # Whoever natively answers to this name wins it — that settles the misrouting
         # cases (a rename shadowing a live tool, and a stale rename stranding one).
         direct = await call_next(name, version=version)
@@ -2142,8 +2163,15 @@ def _tool_transform(spec: dict) -> ToolTransform:
             fields["enabled"] = False
         if fields:
             configs[tool] = ToolTransformConfig(**fields)
+    aliases = {
+        alias: tool
+        for tool, override in overrides.items()
+        for alias in (override or {}).get("aliases") or ()
+    }
     return _ToolTransform(
-        configs, normalize_schema_dialect=bool(spec.get("normalize_schema_dialect"))
+        configs,
+        normalize_schema_dialect=bool(spec.get("normalize_schema_dialect")),
+        aliases=aliases,
     )
 
 

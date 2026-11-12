@@ -58,13 +58,20 @@ from mcp_types import SubscriptionsListenRequestParams
 from fastmcp.client.transports import ClientTransport, StreamableHttpTransport
 from fastmcp.server import create_proxy
 from fastmcp.server.providers.aggregate import AggregateProvider
+from fastmcp.server.transforms import Transform
 from sqlmodel import Session
 from starlette.types import ASGIApp
 
 # Reuse the bridge's tolerant roots handler: an upstream may ask its client (here,
 # the group bundle) to list filesystem roots, and clients without roots support
 # must get [] instead of a noisy -32603 (see app.bridge.host._forward_roots).
-from app.bridge.host import _forward_roots, _is_modern, _ModernTurns, _TurnAwareProxyClient
+from app.bridge.host import (
+    UPSTREAM_META_KEY,
+    _forward_roots,
+    _is_modern,
+    _ModernTurns,
+    _TurnAwareProxyClient,
+)
 from app.db import get_engine, repo
 from app.db.models import BUILTIN_RUNNER, Server
 from app.groups import registry
@@ -308,6 +315,7 @@ class GroupHub:
                 servers = {
                     s.id: (s.mcp_http, s.auth_provider) for s in repo.list_servers(session)
                 }
+                aliases = {s.id: _member_aliases(s) for s in repo.list_servers(session)}
                 builtin = {s.id for s in repo.list_servers(session) if s.runner == BUILTIN_RUNNER}
 
             running = supervisor.running_endpoints()
@@ -354,12 +362,19 @@ class GroupHub:
                     entries.append((server_id, slug, host, port))
                     mounted[slug] = server_id
 
-                key = frozenset(entries)
+                # A member's aliases shape what its proxy answers to, so a change to them
+                # is a topology change too (absent when there are none, keeping the key
+                # the plain entry set).
+                key = frozenset(entries) | frozenset(
+                    ("aliases", server_id, aliases[server_id])
+                    for server_id, *_ in entries
+                    if aliases.get(server_id)
+                )
                 current = self._instances.get(name)
                 if current is not None and current.key == key:
                     continue  # topology unchanged — keep the live instance
                 try:
-                    await self._swap(name, entries, key, mounted, builtin)
+                    await self._swap(name, entries, key, mounted, builtin, aliases)
                 except Exception:
                     # Isolate per group: one group's build/start failure must not abort the
                     # whole pass and starve every group after it in iteration order (the
@@ -373,7 +388,12 @@ class GroupHub:
                     await self._teardown(name)
 
     def _make_proxy(
-        self, slug: str, url: str, forward: bool = False, server_id: str | None = None
+        self,
+        slug: str,
+        url: str,
+        forward: bool = False,
+        server_id: str | None = None,
+        aliases: tuple = (),
     ) -> FastMCP:
         # ProxyClient forwards the caller's inbound headers (Authorization included) by
         # default. On this INTERNAL hop that would send the group's bearer token — which
@@ -387,7 +407,10 @@ class GroupHub:
             self._transport_factory(url), roots=_forward_roots, forward_incoming_headers=forward
         )
         client.member = server_id
-        return create_proxy(client, name=slug)
+        proxy = create_proxy(client, name=slug)
+        if aliases:
+            proxy.add_transform(_MemberAliases(aliases))
+        return proxy
 
     async def _swap(
         self,
@@ -396,6 +419,7 @@ class GroupHub:
         key: frozenset,
         members: dict[str, str] | None = None,
         forward: set[str] | None = None,
+        aliases: dict[str, tuple] | None = None,
     ) -> None:
         """Bring group ``name`` to ``entries``: build its instance if there's none, then
         install the new membership in it, in place."""
@@ -420,6 +444,7 @@ class GroupHub:
                 f"http://{host}:{port}/mcp",
                 forward=server_id in (forward or ()),
                 server_id=server_id,
+                aliases=(aliases or {}).get(server_id, ()),
             )
             members_provider.add_provider(proxy, namespace=slug)
         self._install(instance, members_provider)
@@ -597,3 +622,39 @@ class GroupHub:
             # reachable while shutdown is in progress (including fail-closed shutdown
             # after a broad sync failure).
             await self._close_all_unlocked()
+
+
+def _member_aliases(server: Server) -> tuple:
+    """A member's tool aliases as ``(alias, upstream name, rename or None)``, sorted."""
+    return tuple(sorted(
+        (alias, tool, (override or {}).get("name"))
+        for tool, override in (server.tool_overrides or {}).items()
+        for alias in (override or {}).get("aliases") or ()
+    ))
+
+
+class _MemberAliases(Transform):
+    """Answer a member's tool aliases in the group.
+
+    The member's bridge serves its aliases (``bridge.host._ToolTransform``) but never
+    lists them, and the group's proxy only finds a tool in the member's tool LIST, so it
+    has to know them itself. An alias applies only when the member lists no tool of that
+    name, and resolves to the tool as listed: under its rename when the rename applied
+    (the listed tool carries its upstream name in ``_meta``), else under its own name."""
+
+    def __init__(self, aliases: tuple) -> None:
+        self._aliases = {alias: (tool, renamed) for alias, tool, renamed in aliases}
+
+    async def get_tool(self, name, call_next, *, version=None):
+        found = await call_next(name, version=version)
+        target = self._aliases.get(name)
+        if found is not None or target is None:
+            return found
+        tool, renamed = target
+        if renamed:
+            listed = await call_next(renamed, version=version)
+            if listed is not None and (listed.meta or {}).get(UPSTREAM_META_KEY) == {
+                "name": tool
+            }:
+                return listed
+        return await call_next(tool, version=version)

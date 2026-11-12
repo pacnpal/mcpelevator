@@ -316,6 +316,8 @@ export interface ServerDetail extends ServerSummary {
 export interface ToolOverride {
 	name?: string;
 	description?: string;
+	/** Extra names that call this tool without being listed (e.g. an old name). */
+	aliases?: string[];
 }
 
 // Request body for POST /api/servers. PATCH accepts any subset of these

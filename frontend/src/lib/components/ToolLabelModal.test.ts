@@ -48,6 +48,32 @@ afterEach(() => {
 });
 
 describe('ToolLabelModal', () => {
+	it('saves aliases trimmed, de-duplicated and sorted, without the tool\'s own name', () => {
+		const onsave = vi.fn();
+		const target = render({
+			upstreamName: 'Retrieve_all_tags',
+			override: {} satisfies ToolOverride,
+			onsave
+		});
+		type(field(target, 'Also answers to'), ' getTags \n\nlist_tags\ngetTags\nRetrieve_all_tags\n');
+		button(target, 'Save').click();
+		flushSync();
+		expect(onsave).toHaveBeenCalledWith({ aliases: ['getTags', 'list_tags'] });
+	});
+
+	it('opens on staged aliases and warns about one another tool answers to', () => {
+		const target = render({
+			upstreamName: 'add',
+			override: { aliases: ['plus'] } satisfies ToolOverride,
+			takenNames: new Set(['echo'])
+		});
+		const aliases = field(target, 'Also answers to');
+		expect(aliases.value).toBe('plus');
+		expect(target.textContent).not.toContain('already answers to echo');
+		type(aliases, 'plus\necho');
+		expect(target.querySelector('[data-testid="alias-taken"]')?.textContent).toContain('echo');
+	});
+
 	it('opens on the staged override and saves a trimmed one', () => {
 		const onsave = vi.fn();
 		const onclose = vi.fn();

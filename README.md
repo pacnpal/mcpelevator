@@ -380,14 +380,20 @@ A tool's name and description are the whole interface a model gets — and some 
 ship poor ones. When you can't fix that upstream (a closed-source or paid endpoint),
 override it here instead. Each tool row on the server detail page has an **edit**
 button that opens the label editor — one dialog, so a long upstream description never
-stands between you and the fields — with two optional entries:
+stands between you and the fields — with three optional entries:
 
 - **Name** — what clients call the tool. A renamed tool answers to its **new name
-  only**, exactly as if the upstream server had been rebuilt, so update any client
-  that referenced the old one.
+  only**, exactly as if the upstream server had been rebuilt, unless you keep the
+  old name as an alias.
 - **Description** — the text the model actually reads.
+- **Also answers to** — aliases: extra names, one per line, that still call the tool
+  but never appear in its tool list. Use them to keep an old name working after a
+  rename, yours or the upstream's (an OpenAPI document that drops its `operationId`s
+  renames every tool, for instance). They work on `/s` and through groups, not on
+  REST. A name another tool already answers to is refused when you save, and if the
+  upstream later adds a tool of that name, the real tool wins.
 
-Leave a field empty to keep what the upstream declares; the two are independent, so
+Leave a field empty to keep what the upstream declares; they're independent, so
 you can rewrite a description without renaming, or vice versa. Overrides apply to
 **every** surface at once — MCP, REST (the tool is served at `/rest/<new-name>` and
 appears that way in the generated OpenAPI), and any group the server belongs to.
@@ -398,7 +404,7 @@ Apply bar follows the page, so a change staged at the top of a long tool list ca
 saved without scrolling back to it. They're
 keyed by the tool's upstream name, so an override survives being renamed again. Over
 the API: `PATCH /api/servers/<id>` with
-`{"tool_overrides": {"do_thing": {"name": "run_report", "description": "Runs the report."}}}`
+`{"tool_overrides": {"do_thing": {"name": "run_report", "description": "Runs the report.", "aliases": ["do_thing"]}}}`
 (send `{}` to restore every tool's upstream labels).
 
 ### Server requests: roots, sampling and elicitation
@@ -913,7 +919,7 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 **Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop / retry / **restart** (bounce a running server to pick up its upstream's new tools), with optional setup scripts for local runners and **source-repository** servers (clone + editable post-clone build, auto-detected from a GitHub URL). **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh), `openapi` (serve a plain REST API's operations as MCP tools, translated from its OpenAPI document), and `graphql` (serve a GraphQL API's query and mutation fields as MCP tools, from its schema). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: local bearer tokens or external-AS OAuth JWTs for `/s` and `/g`, control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
 
-Also working: a **tool playground** on the server page (invoke any discovered tool from a schema-built form, no client needed), **per-tool disable** (toggle individual tools off to hide them from every surface — MCP, REST, and groups — and refuse them if called), **per-tool overrides** (rename a tool or rewrite its description when the upstream's wording trips up models — applied to every surface, no upstream rebuild needed), **idle shutdown with wake-on-request** (quiesce inactive servers, restart transparently on the next request), an opt-in **REST/OpenAPI surface** per server (`/s/<slug>/rest/<tool>` + a generated `openapi.json`), and a **multi-user control plane** (admin/member roles, per-user server ownership and token scoping, a per-user local-runner permission, and login-token credentials minted from Settings → Users — see README Security for the trust model).
+Also working: a **tool playground** on the server page (invoke any discovered tool from a schema-built form, no client needed), **per-tool disable** (toggle individual tools off to hide them from every surface — MCP, REST, and groups — and refuse them if called), **per-tool overrides** (rename a tool, rewrite its description, or give it unlisted aliases that keep old names working — applied to every surface, no upstream rebuild needed), **idle shutdown with wake-on-request** (quiesce inactive servers, restart transparently on the next request), an opt-in **REST/OpenAPI surface** per server (`/s/<slug>/rest/<tool>` + a generated `openapi.json`), and a **multi-user control plane** (admin/member roles, per-user server ownership and token scoping, a per-user local-runner permission, and login-token credentials minted from Settings → Users — see README Security for the trust model).
 
 **Planned:** more catalog directories · polish.
 

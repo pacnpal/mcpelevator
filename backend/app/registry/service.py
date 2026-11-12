@@ -1853,10 +1853,20 @@ _TOOL_DESCRIPTION_MAX = 4096
 # once. Half the typical 128 KiB limit, leaving room for the rest of the spec.
 _TOOL_OVERRIDES_MAX_BYTES = 64 * 1024
 
+# Extra names one tool answers calls to (``aliases``); enough for a few renames' history.
+_TOOL_ALIASES_MAX = 16
+
+
+def _valid_tool_name(name: str) -> bool:
+    # `.` and `..` match the charset but are dot-segments: a client resolves `/rest/.` away
+    # before the request is sent, so the tool would be advertised at a path that can't
+    # reach it.
+    return name not in {".", ".."} and bool(_TOOL_NAME_RE.match(name))
+
 
 def normalize_tool_overrides(
     value: Any, disabled: Any = ()
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
     """Canonicalize the per-server tool overrides (issue #112): a map of UPSTREAM tool name
     -> ``{"name": …, "description": …}``, either field optional.
 
@@ -1885,7 +1895,7 @@ def normalize_tool_overrides(
         return {}
     if not isinstance(value, dict):
         raise ValueError("tool_overrides must be a map of tool name -> override")
-    overrides: dict[str, dict[str, str]] = {}
+    overrides: dict[str, dict[str, Any]] = {}
     # A HIDDEN tool exposes no name, so its own rename never applies: it neither claims a
     # target nor collides with anything. Keeping a hidden tool's saved labels must not block
     # an unrelated rename (the bridge skips disabled configs when reserving names).
@@ -1900,14 +1910,14 @@ def normalize_tool_overrides(
         tool = key
         if not isinstance(override, dict):
             raise ValueError(f"tool_overrides[{tool!r}] must be an override object")
-        unknown = set(override) - {"name", "description"}
+        unknown = set(override) - {"name", "description", "aliases"}
         if unknown:
             # Silently dropping an unknown member would turn a typo ("desc") into an
             # override that appears saved and does nothing.
             raise ValueError(
                 f"tool_overrides[{tool!r}] has unknown field(s): {', '.join(sorted(unknown))}"
             )
-        entry: dict[str, str] = {}
+        entry: dict[str, Any] = {}
         for field_name in ("name", "description"):
             field = override.get(field_name)
             if field is None:
@@ -1930,10 +1940,7 @@ def normalize_tool_overrides(
             del entry["name"]
         name = entry.get("name")
         if name is not None:
-            # `.` and `..` match the charset but are dot-segments: a client resolves
-            # `/rest/.` away before the request is sent, so the tool would be advertised
-            # at a REST path that can't reach it.
-            if name in {".", ".."} or not _TOOL_NAME_RE.match(name):
+            if not _valid_tool_name(name):
                 raise ValueError(
                     f"invalid tool name {name!r}: use up to 64 letters, digits, '_', '.' or '-'"
                 )
@@ -1943,6 +1950,9 @@ def normalize_tool_overrides(
                         f"tools {renamed_to[name]!r} and {tool!r} are both renamed to {name!r}"
                     )
                 renamed_to[name] = tool
+        aliases = _normalize_aliases(tool, override.get("aliases"), entry.get("name"))
+        if aliases:
+            entry["aliases"] = aliases
         # Nothing left after trimming = no override at all. Dropping it keeps a cleared
         # field out of the row (and out of the hash) instead of storing an empty shell.
         if entry:
@@ -1966,6 +1976,23 @@ def normalize_tool_overrides(
         other = overrides.get(name)
         if other is not None and "name" in other and name not in hidden:
             raise ValueError(f"renaming {tool!r} to {name!r} would collide with that tool")
+    # An alias is one more name its tool answers calls to, so it may not be a name some
+    # OTHER tool answers to: another tool's alias, rename target or upstream name (an
+    # overridden or hidden key is a tool known to exist). The bridge also lets a live tool
+    # of that name win at call time, for upstream tools this write can't see.
+    aliased: dict[str, str] = {}
+    for tool, entry in overrides.items():
+        for alias in entry.get("aliases", ()):
+            owner = (
+                aliased.get(alias)
+                or renamed_to.get(alias)
+                or (alias if alias in overrides or alias in hidden else None)
+            )
+            if owner is not None and owner != tool:
+                raise ValueError(
+                    f"alias {alias!r} of {tool!r} is already the name of tool {owner!r}"
+                )
+            aliased[alias] = tool
     result = {tool: overrides[tool] for tool in sorted(overrides)}
     # Bound what actually ships to the bridge, not just its parts.
     size = len(json.dumps(result, separators=(",", ":")).encode())
@@ -1975,6 +2002,32 @@ def normalize_tool_overrides(
             f"max {_TOOL_OVERRIDES_MAX_BYTES})"
         )
     return result
+
+
+def _normalize_aliases(tool: str, value: Any, renamed: str | None) -> list[str]:
+    """One tool's ``aliases``: trimmed, de-duplicated, sorted. Its exposed name is never
+    an alias, and neither is its upstream name unless it's renamed (then the alias keeps
+    the old name answering)."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"tool_overrides[{tool!r}].aliases must be a list of names")
+    exposed = renamed or tool
+    names: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"tool_overrides[{tool!r}].aliases must be a list of names")
+        alias = item.strip()
+        if not alias or alias == exposed:
+            continue
+        if not _valid_tool_name(alias):
+            raise ValueError(
+                f"invalid alias {alias!r}: use up to 64 letters, digits, '_', '.' or '-'"
+            )
+        names.add(alias)
+    if len(names) > _TOOL_ALIASES_MAX:
+        raise ValueError(f"tool_overrides[{tool!r}] has more than {_TOOL_ALIASES_MAX} aliases")
+    return sorted(names)
 
 
 def _normalize_setup_script(runner: str, setup_script: str) -> str:

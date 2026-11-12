@@ -857,3 +857,25 @@ def test_graphql_server_with_a_stored_schema_and_its_preview():
             assert refused.status_code == 400
         finally:
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_tool_aliases_round_trip_through_the_api():
+    """`aliases` is accepted, normalized and returned like the other override fields."""
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/servers",
+            json={"name": "Aliases", "runner": "remote", "command": "http://127.0.0.1:9/mcp",
+                  "tool_overrides": {"t": {"aliases": ["b", " a ", "b"]}}},
+            headers=LOOPBACK,
+        )
+        assert r.status_code == 201, r.text
+        sid = r.json()["id"]
+        try:
+            detail = client.get(f"/api/servers/{sid}", headers=LOOPBACK).json()
+            assert detail["tool_overrides"] == {"t": {"aliases": ["a", "b"]}}
+            bad = client.patch(f"/api/servers/{sid}",
+                               json={"tool_overrides": {"t": {"aliases": ["has space"]}}},
+                               headers=LOOPBACK)
+            assert bad.status_code in (400, 422), bad.text
+        finally:
+            client.delete(f"/api/servers/{sid}", headers=LOOPBACK)
