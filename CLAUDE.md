@@ -79,10 +79,12 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   alike. A secret value is stored in `env` as a Fernet token (`PREFIX`), keyed by
   `<data_dir>/env.key`, so a value is secret exactly when it's sealed (no flag column). The
   API masks it as `<hidden>` and takes `<hidden>` back to keep it; `runners.build_spec` is
-  the ONE place it's decrypted. `sealed.resolve` refuses to carry a kept secret through a
-  change of what the server runs (`service._RETARGET_FIELDS`, plus, for a local runner, any
-  other env edit: `NODE_OPTIONS` and friends execute code; for remote/openapi, a `Host`
-  header change) or through making it visible.
+  the ONE place it's decrypted. `sealed.resolve` carries a hidden secret through any other edit
+  and refuses only to make one visible without a new value (it's never shown again), plus
+  one boundary: an editor WITHOUT the local-runner permission moving where a server sends
+  its headers (`service._DESTINATION_FIELDS` + `Host`) must type kept secrets again (anyone
+  with it can read `env.key` anyway). The form warns, without blocking, when a value is
+  about to be made secret.
   `.mcpb` exports turn secrets into sensitive `user_config` prompts, and every manifest is
   validated against the vendored official MCPB 0.2 schema before it's served.
 - **Source repositories** (`runners/repo.py`, `catalog/repository.py`): a local-runner server
@@ -177,8 +179,7 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   (`tick_health_check`), which runs a due one against a live running unit off the sweep.
   A periodic failure sets `unhealthy` with `health_failing` (no restart: the sweep only
   re-derives a crashed `unhealthy`), and a passing check returns it to `running`. Outside
-  `config_hash`; `health_check_command` is a retarget field for sealed env and needs the
-  local-runner permission.
+  `config_hash`; `health_check_command` needs the local-runner permission.
 - **Debug mode** (`debug.py`, `MCPE_DEBUG=true`): deliberately maximal. TRACE logging for every
   logger in the control plane and every bridge (they inherit the env; bridges also run uvicorn at
   `trace`), every SQL statement (values hidden by `hide_parameters`), `TraceMiddleware` logging each request's arrival and headers, its body as the app reads it,

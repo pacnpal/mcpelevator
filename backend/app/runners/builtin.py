@@ -92,9 +92,10 @@ Typical flows:
   restarts the server.
 - Keep secrets write-only: list the env keys (or headers) in secret_env on
   create_server or update_server. Their values are encrypted and read "<hidden>"
-  from then on; send "<hidden>" back to keep one. Making one visible, or changing
-  what the server runs (on a local server, any other env value too), needs the
-  secret values sent in full.
+  from then on; send "<hidden>" back to keep one, whatever else the call changes.
+  Making one visible needs a new value sent in full (the stored one is never
+  shown); so does moving a server's URL or Host if your account can't run local
+  servers.
 - Try a tool: call_server_tool on a running server (not counted as usage).
 - Reach a server from a client: mint a token with create_token (scope "all", a
   server id, or "group:<name>"). The plaintext is returned once.

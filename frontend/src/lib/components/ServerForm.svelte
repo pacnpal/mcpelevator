@@ -1893,14 +1893,44 @@
 								</svg>
 							</button>
 						</div>
+						{#if row.secret && !row.hidden}
+							<!-- A note, not a gate: making a value secret is one-way, so say so before
+							     the save that locks it. -->
+							<p
+								data-testid="secret-warning"
+								role="note"
+								class="-mt-1 flex items-start gap-1.5 text-[11px] leading-relaxed"
+								style="color: var(--color-state-starting);"
+							>
+								<svg
+									class="mt-0.5 size-3 shrink-0"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									aria-hidden="true"
+								>
+									<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+									<path d="M12 9v4M12 17h.01" />
+								</svg>
+								<span>
+									<span class="font-mono">{row.key.trim() || 'This value'}</span> is encrypted when
+									you save and never shown again, here, in the API or in an export. You can replace
+									it later but not read it back, so keep a copy if you'll need it.
+								</span>
+							</p>
+						{/if}
 					{/each}
 				</div>
 				<p class="text-xs text-[var(--color-ink-dim)]">
 					The lock marks a value secret: it's stored encrypted and never shown again, in this
 					form, the API, or a .mcpb export.
 					{#if envRows.some((r) => r.hidden)}
-						Changing what this server runs (for a local server, that includes any other env
-						value), or unlocking a secret, needs the secret values typed in again.
+						A locked value left blank keeps what's stored, whatever else you change. Type a new
+						value to replace it; unlocking one needs a new value too, since the stored one is
+						never shown.
 					{/if}
 				</p>
 			{/if}

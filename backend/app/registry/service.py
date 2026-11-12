@@ -95,10 +95,6 @@ def normalize_remote(command: str, args: Optional[list[str]]) -> tuple[str, list
     return url, [transport]
 
 
-# Runners whose ``env`` is HTTP headers for an upstream, not a process environment.
-_HEADER_RUNNERS = ("remote", "openapi", "graphql")
-
-
 def normalize_openapi(
     command: str, args: Optional[list[str]], document: str = ""
 ) -> tuple[str, list[str], str]:
@@ -2163,7 +2159,7 @@ def create_server(
     )
     # Last, after docker normalization may have moved `-e K=V` values out of the args.
     env = sealed.resolve(
-        {}, dict(env or {}), secret=set(secret_env or []), retargeted=False, env_runs_code=False
+        {}, dict(env or {}), secret=set(secret_env or [])
     )
 
     server = Server(
@@ -2215,31 +2211,6 @@ def create_server(
     # refused here rather than deterministically failing activation later.
     _require_launchable_spec(server)
     return repo.create_server(session, server)
-
-
-# What a server runs, or where it sends its env. Changing any of these on a locked server
-# needs its hidden env values typed in again (app.sealed.resolve): otherwise an editor
-# could point it at `printenv`, or at a URL they control, and read the values back out.
-_RETARGET_FIELDS = (
-    "runner",
-    "command",
-    "args",
-    "run_args",
-    "cwd",
-    "setup_script",
-    "repo_url",
-    "repo_ref",
-    "post_clone_script",
-    "openapi_document",
-    "graphql_schema",
-    "pin_mcp1",
-    # Runs on the host with the child's env, like the setup script.
-    "health_check_command",
-)
-
-
-def _host_header(env: dict[str, str]) -> str | None:
-    return next((value for key, value in env.items() if key.lower() == "host"), None)
 
 
 _MUTABLE_FIELDS = {
@@ -2345,8 +2316,33 @@ def _require_builtin_editable(server: Server, changes: dict[str, Any]) -> None:
         raise ValueError("the built-in mcpelevator server supports none or bearer auth")
 
 
+# Where a server sends its headers. For an editor who can't run code on this box, moving
+# any of these is the one edit that still needs the hidden values typed in again
+# (app.sealed.resolve): otherwise they could point an admin-provisioned key at their host.
+_DESTINATION_FIELDS = ("runner", "command", "args", "openapi_document")
+
+
+def _destination(server: Server, stored_env: dict[str, str] | None = None) -> tuple:
+    """Where ``server`` sends its headers: the destination fields plus EVERY header named
+    ``Host`` in any case, since headers keep each spelling and send them all. With
+    ``stored_env``, a ``Host`` sent back as "<hidden>" reads as the value stored under it."""
+    stored_env = stored_env or {}
+    hosts = tuple(sorted(
+        (key, stored_env.get(key) if value == sealed.HIDDEN else value)
+        for key, value in (server.env or {}).items()
+        if key.lower() == "host"
+    ))
+    return (*((getattr(server, f) or None) for f in _DESTINATION_FIELDS), hosts)
+
+
 @_serialized_write
-def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> Server:
+def update_server(
+    session: Session,
+    server_id: str,
+    changes: dict[str, Any],
+    *,
+    editor_runs_code: bool = False,
+) -> Server:
     server = repo.get_server(session, server_id)
     if server is None:
         raise KeyError(server_id)
@@ -2365,10 +2361,10 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     # was ALREADY docker is not gated (so a broken image/env can be fixed while the runner is
     # off). Captured before the mutation/reclassify below changes server.runner.
     was_docker = server.runner == "docker"
-    # Baselines for the locked-env rule (app.sealed.resolve): what's stored, and what the
-    # server runs, before this change touches either.
+    # The locked-env baselines (app.sealed.resolve): what's stored, and where the server
+    # sends it, before this change.
     env_before = dict(server.env or {})
-    target_before = {key: getattr(server, key) for key in _RETARGET_FIELDS}
+    destination_before = _destination(server)
     # slug is identity/routing, not launch config: validated separately and excluded
     # from config_hash, so a rename re-routes the proxy without bouncing the bridge.
     if "slug" in changes:
@@ -2522,27 +2518,14 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
             bool(server.attach_stderr_on_error),
         )
         # Compared after normalization, so the form resending the same config doesn't
-        # count as pointing the server somewhere new.
-        retargeted = any(
-            (getattr(server, key) or None) != (target_before[key] or None)
-            for key in _RETARGET_FIELDS
-        )
-        # A Host header picks the virtual host behind the same URL, so changing it points
-        # the headers somewhere else as surely as changing the URL does.
-        host_before, host_after = _host_header(env_before), _host_header(server.env or {})
-        if host_after != host_before and not (
-            host_after == sealed.HIDDEN and sealed.is_sealed(host_before)
-        ):
-            retargeted = True
+        # count as a move; a hidden `Host` sent back as "<hidden>" is the stored one.
+        destination_after = _destination(server, env_before)
         secret = changes.get("secret_env")
         server.env = sealed.resolve(
             env_before,
             dict(server.env or {}),
             secret=set(secret) if secret is not None else None,
-            retargeted=retargeted,
-            # Headers (remote/openapi/graphql) only travel to the upstream; a local
-            # process's env can change what it runs (NODE_OPTIONS and friends).
-            env_runs_code=server.runner not in _HEADER_RUNNERS,
+            retargeted=not editor_runs_code and destination_after != destination_before,
         )
         _require_launchable_spec(server)
     except ValueError:

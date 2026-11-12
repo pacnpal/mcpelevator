@@ -706,14 +706,15 @@ never in the database, so authenticating never restarts the bridge on its own.
 `remote`, `openapi` and `graphql` servers) to make it secret. A secret value is encrypted in the
 database with a key in `<data_dir>/env.key` (`0600`) and never shown again: the form, the
 API and the control MCP all read `<hidden>`, and a `.mcpb` export asks for it at install
-instead of carrying it. Leave the field blank to keep the stored value, or type a new one
-to replace it. Changing what the server runs (runner, command, args, image options,
-working directory, setup script, repository, OpenAPI document or GraphQL schema) needs the secret values
-typed in again, and so does unlocking one, so nobody with edit rights can point a server
-at `printenv` or their own URL and read the values back. On a local server that includes
-adding, changing or removing any other env value, since something like `NODE_OPTIONS` changes what
-runs just as much as the command does. Headers on remote, openapi and graphql servers only go to
-the upstream, so those can change freely, except `Host`, which picks where they go. Back up `env.key` with the
+instead of carrying it. Leave the field blank to keep the stored value, whatever else you
+change, or type a new one to replace it. Making a value secret is one-way: it can be
+replaced but never read back, so unlocking one needs a new value typed in (the form warns
+when you lock a value). This protects against a leaked database or an over-the-shoulder
+look, not against an admin or a member with the local-runner permission, who can run code
+that reads `env.key`. A member without that permission is the one exception: moving where a
+remote, openapi or graphql server sends its headers (its URL, base URL, document or `Host`)
+needs the secret values typed in again, so an admin-provisioned key can't be redirected to
+their own host. Back up `env.key` with the
 database: without it the secret values can't be decrypted, and the server's start error
 names the ones to re-enter.
 
