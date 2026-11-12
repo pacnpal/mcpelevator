@@ -2406,7 +2406,10 @@ def main() -> None:
     port = int(os.environ["MCPE_BRIDGE_PORT"])
 
     # MCPE_DEBUG reaches bridges through the inherited environment (see app.debug).
-    from app import debug
+    from app import debug, logconfig
+
+    # A caller hanging up mid-POST is logged by the SDK as a failure with a traceback.
+    logconfig.quiet_client_disconnects()
 
     level = "info"
     if debug.enabled():
