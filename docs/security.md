@@ -128,9 +128,12 @@ against someone who can read the whole data directory, since the key sits beside
 bridge needs the plaintext, so the control plane decrypts them into the bridge's launch
 spec. A secret is write-only, not editor-proof: a save keeps a hidden value through any
 other change, and refuses only to make one visible without a new value
-(`app.sealed.resolve`). Anyone who can edit a server could point it at `printenv` or at a
-URL they control and capture its env, and anyone with the local-runner permission can run
-code that reads `env.key`, so treat edit rights on a server as access to its secrets.
+(`app.sealed.resolve`). Anyone with the local-runner permission (every admin) can run code
+that reads `env.key`, so for them the lock guards nothing more. A member without it can
+only edit header-runner servers (remote/openapi/graphql), so for them it is a boundary:
+moving where such a server sends its headers (runner, URL, base URL, pasted document, or
+`Host`) needs the kept secrets typed in again (`service._DESTINATION_FIELDS`), or an
+admin-provisioned key could be redirected to a host the member controls.
 The one exception is data-plane and admin **bearer tokens**, which are SHA-256-hashed and
 never stored in the clear (§ Data plane). Consequently, anyone who can read the data
 directory — host root, a compromised control-plane process, an unprotected volume mount,

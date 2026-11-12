@@ -80,8 +80,11 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   `<data_dir>/env.key`, so a value is secret exactly when it's sealed (no flag column). The
   API masks it as `<hidden>` and takes `<hidden>` back to keep it; `runners.build_spec` is
   the ONE place it's decrypted. `sealed.resolve` carries a hidden secret through any other edit
-  and refuses only to make one visible without a new value (it's never shown again); the
-  form warns, without blocking, when a value is about to be made secret.
+  and refuses only to make one visible without a new value (it's never shown again), plus
+  one boundary: an editor WITHOUT the local-runner permission moving where a server sends
+  its headers (`service._DESTINATION_FIELDS` + `Host`) must type kept secrets again (anyone
+  with it can read `env.key` anyway). The form warns, without blocking, when a value is
+  about to be made secret.
   `.mcpb` exports turn secrets into sensitive `user_config` prompts, and every manifest is
   validated against the vendored official MCPB 0.2 schema before it's served.
 - **Source repositories** (`runners/repo.py`, `catalog/repository.py`): a local-runner server

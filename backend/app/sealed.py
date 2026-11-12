@@ -95,6 +95,7 @@ def resolve(
     incoming: dict[str, str],
     *,
     secret: set[str] | None,
+    retargeted: bool = False,
 ) -> dict[str, str]:
     """The env to store after a save.
 
@@ -107,6 +108,11 @@ def resolve(
     rides through any other edit of the server untouched (its command, its other env
     values, the other secrets), and the one thing refused is unlocking it without typing
     a replacement, since that would show the stored value.
+
+    ``retargeted`` is the one exception, set by the caller only when an editor who can't
+    run code on this box (no local-runner permission) changes where the server sends its
+    headers. For them the lock is a real boundary: pointing an admin-provisioned key at
+    their own host would read it back out. So a kept value needs typing in again then.
     """
     unknown = sorted((secret or set()) - incoming.keys())
     if unknown:
@@ -115,10 +121,12 @@ def resolve(
         raise ValueError(f"secret_env names keys that aren't in env: {', '.join(unknown)}")
     out: dict[str, str] = {}
     shown: list[str] = []
+    kept: list[str] = []
     for key, value in incoming.items():
         old = stored.get(key)
         is_secret = key in secret if secret is not None else is_sealed(old)
         if is_sealed(old) and value in (HIDDEN, old):
+            kept.append(key)
             if not is_secret:
                 shown.append(key)
             out[key] = old
@@ -137,6 +145,11 @@ def resolve(
         raise ValueError(
             f"{', '.join(shown)}: a secret value is never shown again, so making it "
             "visible needs a new value typed in"
+        )
+    if kept and retargeted:
+        raise ValueError(
+            f"re-enter {', '.join(kept)}: changing where this server sends its headers "
+            "needs the secret values typed in again (your account can't run local servers)"
         )
     return out
 

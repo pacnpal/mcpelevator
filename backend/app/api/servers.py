@@ -552,6 +552,9 @@ async def update_server(
             # PATCH already changed, and misattributing that request's OAuth
             # reconfiguration to this one would wipe a freshly obtained
             # credential this PATCH never touched.
+            # Whether this editor can already run code here (and so read env.key): only
+            # one who can't is asked for kept secrets when moving their destination.
+            runs_code = policy.can_use_runner(fresh, "command")
             before_sig = _oauth_signature(current)
             before_hash = current.config_hash
             if _launch_touched(current, changes):
@@ -560,7 +563,9 @@ async def update_server(
                 )
             if not owner_change_requested:
                 return (
-                    service.update_server(session, server_id, changes),
+                    service.update_server(
+                        session, server_id, changes, editor_runs_code=runs_code
+                    ),
                     before_sig,
                     before_hash,
                 )
@@ -573,7 +578,9 @@ async def update_server(
                 raise HTTPException(status_code=403, detail="only admins may reassign owners")
             if new_owner is not None and repo.get_user(session, new_owner) is None:
                 raise ValueError(f"unknown user {new_owner!r}")
-            updated = service.update_server(session, server_id, changes)
+            updated = service.update_server(
+                session, server_id, changes, editor_runs_code=runs_code
+            )
             old_owner = current.owner_id
             if old_owner is not None and old_owner != new_owner:
                 # The former owner's data-plane tokens for this server: they can no

@@ -259,8 +259,10 @@ def build(app: FastAPI) -> "_Gate":
         fields, the unused one blank. A secret ``env`` value reads "<hidden>"; sending
         "<hidden>" keeps it and any other value replaces it. ``secret_env`` lists the
         secret keys (omit it to leave each key as it is). A kept secret survives any
-        other change to the server; only making one visible needs a new value sent in
-        full in the same call (the stored value is never shown). The health check fields
+        other change to the server; making one visible needs a new value sent in full in
+        the same call (the stored value is never shown), and so does moving where a server
+        sends its headers (runner, command, args, openapi_document, Host) when your
+        account can't run local servers. The health check fields
         (``health_check_tool`` / ``health_check_arguments``, or ``health_check_command``,
         and ``health_check_interval_s``; see create_server) never restart the bridge: a
         change applies from the next start or periodic check, and an explicit null clears

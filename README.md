@@ -710,8 +710,11 @@ instead of carrying it. Leave the field blank to keep the stored value, whatever
 change, or type a new one to replace it. Making a value secret is one-way: it can be
 replaced but never read back, so unlocking one needs a new value typed in (the form warns
 when you lock a value). This protects against a leaked database or an over-the-shoulder
-look, not against someone who can edit the server: they could point it at `printenv` or
-their own URL, and anyone with the local-runner permission can read `env.key`. Back up `env.key` with the
+look, not against an admin or a member with the local-runner permission, who can run code
+that reads `env.key`. A member without that permission is the one exception: moving where a
+remote, openapi or graphql server sends its headers (its URL, base URL, document or `Host`)
+needs the secret values typed in again, so an admin-provisioned key can't be redirected to
+their own host. Back up `env.key` with the
 database: without it the secret values can't be decrypted, and the server's start error
 names the ones to re-enter.
 

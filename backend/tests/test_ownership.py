@@ -360,3 +360,66 @@ def test_permitted_member_import_owns_local_entries():
             ).status_code == 200
         finally:
             _reset()
+
+
+def _member_secret_server(client, admin, uid, **overrides) -> dict:
+    """An admin-provisioned remote server with a secret header, handed to the member."""
+    server = _mk(
+        client, admin, "provisioned",
+        env={"Authorization": "Bearer admin-key", "X-Team": "ops"},
+        secret_env=["Authorization"], **overrides,
+    )
+    r = client.patch(f"/api/servers/{server['id']}", json={"owner_id": uid}, headers=admin)
+    assert r.status_code == 200, r.text
+    return server
+
+
+def test_member_without_local_runners_cannot_retarget_a_kept_secret():
+    """Codex security review on #245: a member who can't run code on the box must not
+    point an admin-provisioned server's headers at their own host while the sealed
+    value rides along. Anything that leaves the destination alone still keeps it."""
+    with TestClient(app) as client:
+        try:
+            admin, member, uid = _setup(client, local_runners=False)
+            server = _member_secret_server(client, admin, uid)
+            path = f"/api/servers/{server['id']}"
+            kept = {"Authorization": "<hidden>", "X-Team": "ops"}
+            for change in (
+                {"command": "https://attacker.example/mcp"},
+                {"args": ["sse"]},
+                {"env": {**kept, "Host": "attacker.example"}},
+            ):
+                r = client.patch(path, json=change, headers=member)
+                assert r.status_code == 400, (change, r.text)
+                assert "Authorization" in r.json()["detail"]
+            # Other edits keep the secret without asking.
+            r = client.patch(path, json={"name": "renamed", "env": {**kept, "X-Team": "dev"}},
+                             headers=member)
+            assert r.status_code == 200, r.text
+            # Typing the value in again allows the move: the member then knows it anyway.
+            r = client.patch(
+                path,
+                json={"command": "https://other.example/mcp",
+                      "env": {"Authorization": "Bearer mine", "X-Team": "dev"}},
+                headers=member,
+            )
+            assert r.status_code == 200, r.text
+        finally:
+            _reset()
+
+
+def test_editors_who_can_run_code_retarget_without_reentry():
+    """An admin, or a member with local runners, can already read env.key by running
+    code, so asking them for the secret again would guard nothing."""
+    with TestClient(app) as client:
+        try:
+            admin, member, uid = _setup(client, local_runners=True)
+            server = _member_secret_server(client, admin, uid)
+            path = f"/api/servers/{server['id']}"
+            r = client.patch(path, json={"command": "https://elsewhere.example/mcp"},
+                             headers=member)
+            assert r.status_code == 200, r.text
+            r = client.patch(path, json={"command": "https://third.example/mcp"}, headers=admin)
+            assert r.status_code == 200, r.text
+        finally:
+            _reset()
