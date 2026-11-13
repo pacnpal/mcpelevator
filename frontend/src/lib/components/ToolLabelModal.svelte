@@ -45,6 +45,9 @@
 	let name = $state(override.name ?? '');
 	// svelte-ignore state_referenced_locally
 	let description = $state(override.description ?? '');
+	// One alias per line: extra names that still call this tool but are never listed.
+	// svelte-ignore state_referenced_locally
+	let aliasText = $state((override.aliases ?? []).join('\n'));
 
 	let dialogEl = $state<HTMLDialogElement>();
 	let nameEl = $state<HTMLInputElement>();
@@ -52,6 +55,15 @@
 	const trimmedName = $derived(name.trim());
 	const exposedName = $derived(trimmedName || upstreamName);
 	const collides = $derived(exposedName !== upstreamName && takenNames.has(exposedName));
+	// The aliases as the backend stores them: trimmed, de-duplicated, sorted, and never the
+	// tool's own exposed name (its upstream name stays allowed once renamed: that alias is
+	// what keeps the old name working).
+	const aliases = $derived(
+		[...new Set(aliasText.split('\n').map((line) => line.trim()))]
+			.filter((alias) => alias && alias !== exposedName)
+			.sort()
+	);
+	const takenAliases = $derived(aliases.filter((alias) => takenNames.has(alias)));
 
 	/** The draft as the backend would store it: trimmed, with blank fields dropped so
 	 * clearing one reads as "keep the upstream's", not as an empty override. */
@@ -59,6 +71,7 @@
 		const next: ToolOverride = {};
 		if (trimmedName) next.name = trimmedName;
 		if (description.trim()) next.description = description.trim();
+		if (aliases.length) next.aliases = aliases;
 		return next;
 	}
 
@@ -175,6 +188,36 @@
 			></textarea>
 		</label>
 
+		<label class="flex flex-col gap-1">
+			<span class="text-[11px] font-medium text-[var(--color-ink-muted)]">Also answers to</span>
+			<textarea
+				rows="3"
+				bind:value={aliasText}
+				placeholder="One name per line, e.g. an old name clients still call"
+				spellcheck="false"
+				autocomplete="off"
+				{disabled}
+				class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] px-2.5 py-2 font-mono text-xs text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
+			></textarea>
+			<span class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
+				Calls to these names run this tool. They aren't listed to clients, so they don't add
+				to a model's context.
+			</span>
+		</label>
+
+		{#if takenAliases.length}
+			<p
+				data-testid="alias-taken"
+				class="text-[11px] leading-snug"
+				style="color: var(--color-state-failed);"
+				role="alert"
+			>
+				Another exposed tool already answers to
+				<code class="font-mono">{takenAliases.join(', ')}</code> — that tool keeps the name, so
+				the alias won't apply.
+			</p>
+		{/if}
+
 		{#if collides}
 			<p class="text-[11px] leading-snug" style="color: var(--color-state-failed);" role="alert">
 				Another exposed tool already answers to
@@ -184,7 +227,8 @@
 
 		<p class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
 			Leave a field empty to keep the upstream's. A renamed tool answers to its new name
-			only — clients using the old one must be updated. Saving here stages the change;
+			only, unless you list the old one under <em>Also answers to</em>. Saving here stages
+			the change;
 			<strong>Apply</strong> writes it in one restart.
 		</p>
 

@@ -39,14 +39,18 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   same bridge also serves each tool as plain REST (`/rest/<tool>` + a generated
   `/rest/openapi.json`), reached through the same `/s/<slug>/` proxy path and auth. A server's
   Per-tool policy — `disabled_tools` (names to hide) and `tool_overrides` (upstream name ->
-  replacement name/description) — is applied by ONE FastMCP `ToolTransform` in the bridge
+  replacement name/description, plus `aliases`: extra names that call the tool but are never
+  listed, applying only when no real tool answers to the name) — is applied by ONE FastMCP
+  `ToolTransform` in the bridge
   (`_tool_transform`), so hiding, renaming, and re-describing all reach every surface at once
   (MCP, REST, and the group hub, which all resolve tools through this proxy): a hidden tool is
   dropped from `tools/list` and refused on call, and a renamed one answers to its new name only.
   A renamed tool carries its pre-rename name in `_meta` under `UPSTREAM_META_KEY` — a contract
   between the bridge and the discovery probe (`supervisor.unit.tool_summary`), which lifts it to
   `upstream_name` so the UI keys per-tool state off a stable identity instead of reversing the
-  rename map (an exposed name isn't unique). Both are part of `config_hash`, so a change
+  rename map (an exposed name isn't unique). A group can't find an unlisted alias in a
+  member's tool list, so the hub adds `_MemberAliases` to that member's proxy from its
+  overrides (and keys the group's topology on them). Both are part of `config_hash`, so a change
   restarts the bridge. A stdio child is ONE kept-alive connection shared by every client, so
   what it sends back (roots/sampling/elicitation requests, logs) can't be attributed by the
   connection: `_StdioRouting` replaces the session's callbacks and reads a single caller slot,

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from typing import Union
 
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_serializer
 
 # The auth providers a server may select. Constrained here so a malformed value
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
@@ -61,9 +61,19 @@ class ToolOverride(BaseModel):
     name: Optional[StrictStr] = None
     # Replace the tool's description — the text the model actually reads.
     description: Optional[StrictStr] = None
+    # Extra names that call this tool without being listed: an old name keeps working
+    # after a rename (upstream's or the operator's). Same name rule as `name`, at most 16.
+    aliases: Optional[list[StrictStr]] = Field(
+        default=None,
+        description=(
+            "Extra names that call this tool but never appear in tools/list, e.g. a "
+            "tool's old name after it was renamed. Up to 16, each up to 64 letters, "
+            "digits, '_', '.' or '-'; a name another tool already answers to is refused."
+        ),
+    )
 
     @model_serializer
-    def _sparse(self) -> dict[str, str]:
+    def _sparse(self) -> dict[str, Any]:
         """Serialize only the fields that are actually set.
 
         Storage is sparse — the normalizer drops blank and absent fields — so an override
@@ -75,7 +85,11 @@ class ToolOverride(BaseModel):
         ``model_dump()``) agrees with what the normalizer would store."""
         return {
             field: value
-            for field, value in (("name", self.name), ("description", self.description))
+            for field, value in (
+                ("name", self.name),
+                ("description", self.description),
+                ("aliases", self.aliases),
+            )
             if value is not None
         }
 

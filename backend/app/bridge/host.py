@@ -1873,6 +1873,13 @@ def _has_incompatible_draft07_construct(
     )
 
 
+def represents(tool: Tool, upstream: str) -> bool:
+    """Whether ``tool`` is the upstream tool named ``upstream``: by the identity a rename
+    stamps in its ``_meta``, or, unrenamed, by its own name."""
+    stamped = (tool.meta or {}).get(UPSTREAM_META_KEY)
+    return stamped == {"name": upstream} if stamped else tool.name == upstream
+
+
 class _ToolTransform(ToolTransform):
     """FastMCP's ``ToolTransform`` with the gaps that matter to elevation closed.
 
@@ -1927,6 +1934,7 @@ class _ToolTransform(ToolTransform):
         transforms: dict[str, ToolTransformConfig],
         *,
         normalize_schema_dialect: bool = False,
+        aliases: dict[str, str] | None = None,
     ) -> None:
         # Own the reverse map rather than inheriting it: a HIDDEN tool exposes no name, so
         # it must not reserve one. FastMCP's constructor reserves a target for every entry
@@ -1943,6 +1951,8 @@ class _ToolTransform(ToolTransform):
         # exists to prevent.
         self._transforms = transforms
         self._normalize_schema_dialect = normalize_schema_dialect
+        # alias -> the UPSTREAM name of the tool it calls (see get_tool).
+        self._aliases = dict(aliases or {})
         self._name_reverse = {}
         for source, config in transforms.items():
             if not config.enabled or not config.name or config.name == source:
@@ -2057,6 +2067,26 @@ class _ToolTransform(ToolTransform):
         return self._apply(source, config, rename=True)
 
     async def get_tool(self, name: str, call_next, *, version=None) -> Tool | None:
+        tool = await self._get_tool(name, call_next, version=version)
+        source = self._aliases.get(name)
+        if tool is not None or source is None:
+            return tool
+        # An alias: an extra name that calls its tool but is never listed. It applies only
+        # when nothing else answers to the name (a live tool of that name, or a rename onto
+        # it, wins, as above), and resolves the tool exactly as clients see it listed,
+        # under its rename or its own name. What answers there must BE the source: another
+        # tool renamed onto a hidden or vanished source's name is not it.
+        if self._hides(source):
+            return None
+        for candidate in (self._renames_to(source), source):
+            if candidate is None:
+                continue
+            found = await self._get_tool(candidate, call_next, version=version)
+            if found is not None and represents(found, source):
+                return found
+        return None
+
+    async def _get_tool(self, name: str, call_next, *, version=None) -> Tool | None:
         # Whoever natively answers to this name wins it — that settles the misrouting
         # cases (a rename shadowing a live tool, and a stale rename stranding one).
         direct = await call_next(name, version=version)
@@ -2142,8 +2172,15 @@ def _tool_transform(spec: dict) -> ToolTransform:
             fields["enabled"] = False
         if fields:
             configs[tool] = ToolTransformConfig(**fields)
+    aliases = {
+        alias: tool
+        for tool, override in overrides.items()
+        for alias in (override or {}).get("aliases") or ()
+    }
     return _ToolTransform(
-        configs, normalize_schema_dialect=bool(spec.get("normalize_schema_dialect"))
+        configs,
+        normalize_schema_dialect=bool(spec.get("normalize_schema_dialect")),
+        aliases=aliases,
     )
 
 

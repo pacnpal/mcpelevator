@@ -1771,3 +1771,65 @@ async def test_turn_that_parks_after_its_group_was_torn_down_does_not_wait(
         await hub.close()
         with Session(get_engine()) as session:
             repo.delete_server(session, member.id)
+
+
+async def test_a_members_tool_alias_answers_through_the_group(clean_settings):
+    """A member's alias is never listed, so the group can't find it in the member's tool
+    list; the hub resolves it from the member's own overrides, and rebuilds the group
+    when they change."""
+    with Session(get_engine()) as session:
+        a = _mk_server(session, "Aliased", tool_overrides={"t": {"aliases": ["old_t"]}})
+    _write_groups({"g": "*"})
+    hub = _hub_for({"up-aliased": _make_upstream("s", "t")})
+    try:
+        sup = _endpoints(a)
+        await hub.sync(sup)
+        app = hub.app_for("g")
+        assert await _list_tool_names(app) == [f"{a.slug}_t"]
+        _, sid = await _rpc(app, "initialize", _INIT_PARAMS)
+        payload, _ = await _rpc(
+            app, "tools/call", {"name": f"{a.slug}_old_t", "arguments": {"q": "x"}}, sid
+        )
+        assert payload["result"]["content"][0]["text"] == "s:x", payload
+
+        # A changed alias set rebuilds the group's members, so the new name answers.
+        with Session(get_engine()) as session:
+            service.update_server(
+                session, a.id, {"tool_overrides": {"t": {"aliases": ["newer_t"]}}}
+            )
+        await hub.sync(sup)
+        app = hub.app_for("g")
+        _, sid = await _rpc(app, "initialize", _INIT_PARAMS)
+        payload, _ = await _rpc(
+            app, "tools/call", {"name": f"{a.slug}_newer_t", "arguments": {"q": "y"}}, sid
+        )
+        assert payload["result"]["content"][0]["text"] == "s:y", payload
+        await hub.close()
+    finally:
+        with Session(get_engine()) as session:
+            repo.delete_server(session, a.id)
+
+
+async def test_a_member_alias_never_reaches_a_tool_renamed_onto_its_sources_name():
+    """The group's alias lookup checks identity too: when the alias's source is gone and
+    another tool is listed under its name (renamed onto it), the alias is refused."""
+    from fastmcp.tools import Tool as _Tool
+
+    from app.bridge.host import UPSTREAM_META_KEY
+    from app.groups.hub import _MemberAliases
+
+    other = _Tool(name="b", parameters={"type": "object"},
+                  meta={UPSTREAM_META_KEY: {"name": "a"}})
+
+    async def call_next(name, version=None):
+        return other if name == "b" else None
+
+    transform = _MemberAliases((("old_b", "b", None),))
+    assert await transform.get_tool("old_b", call_next) is None
+    # The genuine tool under its own name still resolves.
+    genuine = _Tool(name="b", parameters={"type": "object"})
+
+    async def call_genuine(name, version=None):
+        return genuine if name == "b" else None
+
+    assert await transform.get_tool("old_b", call_genuine) is genuine

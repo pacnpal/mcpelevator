@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 from app import sealed
 from app.db.models import Server
@@ -44,9 +45,9 @@ class ProcessSpec:
     # Per-tool policy, applied together by one FastMCP transform in the bridge (see
     # app.bridge.host._tool_transform). `disabled_tools` are upstream names dropped from
     # tools/list and refused on call; `tool_overrides` maps an upstream name to a
-    # replacement name and/or description. Empty = serve every tool as declared.
+    # replacement name, description and/or aliases. Empty = serve every tool as declared.
     disabled_tools: list[str] = field(default_factory=list)
-    tool_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
+    tool_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Rewrite a legacy `$schema` dialect (draft-07, …) on every proxied tool's
     # inputSchema/outputSchema to 2020-12 before advertising it — see
     # app.bridge.host._tool_transform and Server.normalize_schema_dialect.

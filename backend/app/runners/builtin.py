@@ -79,7 +79,8 @@ Typical flows:
 - Bulk add: import_servers with a standard {"mcpServers": {...}} config. Imported
   servers start disabled. Review them, then enable_server and wait_for_server.
 - Hide or relabel a server's tools: update_server with disabled_tools or
-  tool_overrides.
+  tool_overrides (keyed by the upstream tool name: name, description, and
+  aliases, extra unlisted names that still call the tool, e.g. its old name).
 - Clear a local server's cache (its XDG_CACHE_HOME and Playwright browsers,
   under <data_dir>/cache/<id>), e.g. a model download cached corrupt:
   clear_server_cache, then wait_for_server (an enabled server restarts).
