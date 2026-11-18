@@ -218,7 +218,7 @@ Quiet and exact: flat, labeled, a 1px `translateY` press on `:active`, color tra
 The heart of the system. A fully round pill: 12px label at 500 weight with +0.025em tracking, 4px × 10px padding, and a 6px leading dot. Text and dot use the state color, with a 12% state fill and 35% state border. Transient states (Starting, Stopping, startup phases such as "Installing") pulse the dot (opacity 1 → 0.35 over 1.4s, ease-out-quint).
 
 ### Runner Badge
-A small mono tag naming how a server runs (`npx`, `uvx`, `cmd`, `docker`, `remote`, `openapi`, `built-in`): 11px mono at 500 weight, Panel Raised fill, Hairline border, Ink Muted text, 6px radius, 2px × 6px padding. Exposure tags (`MCP`, `REST`) use the same shape tinted emerald.
+A small mono tag naming how a server runs (`npx`, `uvx`, `cmd`, `docker`, `remote`, `openapi`, `built-in`): 11px mono at 500 weight, Panel Raised fill, Hairline border, Ink Muted text, 6px radius, 2px × 6px padding. Exposure tags appear only when exposure differs from the default (MCP on, REST off): `+ REST` in the same neutral shape, `MCP off` with a dashed border. Never emerald: a tag that is true on every card is decoration, not signal.
 
 ### Cards
 - **Corner Style:** 14px card radius.
@@ -238,6 +238,9 @@ A sticky top bar: the logo (mark plus the lowercase wordmark with "mcp" in Signa
 
 ### Endpoint copy controls
 The URL is what people come for, so copying it has one vocabulary everywhere. **Copy URL** copies the bare endpoint; **Add to client ▾** opens the per-client menu (Claude Code, Desktop, web/mobile, Codex, ChatGPT, Gemini CLI, VS Code), whose first item is the bare MCP URL. The server page shows both; a dashboard card shows only **Add to client ▾** to keep its footer on one line. The menu is a disclosure (`aria-expanded` + `aria-controls`), not an ARIA menu.
+
+### Logs
+A sunken Canvas well (mono 12px, Ink Muted) under a Panel header with a live dot. **Hide OK requests** is on by default: successful uvicorn access lines are filtered (the button shows how many), and 4xx/5xx responses always stay visible.
 
 ### Ready strip (signature)
 When the server page watches a start finish, the amber startup panel is replaced in the same slot by a Running-tinted strip: **Ready · N tools**, a one-line prompt, Copy URL, Add to client, and a dismiss ×. It enters with `rise-in` (a fade under reduced motion) and sits above later siblings (`z-20`) so its menu isn't covered. A visually hidden `aria-live="polite"` line announces each phase, readiness ("… is ready, N tools.") and failure. During the first seconds of a readiness phase the probe's error message is held back behind "Waiting for the server to answer…"; the countdown reads "Gives up in …" / "Retrying in …".

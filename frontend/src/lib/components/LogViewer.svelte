@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { isQuietAccessLine } from '#lib/logFilter.js';
 	import { ApiError, streamLogs } from '#lib/api.js';
 	import type { ServerState, StartupStatus } from '#lib/types.js';
 
@@ -22,6 +23,10 @@
 	type Conn = 'idle' | 'connecting' | 'live' | 'reconnecting';
 
 	let lines = $state<string[]>([]);
+	// Successful request lines are noise next to startup output and errors.
+	let hideRequests = $state(true);
+	const shown = $derived(hideRequests ? lines.filter((l) => !isQuietAccessLine(l)) : lines);
+	const hiddenCount = $derived(lines.length - shown.length);
 	let conn = $state<Conn>('idle');
 	let notRunning = $state(false);
 	let stuckToBottom = $state(true);
@@ -157,6 +162,18 @@
 				{dot.label}
 			</span>
 		</div>
+		<div class="flex items-center gap-2">
+		<button
+			type="button"
+			onclick={() => (hideRequests = !hideRequests)}
+			aria-pressed={hideRequests}
+			title="Hide successful HTTP request lines; errors always show"
+			class="rounded-md border border-[var(--color-line)] px-2.5 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+		>
+			{hideRequests
+				? `Show OK requests${hiddenCount ? ` (${hiddenCount})` : ''}`
+				: 'Hide OK requests'}
+		</button>
 		<button
 			type="button"
 			onclick={() => (lines = [])}
@@ -165,6 +182,7 @@
 		>
 			Clear
 		</button>
+		</div>
 	</div>
 
 	<div
@@ -174,10 +192,14 @@
 		aria-label="Server logs"
 		class="overflow-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] p-3 font-mono text-xs leading-relaxed {compact ? 'h-44' : 'h-72'}"
 	>
-		{#if lines.length > 0}
-			{#each lines as line}
+		{#if shown.length > 0}
+			{#each shown as line}
 				<div class="whitespace-pre-wrap break-all text-[var(--color-ink-muted)]">{line}</div>
 			{/each}
+		{:else if lines.length > 0}
+			<p class="text-[var(--color-ink-dim)]">
+				Only successful requests so far ({hiddenCount} hidden).
+			</p>
 		{:else if notRunning}
 			<p class="text-[var(--color-ink-dim)]">Server isn't running — no live logs.</p>
 		{:else}

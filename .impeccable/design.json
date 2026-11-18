@@ -314,9 +314,9 @@
       "name": "Runner Badge",
       "kind": "chip",
       "refersTo": "runner-badge",
-      "description": "Mono tag naming how a server runs, plus emerald exposure tag.",
-      "html": "<span class=\"ds-badge\">npx</span> <span class=\"ds-badge ds-badge-on\">MCP</span>",
-      "css": ".ds-badge{display:inline-flex;align-items:center;padding:2px 6px;border-radius:6px;border:1px solid var(--color-line,#26262b);background:var(--color-surface-2,#161619);color:var(--color-ink-muted,#a1a1aa);font:500 11px/16px ui-monospace,'SF Mono',Menlo,monospace}.ds-badge-on{color:var(--color-accent,#34d399);border-color:color-mix(in oklab,var(--color-accent,#34d399) 35%,transparent);background:color-mix(in oklab,var(--color-accent,#34d399) 10%,transparent)}"
+      "description": "Mono tag naming how a server runs; exposure tags only when non-default (+ REST, MCP off), never emerald.",
+      "html": "<span class=\"ds-badge\">npx</span> <span class=\"ds-badge ds-badge-x\">+ REST</span>",
+      "css": ".ds-badge{display:inline-flex;align-items:center;padding:2px 6px;border-radius:6px;border:1px solid var(--color-line,#26262b);background:var(--color-surface-2,#161619);color:var(--color-ink-muted,#a1a1aa);font:500 11px/16px ui-monospace,'SF Mono',Menlo,monospace}.ds-badge-x{font-family:'Inter var',system-ui,sans-serif}"
     },
     {
       "name": "Text Input",

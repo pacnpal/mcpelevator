@@ -4,6 +4,7 @@
 	import { getAuthStatus, getSettings, previewOpenapi } from '#lib/api.js';
 	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '#lib/remote.js';
 	import { quoteIfNeeded, withPin } from '#lib/uvxPin.js';
+	import { nameFromPackage, parseLaunchLine } from '#lib/launchLine.js';
 	import { HIDDEN_ENV } from '#lib/types.js';
 	import type {
 		OpenapiPreview,
@@ -82,9 +83,14 @@
 	// form just hides what would only 403. Default true so a fetch failure (or a
 	// pre-multi-user backend) keeps the full form.
 	let localRunnersAllowed = $state(true);
+	// What `inherit` resolves to, so the form can say it instead of making you recall it.
+	let defaults = $state<{ auth: string; idle: number } | null>(null);
 	onMount(() => {
 		getSettings()
-			.then((s) => (dockerEnabled = s.docker_runner))
+			.then((s) => {
+				dockerEnabled = s.docker_runner;
+				defaults = { auth: s.default_auth_provider, idle: s.idle_timeout_s };
+			})
 			.catch(() => (dockerEnabled = null));
 		getAuthStatus()
 			.then((a) => (localRunnersAllowed = a.user ? a.user.local_runners : true))
@@ -309,6 +315,22 @@
 		// runner === 'command': command + argsText are edited directly.
 	}
 
+	// A whole `npx …` / `uvx …` line pasted into the package field is split into the
+	// runner, package and extra args (and names an unnamed server) instead of landing
+	// as one long "package".
+	let pasteNote = $state('');
+	function onPkgPaste(event: ClipboardEvent) {
+		const parsed = parseLaunchLine(event.clipboardData?.getData('text') ?? '');
+		if (!parsed) return;
+		event.preventDefault();
+		runner = parsed.runner;
+		pkg = parsed.pkg;
+		extraArgsText = parsed.extra.join('\n');
+		if (!name.trim()) name = nameFromPackage(parsed.pkg);
+		onRunnerChange();
+		pasteNote = `Split the pasted ${parsed.runner} command into package and arguments.`;
+	}
+
 	function onRunnerChange() {
 		// Re-derive raw config for the newly selected runner.
 		if (runner === 'command' || runner === 'docker') {
@@ -485,9 +507,16 @@
 	const accessSummary = $derived.by(() => {
 		const surfaces =
 			mcpHttp && restOpenapi ? 'MCP + REST' : mcpHttp ? 'MCP' : restOpenapi ? 'REST only' : 'not exposed';
-		const auth = authProvider === 'inherit' ? 'auth: Settings default' : `auth: ${authProvider}`;
+		const auth =
+			authProvider === 'inherit'
+				? `auth: ${defaults ? `${defaults.auth} (default)` : 'Settings default'}`
+				: `auth: ${authProvider}`;
 		const idle = idleTimeoutText.trim();
-		const idleText = idle === '' ? 'idle: default' : idle === '0' ? 'always on' : `idle: ${idle}s`;
+		const idleSecs = idle === '' ? (defaults?.idle ?? null) : Number(idle);
+		const idleText =
+			idleSecs === null
+				? 'idle: default'
+				: (idleSecs === 0 ? 'always on' : `idle: ${idleSecs}s`) + (idle === '' ? ' (default)' : '');
 		return `${surfaces} · ${auth} · ${idleText}`;
 	});
 	// An invalid field inside the closed group would otherwise be invisible.
@@ -704,7 +733,7 @@
 			<div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
 				{#each offeredRunners as r (r.value)}
 					<label
-						class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+						class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-[var(--color-accent)]"
 						style={runner === r.value
 							? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
 							: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
@@ -751,12 +780,20 @@
 					id="srv-pkg"
 					type="text"
 					bind:value={pkg}
-					oninput={syncFromFriendly}
+					oninput={() => {
+						pasteNote = '';
+						syncFromFriendly();
+					}}
+					onpaste={onPkgPaste}
 					autocomplete="off"
 					spellcheck="false"
 					placeholder={pkgPlaceholder}
 					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 				/>
+				<p class="text-xs text-[var(--color-ink-dim)]" aria-live="polite">
+					{pasteNote ||
+						`Or paste the whole ${runner} command; it's split into package and arguments.`}
+				</p>
 				<label
 					for="srv-extra-args"
 					class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]"

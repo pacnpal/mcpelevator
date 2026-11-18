@@ -1234,25 +1234,6 @@
 						<CopyButton value={server.urls.rest} label="REST" text="Copy URL" />
 					</div>
 				{/if}
-				{#if server.mcpb_exportable}
-					<div class="flex items-center justify-between gap-3">
-						<div class="min-w-0 flex-1">
-							<p class="text-xs font-medium text-[var(--color-ink-muted)]">Run locally</p>
-							<p class="text-xs text-[var(--color-ink-dim)]">
-								Download a <code class="font-mono">.mcpb</code> bundle of this server's launch
-								config — install it in Claude Desktop to run the server on your own machine.
-							</p>
-						</div>
-						<button
-							type="button"
-							onclick={saveMcpb}
-							disabled={downloadingMcpb}
-							class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
-						>
-							Download .mcpb
-						</button>
-					</div>
-				{/if}
 			</div>
 			{#if effectiveAuth === 'bearer'}
 				<p
@@ -1403,6 +1384,21 @@
 					<span>Idle: the first request wakes it, so it may take a few seconds to answer.</span>
 				</p>
 			{/if}
+			{#if server.mcpb_exportable}
+				<!-- A different way to run it, not an endpoint: one quiet line, last. -->
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					Rather run it on your own machine?
+					<button
+						type="button"
+						onclick={saveMcpb}
+						disabled={downloadingMcpb}
+						class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
+					>
+						{downloadingMcpb ? 'Preparing .mcpb…' : 'Download a .mcpb bundle'}
+					</button>
+					for Claude Desktop.
+				</p>
+			{/if}
 		</div>
 
 		<!-- While starting or failed, logs sit right under the endpoint (which never moves). -->
@@ -1515,12 +1511,10 @@
 							: 'Tools are discovered once the server is running.'}
 					</p>
 				{:else}
-					<p class="text-xs text-[var(--color-ink-dim)]">
-						Toggle tools off to hide them from clients (MCP, REST, and groups); hidden tools
-						are also refused if called. Use <strong>edit</strong> to <strong>rename</strong>
-						a tool or rewrite its description when the upstream's wording trips up models —
-						clients see only your version. Changes are staged — <strong>Apply</strong>
-						saves them all in one restart, from the bar that follows the page.
+					<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
+						Switch a tool off to hide it from every client and refuse calls to it.
+						<strong>Edit</strong> renames a tool or rewrites its description. Changes wait for
+						<strong>Apply</strong>, which restarts the server once.
 					</p>
 					<ul class="flex flex-col divide-y divide-[var(--color-line)]">
 						{#each toolRows as { key, tool, enabled, discovered } (key)}
