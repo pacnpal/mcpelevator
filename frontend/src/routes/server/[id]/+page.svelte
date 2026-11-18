@@ -24,6 +24,8 @@
 	import type { ServerDetail, ServerTool, ServerUsage, ToolOverride } from '#lib/types.js';
 	import { effectiveWindowDays, toolBadge } from '#lib/usage.js';
 	import CopyButton from '#lib/components/CopyButton.svelte';
+	import CopyMenu from '#lib/components/CopyMenu.svelte';
+	import { endpointReach } from '#lib/endpoint.js';
 	import LogViewer from '#lib/components/LogViewer.svelte';
 	import RestartButton from '#lib/components/RestartButton.svelte';
 	import RunnerBadge from '#lib/components/RunnerBadge.svelte';
@@ -96,6 +98,65 @@
 		!!server && !activeStartup && (server.state === 'failed' || server.state === 'unhealthy')
 	);
 	const priorityLogs = $derived(activeStartup || terminalFailure);
+
+	// The first readiness probes usually fail while the child is still booting, and
+	// the backend reports each one as the startup message. Shown at once, a normal
+	// start reads as a failure, so a readiness message waits until the phase has run
+	// for a few seconds (or this is a retry) before it's worth the operator's eye.
+	const PROBE_GRACE_MS = 8000;
+	let phaseKey = $state('');
+	let phaseSince = $state(0);
+	$effect(() => {
+		const key = startup ? `${server?.id}:${startup.attempt}:${startup.phase}` : '';
+		if (key !== phaseKey) {
+			phaseKey = key;
+			phaseSince = Date.now();
+		}
+	});
+	const startupMessageShown = $derived(
+		!!startup?.message &&
+			(startup.phase !== 'readiness' ||
+				startup.attempt > 1 ||
+				Date.now() - phaseSince > PROBE_GRACE_MS)
+	);
+
+	// Going live is the payoff of the whole flow (add, start, copy URL), so a start
+	// this page watched happen ends in a "Ready" strip carrying the URL, instead of
+	// the startup panel just vanishing. Keyed by server id: clone reuses this page.
+	let watchedId = $state<string | null>(null);
+	let watchedStart = $state(false);
+	let readyShown = $state(false);
+	$effect(() => {
+		const id = server?.id ?? null;
+		if (id !== watchedId) {
+			watchedId = id;
+			watchedStart = false;
+			readyShown = false;
+		}
+		if (activeStartup) {
+			watchedStart = true;
+			readyShown = false;
+		} else if (watchedStart && server?.state === 'running') {
+			watchedStart = false;
+			readyShown = true;
+		} else if (watchedStart && server && server.state !== 'starting') {
+			watchedStart = false; // ended some other way (failed, stopped): no strip
+		}
+	});
+	const showReady = $derived(readyShown && server?.state === 'running');
+	const toolCount = $derived(server?.tools.length ?? 0);
+	const reach = $derived(endpointReach(server?.urls.mcp));
+
+	// One polite line for assistive tech: the visual state changes (pill, panel,
+	// strip) are otherwise silent to a screen reader.
+	const liveStatus = $derived.by(() => {
+		if (!server) return '';
+		if (activeStartup && startup) return `${server.name}: ${startupPhaseLabel(startup.phase)}`;
+		if (showReady)
+			return `${server.name} is ready, ${toolCount} tool${toolCount === 1 ? '' : 's'}.`;
+		if (server.state === 'failed') return `${server.name} failed to start.`;
+		return '';
+	});
 
 	let downloadingMcpb = $state(false);
 
@@ -973,18 +1034,60 @@
 					{#if startupCountdown}
 						<span>
 							{startup.next_retry_at
-								? `Retry in ${startupCountdown}`
-								: `${startupCountdown} until this phase times out`}
+								? `Retrying in ${startupCountdown}`
+								: `Gives up in ${startupCountdown}`}
 						</span>
 					{/if}
 				</div>
-				{#if startup.message}
+				{#if startupMessageShown}
 					<p class="font-mono text-xs leading-relaxed text-[var(--color-ink-muted)]">
 						{startup.message}
 					</p>
+				{:else if startup.phase === 'readiness'}
+					<p class="text-xs text-[var(--color-ink-muted)]">Waiting for the server to answer…</p>
 				{/if}
 			</div>
+		{:else if showReady}
+			<!-- Same slot the startup panel held, so going live doesn't reflow the page. -->
+			<div
+				class="animate-rise-in relative z-20 flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border px-4 py-3"
+				style="border-color: color-mix(in oklab, var(--color-state-running) 35%, transparent); background-color: color-mix(in oklab, var(--color-state-running) 8%, transparent);"
+			>
+				<div class="flex min-w-0 flex-col gap-0.5">
+					<p class="text-sm font-semibold text-[var(--color-ink)]">
+						Ready <span class="font-normal text-[var(--color-ink-muted)]"
+							>· {toolCount} tool{toolCount === 1 ? '' : 's'}</span
+						>
+					</p>
+					<p class="text-xs text-[var(--color-ink-muted)]">
+						Copy the URL, or add it straight to a client.
+					</p>
+				</div>
+				<div class="flex items-center gap-2">
+					<CopyButton value={server.urls.mcp} label="MCP" text="Copy URL" />
+					<CopyMenu {server} align="end" />
+					<button
+						type="button"
+						onclick={() => (readyShown = false)}
+						aria-label="Dismiss"
+						class="rounded-md p-1.5 text-[var(--color-ink-dim)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
+					>
+						<svg
+							class="size-4"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							aria-hidden="true"
+						>
+							<path d="M18 6 6 18M6 6l12 12" />
+						</svg>
+					</button>
+				</div>
+			</div>
 		{/if}
+		<p class="sr-only" aria-live="polite">{liveStatus}</p>
 
 		{#if !activeStartup && server.last_error}
 			<p
@@ -995,14 +1098,6 @@
 			</p>
 		{/if}
 
-		{#if priorityLogs}
-			<LogViewer
-				serverId={server.id}
-				serverState={server.state}
-				startupStatus={startup}
-				compact
-			/>
-		{/if}
 
 		<!-- Upstream OAuth: connect / status banner -->
 		{#if oauthState?.enabled}
@@ -1108,14 +1203,18 @@
 		>
 			<h2 class="text-sm font-semibold text-[var(--color-ink)]">Endpoints</h2>
 			<div class="flex flex-col gap-2.5">
-				<div class="flex items-center justify-between gap-3">
+				<!-- On a phone the URL takes its own full line: truncated, it can't be checked. -->
+				<div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
 					<div class="min-w-0 flex-1">
 						<p class="text-xs font-medium text-[var(--color-ink-muted)]">MCP</p>
-						<p class="truncate font-mono text-xs text-[var(--color-ink)]">
+						<p class="font-mono text-xs break-all text-[var(--color-ink)] sm:truncate">
 							{server.urls.mcp ?? '— not exposed —'}
 						</p>
 					</div>
-					<CopyButton value={server.urls.mcp} label="Copy" />
+					<div class="flex shrink-0 items-center gap-2">
+						<CopyButton value={server.urls.mcp} label="MCP" text="Copy URL" />
+						<CopyMenu {server} align="end" />
+					</div>
 				</div>
 				{#if server.transports.rest_openapi}
 					<div class="flex items-center justify-between gap-3">
@@ -1132,7 +1231,7 @@
 								</p>
 							{/if}
 						</div>
-						<CopyButton value={server.urls.rest} label="Copy" />
+						<CopyButton value={server.urls.rest} label="REST" text="Copy URL" />
 					</div>
 				{/if}
 				{#if server.mcpb_exportable}
@@ -1210,8 +1309,111 @@
 						</a>.
 					</span>
 				</p>
+			{:else if effectiveAuth === 'none'}
+				<p
+					class="flex items-start gap-1.5 border-t border-[var(--color-line)] pt-2.5 text-xs text-[var(--color-ink-dim)]"
+				>
+					<svg
+						class="mt-px size-3.5 shrink-0 text-[var(--color-ink-muted)]"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<rect x="5" y="11" width="14" height="10" rx="2" />
+						<path d="M8 11V7a4 4 0 0 1 7.9-1" />
+					</svg>
+					<span>
+						No auth: anyone who can reach this URL can call its tools. Require a token under
+						<a
+							href={`/server/${server.id}/edit`}
+							class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
+							>Edit</a
+						>, or change the default in
+						<a
+							href="/settings"
+							class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
+							>Settings</a
+						>.
+					</span>
+				</p>
+			{/if}
+			{#if server.urls.mcp && reach !== 'public'}
+				<p class="flex items-start gap-1.5 text-xs text-[var(--color-ink-dim)]">
+					<svg
+						class="mt-px size-3.5 shrink-0 text-[var(--color-ink-muted)]"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<circle cx="12" cy="12" r="9" />
+						<path d="M12 11v5M12 8h.01" />
+					</svg>
+					<span>
+						{#if reach === 'local'}
+							This address only works from this machine or network. Claude web and mobile
+							need a public HTTPS URL:
+						{:else}
+							Plain http: Claude web and mobile only connect over HTTPS. Serve this box over
+							HTTPS and
+						{/if}
+						set <code class="font-mono text-[var(--color-ink-muted)]">MCPE_PUBLIC_BASE_URL</code>.
+					</span>
+				</p>
+			{/if}
+			{#if !server.enabled}
+				<p class="flex items-start gap-1.5 text-xs text-[var(--color-ink-dim)]">
+					<svg
+						class="mt-px size-3.5 shrink-0 text-[var(--color-ink-muted)]"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<circle cx="12" cy="12" r="9" />
+						<path d="M12 11v5M12 8h.01" />
+					</svg>
+					<span>Stopped: this URL won't answer until you start the server.</span>
+				</p>
+			{:else if server.state === 'idle'}
+				<p class="flex items-start gap-1.5 text-xs text-[var(--color-ink-dim)]">
+					<svg
+						class="mt-px size-3.5 shrink-0 text-[var(--color-ink-muted)]"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<circle cx="12" cy="12" r="9" />
+						<path d="M12 11v5M12 8h.01" />
+					</svg>
+					<span>Idle: the first request wakes it, so it may take a few seconds to answer.</span>
+				</p>
 			{/if}
 		</div>
+
+		<!-- While starting or failed, logs sit right under the endpoint (which never moves). -->
+		{#if priorityLogs}
+			<LogViewer
+				serverId={server.id}
+				serverState={server.state}
+				startupStatus={startup}
+				compact
+			/>
+		{/if}
 
 		<!-- Configuration -->
 		<div

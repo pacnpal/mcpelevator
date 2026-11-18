@@ -278,7 +278,10 @@
 	let idleTimeoutText = $state(seed.idleTimeoutText);
 	let authProvider = $state<ServerAuthProvider>(seed.authProvider);
 	let startAfter = $state(seed.startAfter);
-	let advancedOpen = $state(seed.setupScript.trim().length > 0);
+	let advancedOpen = $state(seed.setupScript.trim().length > 0 || seed.cwd.trim().length > 0);
+	// Exposure, auth and idle sit behind one disclosure: a first server needs none of
+	// them changed. The built-in server's edit form is ONLY these, so it opens there.
+	let accessOpen = $state(seed.runner === 'mcpelevator');
 
 	let envRows = $state<EnvRow[]>(seed.envRows);
 	let envSeq = seed.envRows.length;
@@ -477,6 +480,43 @@
 			!repoBlocked &&
 			!busy
 	);
+
+	// What the collapsed "Exposure & access" row says, so closing it hides nothing.
+	const accessSummary = $derived.by(() => {
+		const surfaces =
+			mcpHttp && restOpenapi ? 'MCP + REST' : mcpHttp ? 'MCP' : restOpenapi ? 'REST only' : 'not exposed';
+		const auth = authProvider === 'inherit' ? 'auth: Settings default' : `auth: ${authProvider}`;
+		const idle = idleTimeoutText.trim();
+		const idleText = idle === '' ? 'idle: default' : idle === '0' ? 'always on' : `idle: ${idle}s`;
+		return `${surfaces} · ${auth} · ${idleText}`;
+	});
+	// An invalid field inside the closed group would otherwise be invisible.
+	$effect(() => {
+		if (!idleTimeoutValid) accessOpen = true;
+	});
+
+	// Why Create is disabled, said next to it instead of a silently dimmed button.
+	const COMMAND_MISSING: Record<string, string> = {
+		npx: 'Add the npm package.',
+		uvx: 'Add the Python package.',
+		command: 'Add a command.',
+		docker: 'Add an image.',
+		remote: "Add the server's URL.",
+		openapi: 'Add the OpenAPI document URL, or paste the document.'
+	};
+	const submitBlocker = $derived.by(() => {
+		if (busy) return null;
+		if (!nameValid) return 'Add a name.';
+		if (!commandValid) return COMMAND_MISSING[runner] ?? 'Add a command.';
+		if (!remoteUrlValid) return 'Enter a full http(s) URL.';
+		if (!baseUrlValid) return 'The base URL must be a full http(s) URL.';
+		if (!idleTimeoutValid) return 'Idle shutdown must be a whole number of seconds.';
+		if (dockerBlocked) return 'The Docker runner is off: turn off “Start after creating” to save it.';
+		if (setupBlocked) return "This runner can't run a setup script: clear it under Advanced.";
+		if (repoBlocked) return 'Fix the source repository settings above.';
+		return null;
+	});
+	const submitHintId = $props.id();
 
 	function buildEnv(): Record<string, string> {
 		const out: Record<string, string> = {};
@@ -1205,7 +1245,7 @@
 					aria-expanded={repoOpen}
 					class="flex w-full items-center justify-between gap-3 px-3.5 py-3 text-left transition hover:bg-[var(--color-surface-2)]"
 				>
-					<span class="flex flex-col gap-0.5">
+					<span class="flex min-w-0 flex-col gap-0.5">
 						<span class="text-sm font-medium text-[var(--color-ink)]">
 							Source repository <span class="font-normal text-[var(--color-ink-dim)]">(optional)</span>
 						</span>
@@ -1369,7 +1409,14 @@
 				<span class="flex flex-col gap-0.5">
 					<span class="text-sm font-medium text-[var(--color-ink)]">Advanced</span>
 					<span class="text-xs text-[var(--color-ink-dim)]">
-						Setup script{setupAllowed ? ' and raw launch configuration' : ''}
+						{[
+							!isHttpUpstream && !isDocker ? 'Working directory' : null,
+							'setup script',
+							setupAllowed ? 'raw launch configuration' : null
+						]
+							.filter(Boolean)
+							.join(', ')
+							.replace(/^./, (c) => c.toUpperCase())}
 					</span>
 				</span>
 				<svg
@@ -1391,6 +1438,25 @@
 				<div
 					class="flex flex-col gap-3 border-t border-[var(--color-line)] px-3.5 py-3.5"
 				>
+					<!-- Working directory (not applicable to an HTTP upstream or a docker container) -->
+					{#if !isHttpUpstream && !isDocker}
+						<div class="flex flex-col gap-1.5">
+							<label for="srv-cwd" class="text-xs font-medium text-[var(--color-ink-muted)]">
+								Working directory <span class="text-[var(--color-ink-dim)]">(optional)</span>
+							</label>
+							<input
+								id="srv-cwd"
+								type="text"
+								bind:value={cwd}
+								autocomplete="off"
+								spellcheck="false"
+								placeholder={repoUrl.trim()
+									? 'relative to the checkout, e.g. packages/server'
+									: '/path/to/project'}
+								class="rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							/>
+						</div>
+					{/if}
 					<div class="flex flex-col gap-1.5">
 						<label for="srv-setup-script" class="text-xs font-medium text-[var(--color-ink-muted)]">
 							Setup script <span class="text-[var(--color-ink-dim)]">(optional)</span>
@@ -1592,25 +1658,35 @@
 			{/if}
 		</fieldset>
 
-		<!-- Working directory (not applicable to an HTTP upstream or a docker container) -->
-		{#if !isHttpUpstream && !isDocker}
-			<div class="flex flex-col gap-2">
-				<label for="srv-cwd" class="text-sm font-medium text-[var(--color-ink)]">
-					Working directory <span class="font-normal text-[var(--color-ink-dim)]">(optional)</span>
-				</label>
-				<input
-					id="srv-cwd"
-					type="text"
-					bind:value={cwd}
-					autocomplete="off"
-					spellcheck="false"
-					placeholder={repoUrl.trim() ? 'relative to the checkout, e.g. packages/server' : '/path/to/project'}
-					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-				/>
-			</div>
-		{/if}
 	{/if}
 
+	<!-- Exposure & access: everything a first server can leave at its defaults. A native
+	     <details> keeps the fields mounted, so values and validation survive closing it. -->
+	<details
+		bind:open={accessOpen}
+		class="group overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]"
+	>
+		<summary
+			class="flex cursor-pointer list-none items-center justify-between gap-3 px-3.5 py-3 transition hover:bg-[var(--color-surface-2)] [&::-webkit-details-marker]:hidden"
+		>
+			<span class="flex min-w-0 flex-col gap-0.5">
+				<span class="text-sm font-medium text-[var(--color-ink)]">Exposure &amp; access</span>
+				<span class="truncate font-mono text-xs text-[var(--color-ink-dim)]">{accessSummary}</span>
+			</span>
+			<svg
+				class="size-4 shrink-0 text-[var(--color-ink-muted)] transition-transform group-open:rotate-180"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<path d="m6 9 6 6 6-6" />
+			</svg>
+		</summary>
+		<div class="flex flex-col gap-7 border-t border-[var(--color-line)] px-3.5 py-4">
 	<!-- Exposure toggles -->
 	<fieldset class="flex flex-col gap-3 border-0 p-0">
 		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Exposure</legend>
@@ -1790,6 +1866,8 @@
 			</a> page.
 		</p>
 	</fieldset>
+		</div>
+	</details>
 
 	<!-- Start after creating (create only) -->
 	{#if mode === 'create'}
@@ -1837,8 +1915,13 @@
 		</p>
 	{/if}
 
-	<!-- Actions -->
-	<div class="flex items-center justify-end gap-2 pt-1">
+	<!-- Actions: pinned to the bottom of the screen on phones, where the form is long. -->
+	<div
+		class="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t border-[var(--color-line)] bg-[color-mix(in_oklab,var(--color-canvas)_92%,transparent)] px-4 py-3 backdrop-blur-sm sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:pt-1 sm:pb-0 sm:backdrop-blur-none"
+	>
+		{#if submitBlocker}
+			<p id={submitHintId} class="mr-auto text-xs text-[var(--color-ink-muted)]">{submitBlocker}</p>
+		{/if}
 		{#if oncancel}
 			<button
 				type="button"
@@ -1851,6 +1934,7 @@
 		<button
 			type="submit"
 			disabled={!canSubmit}
+			aria-describedby={submitBlocker ? submitHintId : undefined}
 			aria-busy={busy}
 			class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-5 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
 		>

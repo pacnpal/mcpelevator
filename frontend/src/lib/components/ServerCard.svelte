@@ -349,7 +349,7 @@
 		</p>
 	{/if}
 
-	<!-- Footer: copy endpoints + start/stop -->
+	<!-- Footer: the endpoint (raw URL, or a client's snippet) + start/stop -->
 	<footer
 		class="mt-auto flex items-center justify-between gap-2 border-t border-[var(--color-line)] pt-4"
 	>

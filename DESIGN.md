@@ -236,6 +236,18 @@ A small mono tag naming how a server runs (`npx`, `uvx`, `cmd`, `docker`, `remot
 ### Navigation
 A sticky top bar: the logo (mark plus the lowercase wordmark with "mcp" in Signal Emerald) on the left, then Browse, Usage, Settings and an API status dot on the right. Every item uses the one `.nav-item` class in `app.css` (36px tall, secondary-button styling), with an icon and a label that collapses to icon-only below `sm`. The current page is marked with `aria-current="page"`, and the emerald active tint is keyed off that attribute, so the tint and the semantics can't drift apart. The API health dot is solid (no ping); its label is visible from `sm` and screen-reader-only below it.
 
+### Endpoint copy controls
+The URL is what people come for, so copying it has one vocabulary everywhere. **Copy URL** copies the bare endpoint; **Add to client ▾** opens the per-client menu (Claude Code, Desktop, web/mobile, Codex, ChatGPT, Gemini CLI, VS Code), whose first item is the bare MCP URL. The server page shows both; a dashboard card shows only **Add to client ▾** to keep its footer on one line. The menu is a disclosure (`aria-expanded` + `aria-controls`), not an ARIA menu.
+
+### Ready strip (signature)
+When the server page watches a start finish, the amber startup panel is replaced in the same slot by a Running-tinted strip: **Ready · N tools**, a one-line prompt, Copy URL, Add to client, and a dismiss ×. It enters with `rise-in` (a fade under reduced motion) and sits above later siblings (`z-20`) so its menu isn't covered. A visually hidden `aria-live="polite"` line announces each phase, readiness ("… is ready, N tools.") and failure. During the first seconds of a readiness phase the probe's error message is held back behind "Waiting for the server to answer…"; the countdown reads "Gives up in …" / "Retrying in …".
+
+### Endpoint notes
+Below the URLs, one quiet line per fact, each with a 14px stroke icon in Ink Muted and Ink Dim text, never a warning color: the auth requirement (or "No auth: anyone who can reach this URL can call its tools."), reachability when the URL is loopback/private/`.local` or plain http (pointing at `MCPE_PUBLIC_BASE_URL`), and "Stopped" / "Idle" consequences. The Endpoints card keeps its position in every state; while starting or failed, logs sit directly under it.
+
+### Disclosures in forms
+Settings a first server can leave at defaults live in collapsed groups on the Panel surface with a Hairline border: **Advanced** (working directory, setup script, raw launch config) and **Exposure & access** (exposure toggles, idle shutdown, auth). Each closed group's second line states its current values in mono (`MCP · auth: Settings default · idle: default`), so collapsing hides nothing. Native `<details>` keeps fields mounted; a group opens itself when a field inside it is invalid. On phones the form's actions stick to the bottom of the screen, and a disabled submit always says why next to it ("Add the npm package.").
+
 ### Menus
 A Floating surface (#1c1c20) with a Hairline Strong border, 8px radius, 4px vertical padding and the Float shadow. Items are 14px Ink Muted rows (8px × 12px) with a 16px stroke icon, filling with Panel Raised and Ink on hover. A destructive confirmation replaces the item list in place rather than opening a second dialog.
 
