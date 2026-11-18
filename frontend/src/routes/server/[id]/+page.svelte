@@ -865,7 +865,9 @@
 				</p>
 			</div>
 
-			<div class="flex flex-wrap items-center justify-end gap-2">
+			<div
+				class="grid w-full grid-cols-2 gap-2 *:justify-center sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:justify-end"
+			>
 				<ServerActionButton
 					{server}
 					bind:busy
@@ -1237,7 +1239,7 @@
 				{#if server.post_clone_script}
 					<div class="flex flex-col gap-1.5">
 						<span class="text-xs font-medium text-[var(--color-ink-muted)]">Post-clone script</span>
-						<pre class="m-0 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5 font-mono text-xs whitespace-pre-wrap text-[var(--color-ink)]">{server.post_clone_script}</pre>
+						<pre class="m-0 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5 font-mono text-xs whitespace-pre-wrap text-[var(--color-ink)]">{server.post_clone_script}</pre>
 					</div>
 				{/if}
 			{/if}
@@ -1245,14 +1247,14 @@
 			{#if server.setup_script}
 				<div class="flex flex-col gap-1.5">
 					<span class="text-xs font-medium text-[var(--color-ink-muted)]">Setup script</span>
-					<pre class="m-0 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5 font-mono text-xs whitespace-pre-wrap text-[var(--color-ink)]">{server.setup_script}</pre>
+					<pre class="m-0 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5 font-mono text-xs whitespace-pre-wrap text-[var(--color-ink)]">{server.setup_script}</pre>
 				</div>
 			{/if}
 
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Command</span>
 				<div
-					class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5"
+					class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5"
 				>
 					<code class="font-mono text-xs whitespace-pre text-[var(--color-ink)]">{commandLine}</code>
 				</div>
@@ -1444,11 +1446,11 @@
 										type="button"
 										role="switch"
 										aria-checked={enabled}
-										aria-label={`${enabled ? 'Disable' : 'Enable'} ${key}`}
+										aria-label={`Expose ${key}`}
 										title={enabled ? 'Exposed — click to hide from clients' : 'Hidden — click to expose'}
 										disabled={toolEditsBlocked}
 										onclick={() => toggleToolPending(key, !enabled)}
-										class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 {enabled
+										class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition before:absolute before:-inset-2 before:content-[''] disabled:cursor-not-allowed disabled:opacity-50 {enabled
 											? 'bg-[var(--color-accent)]'
 											: 'bg-[var(--color-line)]'}"
 									>
@@ -1546,7 +1548,7 @@
 										{row.name}
 										{#if row.badge}
 											<span
-												class="ml-1 font-sans text-[10px] text-[var(--color-ink-dim)]"
+												class="ml-1 font-sans text-[11px] text-[var(--color-ink-dim)]"
 												title={row.badge === 'unrecognised'
 													? 'Calls to names this server does not expose, pooled past the per-hour budget'
 													: 'Called under a name this server no longer exposes'}

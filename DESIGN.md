@@ -5,7 +5,7 @@ colors:
   signal-emerald: "#34d399"
   signal-emerald-deep: "#10b981"
   emerald-ink: "#022c22"
-  base: "#09090b"
+  canvas: "#09090b"
   surface: "#101012"
   surface-2: "#161619"
   elevated: "#1c1c20"
@@ -131,7 +131,7 @@ A near-black zinc ramp holding a single emerald signal, plus a fixed set of life
 - **Emerald Ink** (#022c22): text and icons on an emerald fill. Never used on its own.
 
 ### Neutral
-- **Base Night** (#09090b): page background.
+- **Base Night** (#09090b, token `--color-canvas`): page background. The token is deliberately not named `base`: Tailwind would read `text-base` as this color instead of the 16px size.
 - **Panel** (#101012): cards, secondary buttons, the resting layer of content.
 - **Panel Raised** (#161619): inputs, badges, hover fills inside cards, code wells.
 - **Floating** (#1c1c20): menus, popovers, dialogs, anything above the page.
@@ -173,13 +173,13 @@ State tints are built with `color-mix(in oklab, <state> N%, transparent)`: about
 - **Title** (600, 15px): card titles (server names), section heads inside a page.
 - **Body** (400–500, 0.875rem/14px): form labels (500), button labels (500–600), menu items, paragraph copy.
 - **Label** (500, 0.75rem/12px, tracking +0.025em): state pills, help text under fields, metadata rows. This is the most-used size in the app.
-- **Micro** (500, 11px, sometimes 10px): runner badges, chart axes, dense table metadata.
+- **Micro** (500, 11px): runner badges, chart axes, heatmap hour labels, dense table metadata. 11px is the floor for any text a person needs to read; sentences (captions, help, notes) are never smaller than 12px.
 - **Mono** (400–500, 11–12px): slugs, endpoint URLs, runner names, commands, env keys, log lines.
 
 ### Named Rules
 **The Machine-in-Mono Rule.** If a string is routed on, copied into a config or typed into a terminal (slug, URL, command, env key, tool name), it is mono. If a human named it, it is Inter.
 
-**The Small-Steps Rule.** The scale stays between 10px and 24px. New hierarchy comes from weight (500/600) and Ink vs Ink Muted vs Ink Dim, not from new sizes.
+**The Small-Steps Rule.** The scale stays between 11px and 24px. New hierarchy comes from weight (500/600) and Ink vs Ink Muted vs Ink Dim, not from new sizes.
 
 ## Layout
 
@@ -234,7 +234,7 @@ A small mono tag naming how a server runs (`npx`, `uvx`, `cmd`, `docker`, `remot
 - **Toggles:** a visually hidden checkbox plus a styled peer track. Never a bare native checkbox in forms.
 
 ### Navigation
-A sticky top bar: the logo (mark plus the lowercase wordmark with "mcp" in Signal Emerald) on the left, then Browse, Usage, Settings and an API status dot on the right. Items are secondary buttons with an icon and a label, collapsing to icon-only below `sm`. The current page uses `aria-current="page"` and the emerald active tint.
+A sticky top bar: the logo (mark plus the lowercase wordmark with "mcp" in Signal Emerald) on the left, then Browse, Usage, Settings and an API status dot on the right. Every item uses the one `.nav-item` class in `app.css` (36px tall, secondary-button styling), with an icon and a label that collapses to icon-only below `sm`. The current page is marked with `aria-current="page"`, and the emerald active tint is keyed off that attribute, so the tint and the semantics can't drift apart. The API health dot is solid (no ping); its label is visible from `sm` and screen-reader-only below it.
 
 ### Menus
 A Floating surface (#1c1c20) with a Hairline Strong border, 8px radius, 4px vertical padding and the Float shadow. Items are 14px Ink Muted rows (8px × 12px) with a 16px stroke icon, filling with Panel Raised and Ink on hover. A destructive confirmation replaces the item list in place rather than opening a second dialog.
@@ -261,3 +261,5 @@ LayerChart, themed through CSS variables so charts reuse these tokens: the prima
 - **Don't** render Stop or other routine lifecycle actions as red or filled. They stay quiet.
 - **Don't** add type sizes above 24px or display faces to the app UI.
 - **Don't** show Idle in a warning color. It is a deliberate, healthy state (Calm Blue).
+- **Don't** add an animation without a `prefers-reduced-motion` path. Under reduced motion, pulses hold a steady dimmed dot, entrances fade in 0.2s, skeleton shimmer stops, and spinners keep turning more slowly.
+- **Don't** add an endless loop to a healthy state. Motion marks something in progress (starting, stopping, loading), never "all is well".

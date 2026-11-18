@@ -137,7 +137,7 @@
 					aria-haspopup="menu"
 					aria-expanded={menuOpen}
 					aria-label="Server actions"
-					class="rounded-md p-1 text-[var(--color-ink-dim)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
+					class="rounded-md p-1.5 text-[var(--color-ink-dim)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
 				>
 					<svg class="size-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 						<circle cx="12" cy="5" r="1.6" />

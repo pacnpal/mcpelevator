@@ -1244,7 +1244,7 @@
 									autocomplete="off"
 									spellcheck="false"
 									placeholder="https://github.com/owner/repo"
-									class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+									class="rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 								/>
 							</div>
 							<div class="flex flex-col gap-1.5 sm:w-40">
@@ -1258,7 +1258,7 @@
 									autocomplete="off"
 									spellcheck="false"
 									placeholder="default branch"
-									class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+									class="rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 								/>
 							</div>
 						</div>
@@ -1272,7 +1272,7 @@
 								rows="3"
 								spellcheck="false"
 								placeholder="npm ci&#10;npm run build"
-								class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 							></textarea>
 						</div>
 						{#if repoBlocked}
@@ -1299,7 +1299,7 @@
 			<!-- Remote endpoint preview (no local process to spawn) -->
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Proxies</span>
-				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
+				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5">
 					{#if command.trim()}
 						<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
 							{transport} → {command.trim()}
@@ -1313,7 +1313,7 @@
 			<!-- OpenAPI preview: where the tools come from (no local process to spawn) -->
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Translates</span>
-				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
+				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5">
 					{#if specFromDocument ? openapiDocument.trim() : command.trim()}
 						<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
 							{specFromDocument ? '(stored document)' : command.trim()} → {baseUrl.trim() || '(document servers)'}
@@ -1329,7 +1329,7 @@
 			<!-- Docker: show the hardened `docker run …` the backend synthesizes. -->
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
-				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
+				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5">
 					<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
 						{dockerPreview}
 					</code>
@@ -1340,7 +1340,7 @@
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
 				<div
-					class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5"
+					class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5"
 				>
 					{#if previewCommand}
 						<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
@@ -1403,7 +1403,7 @@
 							placeholder="npm install @playwright/test&#10;npx playwright install"
 							aria-describedby={setupBlocked ? 'setup-warning setup-validation' : 'setup-warning'}
 							aria-invalid={setupBlocked}
-							class="resize-y rounded-md border bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+							class="resize-y rounded-md border bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 							style={setupBlocked
 								? 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'
 								: 'border-color: var(--color-line);'}
@@ -1439,7 +1439,7 @@
 								oninput={onCommandInput}
 								autocomplete="off"
 								spellcheck="false"
-								class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+								class="rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 							/>
 						</div>
 						<div class="flex flex-col gap-1.5">
@@ -1454,7 +1454,7 @@
 								bind:value={argsText}
 								rows="4"
 								spellcheck="false"
-								class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+								class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 							></textarea>
 						</div>
 						{#if friendly}

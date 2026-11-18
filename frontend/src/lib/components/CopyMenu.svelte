@@ -173,13 +173,13 @@
 			style="max-height: {maxH}px;"
 		>
 			<p
-				class="px-3 pt-1.5 pb-1 text-[10px] font-semibold tracking-wider text-[var(--color-ink-dim)] uppercase"
+				class="px-3 pt-1.5 pb-1 text-[11px] font-semibold tracking-wider text-[var(--color-ink-dim)] uppercase"
 			>
 				Add to client
 			</p>
 			{#each groups as { group, items } (group)}
 				<p
-					class="mt-1 px-3 pt-1.5 pb-0.5 text-[10px] font-semibold tracking-wider text-[var(--color-ink-dim)] uppercase"
+					class="mt-1 px-3 pt-1.5 pb-0.5 text-[11px] font-semibold tracking-wider text-[var(--color-ink-dim)] uppercase"
 				>
 					{group}
 				</p>
@@ -191,7 +191,7 @@
 					>
 						<span class="flex min-w-0 items-start gap-2">
 							<span
-								class="mt-0.5 inline-block w-8 shrink-0 font-mono text-[10px] tracking-wide text-[var(--color-ink-dim)] uppercase"
+								class="mt-0.5 inline-block w-8 shrink-0 font-mono text-[11px] tracking-wide text-[var(--color-ink-dim)] uppercase"
 							>
 								{opt.kind}
 							</span>

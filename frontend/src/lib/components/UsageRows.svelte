@@ -58,10 +58,10 @@
 							<span class="truncate font-mono text-[var(--color-ink)]">{row.label}</span>
 						{/if}
 						{#if row.sublabel}
-							<span class="shrink-0 text-[10px] text-[var(--color-ink-dim)]">{row.sublabel}</span>
+							<span class="shrink-0 text-[11px] text-[var(--color-ink-dim)]">{row.sublabel}</span>
 						{/if}
 						{#if row.badge}
-							<span class="shrink-0 text-[10px] text-[var(--color-ink-dim)]">· {row.badge}</span>
+							<span class="shrink-0 text-[11px] text-[var(--color-ink-dim)]">· {row.badge}</span>
 						{/if}
 						<!-- Carried in BOTH styles, not just the table. A server reached only by
 						     `initialize`/`tools/list` is kept by "Used only" and counted as active
@@ -69,7 +69,7 @@
 						     this line it reads as entirely untouched, which is the opposite of
 						     what it is. `meta` is where "N other requests" is said. -->
 						{#if row.meta}
-							<span class="truncate text-[10px] text-[var(--color-ink-dim)]">· {row.meta}</span>
+							<span class="truncate text-[11px] text-[var(--color-ink-dim)]">· {row.meta}</span>
 						{/if}
 					</span>
 					<span
@@ -123,13 +123,13 @@
 									<span class="font-mono break-all text-[var(--color-ink)]">{row.label}</span>
 								{/if}
 								{#if row.sublabel}
-									<span class="text-[10px] text-[var(--color-ink-dim)]">{row.sublabel}</span>
+									<span class="text-[11px] text-[var(--color-ink-dim)]">{row.sublabel}</span>
 								{/if}
 								{#if row.badge}
-									<span class="text-[10px] text-[var(--color-ink-dim)]">· {row.badge}</span>
+									<span class="text-[11px] text-[var(--color-ink-dim)]">· {row.badge}</span>
 								{/if}
 								{#if row.meta}
-									<span class="text-[10px] text-[var(--color-ink-dim)]">· {row.meta}</span>
+									<span class="text-[11px] text-[var(--color-ink-dim)]">· {row.meta}</span>
 								{/if}
 							</span>
 						</td>

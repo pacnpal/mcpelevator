@@ -172,7 +172,7 @@
 		onscroll={onScroll}
 		role="region"
 		aria-label="Server logs"
-		class="overflow-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] p-3 font-mono text-xs leading-relaxed {compact ? 'h-44' : 'h-72'}"
+		class="overflow-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] p-3 font-mono text-xs leading-relaxed {compact ? 'h-44' : 'h-72'}"
 	>
 		{#if lines.length > 0}
 			{#each lines as line}

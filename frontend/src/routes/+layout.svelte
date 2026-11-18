@@ -68,7 +68,7 @@
 
 <div class="flex min-h-[100dvh] flex-col">
 	<header
-		class="sticky top-0 z-40 border-b border-[var(--color-line)] bg-[color-mix(in_oklab,var(--color-base)_85%,transparent)] backdrop-blur-md"
+		class="sticky top-0 z-40 border-b border-[var(--color-line)] bg-[color-mix(in_oklab,var(--color-canvas)_85%,transparent)] backdrop-blur-md"
 	>
 		<div
 			class="mx-auto flex h-14 w-full max-w-6xl items-center justify-between gap-4 px-4 sm:px-6"
@@ -85,10 +85,7 @@
 					href="/catalog"
 					aria-label="Browse the registry"
 					aria-current={onCatalog ? 'page' : undefined}
-					class="inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium transition active:translate-y-px"
-					style={onCatalog
-						? 'border-color: color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
-						: 'border-color: var(--color-line); color: var(--color-ink-muted); background-color: var(--color-surface);'}
+					class="nav-item px-3"
 				>
 					<svg
 						class="size-4"
@@ -109,10 +106,7 @@
 					href="/usage"
 					aria-label="Usage"
 					aria-current={onUsage ? 'page' : undefined}
-					class="inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium transition active:translate-y-px"
-					style={onUsage
-						? 'border-color: color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
-						: 'border-color: var(--color-line); color: var(--color-ink-muted); background-color: var(--color-surface);'}
+					class="nav-item px-3"
 				>
 					<svg
 						class="size-4"
@@ -135,10 +129,7 @@
 					href="/settings"
 					aria-label="Settings"
 					aria-current={onSettings ? 'page' : undefined}
-					class="inline-flex size-9 items-center justify-center rounded-lg border transition active:translate-y-px"
-					style={onSettings
-						? 'border-color: color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
-						: 'border-color: var(--color-line); color: var(--color-ink-muted); background-color: var(--color-surface);'}
+					class="nav-item size-9"
 				>
 					<svg
 						class="size-4"
@@ -161,7 +152,7 @@
 							type="button"
 							onclick={logout}
 							aria-label="Log out"
-							class="inline-flex size-9 items-center justify-center rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] text-[var(--color-ink-muted)] transition active:translate-y-px hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+							class="nav-item size-9"
 						>
 							<svg
 								class="size-4"

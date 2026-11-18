@@ -165,7 +165,7 @@
 					class="flex flex-col gap-1 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3"
 				>
 					<span class="font-mono text-xl text-[var(--color-ink)]">{value}</span>
-					<span class="text-[11px] text-[var(--color-ink-dim)]">{caption}</span>
+					<span class="text-xs text-[var(--color-ink-dim)]">{caption}</span>
 				</div>
 			{/snippet}
 			{@render tile(String(usage.tool_calls), 'tool calls')}
@@ -179,7 +179,7 @@
 			class="flex flex-col gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
 		>
 			<div class="flex flex-wrap items-center justify-between gap-2">
-				<div class="flex flex-wrap items-center gap-3 text-[11px] text-[var(--color-ink-dim)]">
+				<div class="flex flex-wrap items-center gap-3 text-xs text-[var(--color-ink-dim)]">
 					{#if chartMode === 'servers'}
 						<span>Tool calls per server, on one shared scale</span>
 					{:else}
@@ -251,7 +251,7 @@
 		>
 			<div class="flex flex-wrap items-baseline justify-between gap-2">
 				<h2 class="text-sm font-semibold text-[var(--color-ink)]">Activity by hour</h2>
-				<span class="text-[11px] text-[var(--color-ink-dim)]">
+				<span class="text-xs text-[var(--color-ink-dim)]">
 					tool calls per weekday and hour
 				</span>
 			</div>
@@ -316,7 +316,7 @@
 				</div>
 			</div>
 
-			<p class="text-[11px] text-[var(--color-ink-dim)]">
+			<p class="text-xs text-[var(--color-ink-dim)]">
 				{countLabel(rows.length, allRows.length, tab === 'tools' ? 'tool' : 'server')}
 				{#if loading}· refreshing…{/if}
 			</p>
@@ -333,7 +333,7 @@
 			/>
 		</div>
 
-		<p class="text-[11px] text-[var(--color-ink-dim)]">
+		<p class="text-xs text-[var(--color-ink-dim)]">
 			Call counts and when each was last seen — arguments and results are never recorded.
 			The window reaches back no further than the usage retention set in
 			<a href="/settings" class="underline underline-offset-2">Settings</a>. A server's

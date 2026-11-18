@@ -46,7 +46,7 @@
           "#d1fae5"
         ]
       },
-      "base": {
+      "canvas": {
         "role": "neutral",
         "displayName": "Base Night",
         "tonalRamp": [
@@ -255,6 +255,11 @@
         "name": "press",
         "value": "translateY(1px) on :active",
         "purpose": "Every button and nav item."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "@media (prefers-reduced-motion: reduce)",
+        "purpose": "Pulse → static dot at 0.55 opacity; rise-in → 0.2s fade; skeleton pulse off; spin slowed to 1.6s."
       }
     ],
     "breakpoints": [
@@ -335,7 +340,7 @@
       "refersTo": "nav",
       "description": "Sticky blurred bar; secondary-button nav items with the emerald active tint.",
       "html": "<nav class=\"ds-nav\"><span class=\"ds-nav-logo\"><b>mcp</b>elevator</span><div class=\"ds-nav-items\"><a class=\"ds-nav-item\" aria-current=\"page\">Browse</a><a class=\"ds-nav-item\">Usage</a></div></nav>",
-      "css": ".ds-nav{display:flex;align-items:center;justify-content:space-between;height:56px;padding:0 24px;border-bottom:1px solid var(--color-line,#26262b);background:color-mix(in oklab,var(--color-base,#09090b) 85%,transparent);backdrop-filter:blur(12px)}.ds-nav-logo{font:600 17px/1 'Inter var',system-ui,sans-serif;color:var(--color-ink,#f4f4f5)}.ds-nav-logo b{color:var(--color-accent,#34d399);font-weight:600}.ds-nav-items{display:flex;gap:12px}.ds-nav-item{display:inline-flex;align-items:center;height:36px;padding:0 12px;border-radius:8px;border:1px solid var(--color-line,#26262b);background:var(--color-surface,#101012);color:var(--color-ink-muted,#a1a1aa);font:500 14px/20px 'Inter var',system-ui,sans-serif;text-decoration:none;cursor:pointer}.ds-nav-item[aria-current=page]{color:var(--color-accent,#34d399);border-color:color-mix(in oklab,var(--color-accent,#34d399) 40%,transparent);background:color-mix(in oklab,var(--color-accent,#34d399) 8%,transparent)}"
+      "css": ".ds-nav{display:flex;align-items:center;justify-content:space-between;height:56px;padding:0 24px;border-bottom:1px solid var(--color-line,#26262b);background:color-mix(in oklab,var(--color-canvas,#09090b) 85%,transparent);backdrop-filter:blur(12px)}.ds-nav-logo{font:600 17px/1 'Inter var',system-ui,sans-serif;color:var(--color-ink,#f4f4f5)}.ds-nav-logo b{color:var(--color-accent,#34d399);font-weight:600}.ds-nav-items{display:flex;gap:12px}.ds-nav-item{display:inline-flex;align-items:center;height:36px;padding:0 12px;border-radius:8px;border:1px solid var(--color-line,#26262b);background:var(--color-surface,#101012);color:var(--color-ink-muted,#a1a1aa);font:500 14px/20px 'Inter var',system-ui,sans-serif;text-decoration:none;cursor:pointer}.ds-nav-item[aria-current=page]{color:var(--color-accent,#34d399);border-color:color-mix(in oklab,var(--color-accent,#34d399) 40%,transparent);background:color-mix(in oklab,var(--color-accent,#34d399) 8%,transparent)}"
     }
   ],
   "narrative": {
@@ -377,7 +382,7 @@
       },
       {
         "name": "The Small-Steps Rule",
-        "body": "The scale stays between 10px and 24px. New hierarchy comes from weight (500/600) and Ink vs Ink Muted vs Ink Dim, not from new sizes.",
+        "body": "The scale stays between 11px and 24px. New hierarchy comes from weight (500/600) and Ink vs Ink Muted vs Ink Dim, not from new sizes.",
         "section": "typography"
       },
       {
@@ -402,7 +407,9 @@
       "**Don't** make a light theme variant ad hoc. The system is dark only (`color-scheme: dark`).",
       "**Don't** render Stop or other routine lifecycle actions as red or filled. They stay quiet.",
       "**Don't** add type sizes above 24px or display faces to the app UI.",
-      "**Don't** show Idle in a warning color. It is a deliberate, healthy state (Calm Blue)."
+      "**Don't** show Idle in a warning color. It is a deliberate, healthy state (Calm Blue).",
+      "**Don't** add an animation without a `prefers-reduced-motion` path. Under reduced motion, pulses hold a steady dimmed dot, entrances fade in 0.2s, skeleton shimmer stops, and spinners keep turning more slowly.",
+      "**Don't** add an endless loop to a healthy state. Motion marks something in progress (starting, stopping, loading), never \"all is well\"."
     ]
   }
 }

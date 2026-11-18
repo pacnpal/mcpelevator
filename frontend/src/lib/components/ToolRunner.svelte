@@ -169,7 +169,7 @@
 
 	{#if open}
 		<div
-			class="flex flex-col gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-3"
+			class="flex flex-col gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-3"
 		>
 			{#if hasFields && !rawMode}
 				<div class="flex flex-col gap-2.5">
@@ -181,10 +181,10 @@
 							>
 								{field.name}
 								{#if field.required}
-									<span class="text-[10px] text-[var(--color-state-unhealthy)]">required</span>
+									<span class="text-[11px] text-[var(--color-state-unhealthy)]">required</span>
 								{/if}
 								{#if field.kind === 'json'}
-									<span class="text-[10px] text-[var(--color-ink-dim)]">JSON</span>
+									<span class="text-[11px] text-[var(--color-ink-dim)]">JSON</span>
 								{/if}
 							</label>
 							{#if field.description}
@@ -242,7 +242,7 @@
 						for={`tr-${tool.name}-raw`}
 						class="font-mono text-xs text-[var(--color-ink)]"
 					>
-						arguments <span class="text-[10px] text-[var(--color-ink-dim)]">JSON object</span>
+						arguments <span class="text-[11px] text-[var(--color-ink-dim)]">JSON object</span>
 					</label>
 					<textarea
 						id={`tr-${tool.name}-raw`}
@@ -304,7 +304,7 @@
 			{#if result}
 				<div class="flex flex-col gap-1.5">
 					<span
-						class="w-fit rounded-md border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide"
+						class="w-fit rounded-md border px-1.5 py-0.5 text-[11px] font-semibold tracking-wide"
 						style={result.is_error
 							? 'border-color: color-mix(in oklab, var(--color-state-failed) 40%, transparent); color: var(--color-state-failed);'
 							: 'border-color: color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'}

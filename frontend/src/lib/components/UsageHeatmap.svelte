@@ -54,7 +54,7 @@
 		{#each grid.cells as row, rowIndex (rowIndex)}
 			<div class="flex items-center gap-2">
 				<span
-					class="w-8 shrink-0 text-right text-[10px] text-[var(--color-ink-dim)]"
+					class="w-8 shrink-0 text-right text-[11px] text-[var(--color-ink-dim)]"
 					aria-hidden="true"
 				>
 					{dayLabels[rowIndex]}
@@ -77,7 +77,7 @@
 			<span class="w-8 shrink-0" aria-hidden="true"></span>
 			<div class="flex min-w-0 flex-1 gap-[2px]">
 				{#each hours as hour (hour)}
-					<span class="min-w-0 flex-1 text-[9px] text-[var(--color-ink-dim)]">
+					<span class="min-w-0 flex-1 text-[11px] text-[var(--color-ink-dim)]">
 						{hour % 6 === 0 ? String(hour).padStart(2, '0') : ''}
 					</span>
 				{/each}
@@ -86,7 +86,7 @@
 	</div>
 
 	<figcaption
-		class="flex flex-wrap items-center justify-between gap-2 text-[10px] text-[var(--color-ink-dim)]"
+		class="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--color-ink-dim)]"
 	>
 		<span>Local time · busiest hour {grid.peak} call{grid.peak === 1 ? '' : 's'}</span>
 		<span class="flex items-center gap-1.5">
