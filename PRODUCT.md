@@ -32,7 +32,7 @@ One self-hosted container on one port does all of it. The protocol bridging come
 
 ## Capabilities and Constraints
 
-- Runners: `npx`, `uvx`, `command` (local runners), `docker` (opt-in, root-equivalent), `remote`, `openapi`, `graphql`, and the built-in `mcpelevator` control server.
+- Runners: `npx`, `uvx`, `command` (local runners), `docker` (opt-in, root-equivalent), `remote`, `openapi`, and the built-in `mcpelevator` control server.
 - Server lifecycle states: running, starting, unhealthy, failed, stopped, idle (quiesced, wakes on request). Operator actions write desired state and the supervisor converges, so the UI reflects eventual state and does not issue direct process commands.
 - Per-server: secret env and headers (write-only, shown as `<hidden>`), disabled tools, tool overrides, health checks, idle timeout, a source repository with a post-clone script, upstream OAuth, and REST/OpenAPI exposure.
 - Control plane: access tokens scoped to `all`, one server, or `group:<name>`; users and roles; runtime settings; usage buckets (hourly per-tool counts, never arguments); catalog mirror; debug mode.
