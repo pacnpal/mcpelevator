@@ -126,7 +126,7 @@ Components are quiet and exact: hairline borders, 8px corners, a one-pixel press
 A near-black zinc ramp holding a single emerald signal, plus a fixed set of lifecycle state hues.
 
 ### Primary
-- **Signal Emerald** (#34d399): the "live" light. Running state, the healthy dot, the active nav item (40% border, 8% fill), focus rings, text selection (30%), chart series, and the fill of the one primary action per view (Add server, Start, Save).
+- **Signal Emerald** (#34d399): the "live" light. Running state, the healthy dot, the active nav item (40% border, 8% fill), focus rings, text selection (30%), chart series, and the fill of the primary action in each decision (Add server, Start, Save, Install).
 - **Deep Emerald** (#10b981): hover for primary filled buttons only.
 - **Emerald Ink** (#022c22): text and icons on an emerald fill. Never used on its own.
 
@@ -153,7 +153,7 @@ Fixed meanings, shared by every surface (pills, dots, chart markers, log highlig
 State tints are built with `color-mix(in oklab, <state> N%, transparent)`: about 12% for a fill, 35–40% for a border, the full color for text and dots.
 
 ### Named Rules
-**The One Signal Rule.** Signal Emerald means live, healthy, active or "do this". It is never decoration, never a heading color, and never more than one filled emerald button per view.
+**The One Signal Rule.** Signal Emerald means live, healthy, active or "do this". It is never decoration and never a heading color. Each decision gets at most one filled emerald button: a page header has one, and every card or row in a list of equals may have its own (Start on a stopped server, Install on a catalog entry). Two filled emerald buttons competing for the same decision is the violation.
 
 **The Label-Always Rule.** A state color never appears without its word. A dot sits inside a pill that says "Running", "Failed" or "Idle", so meaning survives color-blindness and grayscale.
 
@@ -208,7 +208,7 @@ Soft, consistent rectangles. Controls (buttons, inputs, nav items, menus) use an
 ### Buttons
 Quiet and exact: flat, labeled, a 1px `translateY` press on `:active`, color transition on hover.
 - **Shape:** 8px radius (`rounded-lg`).
-- **Primary:** Signal Emerald fill, Emerald Ink text, 600 weight, 8px × 12px padding (14px label), hovering to Deep Emerald. One per view (Add server, Start, Save).
+- **Primary:** Signal Emerald fill, Emerald Ink text, 600 weight, 8px × 12px padding (14px label), hovering to Deep Emerald. One per decision: one in a page header, one per card or row in a list of equals (Add server, Start, Save, Install).
 - **Secondary:** Panel fill, 1px Hairline border, Ink Muted label, 36px tall. Used for Refresh, nav items and Copy. When it is the current nav item it takes the active tint (Signal Emerald text, 40% emerald border, 8% emerald fill).
 - **Quiet / Stop:** transparent fill, Hairline border, Ink Muted label. Used for destructive-but-routine lifecycle actions (Stop), so stopping never shouts.
 - **Busy:** an inline 14–16px spinner replaces the icon, the label becomes a gerund ("Starting", "Stopping"), and the button sets `aria-busy` and shows a wait cursor at 70% opacity.
@@ -249,7 +249,7 @@ LayerChart, themed through CSS variables so charts reuse these tokens: the prima
 - **Do** build state tints with `color-mix(in oklab, <state> 12%, transparent)` fills and 35–40% borders.
 - **Do** set slugs, URLs, commands, env keys and tool names in mono at 11–12px.
 - **Do** step depth through Base Night → Panel → Panel Raised → Floating, and separate with 1px Hairlines.
-- **Do** keep one filled Signal Emerald button per view, and make it the action the screen exists for.
+- **Do** keep one filled Signal Emerald button per decision (the page header, or each card or row in a list of equals), and make it the action that decision exists for.
 - **Do** use the global 2px Signal Emerald focus outline (2px offset) for every interactive element.
 - **Do** show busy work in place: a spinner, a gerund label, `aria-busy`.
 

@@ -357,7 +357,7 @@
     "rules": [
       {
         "name": "The One Signal Rule",
-        "body": "Signal Emerald means live, healthy, active or \"do this\". It is never decoration, never a heading color, and never more than one filled emerald button per view.",
+        "body": "Signal Emerald means live, healthy, active or \"do this\". It is never decoration and never a heading color. Each decision gets at most one filled emerald button: a page header has one, and every card or row in a list of equals may have its own (Start on a stopped server, Install on a catalog entry). Two filled emerald buttons competing for the same decision is the violation.",
         "section": "colors"
       },
       {
@@ -396,7 +396,7 @@
       "**Do** build state tints with `color-mix(in oklab, <state> 12%, transparent)` fills and 35–40% borders.",
       "**Do** set slugs, URLs, commands, env keys and tool names in mono at 11–12px.",
       "**Do** step depth through Base Night → Panel → Panel Raised → Floating, and separate with 1px Hairlines.",
-      "**Do** keep one filled Signal Emerald button per view, and make it the action the screen exists for.",
+      "**Do** keep one filled Signal Emerald button per decision (the page header, or each card or row in a list of equals), and make it the action that decision exists for.",
       "**Do** use the global 2px Signal Emerald focus outline (2px offset) for every interactive element.",
       "**Do** show busy work in place: a spinner, a gerund label, `aria-busy`."
     ],
