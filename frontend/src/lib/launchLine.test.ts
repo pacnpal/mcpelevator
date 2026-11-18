@@ -19,6 +19,15 @@ describe('parseLaunchLine', () => {
 		});
 	});
 
+	it('keeps metacharacters that are quoted or escaped', () => {
+		expect(parseLaunchLine(`npx pkg --pattern='a|b' --price='$5' --sep="a;b" \\$HOME`)?.extra).toEqual([
+			'--pattern=a|b',
+			'--price=$5',
+			'--sep=a;b',
+			'$HOME'
+		]);
+	});
+
 	it('parses uvx lines', () => {
 		expect(parseLaunchLine('  uvx mcp-server-time --local-timezone=UTC ')).toEqual({
 			runner: 'uvx',
@@ -41,6 +50,11 @@ describe('parseLaunchLine', () => {
 		// The form stores one trimmed arg per line: these can't round-trip.
 		expect(parseLaunchLine('npx pkg --prefix "" --verbose')).toBeNull();
 		expect(parseLaunchLine('npx pkg --name " padded "')).toBeNull();
+		// Nothing expands args, so shell syntax anywhere (options included) is refused.
+		expect(parseLaunchLine('npx pkg --api-key=$API_KEY')).toBeNull();
+		expect(parseLaunchLine('npx pkg --token="$TOKEN"')).toBeNull();
+		expect(parseLaunchLine('npx pkg --out=a>b')).toBeNull();
+		expect(parseLaunchLine('npx pkg --x=`id`')).toBeNull();
 	});
 });
 

@@ -659,16 +659,23 @@
 	const normalizedSlug = $derived(slugify(slug));
 	const slugChanged = $derived(mode === 'edit' && normalizedSlug !== originalSlug);
 
+	// Every check that blocks Save for a field inside the collapsible "Exposure &
+	// access" group. A closed group would hide the field and its message, leaving
+	// Save dimmed with no reason, so any of these failing opens it.
+	const startupTimeoutsValid = $derived(
+		startTimeoutValid && (!hasCheckout || repoBuildTimeoutValid)
+	);
+	const accessGroupValid = $derived(
+		idleTimeoutValid && startupTimeoutsValid && (isBuiltin || healthValid)
+	);
+
 	const canSubmit = $derived(
 		nameValid &&
 			commandValid &&
 			remoteUrlValid &&
 			baseUrlValid &&
 			schemaValid &&
-			idleTimeoutValid &&
-			startTimeoutValid &&
-			(!hasCheckout || repoBuildTimeoutValid) &&
-			(isBuiltin || healthValid) &&
+			accessGroupValid &&
 			!dockerBlocked &&
 			!setupBlocked &&
 			!repoBlocked &&
@@ -691,9 +698,8 @@
 				: (idleSecs === 0 ? 'always on' : `idle: ${idleSecs}s`) + (idle === '' ? ' (default)' : '');
 		return `${surfaces} · ${auth} · ${idleText}`;
 	});
-	// An invalid field inside the closed group would otherwise be invisible.
 	$effect(() => {
-		if (!idleTimeoutValid) accessOpen = true;
+		if (!accessGroupValid) accessOpen = true;
 	});
 
 	// Why Create is disabled, said next to it instead of a silently dimmed button.
@@ -712,6 +718,11 @@
 		if (!remoteUrlValid) return 'Enter a full http(s) URL.';
 		if (!baseUrlValid) return 'The base URL must be a full http(s) URL.';
 		if (!idleTimeoutValid) return 'Idle shutdown must be a whole number of seconds.';
+		if (!startupTimeoutsValid) return 'Fix the startup timeout under Exposure & access.';
+		if (!isBuiltin && !healthValid)
+			return healthCommandBlocked
+				? "This runner can't run a health-check command: call a tool instead."
+				: 'Finish the health check under Exposure & access.';
 		if (dockerBlocked) return 'The Docker runner is off: turn off “Start after creating” to save it.';
 		if (setupBlocked) return "This runner can't run a setup script: clear it under Advanced.";
 		if (repoBlocked) return 'Fix the source repository settings above.';
