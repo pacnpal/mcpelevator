@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from datetime import datetime, timedelta
 from typing import Awaitable, Callable, NamedTuple, Optional
 
@@ -27,7 +28,9 @@ from app.registry import service as registry_service
 from app.registry import settings as runtime_settings
 from app.runners.docker import DOCKER_BIN, LABEL_KEY
 from app.supervisor.ports import PortAllocator
-from app.supervisor.unit import ServerUnit
+from app.supervisor.unit import HealthCheck, ServerUnit
+
+logger = logging.getLogger(__name__)
 
 # `docker ps` Go-template that prints "<container-id> <server-id-label>" per line, so the
 # boot sweep can keep only containers whose label value is a server in THIS instance's DB.
@@ -102,6 +105,10 @@ class Supervisor:
         # Fired after each reconcile pass so a dependent (the group hub) can
         # converge on the new topology. The supervisor stays group-unaware.
         self.on_converged: Optional[Callable[[], Awaitable[None]]] = None
+        # The last start refusal logged per server (forbidden docker, max_running, no
+        # free port). Reconcile re-derives these every pass; logging each once until it
+        # changes or clears keeps the log readable.
+        self._logged_start_errors: dict[str, str] = {}
 
     # --- lookups (used by the reverse proxy + API) ----------------------- #
 
@@ -272,23 +279,34 @@ class Supervisor:
         try:
             await self._stop(server_id)
         except Exception as exc:
-            print(f"[mcpelevator] stop failed for {server_id}: {exc}")
+            logger.warning("server %s: stop failed: %s", server_id, exc)
             unit = self.units.get(server_id)
             if unit is not None:
                 unit.last_error = f"stop failed: {str(exc)[:280]}"
             return False
         return True
 
-    async def stop(self, server_id: str) -> None:
-        """Public stop (e.g. API-driven delete). Steady state is still reconciled."""
+    async def stop(self, server_id: str, while_stopped=None, authorized=None) -> None:
+        """Public stop (e.g. API-driven delete). Steady state is still reconciled.
+
+        ``while_stopped`` (an optional zero-arg coroutine function, may raise) runs after
+        the stop and still inside the unit lock, so no reconcile pass can relaunch the
+        server while it works on the server's files (a cache clear). ``authorized`` (a
+        zero-arg callable, may raise) runs inside the lock BEFORE the stop, as in
+        :meth:`restart`: a caller's entry check precedes the lock wait, and a refusal
+        afterwards could no longer undo the interruption."""
         # An operator/API stop overrides quiescence bookkeeping: the server must not
         # come back as "idle" (wakeable) after a delete/disable/disconnect.
         self._idle.discard(server_id)
         self._last_activity.pop(server_id, None)
         async with self._unit_lock:
+            if authorized is not None:
+                authorized()
             await self._stop(server_id)
+            if while_stopped is not None:
+                await while_stopped()
 
-    async def restart(self, server_id: str, authorized=None) -> None:
+    async def restart(self, server_id: str, authorized=None, while_stopped=None) -> None:
         """Bounce one desired server: stop its unit now, then queue a fresh activation.
 
         The single restart primitive — the ``/servers/{id}/restart`` endpoint and a
@@ -303,6 +321,12 @@ class Supervisor:
         inside the unit lock both before and after the stop, so an ownership
         reassignment committing in that gap can't have a former owner's queued
         activation bounce the new owner's server.
+
+        ``while_stopped`` (an optional zero-arg coroutine function, may raise) runs
+        between the stop and the queued activation, inside the same lock — the window in
+        which nothing runs for the server, which a cache clear uses to delete its files.
+        A raise leaves the server stopped with no activation queued; the reconciler then
+        converges it as usual.
         """
         async with self._unit_lock:
             if authorized is not None:
@@ -310,6 +334,8 @@ class Supervisor:
             await self._stop(server_id)
             if authorized is not None:
                 authorized()
+            if while_stopped is not None:
+                await while_stopped()
             # A quiesced server is desired-but-stopped; the activation request clears the
             # marker in reconcile, but discard it here too so nothing observes the id as
             # idle (i.e. wakeable but not starting) in the gap before the sweep runs.
@@ -353,7 +379,7 @@ class Supervisor:
             try:
                 await self.on_converged()
             except Exception as exc:  # a hub bug must never kill the reconcile loop
-                print(f"[mcpelevator] post-reconcile hook error: {exc}")
+                logger.exception("post-reconcile hook failed: %s", exc)
 
     async def _reconcile_once_unlocked(self) -> None:
         # Snapshot desired state under a short-lived session, then RELEASE it before the slow
@@ -405,7 +431,7 @@ class Supervisor:
             if registry_service.local_exec_invokes_docker(
                 sv.runner, sv.command, sv.args
             ) or registry_service.scripts_invoke_docker(
-                sv.runner, sv.setup_script, sv.post_clone_script
+                sv.runner, sv.setup_script, sv.post_clone_script, sv.health_check_command
             ):
                 forbidden_docker.append(
                     (sv, "Docker CLI invocations require the docker runner")
@@ -416,6 +442,7 @@ class Supervisor:
         # gate: stop any docker unit now forbidden (runner off, or an unhardenable shell wrapper),
         # and surface why
         for sv, reason in forbidden_docker:
+            self._log_start_error(sv.id, sv.slug, reason)
             self.cancel_activation_request(sv.id)
             if sv.id in self.units:
                 await self._stop_quietly(sv.id)
@@ -522,7 +549,13 @@ class Supervisor:
                 requested_at is None
                 and timeout > 0
                 and unit is not None
-                and unit.state == "running"
+                and (
+                    unit.state == "running"
+                    # A live bridge failing its periodic health check is still up and
+                    # still checked: unused, it must sleep like a running one (waking
+                    # re-runs the check at readiness), not stay up forever.
+                    or (unit.state == "unhealthy" and getattr(unit, "health_failing", False))
+                )
                 and self._in_flight.get(server_id, 0) == 0
             ):
                 last = self._last_activity.get(server_id)
@@ -532,6 +565,10 @@ class Supervisor:
                     # the proxy may wake, and waking a unit whose process never died
                     # would start a second one. Leave it quarantined and try next pass.
                     if await self._stop_quietly(server_id):
+                        logger.info(
+                            "server %s: idle for %ds; stopped until the next request",
+                            server.slug, timeout,
+                        )
                         self._idle.add(server_id)
                         self._write_runtime(
                             server_id, state="idle", pid=None, port=None,
@@ -553,7 +590,10 @@ class Supervisor:
                 # in this sweep looks at a unit whose config still matches.
                 or server_id in self._teardown_failed
                 or unit.config_hash != server.config_hash
-                or unit.state == "unhealthy"
+                # A crashed bridge's unhealthy, not one whose bridge still runs but fails
+                # its periodic health check: that one only reports (no auto-restart), is
+                # re-checked below, and returns to running when a check passes.
+                or (unit.state == "unhealthy" and not getattr(unit, "health_failing", False))
             ):
                 # Start only if the teardown actually succeeded: a failed one leaves the
                 # unit quarantined (the next pass retries it), and launching a second
@@ -574,6 +614,14 @@ class Supervisor:
                 # started here from a pre-rename snapshot). Re-reading the slug each
                 # pass guarantees ``endpoint(<new>)`` resolves within one interval.
                 unit.slug = server.slug
+                # Periodic health check: the CURRENT config each pass (it's outside
+                # config_hash, so an edit lands on the next check without a restart). The
+                # unit starts a check only when one is due against a live, running bridge;
+                # it runs off this sweep and never counts as traffic, so it can't hold an
+                # idle window open (and an idle server has no unit to check).
+                tick = getattr(unit, "tick_health_check", None)
+                if tick is not None:
+                    tick(HealthCheck.from_server(server))
                 self._write_runtime(
                     server_id,
                     state=unit.state, pid=unit.pid, port=unit.port,
@@ -583,6 +631,7 @@ class Supervisor:
                     last_health=getattr(unit, "last_health", None),
                 )
             elif start_error is not None:
+                self._log_start_error(server_id, server.slug, start_error)
                 # _start raised before creating a unit (port exhaustion / max_running). On the
                 # restart path _stop() doesn't write runtime, so the row still carries the prior
                 # RUNNING pid/port — clear them here (matching the other failure writes) so a
@@ -591,6 +640,11 @@ class Supervisor:
                     server_id, state="failed", pid=None, port=None,
                     last_error=start_error, restart_count=0, last_health=None, tools=[], tools_config_hash="",
                 )
+
+    def _log_start_error(self, server_id: str, slug: str, error: str) -> None:
+        if self._logged_start_errors.get(server_id) != error:
+            self._logged_start_errors[server_id] = error
+            logger.error("server %s: cannot start: %s", slug, error)
 
     def _write_runtime(self, server_id: str, **fields) -> None:
         """Persist one runtime row in its own short-lived session/transaction, so a slow
@@ -604,6 +658,7 @@ class Supervisor:
         reconcile write lock."""
         try:
             await self._start(server, activation_started_at=activation_started_at)
+            self._logged_start_errors.pop(server.id, None)
             return None
         except Exception as exc:  # port exhaustion, max_running, spawn failure
             return str(exc)[:300]
@@ -656,7 +711,7 @@ class Supervisor:
             try:
                 await self.reconcile_once()
             except Exception as exc:  # never let the loop die
-                print(f"[mcpelevator] reconcile error: {exc}")
+                logger.exception("reconcile failed: %s", exc)
             try:
                 await asyncio.wait_for(self._nudge.wait(), timeout=self.interval)
             except asyncio.TimeoutError:

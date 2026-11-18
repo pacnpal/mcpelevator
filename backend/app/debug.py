@@ -136,6 +136,12 @@ def configure_logging(*, keep: bool) -> None:
         return  # already on (a second app in the same process, e.g. tests)
     logging.addLevelName(TRACE, "TRACE")
     root.setLevel(TRACE)
+    # Debug replaces standard logging (app.logconfig): drop its handler so nothing
+    # prints twice, and let the app logger inherit the root's TRACE.
+    app_log = logging.getLogger("app")
+    for handler in list(app_log.handlers):
+        if getattr(handler, "_mcpe_standard", False):
+            app_log.removeHandler(handler)
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
     if keep:
         handlers.append(_Ring())

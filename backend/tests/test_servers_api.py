@@ -184,6 +184,55 @@ def test_serialize_client_requests_api_round_trip():
             c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
 
+def test_attach_stderr_on_error_api_round_trip():
+    """attach_stderr_on_error defaults false, needs serialize_client_requests (a 400
+    without it), is echoed on GET and PATCH-able (issue #227)."""
+    with TestClient(app) as c:
+        refused = c.post(
+            "/api/servers",
+            json={
+                "name": "Loud",
+                "runner": "command",
+                "command": "/bin/true",
+                "attach_stderr_on_error": True,
+            },
+            headers=LOOPBACK,
+        )
+        assert refused.status_code == 400, refused.text
+        assert "serialize_client_requests" in refused.text
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "Loud",
+                "runner": "command",
+                "command": "/bin/true",
+                "serialize_client_requests": True,
+            },
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["attach_stderr_on_error"] is False
+            patched = c.patch(
+                f"/api/servers/{server_id}",
+                json={"attach_stderr_on_error": True},
+                headers=LOOPBACK,
+            )
+            assert patched.status_code == 200, patched.text
+            detail = c.get(f"/api/servers/{server_id}", headers=LOOPBACK)
+            assert detail.json()["attach_stderr_on_error"] is True
+            refused = c.patch(
+                f"/api/servers/{server_id}",
+                json={"serialize_client_requests": False},
+                headers=LOOPBACK,
+            )
+            assert refused.status_code == 400, refused.text
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
 def test_tool_overrides_api_round_trip():
     """tool_overrides is accepted on create, normalized, echoed on GET, replaceable via
     PATCH ({} restores the upstream labels), and an unusable rename is a 400."""
@@ -746,3 +795,87 @@ def test_summary_reports_why_a_teardown_is_being_retried(monkeypatch):
             sup._teardown_failed.pop(server_id, None)
             with Session(get_engine()) as session:
                 repo.delete_server(session, server_id)
+
+
+def test_graphql_server_with_a_stored_schema_and_its_preview():
+    schema = "type Query { hello(name: String): String }\ntype Mutation { bump: Int }\n"
+    with TestClient(app) as c:
+        preview = c.post(
+            "/api/graphql/preview",
+            json={"command": "https://api.example/graphql", "graphql_schema": schema},
+            headers=LOOPBACK,
+        ).json()
+        assert preview == {"queries": ["hello"], "mutations": ["bump"], "subscriptions": 0, "error": None}
+        bad = c.post(
+            "/api/graphql/preview",
+            json={"command": "https://api.example/graphql", "graphql_schema": "type Query {"},
+            headers=LOOPBACK,
+        ).json()
+        assert bad["error"].startswith("not a valid GraphQL schema")
+        assert c.post(
+            "/api/graphql/preview", json={"command": "not a url"}, headers=LOOPBACK
+        ).status_code == 400
+        # The save rules: one schema source.
+        both = c.post(
+            "/api/graphql/preview",
+            json={"command": "https://api.example/graphql", "args": ["https://a.example/s"],
+                  "graphql_schema": schema},
+            headers=LOOPBACK,
+        ).json()
+        assert "not both" in both["error"] and both["queries"] == []
+        two = c.post(
+            "/api/graphql/preview",
+            json={"command": "https://api.example/graphql",
+                  "args": ["https://a.example/s", "https://b.example/s"]},
+            headers=LOOPBACK,
+        ).json()
+        assert "at most one schema URL" in two["error"]
+
+        created = c.post(
+            "/api/servers",
+            json={"name": "GQL", "runner": "graphql", "command": "https://api.example/graphql",
+                  "graphql_schema": schema},
+            headers=LOOPBACK,
+        )
+        assert created.status_code == 201, created.text
+        server_id = created.json()["id"]
+        try:
+            polled = c.get(f"/api/servers/{server_id}", headers=LOOPBACK).json()
+            assert (polled["command"], polled["graphql_schema"], polled["document_stored"]) == (
+                "https://api.example/graphql", "", True
+            )
+            editing = c.get(
+                f"/api/servers/{server_id}?include_document=true", headers=LOOPBACK
+            ).json()
+            assert editing["graphql_schema"] == schema
+            refused = c.post(
+                "/api/servers",
+                json={"name": "Bad", "runner": "graphql", "command": "https://api.example/graphql",
+                      "graphql_schema": "type Query { x: Nope }"},
+                headers=LOOPBACK,
+            )
+            assert refused.status_code == 400
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
+
+
+def test_tool_aliases_round_trip_through_the_api():
+    """`aliases` is accepted, normalized and returned like the other override fields."""
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/servers",
+            json={"name": "Aliases", "runner": "remote", "command": "http://127.0.0.1:9/mcp",
+                  "tool_overrides": {"t": {"aliases": ["b", " a ", "b"]}}},
+            headers=LOOPBACK,
+        )
+        assert r.status_code == 201, r.text
+        sid = r.json()["id"]
+        try:
+            detail = client.get(f"/api/servers/{sid}", headers=LOOPBACK).json()
+            assert detail["tool_overrides"] == {"t": {"aliases": ["a", "b"]}}
+            bad = client.patch(f"/api/servers/{sid}",
+                               json={"tool_overrides": {"t": {"aliases": ["has space"]}}},
+                               headers=LOOPBACK)
+            assert bad.status_code in (400, 422), bad.text
+        finally:
+            client.delete(f"/api/servers/{sid}", headers=LOOPBACK)

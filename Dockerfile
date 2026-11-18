@@ -1,6 +1,6 @@
 # mcpelevator — single image: control plane + reverse proxy + SPA, batteries-included.
 # Stage 1: build the SvelteKit SPA.
-FROM node:26-bookworm-slim@sha256:bc0a2afd3b74ce12222fc8bab99271e66257f021078f5f4a5d687a77d280c1d9 AS frontend
+FROM node:26-bookworm-slim@sha256:5df79989ed685e09f0a98019db4cebfb22fb9df1a53c0161664a011f7ff6b0f1 AS frontend
 WORKDIR /fe
 COPY frontend/package*.json ./
 RUN npm ci
@@ -9,11 +9,11 @@ RUN npm run build   # -> /fe/build (adapter-static, SPA fallback)
 
 # uv + uvx binaries come from the official image — declared as a named stage so the
 # COPY --from below references an alias (Hadolint DL3022) rather than an external ref.
-FROM ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.8@sha256:5cc1805e2426484abca4ad46ea783bab281fdb225fd82d8ce6d66a81254bac85 AS uv
 
 # Stage 2: runtime — Python control plane + Node/npx + uv/uvx so npx/uvx MCP
 # servers run with zero local setup (batteries-included).
-FROM python:3.15-slim-bookworm@sha256:4e03260adeeebafccd084f3584e6b84823aba5651cfb53ef8a078ed441ddf9cd AS runtime
+FROM python:3.15-slim-bookworm@sha256:96599df822d0e1c6bb700014a05c7f3c8cabc6e0f7ff3c4f9f69cee033b4b5d9 AS runtime
 
 # pipefail so a failure in the piped NodeSource setup below aborts the RUN (DL4006).
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -86,9 +86,8 @@ ARG APP_VERSION=0.0.0-dev
 # Every release build carries a fresh APP_VERSION, so this layer always re-runs and reinstalls
 # the LATEST published docker-ce-cli .deb — picking up a Go-patched rebuild the moment Docker
 # ships one — without invalidating the expensive uv-sync/arm64 layers before it. That is what
-# lets the Go stdlib CVEs suppressed in .trivyignore.yaml clear automatically on the next
-# release once a fixed .deb exists, instead of a durably-cached layer re-shipping a
-# now-fixable binary while the suppression hides it.
+# lets Go stdlib CVEs in the docker binary clear automatically on the next release once a
+# fixed .deb exists, instead of a durably-cached layer re-shipping a now-fixable binary.
 RUN echo "docker-ce-cli refresh for mcpelevator ${APP_VERSION}" \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
@@ -106,7 +105,9 @@ ENV PATH="/app/backend/.venv/bin:${PATH}" \
     MCPE_DATA_DIR=/data \
     MCPE_FRONTEND_DIR=/app/frontend/build \
     npm_config_cache=/data/.npm-cache \
-    UV_CACHE_DIR=/data/.uv-cache
+    UV_CACHE_DIR=/data/.uv-cache \
+    XDG_CACHE_HOME=/data/.cache \
+    PLAYWRIGHT_BROWSERS_PATH=/data/.cache/ms-playwright
 
 VOLUME ["/data"]
 EXPOSE 8080

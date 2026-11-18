@@ -32,7 +32,7 @@ One self-hosted container on one port does all of it. The protocol bridging come
 
 ## Capabilities and Constraints
 
-- Runners: `npx`, `uvx`, `command` (local runners), `docker` (opt-in, root-equivalent), `remote`, `openapi`, and the built-in `mcpelevator` control server.
+- Runners: `npx`, `uvx`, `command` (local runners), `docker` (opt-in, root-equivalent), `remote`, `openapi`, `graphql`, and the built-in `mcpelevator` control server.
 - Server lifecycle states: running, starting, unhealthy, failed, stopped, idle (quiesced, wakes on request). Operator actions write desired state and the supervisor converges, so the UI reflects eventual state and does not issue direct process commands.
 - Per-server: secret env and headers (write-only, shown as `<hidden>`), disabled tools, tool overrides, health checks, idle timeout, a source repository with a post-clone script, upstream OAuth, and REST/OpenAPI exposure.
 - Control plane: access tokens scoped to `all`, one server, or `group:<name>`; users and roles; runtime settings; usage buckets (hourly per-tool counts, never arguments); catalog mirror; debug mode.
@@ -57,7 +57,7 @@ One self-hosted container on one port does all of it. The protocol bridging come
 
 1. **Add, start, copy URL.** The shortest path from a launch command to a working endpoint comes first. Everything else is reachable but never in the way.
 2. **State is truth, shown honestly.** The UI reports desired versus observed state as the supervisor sees it, including idle, starting and failed, and every failure explains itself (last error, logs).
-3. **Secure by default, caveats stated.** Auth, write-only secrets and Host/Origin checks are on by default. The UI is explicit about what is and isn't protected.
+3. **Secure by default, caveats stated.** Write-only secrets and Host/Origin checks are always on. Control-plane auth defaults to `auto`: it requires a token once the instance is reachable off-host, and a loopback-only install accepts `/api` calls without one. The UI is explicit about what is and isn't protected.
 4. **One control plane, any operator.** Whatever a person can do in the UI, an agent can do through the control MCP, with the same permissions and the same vocabulary.
 5. **Calm when it works.** Most visits are quick check-ins. A healthy instance should read as quiet, and attention goes to whatever needs action.
 

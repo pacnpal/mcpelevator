@@ -33,6 +33,7 @@ describe('startup policy', () => {
 		expect(startupPhaseLabel('setup')).toBe('Running setup');
 		expect(startupPhaseLabel('bridge')).toBe('Starting bridge');
 		expect(startupPhaseLabel('readiness')).toBe('Checking readiness');
+		expect(startupPhaseLabel('health')).toBe('Running health check');
 		expect(startupPhaseLabel('retry_wait')).toBe('Waiting to retry');
 	});
 

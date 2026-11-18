@@ -339,6 +339,77 @@ def test_serialize_client_requests_survives_clone(session):
     assert clone.serialize_client_requests is True
 
 
+# --- attach_stderr_on_error (issue #227) ----------------------------------------
+
+
+def test_attach_stderr_on_error_default_false(session):
+    assert _mk(session).attach_stderr_on_error is False
+
+
+def test_attach_stderr_on_error_requires_serialization(session):
+    """Without serialize_client_requests a call's stderr can't be told apart from its
+    neighbours', so the flag would silently do nothing: refused at save instead."""
+    with pytest.raises(ValueError, match="requires serialize_client_requests"):
+        _mk(session, attach_stderr_on_error=True)
+    a = _mk(session, serialize_client_requests=True, attach_stderr_on_error=True)
+    assert a.attach_stderr_on_error is True
+    with pytest.raises(ValueError, match="requires serialize_client_requests"):
+        service.update_server(session, a.id, {"serialize_client_requests": False})
+    stored = repo.get_server(session, a.id)
+    assert stored.serialize_client_requests is True and stored.attach_stderr_on_error is True
+    b = _mk(session)
+    with pytest.raises(ValueError, match="requires serialize_client_requests"):
+        service.update_server(session, b.id, {"attach_stderr_on_error": True})
+    service.update_server(
+        session, a.id, {"serialize_client_requests": False, "attach_stderr_on_error": False}
+    )
+
+
+@pytest.mark.parametrize(
+    "runner,command,args",
+    [
+        ("remote", "https://up.example/mcp", []),
+        ("openapi", "https://api.example/openapi.json", []),
+        ("graphql", "https://api.example/graphql", []),
+    ],
+)
+def test_attach_stderr_on_error_refused_for_http_upstreams(session, runner, command, args):
+    """A remote/openapi/graphql upstream has no stderr to tee: refused, even with
+    serialize on."""
+    with pytest.raises(ValueError, match="only to stdio runners"):
+        _mk(
+            session,
+            runner=runner,
+            command=command,
+            args=args,
+            serialize_client_requests=True,
+            attach_stderr_on_error=True,
+        )
+    a = _mk(session, serialize_client_requests=True, attach_stderr_on_error=True)
+    with pytest.raises(ValueError, match="only to stdio runners"):
+        service.update_server(session, a.id, {"runner": runner, "command": command, "args": args})
+    assert repo.get_server(session, a.id).runner == "npx"
+
+
+def test_attach_stderr_on_error_change_bounces_bridge(session):
+    """The bridge decides whether to tee the child's stderr when it builds its transport,
+    so toggling the flag changes config_hash both ways — and a row without it keeps the
+    hash it had before the field existed (the key is present only when on)."""
+    a = _mk(session, serialize_client_requests=True)
+    before = a.config_hash
+    assert "attach_stderr_on_error" not in service._hash_payload(a)
+    service.update_server(session, a.id, {"attach_stderr_on_error": True})
+    assert repo.get_server(session, a.id).config_hash != before
+    service.update_server(session, a.id, {"attach_stderr_on_error": False})
+    assert repo.get_server(session, a.id).config_hash == before
+
+
+def test_attach_stderr_on_error_survives_clone(session):
+    a = _mk(session, serialize_client_requests=True, attach_stderr_on_error=True)
+    clone = service.clone_server(session, a.id)
+    assert clone.attach_stderr_on_error is True
+
+
 # --- tool overrides (issue #112) ----------------------------------------------
 
 
@@ -2695,3 +2766,142 @@ def test_create_refuses_a_config_too_large_to_launch(session):
     activation the moment it's enabled."""
     with pytest.raises(ValueError, match="too large to launch"):
         _mk(session, env={"HUGE": "x" * (129 * 1024)})
+
+
+_GQL_SCHEMA = "type Query { hello(name: String): String }\ntype Mutation { bump: Int }\n"
+
+
+def test_graphql_server_canonicalizes_and_validates(session):
+    s = service.create_server(
+        session, name="GQL", runner="graphql", command=" https://api.example/graphql ",
+        args=["", " "], env={"Authorization": "Bearer k"}, cwd="/tmp",
+    )
+    # Endpoint trimmed, a blank schema URL collapsed to "introspect", no working directory.
+    assert (s.command, s.args, s.cwd, s.graphql_schema) == (
+        "https://api.example/graphql", [], None, ""
+    )
+    introspecting = s.config_hash
+    linked = service.update_server(session, s.id, {"args": ["https://docs.example/schema.graphql"]})
+    assert linked.args == ["https://docs.example/schema.graphql"]
+    assert linked.config_hash != introspecting  # a new schema source restarts the bridge
+    stored = service.update_server(session, s.id, {"args": [], "graphql_schema": _GQL_SCHEMA})
+    assert (stored.command, stored.args, stored.graphql_schema) == (
+        "https://api.example/graphql", [], _GQL_SCHEMA
+    )
+    before = stored.config_hash
+    edited = service.update_server(
+        session, s.id, {"graphql_schema": _GQL_SCHEMA.replace("bump", "bump2")}
+    )
+    assert edited.config_hash != before  # a new schema restarts the bridge
+    # Converting to another runner drops the stored schema.
+    converted = service.update_server(
+        session, s.id, {"runner": "remote", "args": ["streamable-http"], "env": {}}
+    )
+    assert converted.graphql_schema == ""
+
+
+@pytest.mark.parametrize(
+    "command, args, document, message",
+    [
+        ("", [], "", "command is required"),
+        ("/var/run/api.sock", [], "", r"http\(s\):// URL of its GraphQL endpoint"),
+        ("https://api.example/graphql", ["not-a-url"], "", "schema URL must be an http"),
+        ("https://api.example/graphql", ["https://a.example/s", "https://b.example/s"], "", "at most one"),
+        ("https://api.example/graphql", ["https://a.example/s"], _GQL_SCHEMA, "not both"),
+        ("https://api.example/graphql", [], "type Query { x: Nope }", "not a valid GraphQL schema"),
+        ("https://api.example/graphql", [], '{"openapi": "3.1.0"}', "introspection result"),
+    ],
+)
+def test_graphql_server_refuses_bad_config(session, command, args, document, message):
+    with pytest.raises(ValueError, match=message):
+        service.create_server(
+            session, name="G", runner="graphql", command=command, args=args,
+            graphql_schema=document,
+        )
+
+
+def test_graphql_headers_are_not_process_env(session):
+    """Headers only travel to the API, so (like remote/openapi) editing an unrelated one
+    doesn't demand the hidden ones again."""
+    s = service.create_server(
+        session, name="G", runner="graphql", command="https://api.example/graphql",
+        env={"Authorization": "Bearer k", "X-Tenant": "a"}, secret_env=["Authorization"],
+    )
+    edited = service.update_server(
+        session, s.id, {"env": {"Authorization": "<hidden>", "X-Tenant": "b"}}
+    )
+    assert edited.env["X-Tenant"] == "b"
+
+
+def test_rejected_graphql_update_rolls_back(session):
+    s = service.create_server(
+        session, name="G", runner="graphql", command="https://api.example/graphql"
+    )
+    with pytest.raises(ValueError):
+        service.update_server(session, s.id, {"command": "not a url"})
+    session.expire_all()
+    stored = repo.get_server(session, s.id)
+    assert (stored.command, stored.args) == ("https://api.example/graphql", [])
+
+
+def test_graphql_schema_and_openapi_document_stay_with_their_runners(session):
+    """Each runner keeps its own stored document; neither leaks into the other's column."""
+    g = service.create_server(
+        session, name="G", runner="graphql", command="https://api.example/graphql",
+        graphql_schema=_GQL_SCHEMA, openapi_document=_INLINE_DOC,
+    )
+    assert (g.graphql_schema, g.openapi_document) == (_GQL_SCHEMA, "")
+    o = service.create_server(
+        session, name="O", runner="openapi", command="", openapi_document=_INLINE_DOC,
+        graphql_schema=_GQL_SCHEMA,
+    )
+    assert (o.openapi_document, o.graphql_schema) == (_INLINE_DOC, "")
+
+
+# --- tool aliases --------------------------------------------------------------
+
+
+def test_tool_aliases_normalized(session):
+    """Aliases are trimmed, de-duplicated and sorted, so re-saving them in another order
+    doesn't bounce the bridge; a tool can carry aliases alone."""
+    a = _mk(session, tool_overrides={"t": {"aliases": [" zeta ", "alpha", "zeta", ""]}})
+    assert a.tool_overrides == {"t": {"aliases": ["alpha", "zeta"]}}
+    before = a.config_hash
+    service.update_server(session, a.id, {"tool_overrides": {"t": {"aliases": ["zeta", "alpha"]}}})
+    assert repo.get_server(session, a.id).config_hash == before
+
+
+def test_tool_alias_of_its_own_name_needs_a_rename(session):
+    """Aliasing a tool to its own upstream name only means something once it's renamed
+    (the old name stops answering otherwise)."""
+    assert _mk(session, tool_overrides={"t": {"aliases": ["t"]}}).tool_overrides == {}
+    kept = _mk(session, tool_overrides={"t": {"name": "u", "aliases": ["t"]}})
+    assert kept.tool_overrides == {"t": {"name": "u", "aliases": ["t"]}}
+    # Its own exposed name is never an alias.
+    assert _mk(session, tool_overrides={"t": {"name": "u", "aliases": ["u"]}}).tool_overrides == {
+        "t": {"name": "u"}
+    }
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"t": {"aliases": ["has space"]}},
+        {"t": {"aliases": [".."]}},
+        {"t": {"aliases": "not-a-list"}},
+        {"t": {"aliases": [1]}},
+        {"t": {"aliases": [f"a{i}" for i in range(17)]}},
+        # Taken by another tool: its alias, its rename, or its upstream name.
+        {"a": {"aliases": ["x"]}, "b": {"aliases": ["x"]}},
+        {"a": {"aliases": ["x"]}, "b": {"name": "x"}},
+        {"a": {"aliases": ["b"]}, "b": {"description": "exists"}},
+    ],
+)
+def test_tool_aliases_refuse_unusable_or_taken_names(session, overrides):
+    with pytest.raises(ValueError):
+        _mk(session, tool_overrides=overrides)
+
+
+def test_tool_alias_cannot_take_a_hidden_tools_name(session):
+    with pytest.raises(ValueError):
+        _mk(session, disabled_tools=["b"], tool_overrides={"a": {"aliases": ["b"]}})

@@ -1,12 +1,13 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
-	import { getAuthStatus, getSettings, previewOpenapi } from '#lib/api.js';
+	import { getAuthStatus, getSettings, previewGraphql, previewOpenapi } from '#lib/api.js';
 	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '#lib/remote.js';
 	import { quoteIfNeeded, withPin } from '#lib/uvxPin.js';
 	import { nameFromPackage, parseLaunchLine } from '#lib/launchLine.js';
 	import { HIDDEN_ENV } from '#lib/types.js';
 	import type {
+		GraphqlPreview,
 		OpenapiPreview,
 		Runner,
 		ServerAuthProvider,
@@ -20,6 +21,14 @@
 	// returned as HIDDEN_ENV; while its field stays blank the save sends HIDDEN_ENV
 	// back, which keeps the stored value.
 	type EnvRow = { id: number; key: string; value: string; secret: boolean; hidden: boolean };
+	type HealthMode = 'none' | 'tool' | 'command';
+	// Where a graphql server's schema comes from.
+	type SchemaSource = 'introspect' | 'url' | 'pasted';
+	const SCHEMA_SOURCES: { value: SchemaSource; title: string; hint: string }[] = [
+		{ value: 'introspect', title: 'Introspect', hint: 'Asked of the endpoint on every start' },
+		{ value: 'url', title: 'Schema URL', hint: 'SDL or introspection JSON, fetched on start' },
+		{ value: 'pasted', title: 'Paste or upload', hint: 'Stored with the server' }
+	];
 
 	// Per-server auth options. `inherit` defers to the global default set on
 	// the Settings page.
@@ -67,7 +76,8 @@
 		{ value: 'command', label: 'command', hint: 'Any local binary' },
 		{ value: 'docker', label: 'docker', hint: 'Docker / OCI image' },
 		{ value: 'remote', label: 'remote', hint: 'Remote HTTP/SSE URL' },
-		{ value: 'openapi', label: 'openapi', hint: 'REST API from an OpenAPI spec' }
+		{ value: 'openapi', label: 'openapi', hint: 'REST API from an OpenAPI spec' },
+		{ value: 'graphql', label: 'graphql', hint: 'GraphQL API from its schema' }
 	];
 
 	// Runners that execute code on the box (mirrors the backend's policy.LOCAL_RUNNERS);
@@ -97,7 +107,7 @@
 			.catch(() => (localRunnersAllowed = true));
 	});
 
-	// Restricted accounts get the HTTP-only runners (`remote`, `openapi`) plus whatever
+	// Restricted accounts get the HTTP-only runners (`remote`, `openapi`, `graphql`) plus whatever
 	// the form is CURRENTLY set to:
 	// in edit mode that keeps an admin-provisioned local server's runner visible
 	// (the backend allows non-launch edits, so the form must still render/submit),
@@ -166,6 +176,15 @@
 				: 'streamable-http';
 		// openapi stores [] or [base URL override] in args (command holds the document URL).
 		const baseUrl0 = runner0 === 'openapi' ? (args0[0] ?? '') : '';
+		// graphql stores [] (introspect) or [schema URL] in args; a stored schema rides in
+		// graphql_schema (command keeps the endpoint).
+		const schemaUrl0 = runner0 === 'graphql' ? (args0[0] ?? '') : '';
+		const schemaSource0: SchemaSource =
+			runner0 === 'graphql' && init.graphql_schema
+				? 'pasted'
+				: schemaUrl0
+					? 'url'
+					: 'introspect';
 		return {
 			name: init.name ?? '',
 			slug: init.slug ?? '',
@@ -177,7 +196,10 @@
 			extraArgsText: extra0,
 			transport: transport0,
 			baseUrl: baseUrl0,
+			schemaUrl: schemaUrl0,
+			schemaSource: schemaSource0,
 			openapiDocument: init.openapi_document ?? '',
+			graphqlSchema: init.graphql_schema ?? '',
 			setupScript: init.setup_script ?? '',
 			repoUrl: init.repo_url ?? '',
 			repoRef: init.repo_ref ?? '',
@@ -188,11 +210,30 @@
 			restOpenapi: init.rest_openapi ?? false,
 			normalizeSchemaDialect: init.normalize_schema_dialect ?? false,
 			serializeClientRequests: init.serialize_client_requests ?? false,
+			attachStderrOnError: init.attach_stderr_on_error ?? false,
 			// Blank = inherit the global default (null); "0" pins the server always-on.
 			idleTimeoutText:
 				init.idle_timeout_s === null || init.idle_timeout_s === undefined
 					? ''
 					: String(init.idle_timeout_s),
+			// Blank = inherit MCPE_START_TIMEOUT_S / MCPE_REPO_BUILD_TIMEOUT_S (null).
+			startTimeoutText: init.start_timeout_s == null ? '' : String(init.start_timeout_s),
+			repoBuildTimeoutText:
+				init.repo_build_timeout_s == null ? '' : String(init.repo_build_timeout_s),
+			// Health check: one form (tool call or shell command), or none.
+			healthMode: (init.health_check_tool
+				? 'tool'
+				: init.health_check_command
+					? 'command'
+					: 'none') as HealthMode,
+			healthTool: init.health_check_tool ?? '',
+			healthArgsText:
+				init.health_check_arguments && Object.keys(init.health_check_arguments).length > 0
+					? JSON.stringify(init.health_check_arguments, null, 2)
+					: '',
+			healthCommand: init.health_check_command ?? '',
+			healthIntervalText:
+				init.health_check_interval_s == null ? '' : String(init.health_check_interval_s),
 			startAfter: init.enabled ?? true,
 			authProvider: init.auth_provider ?? 'inherit',
 			oauth: init.oauth ?? false,
@@ -234,6 +275,25 @@
 	// …or the document itself, pasted or loaded from a file (command blank then).
 	let openapiDocument = $state(seed.openapiDocument);
 	let specPasted = $state(seed.openapiDocument.length > 0);
+	// GraphQL runner: command holds the endpoint; the schema comes from introspecting it,
+	// a schema URL (args = [url]), or a pasted/uploaded schema (graphqlSchema).
+	let schemaSource = $state<SchemaSource>(seed.schemaSource);
+	let graphqlSchema = $state(seed.graphqlSchema);
+	let schemaFileError = $state('');
+
+	async function loadSchemaFile(e: Event) {
+		const input = e.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = ''; // picking the same file again still fires
+		if (!file) return;
+		try {
+			graphqlSchema = await file.text();
+			schemaFileError = '';
+		} catch {
+			schemaFileError = `Couldn't read ${file.name}.`;
+		}
+	}
+	let schemaUrl = $state(seed.schemaUrl);
 	let specFileError = $state('');
 
 	async function loadSpecFile(e: Event) {
@@ -281,7 +341,16 @@
 	let normalizeSchemaDialect = $state(seed.normalizeSchemaDialect);
 	// Stdio runners only: route the child's roots/sampling/elicitation to the caller.
 	let serializeClientRequests = $state(seed.serializeClientRequests);
+	// Needs serializeClientRequests: only then is a call's stderr its own (issue #227).
+	let attachStderrOnError = $state(seed.attachStderrOnError);
 	let idleTimeoutText = $state(seed.idleTimeoutText);
+	let startTimeoutText = $state(seed.startTimeoutText);
+	let repoBuildTimeoutText = $state(seed.repoBuildTimeoutText);
+	let healthMode = $state<HealthMode>(seed.healthMode);
+	let healthTool = $state(seed.healthTool);
+	let healthArgsText = $state(seed.healthArgsText);
+	let healthCommand = $state(seed.healthCommand);
+	let healthIntervalText = $state(seed.healthIntervalText);
 	let authProvider = $state<ServerAuthProvider>(seed.authProvider);
 	let startAfter = $state(seed.startAfter);
 	let advancedOpen = $state(seed.setupScript.trim().length > 0 || seed.cwd.trim().length > 0);
@@ -346,7 +415,10 @@
 		} else {
 			syncFromFriendly();
 		}
-		if ((runner === 'docker' || runner === 'remote' || runner === 'openapi') && setupScript.trim()) {
+		if (
+			(runner === 'docker' || runner === 'remote' || runner === 'openapi' || runner === 'graphql') &&
+			setupScript.trim()
+		) {
 			advancedOpen = true;
 		}
 	}
@@ -377,9 +449,10 @@
 
 	const isRemote = $derived(runner === 'remote');
 	const isOpenapi = $derived(runner === 'openapi');
+	const isGraphql = $derived(runner === 'graphql');
 	// No local process: the server is reached over HTTP, so it has headers instead of an
 	// environment, and no working directory, setup script, or stdio-only options.
-	const isHttpUpstream = $derived(isRemote || isOpenapi);
+	const isHttpUpstream = $derived(isRemote || isOpenapi || isGraphql);
 	const isDocker = $derived(runner === 'docker');
 	const commandUsesDocker = $derived(
 		(runner === 'npx' || runner === 'uvx' || runner === 'command') && isDockerLauncher(command)
@@ -388,7 +461,9 @@
 	const setupAllowed = $derived(!isHttpUpstream && !setupUsesDocker);
 	const setupBlocked = $derived(!setupAllowed && setupScript.trim().length > 0);
 	// A checkout needs a host process to run in, and a post-clone script needs a checkout.
-	const repoAllowed = $derived(!isRemote && !isDocker);
+	const repoAllowed = $derived(!isRemote && !isDocker && !isOpenapi && !isGraphql);
+	// A server launched from a checkout: the only kind with a build deadline to set.
+	const hasCheckout = $derived(repoAllowed && repoUrl.trim().length > 0);
 	const repoBlocked = $derived(
 		(!repoAllowed && (repoUrl.trim().length > 0 || postCloneScript.trim().length > 0)) ||
 			(postCloneScript.trim().length > 0 && !repoUrl.trim())
@@ -408,6 +483,52 @@
 	// Blank = inherit; otherwise a whole non-negative number of seconds.
 	const idleTimeoutValid = $derived(
 		idleTimeoutText.trim() === '' || /^\d+$/.test(idleTimeoutText.trim())
+	);
+	// Startup deadlines: blank = inherit; otherwise 1 second to a day (the backend's range).
+	const MAX_STARTUP_TIMEOUT_S = 86400;
+	const startupTimeoutValid = (text: string) => {
+		const t = text.trim();
+		if (t === '') return true;
+		if (!/^\d+$/.test(t)) return false;
+		const n = Number(t);
+		return n >= 1 && n <= MAX_STARTUP_TIMEOUT_S;
+	};
+	const parseTimeout = (text: string) => (text.trim() === '' ? null : Number(text.trim()));
+	const startTimeoutValid = $derived(startupTimeoutValid(startTimeoutText));
+	const repoBuildTimeoutValid = $derived(startupTimeoutValid(repoBuildTimeoutText));
+
+	// Health check. A shell command runs on this host like the setup script, so it is
+	// offered where a setup script is (npx/uvx/command); a tool call works for any runner.
+	const MIN_HEALTH_CHECK_INTERVAL_S = 10;
+	const healthArgs = $derived.by((): { ok: boolean; value: Record<string, unknown> | null } => {
+		const t = healthArgsText.trim();
+		if (t === '') return { ok: true, value: null };
+		try {
+			const parsed: unknown = JSON.parse(t);
+			if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+				return { ok: false, value: null };
+			}
+			const obj = parsed as Record<string, unknown>;
+			return { ok: true, value: Object.keys(obj).length > 0 ? obj : null };
+		} catch {
+			return { ok: false, value: null };
+		}
+	});
+	const healthIntervalValid = $derived.by(() => {
+		const t = healthIntervalText.trim();
+		if (t === '') return true;
+		if (!/^\d+$/.test(t)) return false;
+		const n = Number(t);
+		return n >= MIN_HEALTH_CHECK_INTERVAL_S && n <= MAX_STARTUP_TIMEOUT_S;
+	});
+	const healthCommandBlocked = $derived(healthMode === 'command' && !setupAllowed);
+	const healthValid = $derived(
+		healthMode === 'none' ||
+			(healthMode === 'tool' && healthTool.trim().length > 0 && healthArgs.ok && healthIntervalValid) ||
+			(healthMode === 'command' &&
+				!healthCommandBlocked &&
+				healthCommand.trim().length > 0 &&
+				healthIntervalValid)
 	);
 
 	// The hardened `docker run …` the backend will synthesize, live as the operator types
@@ -457,6 +578,45 @@
 		!isHttpUpstream || specFromDocument || isValidRemoteUrl(command)
 	);
 	const baseUrlValid = $derived(!isOpenapi || !baseUrl.trim() || isValidRemoteUrl(baseUrl));
+	const schemaValid = $derived(
+		!isGraphql ||
+			(schemaSource === 'url'
+				? isValidRemoteUrl(schemaUrl)
+				: schemaSource === 'pasted'
+					? graphqlSchema.trim().length > 0
+					: true)
+	);
+
+	// What a GraphQL schema would serve (one tool per query and mutation field), read
+	// without credentials. Debounced; a stale answer is dropped, as for the OpenAPI preview.
+	let gqlPreview = $state<GraphqlPreview | null>(null);
+	let gqlPreviewSeq = 0;
+	$effect(() => {
+		const source = !isGraphql
+			? null
+			: schemaSource === 'pasted'
+				? graphqlSchema.trim() && { command: command.trim(), args: [], document: graphqlSchema }
+				: schemaSource === 'url'
+					? isValidRemoteUrl(schemaUrl) && {
+							command: command.trim(),
+							args: [schemaUrl.trim()],
+							document: ''
+						}
+					: isValidRemoteUrl(command) && { command: command.trim(), args: [], document: '' };
+		const seq = ++gqlPreviewSeq;
+		gqlPreview = null;
+		if (!source) return;
+		const timer = setTimeout(() => {
+			previewGraphql(source.command, source.args, source.document)
+				.then((result) => {
+					if (seq === gqlPreviewSeq) gqlPreview = result;
+				})
+				.catch(() => {
+					if (seq === gqlPreviewSeq) gqlPreview = null;
+				});
+		}, 600);
+		return () => clearTimeout(timer);
+	});
 
 	// What the document itself says to call, shown under the base URL field so an operator
 	// sees (say) Coolify Cloud's URL before saving a server meant for their own instance.
@@ -504,7 +664,11 @@
 			commandValid &&
 			remoteUrlValid &&
 			baseUrlValid &&
+			schemaValid &&
 			idleTimeoutValid &&
+			startTimeoutValid &&
+			(!hasCheckout || repoBuildTimeoutValid) &&
+			(isBuiltin || healthValid) &&
 			!dockerBlocked &&
 			!setupBlocked &&
 			!repoBlocked &&
@@ -595,8 +759,11 @@
 			name: name.trim(),
 			runner,
 			command: specFromDocument ? '' : command.trim(),
-			// openapi only, and only when pasted; '' tells the backend to fetch `command`.
+			// openapi: only when pasted ('' tells the backend to fetch `command`); graphql:
+			// only when pasted ('' = introspect, or the schema URL).
 			openapi_document: specFromDocument ? openapiDocument : '',
+			// graphql only, and only when pasted ('' = introspect, or the schema URL).
+			graphql_schema: isGraphql && schemaSource === 'pasted' ? graphqlSchema : '',
 			// remote stores [transport] in args, openapi [] or [base URL]; neither has a
 			// local process, so no cwd. docker stores command=image + args=container args,
 			// and cwd is meaningless.
@@ -606,7 +773,11 @@
 					? baseUrl.trim()
 						? [baseUrl.trim()]
 						: []
-					: resolvedArgs,
+					: isGraphql
+						? schemaSource === 'url'
+							? [schemaUrl.trim()]
+							: []
+						: resolvedArgs,
 			// docker only: extra `docker run` options before the image (empty elsewhere,
 			// matching the backend's normalization).
 			run_args: isDocker ? resolvedRunArgs : [],
@@ -630,7 +801,19 @@
 			// Stdio runners only; a remote upstream has its own session per request, so the
 			// bridge ignores it there — keep the payload honest on a runner switch.
 			serialize_client_requests: !isHttpUpstream && serializeClientRequests,
+			attach_stderr_on_error: !isHttpUpstream && serializeClientRequests && attachStderrOnError,
 			idle_timeout_s: idleTimeoutText.trim() === '' ? null : Number(idleTimeoutText.trim()),
+			start_timeout_s: parseTimeout(startTimeoutText),
+			// Only a checkout has a build to time; dropping the repo drops its override.
+			repo_build_timeout_s: hasCheckout ? parseTimeout(repoBuildTimeoutText) : null,
+			// One form or none; the unused fields are sent as null so a switch clears them.
+			health_check_tool: !isBuiltin && healthMode === 'tool' ? healthTool.trim() : null,
+			health_check_arguments:
+				!isBuiltin && healthMode === 'tool' ? healthArgs.value : null,
+			health_check_command:
+				!isBuiltin && healthMode === 'command' && setupAllowed ? healthCommand : null,
+			health_check_interval_s:
+				!isBuiltin && healthMode !== 'none' ? parseTimeout(healthIntervalText) : null,
 			auth_provider: authProvider,
 			// Upstream OAuth only applies to remote; the backend forces it off elsewhere,
 			// but keep the payload honest so a runner switch clears it client-side too.
@@ -1166,6 +1349,119 @@
 					{/if}
 				</p>
 			</div>
+		{:else if isGraphql}
+			<!-- runner === graphql: a GraphQL API, served as one MCP tool per query and mutation
+			     field. command = endpoint, args = [] (introspect) or [schema URL], a pasted
+			     schema in graphql_schema, env = headers sent to the API. No local process. -->
+			<div class="flex flex-col gap-2">
+				<label for="srv-gql-endpoint" class="text-sm font-medium text-[var(--color-ink)]">
+					GraphQL endpoint
+				</label>
+				<input
+					id="srv-gql-endpoint"
+					type="url"
+					inputmode="url"
+					bind:value={command}
+					autocomplete="off"
+					spellcheck="false"
+					placeholder="https://api.example.com/graphql"
+					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+				/>
+				{#if command.trim() && !remoteUrlValid}
+					<p class="text-xs text-[var(--color-state-failed)]">
+						Enter the http(s):// URL the API takes GraphQL requests on.
+					</p>
+				{/if}
+				<span class="mt-1 text-sm font-medium text-[var(--color-ink)]">Schema</span>
+				<div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+					{#each SCHEMA_SOURCES as opt (opt.value)}
+						<label
+							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+							style={schemaSource === opt.value
+								? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+								: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+						>
+							<span class="flex items-center gap-2">
+								<input
+									type="radio"
+									name="schema-source"
+									checked={schemaSource === opt.value}
+									onchange={() => (schemaSource = opt.value)}
+								/>
+								<span class="text-sm font-medium text-[var(--color-ink)]">{opt.title}</span>
+							</span>
+							<span class="text-xs text-[var(--color-ink-dim)]">{opt.hint}</span>
+						</label>
+					{/each}
+				</div>
+				{#if schemaSource === 'url'}
+					<input
+						id="srv-gql-schema-url"
+						type="url"
+						inputmode="url"
+						aria-label="Schema URL"
+						bind:value={schemaUrl}
+						autocomplete="off"
+						spellcheck="false"
+						placeholder="https://api.example.com/schema.graphql"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+					/>
+					{#if schemaUrl.trim() && !isValidRemoteUrl(schemaUrl)}
+						<p class="text-xs text-[var(--color-state-failed)]">
+							Enter the http(s):// URL of the schema (SDL or an introspection result).
+						</p>
+					{/if}
+				{:else if schemaSource === 'pasted'}
+					<textarea
+						id="srv-gql-schema"
+						aria-label="GraphQL schema"
+						bind:value={graphqlSchema}
+						rows="8"
+						spellcheck="false"
+						placeholder={'type Query { … }   or   {"data": {"__schema": …}}'}
+						class="resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+					></textarea>
+					<label class="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+						Or load a file:
+						<input
+							type="file"
+							accept=".graphql,.graphqls,.gql,.json,application/json,application/graphql"
+							onchange={loadSchemaFile}
+							class="text-xs file:mr-2 file:rounded-md file:border file:border-[var(--color-line)] file:bg-[var(--color-surface-2)] file:px-2 file:py-1 file:text-xs file:text-[var(--color-ink)]"
+						/>
+					</label>
+					{#if schemaFileError}
+						<p class="text-xs text-[var(--color-state-failed)]">{schemaFileError}</p>
+					{/if}
+				{/if}
+				{#if gqlPreview}
+					{#if gqlPreview.error}
+						<p class="text-xs text-[var(--color-ink-dim)]">
+							Couldn't read the schema: {gqlPreview.error}
+						</p>
+					{:else}
+						<p class="text-xs text-[var(--color-ink-muted)]">
+							{gqlPreview.queries.length}
+							{gqlPreview.queries.length === 1 ? 'query' : 'queries'} and {gqlPreview.mutations.length}
+							{gqlPreview.mutations.length === 1 ? 'mutation' : 'mutations'}, one tool each, plus
+							<code class="font-mono">graphql_query</code> for any operation{gqlPreview.subscriptions
+								? ` (${gqlPreview.subscriptions} subscription${gqlPreview.subscriptions === 1 ? '' : 's'} not served)`
+								: ''}.
+						</p>
+					{/if}
+				{/if}
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					Each query and mutation field becomes an MCP tool: its arguments are the tool's
+					arguments (sent as GraphQL variables), and the result's fields come from a default
+					selection the caller can replace with a <code class="font-mono">selection_set</code>
+					argument. Put the API's credential under <span class="font-medium">Headers</span> below
+					(e.g. <span class="font-mono">Authorization: Bearer &lt;token&gt;</span>); it is sent
+					with every request, your clients' headers never are. {schemaSource === 'pasted'
+						? 'Edit the schema here to pick up a changed API.'
+						: 'Restart the server to pick up a changed API.'} Hide fields you don't want exposed
+					from its tool list.
+				</p>
+			</div>
 		{:else if isDocker}
 			<!-- runner === docker: command = OCI image ref, args = the container's own args.
 			     The backend synthesizes the hardened `docker run …` (see dockerPreview). -->
@@ -1412,6 +1708,24 @@
 					{/if}
 				</div>
 			</div>
+		{:else if isGraphql}
+			<!-- GraphQL preview: where the tools come from (no local process to spawn) -->
+			<div class="flex flex-col gap-1.5">
+				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Translates</span>
+				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5">
+					{#if command.trim()}
+						<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
+							{schemaSource === 'pasted'
+								? '(stored schema)'
+								: schemaSource === 'url'
+									? schemaUrl.trim() || '(schema URL not set)'
+									: 'introspection'} → {command.trim()}
+						</code>
+					{:else}
+						<code class="font-mono text-xs text-[var(--color-ink-dim)]">(endpoint not set)</code>
+					{/if}
+				</div>
+			</div>
 		{:else if isDocker}
 			<!-- Docker: show the hardened `docker run …` the backend synthesizes. -->
 			<div class="flex flex-col gap-1.5">
@@ -1581,7 +1895,7 @@
 			{/if}
 		</div>
 
-		<!-- Environment variables (upstream headers when remote/openapi) -->
+		<!-- Environment variables (upstream headers when remote/openapi/graphql) -->
 		<fieldset class="flex flex-col gap-2 border-0 p-0">
 			<div class="flex items-center justify-between">
 				<legend class="text-sm font-medium text-[var(--color-ink)]">
@@ -1610,7 +1924,7 @@
 				<p
 					class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-3 text-xs text-[var(--color-ink-dim)]"
 				>
-					{isOpenapi
+					{isOpenapi || isGraphql
 						? 'No headers. Add the auth (e.g. Authorization, X-API-Key) the API needs; it is sent with every API call.'
 						: isRemote
 							? oauth
@@ -1692,14 +2006,44 @@
 								</svg>
 							</button>
 						</div>
+						{#if row.secret && !row.hidden}
+							<!-- A note, not a gate: making a value secret is one-way, so say so before
+							     the save that locks it. -->
+							<p
+								data-testid="secret-warning"
+								role="note"
+								class="-mt-1 flex items-start gap-1.5 text-[11px] leading-relaxed"
+								style="color: var(--color-state-starting);"
+							>
+								<svg
+									class="mt-0.5 size-3 shrink-0"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									aria-hidden="true"
+								>
+									<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+									<path d="M12 9v4M12 17h.01" />
+								</svg>
+								<span>
+									<span class="font-mono">{row.key.trim() || 'This value'}</span> is encrypted when
+									you save and never shown again, here, in the API or in an export. You can replace
+									it later but not read it back, so keep a copy if you'll need it.
+								</span>
+							</p>
+						{/if}
 					{/each}
 				</div>
 				<p class="text-xs text-[var(--color-ink-dim)]">
 					The lock marks a value secret: it's stored encrypted and never shown again, in this
 					form, the API, or a .mcpb export.
 					{#if envRows.some((r) => r.hidden)}
-						Changing what this server runs (for a local server, that includes any other env
-						value), or unlocking a secret, needs the secret values typed in again.
+						A locked value left blank keeps what's stored, whatever else you change. Type a new
+						value to replace it; unlocking one needs a new value too, since the stored one is
+						never shown.
 					{/if}
 				</p>
 			{/if}
@@ -1842,6 +2186,33 @@
 					></span>
 				</span>
 			</label>
+			<!-- One request at a time is what makes the child's stderr this call's (issue #227). -->
+			{#if serializeClientRequests}
+				<label
+					class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
+				>
+					<span class="flex flex-col gap-0.5">
+						<span class="text-sm font-medium text-[var(--color-ink)]">
+							Attach stderr to failed calls
+						</span>
+						<span class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+							When a tool call fails, add what this server wrote to stderr during that call (the
+							last 20 lines, scrubbed of credentials) to the error the client sees. Only helps when
+							the failure comes back as a failed call; the lines still go to the server's log.
+						</span>
+					</span>
+					<input type="checkbox" bind:checked={attachStderrOnError} class="peer sr-only" />
+					<span
+						class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition peer-checked:bg-[var(--color-accent)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[var(--color-accent)]"
+						style="background-color: {attachStderrOnError ? '' : 'var(--color-line-strong)'};"
+					>
+						<span
+							class="ml-0.5 inline-block size-4 rounded-full bg-white transition"
+							style={attachStderrOnError ? 'transform: translateX(16px);' : ''}
+						></span>
+					</span>
+				</label>
+			{/if}
 		{/if}
 
 		<!-- Idle shutdown (wake-on-request) -->
@@ -1875,6 +2246,191 @@
 				<code class="font-mono text-[var(--color-ink-muted)]">0</code> keeps it always running.
 			</p>
 		</div>
+
+		{#if !isBuiltin}
+			<!-- Startup deadlines -->
+			<div class="flex flex-col gap-1.5">
+				<div class="flex flex-wrap gap-4">
+					<div class="flex flex-col gap-1.5">
+						<label
+							for="srv-start-timeout"
+							class="text-xs font-medium text-[var(--color-ink-muted)]"
+						>
+							Startup timeout <span class="text-[var(--color-ink-dim)]">(seconds, optional)</span>
+						</label>
+						<input
+							id="srv-start-timeout"
+							type="text"
+							inputmode="numeric"
+							bind:value={startTimeoutText}
+							autocomplete="off"
+							spellcheck="false"
+							placeholder="inherit default"
+							aria-invalid={!startTimeoutValid}
+							class="w-48 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							style={startTimeoutValid
+								? 'border-color: var(--color-line);'
+								: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+						/>
+					</div>
+					{#if hasCheckout}
+						<div class="flex flex-col gap-1.5">
+							<label
+								for="srv-build-timeout"
+								class="text-xs font-medium text-[var(--color-ink-muted)]"
+							>
+								Checkout &amp; build timeout <span class="text-[var(--color-ink-dim)]">(seconds, optional)</span>
+							</label>
+							<input
+								id="srv-build-timeout"
+								type="text"
+								inputmode="numeric"
+								bind:value={repoBuildTimeoutText}
+								autocomplete="off"
+								spellcheck="false"
+								placeholder="inherit default"
+								aria-invalid={!repoBuildTimeoutValid}
+								class="w-48 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								style={repoBuildTimeoutValid
+									? 'border-color: var(--color-line);'
+									: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+							/>
+						</div>
+					{/if}
+				</div>
+				{#if !startTimeoutValid || (hasCheckout && !repoBuildTimeoutValid)}
+					<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+						Enter a whole number of seconds from 1 to {MAX_STARTUP_TIMEOUT_S} (or leave blank
+						to inherit).
+					</p>
+				{/if}
+				<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+					How long each start attempt may spend in the setup script, and again waiting for
+					the server to answer{hasCheckout ? '; the checkout and its build get their own limit' : ''}.
+					Raise it for a setup that installs system packages or downloads a browser, so it
+					isn't cut off part-way. Blank inherits the instance default. Takes effect on the next
+					start.
+				</p>
+			</div>
+
+			<!-- Health check -->
+			<div class="flex flex-col gap-1.5">
+				<label for="srv-health-mode" class="text-xs font-medium text-[var(--color-ink-muted)]">
+					Health check <span class="text-[var(--color-ink-dim)]">(optional)</span>
+				</label>
+				<select
+					id="srv-health-mode"
+					bind:value={healthMode}
+					class="w-48 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+				>
+					<option value="none">None</option>
+					<option value="tool">Call a tool</option>
+					{#if setupAllowed || healthMode === 'command'}
+						<option value="command">Run a shell command</option>
+					{/if}
+				</select>
+
+				{#if healthMode === 'tool'}
+					<div class="flex flex-col gap-1.5">
+						<label for="srv-health-tool" class="text-xs font-medium text-[var(--color-ink-muted)]">
+							Tool name
+						</label>
+						<input
+							id="srv-health-tool"
+							type="text"
+							bind:value={healthTool}
+							maxlength={256}
+							autocomplete="off"
+							spellcheck="false"
+							placeholder="e.g. ping"
+							aria-invalid={healthTool.trim() === ''}
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+						<label for="srv-health-args" class="text-xs font-medium text-[var(--color-ink-muted)]">
+							Arguments <span class="text-[var(--color-ink-dim)]">(JSON object, optional)</span>
+						</label>
+						<textarea
+							id="srv-health-args"
+							bind:value={healthArgsText}
+							rows="3"
+							spellcheck="false"
+							placeholder={'{"url": "https://example.com"}'}
+							aria-invalid={!healthArgs.ok}
+							class="resize-y rounded-md border bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+							style={healthArgs.ok
+								? 'border-color: var(--color-line);'
+								: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+						></textarea>
+						{#if !healthArgs.ok}
+							<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+								Enter a JSON object (or leave blank for no arguments).
+							</p>
+						{/if}
+					</div>
+				{:else if healthMode === 'command'}
+					<div class="flex flex-col gap-1.5">
+						<label for="srv-health-command" class="text-xs font-medium text-[var(--color-ink-muted)]">
+							Command
+						</label>
+						<textarea
+							id="srv-health-command"
+							bind:value={healthCommand}
+							rows="3"
+							spellcheck="false"
+							placeholder="curl -fsS http://127.0.0.1:3000/health"
+							aria-invalid={healthCommandBlocked || healthCommand.trim() === ''}
+							class="resize-y rounded-md border bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+							style={healthCommandBlocked
+								? 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'
+								: 'border-color: var(--color-line);'}
+						></textarea>
+						{#if healthCommandBlocked}
+							<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+								Health check commands run on this host, so they're supported only for npx, uvx and
+								command servers. Call a tool instead.
+							</p>
+						{/if}
+					</div>
+				{/if}
+
+				{#if healthMode !== 'none'}
+					<div class="flex flex-col gap-1.5">
+						<label for="srv-health-interval" class="text-xs font-medium text-[var(--color-ink-muted)]">
+							Re-check every <span class="text-[var(--color-ink-dim)]">(seconds, optional)</span>
+						</label>
+						<input
+							id="srv-health-interval"
+							type="text"
+							inputmode="numeric"
+							bind:value={healthIntervalText}
+							autocomplete="off"
+							spellcheck="false"
+							placeholder="only at startup"
+							aria-invalid={!healthIntervalValid}
+							class="w-48 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							style={healthIntervalValid
+								? 'border-color: var(--color-line);'
+								: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+						/>
+						{#if !healthIntervalValid}
+							<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+								Enter a whole number of seconds from {MIN_HEALTH_CHECK_INTERVAL_S} to
+								{MAX_STARTUP_TIMEOUT_S} (or leave blank to check only at startup).
+							</p>
+						{/if}
+					</div>
+				{/if}
+				<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+					Proves the server actually works, not just that it lists its tools. It runs once the
+					server answers, within the startup timeout — a failure fails that start attempt — and,
+					with a re-check interval, while it runs: a failing check marks the server unhealthy
+					until one passes. A tool check calls the tool as clients see it and fails on an error
+					result; a command runs like the setup script and fails on a non-zero exit. Checks
+					aren't counted as usage and never wake an idle server. Changes apply from the next
+					start or check, without a restart.
+				</p>
+			</div>
+		{/if}
 	</fieldset>
 
 	<!-- Auth -->

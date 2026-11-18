@@ -24,6 +24,7 @@ import httpx
 import httpx2
 import yaml
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.server.providers.openapi import components as _openapi_components
 from fastmcp.tools import Tool
 from fastmcp.utilities.openapi import HTTPRoute
@@ -341,6 +342,29 @@ def _guard_api_requests(base_url: str, headers: dict[str, str]):
     return guard
 
 
+class _ApiClient(httpx2.AsyncClient):
+    """The API client, whose network failures name the API they couldn't reach.
+
+    A wrong base URL, an API that's down or a name that doesn't resolve otherwise reaches
+    the caller as httpx's bare "All connection attempts failed", and the bridge log as a
+    full traceback — neither saying which URL was tried, the one thing the operator needs.
+    A ``ToolError`` is the tool's own answer: FastMCP passes its message through and logs
+    one line. A subclass rather than a wrapping transport, since passing a transport turns
+    off the environment's proxy settings."""
+
+    async def send(self, request: httpx2.Request, **kwargs) -> httpx2.Response:
+        try:
+            return await super().send(request, **kwargs)
+        except httpx2.TransportError as exc:
+            url = request.url
+            detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            raise ToolError(
+                f"can't reach the API at {url.scheme}://{url.netloc.decode()} ({detail}); "
+                "check the server's API base URL and that the API is reachable from "
+                "mcpelevator"
+            ) from exc
+
+
 def build_server(spec: dict, *, transport=None, api_transport=None) -> FastMCP:
     """A FastMCP server whose tools are the API's operations, from a bridge spec.
 
@@ -368,7 +392,7 @@ def build_server(spec: dict, *, transport=None, api_transport=None) -> FastMCP:
     info = doc.get("info") if isinstance(doc.get("info"), dict) else {}
     title = info.get("title")
     logger.info("serving OpenAPI document %r against %s", title or url or "(stored document)", base_url)
-    client = httpx2.AsyncClient(
+    client = _ApiClient(
         base_url=base_url,
         headers=headers,
         timeout=TIMEOUT_S,

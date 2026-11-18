@@ -39,14 +39,18 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   same bridge also serves each tool as plain REST (`/rest/<tool>` + a generated
   `/rest/openapi.json`), reached through the same `/s/<slug>/` proxy path and auth. A server's
   Per-tool policy — `disabled_tools` (names to hide) and `tool_overrides` (upstream name ->
-  replacement name/description) — is applied by ONE FastMCP `ToolTransform` in the bridge
+  replacement name/description, plus `aliases`: extra names that call the tool but are never
+  listed, applying only when no real tool answers to the name) — is applied by ONE FastMCP
+  `ToolTransform` in the bridge
   (`_tool_transform`), so hiding, renaming, and re-describing all reach every surface at once
   (MCP, REST, and the group hub, which all resolve tools through this proxy): a hidden tool is
   dropped from `tools/list` and refused on call, and a renamed one answers to its new name only.
   A renamed tool carries its pre-rename name in `_meta` under `UPSTREAM_META_KEY` — a contract
   between the bridge and the discovery probe (`supervisor.unit.tool_summary`), which lifts it to
   `upstream_name` so the UI keys per-tool state off a stable identity instead of reversing the
-  rename map (an exposed name isn't unique). Both are part of `config_hash`, so a change
+  rename map (an exposed name isn't unique). A group can't find an unlisted alias in a
+  member's tool list, so the hub adds `_MemberAliases` to that member's proxy from its
+  overrides (and keys the group's topology on them). Both are part of `config_hash`, so a change
   restarts the bridge. A stdio child is ONE kept-alive connection shared by every client, so
   what it sends back (roots/sampling/elicitation requests, logs) can't be attributed by the
   connection: `_StdioRouting` replaces the session's callbacks and reads a single caller slot,
@@ -54,6 +58,11 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   declined, logs to the bridge log); the per-server `serialize_client_requests` flag runs one
   proxied request at a time (`_SerializeClientRequests` middleware) and fills the slot, so the
   child can only be asking that caller (issue #143). Progress is bound per call by its token.
+  With serialization on, the opt-in `attach_stderr_on_error` tees the child's stderr
+  (`_StderrTee`: a raw byte ring addressed by stream offset, so a window is exact, with the
+  server's secret values hidden over the window's bytes before it is split into lines) and
+  appends the lines a failed `tools/call` window saw to its error result, scrubbed
+  (`_with_stderr`, issue #227).
   Pushing needs a back-channel, which only handshake-era client connections have. An
   interactive request (`tools/call`, `resources/read`, `prompts/get`) from a client on the
   sessionless `2026-07-28` protocol (FastMCP 4's default) runs as a `_Turn` instead: the
@@ -74,10 +83,12 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   alike. A secret value is stored in `env` as a Fernet token (`PREFIX`), keyed by
   `<data_dir>/env.key`, so a value is secret exactly when it's sealed (no flag column). The
   API masks it as `<hidden>` and takes `<hidden>` back to keep it; `runners.build_spec` is
-  the ONE place it's decrypted. `sealed.resolve` refuses to carry a kept secret through a
-  change of what the server runs (`service._RETARGET_FIELDS`, plus, for a local runner, any
-  other env edit: `NODE_OPTIONS` and friends execute code; for remote/openapi, a `Host`
-  header change) or through making it visible.
+  the ONE place it's decrypted. `sealed.resolve` carries a hidden secret through any other edit
+  and refuses only to make one visible without a new value (it's never shown again), plus
+  one boundary: an editor WITHOUT the local-runner permission moving where a server sends
+  its headers (`service._DESTINATION_FIELDS` + `Host`) must type kept secrets again (anyone
+  with it can read `env.key` anyway). The form warns, without blocking, when a value is
+  about to be made secret.
   `.mcpb` exports turn secrets into sensitive `user_config` prompts, and every manifest is
   validated against the vendored official MCPB 0.2 schema before it's served.
 - **Source repositories** (`runners/repo.py`, `catalog/repository.py`): a local-runner server
@@ -90,6 +101,14 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   (and the control MCP's `get_repository_draft` / `install_from_repository`) detect the
   steps from a GitHub repo's manifests; detection is best effort and every field stays
   editable.
+- **Per-server cache** (`runners/cache.py`): each local (`npx`/`uvx`/`command`) server's
+  setup/checkout shells and child see `XDG_CACHE_HOME` = `<data_dir>/cache/<id>` and
+  `PLAYWRIGHT_BROWSERS_PATH` under it (server `env` wins). The unit resolves the dir (like
+  the checkout cwd, builders stay pure) and hands it to the bridge in its own env
+  (`MCPE_BRIDGE_CACHE_DIR`), not the size-capped spec; not in `config_hash`.
+  `POST /api/servers/{id}/cache/clear` deletes it inside `Supervisor.restart`'s
+  `while_stopped` hook (or `stop`'s, when disabled), so nothing writes into it meanwhile;
+  delete removes it too.
 - **Upstream OAuth** (`auth/oauth_store.py`, `auth/oauth_flow.py`): a `remote` server can
   authenticate to its upstream via OAuth instead of static `env` headers. The interactive
   authorization-code grant (DCR + PKCE) runs in the control plane (`/api/servers/{id}/oauth/authorize`
@@ -114,6 +133,12 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   spec env var); `args` = `[]` or `[base_url]`, `env` =
   API headers, which always win and are dropped from tool arguments — and the caller's request
   headers are never forwarded to the API),
+  `graphql` (no MCP upstream either: the bridge loads a GraphQL schema — introspection of the
+  endpoint in `command`, a schema URL in `args[0]`, or SDL/introspection JSON stored in
+  `graphql_schema` — and serves each Query/Mutation field as a tool, `bridge/graphql.py`;
+  arguments go as variables, a generated selection set is replaceable per call via
+  `selection_set`, `graphql_query` runs any operation, every operation is validated against
+  the schema first; `env` = API headers, caller headers never forwarded, no redirects),
   and `docker` (image-packaged servers — opt-in + root-equivalent behind the `docker_runner`
   setting). Each runner is a pure `Server -> ProcessSpec` builder; `docker` stores the canonical
   image+container-args+env shape and synthesizes a hardened `docker run` (the bridge scrubs the
@@ -136,6 +161,29 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   bridge's internal header (`runners.builtin.is_internal`), never on the rest of `/api` (CSRF). The
   global switch is the row's `enabled` (surfaced as the `control_mcp` setting) and the per-user
   switch is `User.control_mcp`. `/api/mcp` checks both on every request.
+- **Standard logging** (`logconfig.py`): with debug off, one scrubbed stderr handler on the
+  `app` logger at `MCPE_LOG_LEVEL` (INFO); uvicorn's access log is silenced unless
+  `MCPE_ACCESS_LOG` (debug re-opens it). The supervisor logs each server's start, failed
+  attempts, terminal failure (hint + the tail of its own log), crash, idle stop and stop
+  there, so a failure's reason reaches the container log without debug mode; debug mode
+  removes that handler and takes over. A client hanging up mid-POST, which the MCP SDK
+  logs as an ERROR traceback, is demoted to one DEBUG line in the control plane and every
+  bridge (`logconfig.quiet_client_disconnects`). A startup attempt's failure also lands in
+  `last_error` while retrying (cleared on running). Setup/checkout shells run behind
+  `unit.DPKG_REPAIR_PREAMBLE`, which runs `dpkg --configure -a` as root when dpkg reports
+  an interrupted run (a setup killed mid-apt otherwise breaks every later attempt).
+  Per-server `start_timeout_s` / `repo_build_timeout_s` override the instance deadlines,
+  outside `config_hash`.
+- **Health checks** (`supervisor.unit.HealthCheck`, issue #225): an optional per-server
+  tool call (through the bridge's loopback `/mcp`, so never usage or idle traffic) or,
+  for npx/uvx/command, a shell command run like setup (`DPKG_REPAIR_PREAMBLE`, child env
+  and cwd). It runs at the end of `_await_ready` as its own `health` phase under the same
+  deadline (a failure is an ordinary `_AttemptFailed`), and, with
+  `health_check_interval_s`, the reconcile sweep hands each unit its current check
+  (`tick_health_check`), which runs a due one against a live running unit off the sweep.
+  A periodic failure sets `unhealthy` with `health_failing` (no restart: the sweep only
+  re-derives a crashed `unhealthy`), and a passing check returns it to `running`. Outside
+  `config_hash`; `health_check_command` needs the local-runner permission.
 - **Debug mode** (`debug.py`, `MCPE_DEBUG=true`): deliberately maximal. TRACE logging for every
   logger in the control plane and every bridge (they inherit the env; bridges also run uvicorn at
   `trace`), every SQL statement (values hidden by `hide_parameters`), `TraceMiddleware` logging each request's arrival and headers, its body as the app reads it,
@@ -223,6 +271,17 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   first, then the adjacent `pyproject.toml` (source tree), then installed metadata. `backend/pyproject.toml` /
   `frontend/package.json` versions are source metadata that only track the dev line (the tag wins
   at deploy); bump them when cutting a release and run `uv lock`.
+- Cutting a release: ONLY when the user explicitly asks for one — never on your own, never as
+  the follow-up to a merge or a version bump. Dispatch the release workflow (it's an outward,
+  hard-to-undo action: it creates the `v<version>` tag, publishes the GitHub release and moves
+  the image's `latest`/`beta`/`X.Y`/`X` tags) with the version the user names, from the ref
+  they name (default `main`): `gh workflow run docker-image.yml --ref main -f version=X.Y.Z
+  -f channel=release`, or the GitHub MCP `actions_run_trigger` with the same workflow, ref and
+  inputs. The workflow writes the title and notes itself (an OpenRouter free model via
+  `pacnpal/free-ai-release-notes`, from every commit since the previous `v*` tag, in this
+  repo's house style; needs the `OPENROUTER_API_KEY` repo secret), so don't write or edit
+  notes unless asked. A pushed `vX.Y.Z` tag does the same, so don't push version tags either
+  unless asked. `channel=dev`/`beta` only builds a channel-tagged image and releases nothing.
 - A new runner, or a new meaning for a launch field, updates the control MCP in the same PR:
   the `create_server` / `update_server` descriptions (`backend/app/control_mcp.py`) and the
   `INSTRUCTIONS` flows (`backend/app/runners/builtin.py`) are the only docs an agent sees.

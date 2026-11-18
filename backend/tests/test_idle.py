@@ -506,3 +506,43 @@ def test_proxy_503_when_wake_declined():
             assert r.headers.get("retry-after") == "5"
         finally:
             client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)
+
+
+def test_startup_timeout_overrides_validate_and_inherit():
+    with TestClient(app) as client:
+        for bad in (0, -5, 86401):
+            r = client.post(
+                "/api/servers",
+                json={"name": "bad-timeout", "command": "echo", "start_timeout_s": bad},
+                headers=LOOPBACK,
+            )
+            assert r.status_code == 400, bad
+        assert client.post(
+            "/api/servers",
+            json={"name": "bad-timeout", "command": "echo", "repo_build_timeout_s": True},
+            headers=LOOPBACK,
+        ).status_code == 422
+        srv = client.post(
+            "/api/servers",
+            json={"name": "slow-start", "command": "echo",
+                  "start_timeout_s": 900, "repo_build_timeout_s": 3600},
+            headers=LOOPBACK,
+        ).json()
+        try:
+            detail = client.get(f"/api/servers/{srv['id']}", headers=LOOPBACK).json()
+            assert detail["start_timeout_s"] == 900
+            assert detail["repo_build_timeout_s"] == 3600
+            # A deadline is a supervisor concern: changing it never bounces the bridge.
+            with Session(get_engine()) as session:
+                before = repo.get_server(session, srv["id"]).config_hash
+            r = client.patch(
+                f"/api/servers/{srv['id']}", json={"start_timeout_s": None}, headers=LOOPBACK
+            )
+            assert r.status_code == 200
+            detail = client.get(f"/api/servers/{srv['id']}", headers=LOOPBACK).json()
+            assert detail["start_timeout_s"] is None  # explicit null = inherit
+            assert detail["repo_build_timeout_s"] == 3600
+            with Session(get_engine()) as session:
+                assert repo.get_server(session, srv["id"]).config_hash == before
+        finally:
+            client.delete(f"/api/servers/{srv['id']}", headers=LOOPBACK)

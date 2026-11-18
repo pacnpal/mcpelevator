@@ -170,6 +170,14 @@ def test_docker_runner_sanitizes_forbidden_run_args_on_legacy_rows():
     assert a[-2:] == ["--", "img:1"]
 
 
+@pytest.mark.parametrize("runner,command", [("command", "srv"), ("docker", "img:1")])
+def test_stdio_runners_carry_attach_stderr_on_error(runner, command):
+    """The `docker run` child's stderr is the container's, so docker carries it too."""
+    flags = {"serialize_client_requests": True, "attach_stderr_on_error": True}
+    assert build_spec(_server(runner=runner, command=command, **flags)).attach_stderr_on_error
+    assert not build_spec(_server(runner=runner, command=command)).attach_stderr_on_error
+
+
 def test_docker_child_env_strips_proxy_and_reserved_vars(monkeypatch):
     # The docker CLI child gets: operator DOCKER_* + PATH/HOME from the bridge env, plus the
     # server's NON-reserved vars — but NOT a server-declared proxy var (it would reroute the
@@ -250,3 +258,20 @@ def test_openapi_runner_maps_document_base_url_headers():
 def test_local_runner_transport_is_stdio():
     # The discriminator defaults so existing runners are unchanged.
     assert build_spec(_server(runner="npx", command="npx")).transport == "stdio"
+
+
+def test_build_spec_names_the_sealed_env_keys():
+    """build_spec, the one place sealed env is decrypted, also records which keys were
+    sealed, so the bridge can hide their values from attached stderr (#227)."""
+    from app import sealed as sealed_mod
+    from app.db.models import Server
+    from app.runners import build_spec
+
+    token = sealed_mod.seal("sk-live-0123456789abcdef")
+    server = Server(
+        id="s1", name="s", slug="s", runner="command", command="x",
+        env={"API_KEY": token, "REGION": "eu"},
+    )
+    spec = build_spec(server)
+    assert spec.env["API_KEY"] == "sk-live-0123456789abcdef"
+    assert spec.secret_env_keys == ["API_KEY"]

@@ -73,20 +73,16 @@ def test_resending_hidden_keeps_value_and_hash(c, server):
     assert after.env == before.env and after.config_hash == before.config_hash
 
 
-def test_other_env_changes_on_a_local_server_need_secrets_again(c, server):
-    """NODE_OPTIONS=--import=... (or PYTHONSTARTUP, LD_PRELOAD, ...) changes what runs
-    as surely as the command does, so any env edit counts as retargeting."""
-    attack = {"API_KEY": HIDDEN, "REGION": "eu",
-              "NODE_OPTIONS": "--import=data:text/javascript,console.error(process.env.API_KEY)"}
-    r = _patch(c, server, env=attack)
-    assert r.status_code == 400 and "API_KEY" in r.json()["detail"]
-    assert _patch(c, server, env={"API_KEY": HIDDEN, "REGION": "us"}).status_code == 400
-    # Removing a key counts too: code falling back to a default would get the secret.
-    assert _patch(c, server, env={"API_KEY": HIDDEN}).status_code == 400
-    # Re-entering the secret allows it, and an omitted secret_env keeps it secret.
-    r = _patch(c, server, env={"API_KEY": "s3cret", "REGION": "us", "NEW": "x"})
+def test_other_env_changes_keep_an_unchanged_secret(c, server):
+    """A secret the save leaves alone keeps its stored value, whatever else changes:
+    adding, changing or removing another env value never asks for it again."""
+    before = _row(server).env["API_KEY"]
+    r = _patch(c, server, env={"API_KEY": HIDDEN, "REGION": "us", "NEW": "x"})
     assert r.status_code == 200, r.text
+    assert _row(server).env["API_KEY"] == before  # the same token, not re-sealed
     assert _detail(c, server)["env"] == {"API_KEY": HIDDEN, "REGION": "us", "NEW": "x"}
+    assert _patch(c, server, env={"API_KEY": HIDDEN}).status_code == 200
+    assert build_spec(_row(server)).env == {"API_KEY": "s3cret"}
 
 
 def test_new_value_replaces_and_missing_key_drops(c, server):
@@ -94,16 +90,15 @@ def test_new_value_replaces_and_missing_key_drops(c, server):
     assert build_spec(_row(server)).env == {"API_KEY": "rotated"}
 
 
-def test_retarget_needs_secret_values_again(c, server):
+def test_changing_what_runs_keeps_an_unchanged_secret(c, server):
     r = _patch(c, server, command="/usr/bin/env", env={"API_KEY": HIDDEN, "REGION": "eu"})
-    assert r.status_code == 400
-    assert "API_KEY" in r.json()["detail"] and "REGION" not in r.json()["detail"]
-    # Not sending env at all is the same as keeping every secret value.
-    assert _patch(c, server, args=["--dump"]).status_code == 400
-    assert _row(server).command == "/bin/true"
-    r = _patch(c, server, command="/usr/bin/env", env={"API_KEY": "s3cret", "REGION": "eu"})
     assert r.status_code == 200, r.text
-    assert build_spec(_row(server)).env == {"API_KEY": "s3cret", "REGION": "eu"}
+    # Not sending env at all is the same as keeping every secret value.
+    assert _patch(c, server, args=["--dump"]).status_code == 200
+    row = _row(server)
+    assert (row.command, row.args) == ("/usr/bin/env", ["--dump"])
+    assert build_spec(row).env == {"API_KEY": "s3cret", "REGION": "eu"}
+    assert _detail(c, server)["env"] == {"API_KEY": HIDDEN, "REGION": "eu"}
 
 
 def test_making_a_secret_visible_needs_it_again(c, server):
@@ -136,9 +131,10 @@ def test_remote_headers_can_be_secret(c):
         # A header only travels to the upstream, so other headers can change freely.
         r = _patch(c, server_id, env={"Authorization": HIDDEN, "X-Team": "dev"})
         assert r.status_code == 200, r.text
-        # Pointing the headers at another host needs the secret again.
-        r = _patch(c, server_id, command="https://evil.example/mcp")
-        assert r.status_code == 400
+        # So can the URL, and the unchanged secret header rides along.
+        r = _patch(c, server_id, command="https://other.example/mcp")
+        assert r.status_code == 200, r.text
+        assert build_spec(_row(server_id)).env["Authorization"] == "Bearer t0ken"
     finally:
         c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 
@@ -193,7 +189,7 @@ def test_secret_env_must_name_env_keys(c, server):
     assert r.status_code == 400 and "api_key" in r.json()["detail"]
 
 
-def test_changing_the_host_header_needs_secrets_again(c):
+def test_changing_the_host_header_keeps_an_unchanged_secret(c):
     server_id = _create(
         c,
         runner="remote",
@@ -203,10 +199,11 @@ def test_changing_the_host_header_needs_secrets_again(c):
         secret_env=["Authorization"],
     )
     try:
-        r = _patch(c, server_id, env={"Authorization": HIDDEN, "Host": "evil.example"})
-        assert r.status_code == 400 and "Authorization" in r.json()["detail"]
-        r = _patch(c, server_id, env={"Authorization": HIDDEN, "host": "a.example"})
-        assert r.status_code == 200, r.text  # same value, any case: not a change
+        r = _patch(c, server_id, env={"Authorization": HIDDEN, "Host": "b.example"})
+        assert r.status_code == 200, r.text
+        assert build_spec(_row(server_id)).env == {
+            "Authorization": "Bearer t0ken", "Host": "b.example"
+        }
     finally:
         c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)
 

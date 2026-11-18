@@ -165,3 +165,70 @@ def test_marker_shaped_child_output_with_huge_attempt_number_is_ignored():
         _MCP2_TRACEBACK_LINE,
     ]
     assert startup_hint(lines, "uvx") is not None
+
+
+# --- Playwright's missing browser (issue #225) -------------------------------- #
+
+_PLAYWRIGHT_LINE = (
+    "[health] Error: browserType.launchPersistentContext: Executable doesn't exist at "
+    "/root/.cache/ms-playwright/chromium-1179/chrome-linux/chrome"
+)
+
+
+def test_playwright_missing_browser_in_the_health_phase_recommends_the_setup_install():
+    lines = [
+        "[mcpelevator] attempt 1/1: readiness",
+        "[mcpelevator] attempt 1/1: health",
+        _PLAYWRIGHT_LINE,
+    ]
+    hint = startup_hint(lines, "npx", command="npx", args=["-y", "@playwright/mcp"])
+    assert hint is not None
+    assert "npx playwright@<version> install chromium" in hint
+    assert "the Playwright version the server itself uses" in hint
+    assert "setup script" in hint
+    assert "MCPE_APT_PACKAGES" in hint and "--with-deps" in hint
+
+
+def test_playwright_install_banner_line_is_evidence_too():
+    banner = "[health] ║     npx playwright install                                   ║"
+    lines = ["[mcpelevator] attempt 1/1: health", banner]
+    assert "npx playwright@<version> install chromium" in (startup_hint(lines, "command") or "")
+    # The command merely mentioned in prose is not.
+    prose = ["[mcpelevator] attempt 1/1: health", "tip: run npx playwright install first"]
+    assert startup_hint(prose, "command") is None
+
+
+def test_playwright_text_in_a_setup_section_that_succeeded_gets_no_hint():
+    # The setup script printed the message but exited 0; the start then failed in the
+    # health phase for another reason. A browser remedy would send the operator astray.
+    lines = [
+        "[mcpelevator] attempt 1/1: setup",
+        _PLAYWRIGHT_LINE.removeprefix("[health] "),
+        "[mcpelevator] attempt 1/1: bridge",
+        "[mcpelevator] attempt 1/1: readiness",
+        "[mcpelevator] attempt 1/1: health",
+        "[health] connection refused",
+    ]
+    assert startup_hint(lines, "npx") is None
+
+
+def test_playwright_hint_adapts_to_the_runner():
+    lines = ["[mcpelevator] attempt 1/1: health", _PLAYWRIGHT_LINE]
+    docker = startup_hint(lines, "docker") or ""
+    assert "image" in docker and "setup script" not in docker
+    remote = startup_hint(lines, "remote") or ""
+    assert "upstream" in remote and "setup script" not in remote
+    assert "uvx playwright@<version> install chromium" in (startup_hint(lines, "uvx") or "")
+
+
+def test_playwright_hint_names_the_missing_browser():
+    # Installing chromium doesn't give a server launching Firefox or WebKit its browser.
+    builds = {"firefox": "firefox-1488/firefox/firefox", "webkit": "webkit-2182/pw_run.sh"}
+    for browser, build in builds.items():
+        line = f"[health] Error: Executable doesn't exist at /data/cache/x/ms-playwright/{build}"
+        hint = startup_hint(["[mcpelevator] attempt 1/1: health", line], "npx") or ""
+        assert f"npx playwright@<version> install {browser}" in hint
+        assert "chromium" not in hint
+    headless = _PLAYWRIGHT_LINE.replace("chromium-1179", "chromium_headless_shell-1179")
+    hint = startup_hint(["[mcpelevator] attempt 1/1: health", headless], "npx") or ""
+    assert "install chromium" in hint

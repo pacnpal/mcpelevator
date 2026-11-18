@@ -22,10 +22,13 @@ from sqlmodel import Session
 from starlette.responses import Response, StreamingResponse
 
 from app.api.schemas import (
+    CacheCleared,
     ImportResult,
     ImportSkipped,
     ImportWarning,
     OAuthStatus,
+    GraphqlPreview,
+    GraphqlPreviewRequest,
     OpenapiPreview,
     OpenapiPreviewRequest,
     ServerClone,
@@ -49,6 +52,7 @@ from app.auth.oauth_store import ServerTokenStorage
 from app.config import get_settings
 from app.db import get_engine, get_session, repo
 from app.db.models import BUILTIN_RUNNER, Server
+from app.runners import cache as server_cache
 from app.runners import repo as repo_checkout
 from app.runners.builtin import ORIGINAL_HOST_HEADER
 from app.groups import registry as group_registry
@@ -135,7 +139,10 @@ def _visible(
 
 _LAUNCH_FIELDS = {
     "runner", "command", "args", "run_args", "env", "cwd", "setup_script", "pin_mcp1",
-    "repo_url", "repo_ref", "post_clone_script", "openapi_document",
+    "repo_url", "repo_ref", "post_clone_script", "openapi_document", "graphql_schema",
+    # Not launch config (outside config_hash), but it executes on the host like the
+    # setup script, so shaping it takes the same local-runner permission.
+    "health_check_command",
 }
 
 
@@ -148,8 +155,10 @@ def _row_launch_value(row: Server, key: str):
         return bool(getattr(row, key))
     if key == "env":  # as the form got it: a kept hidden value comes back "<hidden>"
         return sealed.masked(row.env or {})
-    if key in ("repo_url", "repo_ref", "post_clone_script", "openapi_document"):
+    if key in ("repo_url", "repo_ref", "post_clone_script", "openapi_document", "graphql_schema"):
         return getattr(row, key) or ""
+    if key == "health_check_command":
+        return (getattr(row, key) or "").strip() or None
     return getattr(row, key)
 
 
@@ -160,9 +169,16 @@ def _launch_touched(row: Server, changes: dict) -> bool:
     nullable in storage (legacy rows hold NULL, read as [] / false) while the form
     always sends a value — normalized so NULL vs the empty value isn't a "change"."""
     return any(
-        changes[k] != _row_launch_value(row, k)
+        _sent_launch_value(changes, k) != _row_launch_value(row, k)
         for k in changes.keys() & _LAUNCH_FIELDS
     )
+
+
+def _sent_launch_value(changes: dict, key: str):
+    # A blank health check command and none at all are the same thing (no check).
+    if key == "health_check_command":
+        return (changes[key] or "").strip() or None
+    return changes[key]
 
 
 def _fresh(session: Session, principal: Principal) -> Principal:
@@ -296,6 +312,8 @@ def _detail(
         # Opt-in: the detail page polls this route, and a stored document can run to
         # megabytes. Only the edit form asks for it.
         openapi_document=(server.openapi_document or "") if include_document else "",
+        graphql_schema=(server.graphql_schema or "") if include_document else "",
+        document_stored=bool(server.openapi_document or server.graphql_schema),
         pin_mcp1=bool(server.pin_mcp1),
         auth_provider=server.auth_provider,
         oauth=bool(server.oauth),
@@ -306,10 +324,17 @@ def _detail(
         oauth_client_mode=server.oauth_client_mode or "inherit",
         oauth_status=_oauth_status(server),
         idle_timeout_s=server.idle_timeout_s,
+        start_timeout_s=server.start_timeout_s,
+        repo_build_timeout_s=server.repo_build_timeout_s,
+        health_check_tool=server.health_check_tool,
+        health_check_arguments=server.health_check_arguments,
+        health_check_command=server.health_check_command,
+        health_check_interval_s=server.health_check_interval_s,
         disabled_tools=list(server.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),
         serialize_client_requests=bool(server.serialize_client_requests),
+        attach_stderr_on_error=bool(server.attach_stderr_on_error),
         config_hash=server.config_hash,
         source=server.source,
         mcpb_exportable=mcpb.exportable(server),
@@ -480,8 +505,19 @@ async def update_server(
     # null on the nullable OAuth client fields — so clearing a static client id/secret to
     # fall back to Dynamic Client Registration would be silently ignored. Preserve those
     # when the client actually sent them (model_fields_set) so null means "clear" (and,
-    # for idle_timeout_s, "inherit the global default").
-    for key in ("oauth_client_id", "oauth_client_secret", "idle_timeout_s"):
+    # for idle_timeout_s and the startup timeouts, "inherit the global default"; for the
+    # health check fields, "no check").
+    for key in (
+        "oauth_client_id",
+        "oauth_client_secret",
+        "idle_timeout_s",
+        "start_timeout_s",
+        "repo_build_timeout_s",
+        "health_check_tool",
+        "health_check_arguments",
+        "health_check_command",
+        "health_check_interval_s",
+    ):
         if key in payload.model_fields_set:
             changes[key] = provided[key]
 
@@ -516,6 +552,9 @@ async def update_server(
             # PATCH already changed, and misattributing that request's OAuth
             # reconfiguration to this one would wipe a freshly obtained
             # credential this PATCH never touched.
+            # Whether this editor can already run code here (and so read env.key): only
+            # one who can't is asked for kept secrets when moving their destination.
+            runs_code = policy.can_use_runner(fresh, "command")
             before_sig = _oauth_signature(current)
             before_hash = current.config_hash
             if _launch_touched(current, changes):
@@ -524,7 +563,9 @@ async def update_server(
                 )
             if not owner_change_requested:
                 return (
-                    service.update_server(session, server_id, changes),
+                    service.update_server(
+                        session, server_id, changes, editor_runs_code=runs_code
+                    ),
                     before_sig,
                     before_hash,
                 )
@@ -537,7 +578,9 @@ async def update_server(
                 raise HTTPException(status_code=403, detail="only admins may reassign owners")
             if new_owner is not None and repo.get_user(session, new_owner) is None:
                 raise ValueError(f"unknown user {new_owner!r}")
-            updated = service.update_server(session, server_id, changes)
+            updated = service.update_server(
+                session, server_id, changes, editor_runs_code=runs_code
+            )
             old_owner = current.owner_id
             if old_owner is not None and old_owner != new_owner:
                 # The former owner's data-plane tokens for this server: they can no
@@ -693,6 +736,8 @@ async def delete_server(
         # deleted id, so nothing else would ever reuse or remove it. Last, and best-effort,
         # so a filesystem hiccup can't skip the group resync above.
         await run_in_threadpool(repo_checkout.remove_checkout, get_settings().data_dir, server_id)
+        # Same for its cache directory (models, browsers): keyed by the id, so orphaned.
+        await run_in_threadpool(server_cache.remove_cache, get_settings().data_dir, server_id)
     return Response(status_code=204)
 
 
@@ -874,6 +919,65 @@ async def preview_openapi(
     return await run_in_threadpool(_openapi_preview, payload.command, payload.openapi_document)
 
 
+def _graphql_preview(command: str, args: list[str], document: str) -> GraphqlPreview:
+    from app.bridge import graphql as bridge_graphql
+
+    urls = [a.strip() for a in args if a.strip()]
+    # The same source rules a save applies (registry.service.normalize_graphql), so the
+    # preview never shows tools for a configuration that can't be saved. The endpoint can
+    # still be blank while a pasted schema is previewed: the form fills it in after.
+    if len(urls) > 1:
+        return GraphqlPreview(error="a graphql server takes at most one schema URL")
+    if urls and document.strip():
+        return GraphqlPreview(
+            error="a graphql server takes its schema from a URL or from the schema itself, not both"
+        )
+    schema_url = urls[0] if urls else ""
+    try:
+        if document.strip():
+            schema = bridge_graphql.parse_schema(document)
+        elif schema_url:
+            # No headers, as for an OpenAPI document: the preview never sends the API's
+            # credentials anywhere.
+            schema = bridge_graphql.parse_schema(
+                bridge_graphql.fetch_schema_url(schema_url, command.strip(), {})
+            )
+        else:
+            schema = bridge_graphql.parse_schema(
+                bridge_graphql.introspect(command.strip(), {})
+            )
+    except ValueError as exc:  # SchemaError is a ValueError
+        message = str(exc)
+        if not document.strip():
+            message += " (the preview sends no headers; the server sends its own when it starts)"
+        return GraphqlPreview(error=message[:400])
+    return GraphqlPreview(
+        queries=sorted(schema.query_type.fields) if schema.query_type else [],
+        mutations=sorted(schema.mutation_type.fields) if schema.mutation_type else [],
+        subscriptions=len(schema.subscription_type.fields) if schema.subscription_type else 0,
+    )
+
+
+@router.post("/graphql/preview", response_model=GraphqlPreview)
+async def preview_graphql(
+    payload: GraphqlPreviewRequest,
+    principal: Principal = Depends(current_principal),
+):
+    """What a graphql server would serve before it's saved: one tool per query and
+    mutation field. Reads the pasted schema, the schema URL, or introspects the endpoint."""
+    policy.require_runner_allowed(principal, "graphql")
+    if not payload.graphql_schema.strip():
+        target = next((a for a in payload.args if a.strip()), "") or payload.command
+        if not target.strip().startswith(("http://", "https://")):
+            raise HTTPException(
+                status_code=400,
+                detail="give the endpoint's http(s) URL, a schema URL, or the schema itself",
+            )
+    return await run_in_threadpool(
+        _graphql_preview, payload.command, payload.args, payload.graphql_schema
+    )
+
+
 @router.post("/servers/{server_id}/clone", response_model=ServerSummary, status_code=201)
 async def clone_server(
     server_id: str,
@@ -1021,6 +1125,93 @@ async def restart_server(
 
     await sup.restart(server_id, authorized=_authorize)
     return _summary(server, sup, session, copy_base_url(request))
+
+
+@router.post("/servers/{server_id}/cache/clear", response_model=CacheCleared)
+async def clear_server_cache(
+    server_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+):
+    """Delete a local server's cache directory (``<data_dir>/cache/<id>``: its
+    XDG_CACHE_HOME and Playwright browsers, app.runners.cache) — e.g. a model download
+    cached corrupt. The directory is deleted while the server is stopped, inside the
+    supervisor's unit lock, so neither the bridge's child nor a setup script is writing
+    into it: an enabled server goes through ``Supervisor.restart`` (stop, delete, queue a
+    fresh activation, which re-downloads), a disabled one is only stopped-and-deleted.
+    Same authorization as restart; 400 for a runner without a per-server cache."""
+    server = _visible(principal, session, server_id)
+    if not server_cache.has_cache(server.runner):
+        raise HTTPException(
+            status_code=400,
+            detail="only local servers (npx, uvx, command) have a per-server cache",
+        )
+    sup = request.app.state.supervisor
+    data_dir = get_settings().data_dir
+    freed = 0
+
+    async def _wipe() -> None:
+        nonlocal freed
+        try:
+            # A repo server's post-clone script may be what filled the cache (e.g.
+            # `npx playwright install chromium`); drop its build stamp so the next
+            # activation reruns it instead of skipping an unchanged commit + script.
+            # First: a delete that then fails partway must still leave it rerunning.
+            await run_in_threadpool(
+                repo_checkout.stamp_path(data_dir, server_id).unlink, missing_ok=True
+            )
+            freed = await run_in_threadpool(server_cache.clear_cache, data_dir, server_id)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail=f"cache could not be cleared: {exc}")
+
+    restarted = bool(server.enabled)
+    if restarted:
+        # The restart route's own re-validation, at the supervisor's decision points.
+        def _authorize() -> None:
+            visible, enabled = _visible_enabled_now(server_id, principal)
+            if not visible:
+                raise HTTPException(status_code=404, detail="server not found")
+            if not enabled:
+                # Disabled while the stop awaited teardown: the stop stands (it's the
+                # desired state now) and the clear goes ahead without a restart.
+                raise _DisabledMidway()
+
+        try:
+            await sup.restart(server_id, authorized=_authorize, while_stopped=_wipe)
+        except _DisabledMidway:
+            restarted = False
+    if not restarted:
+        async def _wipe_if_visible() -> None:
+            if not _visible_now(server_id, principal):
+                raise HTTPException(status_code=404, detail="server not found")
+            await _wipe()
+
+        def _authorize_stop() -> None:
+            # Before the stop, inside the unit lock: an owner reassignment, or the server
+            # being enabled and started, while this waited must not let the clear
+            # interrupt a unit it no longer has the right to (or would leave stopped).
+            visible, enabled = _visible_enabled_now(server_id, principal)
+            if not visible:
+                raise HTTPException(status_code=404, detail="server not found")
+            if enabled:
+                raise HTTPException(
+                    status_code=409,
+                    detail="the server was enabled meanwhile; clear its cache again",
+                )
+
+        await sup.stop(server_id, while_stopped=_wipe_if_visible, authorized=_authorize_stop)
+    session.expire_all()
+    current = _visible(principal, session, server_id)
+    return CacheCleared(
+        freed_bytes=freed,
+        restarted=restarted,
+        server=_summary(current, sup, session, copy_base_url(request)),
+    )
+
+
+class _DisabledMidway(Exception):
+    """A cache clear's server was disabled while its unit stopped (see above)."""
 
 
 @router.post("/servers/import", response_model=ImportResult, status_code=201)

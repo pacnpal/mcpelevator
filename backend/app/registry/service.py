@@ -143,6 +143,41 @@ def normalize_openapi(
     return "", rest, document
 
 
+def normalize_graphql(
+    command: str, args: Optional[list[str]], document: str = ""
+) -> tuple[str, list[str], str]:
+    """Validate + canonicalize a graphql server's (endpoint, [schema_url?], schema).
+
+    ``command`` is always the API's ``http(s)://`` endpoint: every call goes there. The
+    schema comes from one source: introspection of the endpoint (``args == []``, no stored
+    schema), a schema file published at ``args[0]`` (SDL or introspection JSON, for an API
+    with introspection turned off), or ``document`` (the schema itself, pasted or
+    uploaded). A blank schema URL collapses to ``[]`` so the stored shape — and
+    ``config_hash`` — is deterministic. A stored schema is parsed here with the bridge's
+    own rules, so a bad one is a 400 rather than a failed start.
+    """
+    url = (command or "").strip()
+    rest = [str(a).strip() for a in (args or []) if str(a).strip()]
+    if not _is_http_url(url):
+        raise ValueError(
+            "a graphql server's command must be the http(s):// URL of its GraphQL endpoint"
+        )
+    if len(rest) > 1:
+        raise ValueError("a graphql server takes at most one argument: a schema URL")
+    if rest and not _is_http_url(rest[0]):
+        raise ValueError("a graphql server's schema URL must be an http(s):// URL with a host")
+    if not (document or "").strip():
+        return url, rest, ""
+    if rest:
+        raise ValueError(
+            "a graphql server takes its schema from a URL or from the schema itself, not both"
+        )
+    from app.bridge import graphql as bridge_graphql
+
+    bridge_graphql.parse_schema(document)  # SchemaError is a ValueError
+    return url, [], document
+
+
 def normalize_oauth(
     runner: str,
     oauth: bool,
@@ -1406,7 +1441,34 @@ def _hash_payload(server: Server) -> dict[str, Any]:
     # (present only when set), and a digest: the hash input needn't carry megabytes.
     if server.openapi_document:
         payload["openapi_document"] = hashlib.sha256(server.openapi_document.encode()).hexdigest()
+    # The bridge decides whether to tee the stdio child's stderr when it builds its
+    # transport, so a toggle must restart it. Same rule (present only when on): a new key
+    # must not rehash every existing row and bounce every bridge on upgrade.
+    if server.attach_stderr_on_error:
+        payload["attach_stderr_on_error"] = True
+    # Same for a stored GraphQL schema.
+    if server.graphql_schema:
+        payload["graphql_schema"] = hashlib.sha256(server.graphql_schema.encode()).hexdigest()
     return payload
+
+
+def _require_attachable_stderr(runner: str, serialize: bool, attach: bool) -> None:
+    """Refuse ``attach_stderr_on_error`` where it could never do anything, rather than
+    store a toggle that silently no-ops (issue #227). A failed call's stderr is only
+    attributable while ONE request holds the stdio child (``serialize_client_requests``),
+    and only a stdio child has a stderr: a remote/openapi/graphql upstream is reached over
+    HTTP. An allowlist, so a new HTTP-backed runner is refused until it says otherwise."""
+    if not attach:
+        return
+    if runner not in ("npx", "uvx", "command", "docker"):
+        raise ValueError(
+            "attach_stderr_on_error applies only to stdio runners (npx, uvx, command, docker)"
+        )
+    if not serialize:
+        raise ValueError(
+            "attach_stderr_on_error requires serialize_client_requests: only one request "
+            "at a time makes the server's stderr attributable to a call"
+        )
 
 
 def _require_pinnable_uvx(command: str, args) -> None:
@@ -1640,6 +1702,114 @@ def normalize_idle_timeout(value: Any) -> Optional[int]:
     return value
 
 
+def normalize_startup_timeout(value: Any, field: str = "start_timeout_s") -> Optional[int]:
+    """Canonicalize a per-server startup deadline (``start_timeout_s`` or
+    ``repo_build_timeout_s``): ``None`` inherits the instance default
+    (MCPE_START_TIMEOUT_S / MCPE_REPO_BUILD_TIMEOUT_S), otherwise whole seconds from 1 to
+    a day. bool is refused for the same reason as in :func:`normalize_idle_timeout`."""
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_STARTUP_TIMEOUT_S
+    ):
+        raise ValueError(
+            f"invalid {field}: {value!r} (seconds, 1 to {MAX_STARTUP_TIMEOUT_S})"
+        )
+    return value
+
+
+MAX_STARTUP_TIMEOUT_S = 86400
+
+# Periodic health checks: a floor so a check can't hammer a server (or fork a shell)
+# every second, and the same one-day ceiling as the startup deadlines.
+MIN_HEALTH_CHECK_INTERVAL_S = 10
+_HEALTH_CHECK_TOOL_MAX = 256
+_HEALTH_CHECK_ARGUMENTS_MAX_BYTES = 16 * 1024
+_HEALTH_CHECK_COMMAND_MAX = 16 * 1024
+
+
+def normalize_health_check(
+    runner: str,
+    tool: Any,
+    arguments: Any,
+    command: Any,
+    interval_s: Any,
+) -> tuple[Optional[str], Optional[dict], Optional[str], Optional[int]]:
+    """Canonicalize a server's health check (issue #225) to
+    ``(tool, arguments, command, interval_s)``, all None when there is no check.
+
+    Two forms, one per server: a tool call through the bridge (any runner but the
+    built-in one, whose tools authorize as the caller and so can't be called by the
+    supervisor), or a shell command (npx/uvx/command only — it runs on this host like
+    the setup script, which a container or a remote URL has none of). Blank tool/command
+    read as unset; arguments belong to a tool check; the interval needs a check and
+    sits between :data:`MIN_HEALTH_CHECK_INTERVAL_S` and a day."""
+    if tool is not None and not isinstance(tool, str):
+        raise ValueError("health_check_tool must be a tool name")
+    if command is not None and not isinstance(command, str):
+        raise ValueError("health_check_command must be a shell command")
+    tool = (tool or "").strip() or None
+    command = command if command is not None and command.strip() else None
+    if tool is not None and command is not None:
+        raise ValueError(
+            "a health check is a tool call or a shell command, not both — "
+            "set health_check_tool or health_check_command"
+        )
+    if tool is not None:
+        if runner == BUILTIN_RUNNER:
+            raise ValueError("the built-in mcpelevator server has no health check")
+        if len(tool) > _HEALTH_CHECK_TOOL_MAX:
+            raise ValueError("health_check_tool is too long")
+    if command is not None:
+        if runner == "docker":
+            raise ValueError(
+                "Health check commands are not supported for Docker servers; "
+                "use a tool health check (health_check_tool) instead."
+            )
+        if runner not in _LOCAL_EXEC_RUNNERS:
+            raise ValueError(
+                "Health check commands are supported only by the npx, uvx, and command "
+                "local runners; use a tool health check (health_check_tool) instead."
+            )
+        if len(command) > _HEALTH_CHECK_COMMAND_MAX:
+            raise ValueError("health_check_command is too long")
+    if arguments is not None and not isinstance(arguments, dict):
+        raise ValueError("health_check_arguments must be a JSON object")
+    if arguments:
+        if tool is None:
+            raise ValueError("health_check_arguments needs a health_check_tool")
+        try:
+            encoded = json.dumps(arguments)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"health_check_arguments is not JSON: {exc}") from None
+        if len(encoded.encode()) > _HEALTH_CHECK_ARGUMENTS_MAX_BYTES:
+            raise ValueError(
+                f"health_check_arguments is too large "
+                f"(max {_HEALTH_CHECK_ARGUMENTS_MAX_BYTES} bytes)"
+            )
+        arguments = dict(arguments)
+    else:
+        arguments = None
+    if interval_s is not None:
+        if (
+            isinstance(interval_s, bool)
+            or not isinstance(interval_s, int)
+            or not MIN_HEALTH_CHECK_INTERVAL_S <= interval_s <= MAX_STARTUP_TIMEOUT_S
+        ):
+            raise ValueError(
+                f"invalid health_check_interval_s: {interval_s!r} "
+                f"(seconds, {MIN_HEALTH_CHECK_INTERVAL_S} to {MAX_STARTUP_TIMEOUT_S})"
+            )
+        if tool is None and command is None:
+            raise ValueError(
+                "health_check_interval_s needs a health check "
+                "(health_check_tool or health_check_command)"
+            )
+    return tool, arguments, command, interval_s
+
+
 def normalize_disabled_tools(value: Any) -> list[str]:
     """Canonicalize the per-server hide list: non-empty tool names, de-duplicated and
     SORTED so the stored value (and thus config_hash) is order-independent — reordering the
@@ -1683,10 +1853,20 @@ _TOOL_DESCRIPTION_MAX = 4096
 # once. Half the typical 128 KiB limit, leaving room for the rest of the spec.
 _TOOL_OVERRIDES_MAX_BYTES = 64 * 1024
 
+# Extra names one tool answers calls to (``aliases``); enough for a few renames' history.
+_TOOL_ALIASES_MAX = 16
+
+
+def _valid_tool_name(name: str) -> bool:
+    # `.` and `..` match the charset but are dot-segments: a client resolves `/rest/.` away
+    # before the request is sent, so the tool would be advertised at a path that can't
+    # reach it.
+    return name not in {".", ".."} and bool(_TOOL_NAME_RE.match(name))
+
 
 def normalize_tool_overrides(
     value: Any, disabled: Any = ()
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
     """Canonicalize the per-server tool overrides (issue #112): a map of UPSTREAM tool name
     -> ``{"name": …, "description": …}``, either field optional.
 
@@ -1715,7 +1895,7 @@ def normalize_tool_overrides(
         return {}
     if not isinstance(value, dict):
         raise ValueError("tool_overrides must be a map of tool name -> override")
-    overrides: dict[str, dict[str, str]] = {}
+    overrides: dict[str, dict[str, Any]] = {}
     # A HIDDEN tool exposes no name, so its own rename never applies: it neither claims a
     # target nor collides with anything. Keeping a hidden tool's saved labels must not block
     # an unrelated rename (the bridge skips disabled configs when reserving names).
@@ -1730,14 +1910,14 @@ def normalize_tool_overrides(
         tool = key
         if not isinstance(override, dict):
             raise ValueError(f"tool_overrides[{tool!r}] must be an override object")
-        unknown = set(override) - {"name", "description"}
+        unknown = set(override) - {"name", "description", "aliases"}
         if unknown:
             # Silently dropping an unknown member would turn a typo ("desc") into an
             # override that appears saved and does nothing.
             raise ValueError(
                 f"tool_overrides[{tool!r}] has unknown field(s): {', '.join(sorted(unknown))}"
             )
-        entry: dict[str, str] = {}
+        entry: dict[str, Any] = {}
         for field_name in ("name", "description"):
             field = override.get(field_name)
             if field is None:
@@ -1760,10 +1940,7 @@ def normalize_tool_overrides(
             del entry["name"]
         name = entry.get("name")
         if name is not None:
-            # `.` and `..` match the charset but are dot-segments: a client resolves
-            # `/rest/.` away before the request is sent, so the tool would be advertised
-            # at a REST path that can't reach it.
-            if name in {".", ".."} or not _TOOL_NAME_RE.match(name):
+            if not _valid_tool_name(name):
                 raise ValueError(
                     f"invalid tool name {name!r}: use up to 64 letters, digits, '_', '.' or '-'"
                 )
@@ -1773,6 +1950,9 @@ def normalize_tool_overrides(
                         f"tools {renamed_to[name]!r} and {tool!r} are both renamed to {name!r}"
                     )
                 renamed_to[name] = tool
+        aliases = _normalize_aliases(tool, override.get("aliases"), entry.get("name"))
+        if aliases:
+            entry["aliases"] = aliases
         # Nothing left after trimming = no override at all. Dropping it keeps a cleared
         # field out of the row (and out of the hash) instead of storing an empty shell.
         if entry:
@@ -1796,6 +1976,23 @@ def normalize_tool_overrides(
         other = overrides.get(name)
         if other is not None and "name" in other and name not in hidden:
             raise ValueError(f"renaming {tool!r} to {name!r} would collide with that tool")
+    # An alias is one more name its tool answers calls to, so it may not be a name some
+    # OTHER tool answers to: another tool's alias, rename target or upstream name (an
+    # overridden or hidden key is a tool known to exist). The bridge also lets a live tool
+    # of that name win at call time, for upstream tools this write can't see.
+    aliased: dict[str, str] = {}
+    for tool, entry in overrides.items():
+        for alias in entry.get("aliases", ()):
+            owner = (
+                aliased.get(alias)
+                or renamed_to.get(alias)
+                or (alias if alias in overrides or alias in hidden else None)
+            )
+            if owner is not None and owner != tool:
+                raise ValueError(
+                    f"alias {alias!r} of {tool!r} is already the name of tool {owner!r}"
+                )
+            aliased[alias] = tool
     result = {tool: overrides[tool] for tool in sorted(overrides)}
     # Bound what actually ships to the bridge, not just its parts.
     size = len(json.dumps(result, separators=(",", ":")).encode())
@@ -1805,6 +2002,32 @@ def normalize_tool_overrides(
             f"max {_TOOL_OVERRIDES_MAX_BYTES})"
         )
     return result
+
+
+def _normalize_aliases(tool: str, value: Any, renamed: str | None) -> list[str]:
+    """One tool's ``aliases``: trimmed, de-duplicated, sorted. Its exposed name is never
+    an alias, and neither is its upstream name unless it's renamed (then the alias keeps
+    the old name answering)."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"tool_overrides[{tool!r}].aliases must be a list of names")
+    exposed = renamed or tool
+    names: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"tool_overrides[{tool!r}].aliases must be a list of names")
+        alias = item.strip()
+        if not alias or alias == exposed:
+            continue
+        if not _valid_tool_name(alias):
+            raise ValueError(
+                f"invalid alias {alias!r}: use up to 64 letters, digits, '_', '.' or '-'"
+            )
+        names.add(alias)
+    if len(names) > _TOOL_ALIASES_MAX:
+        raise ValueError(f"tool_overrides[{tool!r}] has more than {_TOOL_ALIASES_MAX} aliases")
+    return sorted(names)
 
 
 def _normalize_setup_script(runner: str, setup_script: str) -> str:
@@ -1836,8 +2059,8 @@ def _normalize_repo_fields(
 
 
 def scripts_invoke_docker(runner: str, *scripts: Optional[str]) -> bool:
-    """``setup_script_invokes_docker`` over every shell script a server runs before launch
-    (its setup script and its repository's post-clone script)."""
+    """``setup_script_invokes_docker`` over every shell script a server runs on the host
+    (its setup script, its repository's post-clone script, its health check command)."""
     return any(setup_script_invokes_docker(runner, script) for script in scripts)
 
 
@@ -1879,6 +2102,7 @@ def create_server(
     repo_ref: str = "",
     post_clone_script: str = "",
     openapi_document: str = "",
+    graphql_schema: str = "",
     pin_mcp1: bool = False,
     mcp_http: bool = True,
     rest_openapi: bool = False,
@@ -1886,6 +2110,7 @@ def create_server(
     tool_overrides: Optional[dict[str, dict[str, str]]] = None,
     normalize_schema_dialect: bool = False,
     serialize_client_requests: bool = False,
+    attach_stderr_on_error: bool = False,
     auth_provider: str = "inherit",
     oauth: bool = False,
     oauth_scopes: str = "",
@@ -1893,6 +2118,12 @@ def create_server(
     oauth_client_secret: Optional[str] = None,
     oauth_client_mode: str = "inherit",
     idle_timeout_s: Optional[int] = None,
+    start_timeout_s: Optional[int] = None,
+    repo_build_timeout_s: Optional[int] = None,
+    health_check_tool: Optional[str] = None,
+    health_check_arguments: Optional[dict] = None,
+    health_check_command: Optional[str] = None,
+    health_check_interval_s: Optional[int] = None,
     enabled: bool = False,
     source: str = "manual",
     owner_id: Optional[str] = None,
@@ -1914,7 +2145,21 @@ def create_server(
     repo_url, repo_ref, post_clone_script = _normalize_repo_fields(
         runner, repo_url, repo_ref, post_clone_script
     )
-    if enabled and scripts_invoke_docker(runner, setup_script, post_clone_script):
+    (
+        health_check_tool,
+        health_check_arguments,
+        health_check_command,
+        health_check_interval_s,
+    ) = normalize_health_check(
+        runner,
+        health_check_tool,
+        health_check_arguments,
+        health_check_command,
+        health_check_interval_s,
+    )
+    if enabled and scripts_invoke_docker(
+        runner, setup_script, post_clone_script, health_check_command
+    ):
         raise ValueError("Docker CLI invocations require the docker runner")
     # A remote server reuses command/args for the upstream URL + transport; canonicalize
     # them up front so the persisted row (and config_hash) is deterministic. There is no
@@ -1925,8 +2170,13 @@ def create_server(
     elif runner == "openapi":
         command, args, openapi_document = normalize_openapi(command, args, openapi_document)
         cwd = None
+    elif runner == "graphql":
+        command, args, graphql_schema = normalize_graphql(command, args, graphql_schema)
+        cwd = None
     if runner != "openapi":
         openapi_document = ""
+    if runner != "graphql":
+        graphql_schema = ""
     # OAuth applies only to remote; normalize (and force-off elsewhere) before hashing.
     oauth, oauth_scopes, oauth_client_id, oauth_client_secret = normalize_oauth(
         runner, oauth, oauth_scopes, oauth_client_id, oauth_client_secret
@@ -1952,11 +2202,17 @@ def create_server(
     if pin_mcp1:
         _require_pinnable_uvx(command, args)
     idle_timeout_s = normalize_idle_timeout(idle_timeout_s)
+    start_timeout_s = normalize_startup_timeout(start_timeout_s, "start_timeout_s")
+    repo_build_timeout_s = normalize_startup_timeout(repo_build_timeout_s, "repo_build_timeout_s")
     disabled_tools = normalize_disabled_tools(disabled_tools)
     tool_overrides = normalize_tool_overrides(tool_overrides, disabled_tools)
+    # After the docker reclassify above, so a docker-launching `command` is judged as docker.
+    _require_attachable_stderr(
+        runner, bool(serialize_client_requests), bool(attach_stderr_on_error)
+    )
     # Last, after docker normalization may have moved `-e K=V` values out of the args.
     env = sealed.resolve(
-        {}, dict(env or {}), secret=set(secret_env or []), retargeted=False, env_runs_code=False
+        {}, dict(env or {}), secret=set(secret_env or [])
     )
 
     server = Server(
@@ -1974,6 +2230,7 @@ def create_server(
         repo_ref=repo_ref,
         post_clone_script=post_clone_script,
         openapi_document=openapi_document,
+        graphql_schema=graphql_schema,
         pin_mcp1=pin_mcp1,
         mcp_http=mcp_http,
         rest_openapi=rest_openapi,
@@ -1981,6 +2238,7 @@ def create_server(
         tool_overrides=tool_overrides,
         normalize_schema_dialect=bool(normalize_schema_dialect),
         serialize_client_requests=bool(serialize_client_requests),
+        attach_stderr_on_error=bool(attach_stderr_on_error),
         auth_provider=auth_provider,
         oauth=oauth,
         oauth_scopes=oauth_scopes,
@@ -1988,6 +2246,12 @@ def create_server(
         oauth_client_secret=oauth_client_secret,
         oauth_client_mode=oauth_client_mode,
         idle_timeout_s=idle_timeout_s,
+        start_timeout_s=start_timeout_s,
+        repo_build_timeout_s=repo_build_timeout_s,
+        health_check_tool=health_check_tool,
+        health_check_arguments=health_check_arguments,
+        health_check_command=health_check_command,
+        health_check_interval_s=health_check_interval_s,
         enabled=enabled,
         source=source,
         # Ownership is identity, not launch config: outside config_hash by
@@ -2000,28 +2264,6 @@ def create_server(
     # refused here rather than deterministically failing activation later.
     _require_launchable_spec(server)
     return repo.create_server(session, server)
-
-
-# What a server runs, or where it sends its env. Changing any of these on a locked server
-# needs its hidden env values typed in again (app.sealed.resolve): otherwise an editor
-# could point it at `printenv`, or at a URL they control, and read the values back out.
-_RETARGET_FIELDS = (
-    "runner",
-    "command",
-    "args",
-    "run_args",
-    "cwd",
-    "setup_script",
-    "repo_url",
-    "repo_ref",
-    "post_clone_script",
-    "openapi_document",
-    "pin_mcp1",
-)
-
-
-def _host_header(env: dict[str, str]) -> str | None:
-    return next((value for key, value in env.items() if key.lower() == "host"), None)
 
 
 _MUTABLE_FIELDS = {
@@ -2037,6 +2279,7 @@ _MUTABLE_FIELDS = {
     "repo_ref",
     "post_clone_script",
     "openapi_document",
+    "graphql_schema",
     "pin_mcp1",
     "mcp_http",
     "rest_openapi",
@@ -2044,6 +2287,7 @@ _MUTABLE_FIELDS = {
     "tool_overrides",
     "normalize_schema_dialect",
     "serialize_client_requests",
+    "attach_stderr_on_error",
     "auth_provider",
     "oauth",
     "oauth_scopes",
@@ -2054,6 +2298,16 @@ _MUTABLE_FIELDS = {
     # Like auth_provider, idle_timeout_s is enforced outside the bridge (by the
     # supervisor), so it's mutable without entering config_hash — no restart on change.
     "idle_timeout_s",
+    # Startup deadlines: read by the supervisor when an activation starts, outside
+    # config_hash — a change applies from the next start and never bounces a bridge.
+    "start_timeout_s",
+    "repo_build_timeout_s",
+    # Health check: run by the supervisor at readiness and on its own interval, outside
+    # config_hash — a change applies from the next activation or periodic check.
+    "health_check_tool",
+    "health_check_arguments",
+    "health_check_command",
+    "health_check_interval_s",
 }
 
 
@@ -2115,8 +2369,33 @@ def _require_builtin_editable(server: Server, changes: dict[str, Any]) -> None:
         raise ValueError("the built-in mcpelevator server supports none or bearer auth")
 
 
+# Where a server sends its headers. For an editor who can't run code on this box, moving
+# any of these is the one edit that still needs the hidden values typed in again
+# (app.sealed.resolve): otherwise they could point an admin-provisioned key at their host.
+_DESTINATION_FIELDS = ("runner", "command", "args", "openapi_document")
+
+
+def _destination(server: Server, stored_env: dict[str, str] | None = None) -> tuple:
+    """Where ``server`` sends its headers: the destination fields plus EVERY header named
+    ``Host`` in any case, since headers keep each spelling and send them all. With
+    ``stored_env``, a ``Host`` sent back as "<hidden>" reads as the value stored under it."""
+    stored_env = stored_env or {}
+    hosts = tuple(sorted(
+        (key, stored_env.get(key) if value == sealed.HIDDEN else value)
+        for key, value in (server.env or {}).items()
+        if key.lower() == "host"
+    ))
+    return (*((getattr(server, f) or None) for f in _DESTINATION_FIELDS), hosts)
+
+
 @_serialized_write
-def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> Server:
+def update_server(
+    session: Session,
+    server_id: str,
+    changes: dict[str, Any],
+    *,
+    editor_runs_code: bool = False,
+) -> Server:
     server = repo.get_server(session, server_id)
     if server is None:
         raise KeyError(server_id)
@@ -2135,10 +2414,10 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     # was ALREADY docker is not gated (so a broken image/env can be fixed while the runner is
     # off). Captured before the mutation/reclassify below changes server.runner.
     was_docker = server.runner == "docker"
-    # Baselines for the locked-env rule (app.sealed.resolve): what's stored, and what the
-    # server runs, before this change touches either.
+    # The locked-env baselines (app.sealed.resolve): what's stored, and where the server
+    # sends it, before this change.
     env_before = dict(server.env or {})
-    target_before = {key: getattr(server, key) for key in _RETARGET_FIELDS}
+    destination_before = _destination(server)
     # slug is identity/routing, not launch config: validated separately and excluded
     # from config_hash, so a rename re-routes the proxy without bouncing the bridge.
     if "slug" in changes:
@@ -2179,22 +2458,52 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
     except ValueError:
         session.rollback()
         raise
+    try:
+        (
+            server.health_check_tool,
+            server.health_check_arguments,
+            server.health_check_command,
+            server.health_check_interval_s,
+        ) = normalize_health_check(
+            server.runner,
+            server.health_check_tool,
+            server.health_check_arguments,
+            server.health_check_command,
+            server.health_check_interval_s,
+        )
+    except ValueError:
+        session.rollback()
+        raise
     if server.enabled and scripts_invoke_docker(
-            server.runner, server.setup_script, server.post_clone_script):
+            server.runner, server.setup_script, server.post_clone_script,
+            server.health_check_command):
         session.expire(server)  # raises before any autoflush — discard just this instance's edits
         raise ValueError("Docker CLI invocations require the docker runner")
-    if server.runner == "remote":
-        server.command, server.args = normalize_remote(server.command, server.args)
-        # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
-        # the stale working directory here (remote has no process) to keep the row canonical.
-        server.cwd = None
-    elif server.runner == "openapi":
-        server.command, server.args, server.openapi_document = normalize_openapi(
-            server.command, server.args, server.openapi_document or ""
-        )
-        server.cwd = None  # likewise: no process, so no working directory
+    # A rejected launch line rolls back like every other refused edit above, so a caller
+    # that keeps the session can't commit half of it later.
+    try:
+        if server.runner == "remote":
+            server.command, server.args = normalize_remote(server.command, server.args)
+            # Converting a local server to remote: PATCH drops the form's cwd:null, so clear
+            # the stale working directory here (remote has no process) to keep the row canonical.
+            server.cwd = None
+        elif server.runner == "openapi":
+            server.command, server.args, server.openapi_document = normalize_openapi(
+                server.command, server.args, server.openapi_document or ""
+            )
+            server.cwd = None  # likewise: no process, so no working directory
+        elif server.runner == "graphql":
+            server.command, server.args, server.graphql_schema = normalize_graphql(
+                server.command, server.args, server.graphql_schema or ""
+            )
+            server.cwd = None
+    except ValueError:
+        session.rollback()
+        raise
     if server.runner != "openapi":
         server.openapi_document = ""
+    if server.runner != "graphql":
+        server.graphql_schema = ""
     # Normalize OAuth (and force it off for any non-remote runner) so a stray secret can't
     # ride along on a converted server and the hash stays deterministic.
     server.oauth, server.oauth_scopes, server.oauth_client_id, server.oauth_client_secret = (
@@ -2246,32 +2555,30 @@ def update_server(session: Session, server_id: str, changes: dict[str, Any]) -> 
         if server.pin_mcp1:
             _require_pinnable_uvx(server.command, server.args)
         server.idle_timeout_s = normalize_idle_timeout(server.idle_timeout_s)
+        server.start_timeout_s = normalize_startup_timeout(
+            server.start_timeout_s, "start_timeout_s"
+        )
+        server.repo_build_timeout_s = normalize_startup_timeout(
+            server.repo_build_timeout_s, "repo_build_timeout_s"
+        )
         server.disabled_tools = normalize_disabled_tools(server.disabled_tools)
         server.tool_overrides = normalize_tool_overrides(
             server.tool_overrides, server.disabled_tools or []
         )
-        # Compared after normalization, so the form resending the same config doesn't
-        # count as pointing the server somewhere new.
-        retargeted = any(
-            (getattr(server, key) or None) != (target_before[key] or None)
-            for key in _RETARGET_FIELDS
+        _require_attachable_stderr(
+            server.runner,
+            bool(server.serialize_client_requests),
+            bool(server.attach_stderr_on_error),
         )
-        # A Host header picks the virtual host behind the same URL, so changing it points
-        # the headers somewhere else as surely as changing the URL does.
-        host_before, host_after = _host_header(env_before), _host_header(server.env or {})
-        if host_after != host_before and not (
-            host_after == sealed.HIDDEN and sealed.is_sealed(host_before)
-        ):
-            retargeted = True
+        # Compared after normalization, so the form resending the same config doesn't
+        # count as a move; a hidden `Host` sent back as "<hidden>" is the stored one.
+        destination_after = _destination(server, env_before)
         secret = changes.get("secret_env")
         server.env = sealed.resolve(
             env_before,
             dict(server.env or {}),
             secret=set(secret) if secret is not None else None,
-            retargeted=retargeted,
-            # Headers (remote/openapi) only travel to the upstream; a local process's env
-            # can change what it runs (NODE_OPTIONS and friends).
-            env_runs_code=server.runner not in ("remote", "openapi"),
+            retargeted=not editor_runs_code and destination_after != destination_before,
         )
         _require_launchable_spec(server)
     except ValueError:
@@ -2322,6 +2629,7 @@ def clone_server(
         repo_ref=src.repo_ref or "",
         post_clone_script=src.post_clone_script or "",
         openapi_document=src.openapi_document or "",
+        graphql_schema=src.graphql_schema or "",
         pin_mcp1=bool(src.pin_mcp1),
         mcp_http=src.mcp_http,
         rest_openapi=src.rest_openapi,
@@ -2329,6 +2637,7 @@ def clone_server(
         tool_overrides={k: dict(v) for k, v in (src.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(src.normalize_schema_dialect),
         serialize_client_requests=bool(src.serialize_client_requests),
+        attach_stderr_on_error=bool(src.attach_stderr_on_error),
         auth_provider=src.auth_provider,
         oauth=bool(src.oauth),
         oauth_scopes=src.oauth_scopes or "",
@@ -2336,6 +2645,12 @@ def clone_server(
         oauth_client_secret=src.oauth_client_secret,
         oauth_client_mode=src.oauth_client_mode or "inherit",
         idle_timeout_s=src.idle_timeout_s,
+        start_timeout_s=src.start_timeout_s,
+        repo_build_timeout_s=src.repo_build_timeout_s,
+        health_check_tool=src.health_check_tool,
+        health_check_arguments=dict(src.health_check_arguments or {}) or None,
+        health_check_command=src.health_check_command,
+        health_check_interval_s=src.health_check_interval_s,
         enabled=False,
         source="clone",
         # The cloner (not the source's owner) owns the copy — cloning is a create.
@@ -2355,7 +2670,8 @@ def set_enabled(session: Session, server_id: str, enabled: bool) -> Server:
     elif enabled and (
             local_exec_invokes_docker(server.runner, server.command, server.args)
             or scripts_invoke_docker(
-                server.runner, server.setup_script, server.post_clone_script)):
+                server.runner, server.setup_script, server.post_clone_script,
+                server.health_check_command)):
         raise ValueError("Docker CLI invocations require the docker runner")
     server.enabled = enabled
     return repo.save_server(session, server)

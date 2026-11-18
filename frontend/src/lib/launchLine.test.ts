@@ -38,6 +38,9 @@ describe('parseLaunchLine', () => {
 		expect(parseLaunchLine('npx -y "pkg')).toBeNull();
 		expect(parseLaunchLine('npx -y')).toBeNull();
 		expect(parseLaunchLine('npx a\nnpx b')).toBeNull();
+		// The form stores one trimmed arg per line: these can't round-trip.
+		expect(parseLaunchLine('npx pkg --prefix "" --verbose')).toBeNull();
+		expect(parseLaunchLine('npx pkg --name " padded "')).toBeNull();
 	});
 });
 
@@ -45,6 +48,12 @@ describe('shellSplit', () => {
 	it('handles quotes and escapes', () => {
 		expect(shellSplit(`a 'b c' "d \\"e\\"" f\\ g`)).toEqual(['a', 'b c', 'd "e"', 'f g']);
 		expect(shellSplit(`x ''`)).toEqual(['x', '']);
+		// Inside double quotes only $ ` " \ are escapable; other backslashes stay.
+		expect(shellSplit(String.raw`--pattern="\d+" "C:\tmp\x"`)).toEqual([
+			String.raw`--pattern=\d+`,
+			String.raw`C:\tmp\x`
+		]);
+		expect(shellSplit(String.raw`"a\\b \"q\""`)).toEqual([String.raw`a\b "q"`]);
 	});
 });
 

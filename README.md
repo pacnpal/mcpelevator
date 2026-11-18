@@ -7,7 +7,7 @@ Most [MCP](https://modelcontextprotocol.io) servers ship as **stdio** programs (
 
 Already-remote servers work too: point mcpelevator at an existing Streamable-HTTP/SSE MCP URL (the `remote` runner) and it proxies that upstream behind the same auth, supervision, and per-client copy menu as a local one — handy for putting bearer auth in front of a remote server, or giving every client one consistent endpoint.
 
-Not an MCP server at all? Point the `openapi` runner at any REST API's **OpenAPI document** and mcpelevator translates it for you: every operation becomes an MCP tool, served like any other server.
+Not an MCP server at all? Point the `openapi` runner at any REST API's **OpenAPI document**, or the `graphql` runner at any **GraphQL endpoint**, and mcpelevator translates it for you: every operation (or query and mutation field) becomes an MCP tool, served like any other server.
 
 The protocol bridging is done by [FastMCP](https://gofastmcp.com); mcpelevator is the **control plane**: a clean UI, process supervision, security, and onboarding around it.
 
@@ -39,7 +39,7 @@ Add a server, press start, copy the URL. The dashboard supervises each one — l
     <td width="50%"><img src="docs/screenshots/catalog-search.png" alt="Search the registry for a server"><br><b>Search &amp; install</b> — pick a version, install with one review.</td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/add-server.png" alt="Add a server form"><br><b>Add a server</b> — npx, uvx, a command, a remote URL, or an OpenAPI document.</td>
+    <td><img src="docs/screenshots/add-server.png" alt="Add a server form"><br><b>Add a server</b> — npx, uvx, a command, a remote URL, an OpenAPI document, or a GraphQL endpoint.</td>
     <td><img src="docs/screenshots/settings.png" alt="Settings — access tokens and network security"><br><b>Settings</b> — access tokens, bind mode, and the LAN gate.</td>
   </tr>
   <tr>
@@ -229,13 +229,67 @@ package caches configured on those paths survive. `MCPE_APT_PACKAGES` is differe
 is global container bootstrap for extra Debian packages before mcpelevator starts, not
 per-server setup.
 
+#### Per-server cache
+
+Each local (`npx`, `uvx`, `command`) server gets its own cache directory,
+`<data_dir>/cache/<server id>` (`/data/cache/<id>` in Docker). Its setup script, its
+post-clone script and the launched server all see `XDG_CACHE_HOME` set to it and
+`PLAYWRIGHT_BROWSERS_PATH` set to its `ms-playwright` subdirectory, so Hugging Face models,
+fastembed/onnx caches, anything else following `XDG_CACHE_HOME`, and Playwright browsers
+land on the data volume and survive a container recreate. A setup script's
+`npx playwright install chromium` installs where the server will look. Setting either
+variable in the server's `env` overrides it for that server. The npm and uv caches stay
+shared across servers (`npm_config_cache` / `UV_CACHE_DIR` under `/data` in the image).
+Docker-runner servers keep their own filesystem and are unaffected.
+
+When a download was cached corrupt (an embedding model failing with `TAR_BAD_ARCHIVE`, say),
+**Clear cache** on the server page (or `POST /api/servers/{id}/cache/clear`, or the built-in
+server's `clear_server_cache` tool) deletes that server's directory and returns the bytes
+freed. A location set by the server's own `env` override is not cleared. It needs the same access as restart. An enabled server is stopped first and
+restarted after the delete, so it downloads afresh; a disabled one is only cleared.
+Deleting a server deletes its cache directory.
+
 Each startup attempt runs setup, launches the bridge, and checks readiness. Setup and
-readiness each get a separate `MCPE_START_TIMEOUT_S` window. Failed setup, bridge launch
+readiness each get a separate `MCPE_START_TIMEOUT_S` window. A server can set its own
+**startup timeout** (`start_timeout_s`, and `repo_build_timeout_s` for a repository
+checkout) in its form; blank inherits the instance default. Raise it for a setup that
+installs system packages or downloads a browser (`playwright install --with-deps`), which
+can outlast two minutes on a cold container. A change applies from the next start and
+never restarts a running server. Failed setup, bridge launch
 or readiness, and exits before a stable run retry the full attempt, including setup.
 `MCPE_RESTART_BUDGET` defaults to 5 attempts, with waits of 2, 4, 8, then 16 seconds;
 further waits stay at 16 seconds. After `MCPE_RESTART_STABLE_S` (60 seconds by default)
 of uninterrupted running, the retry budget is restored. Stop cancels startup and any
-pending retry.
+pending retry. While attempts are failing, the server's `last_error` carries the latest
+one (`attempt 1/5 failed: setup exited with code 100`), and it clears once the server is
+running.
+
+Readiness only proves the bridge answers `tools/list`. An optional per-server **health
+check** proves more: either a **tool call** (`health_check_tool` plus
+`health_check_arguments`, called through the bridge as clients see it; fails on an error
+result; any runner) or, for npx/uvx/command servers, a **shell command**
+(`health_check_command`, run like the setup script with the server's environment and
+working directory; fails on a non-zero exit). It runs once the server answers, inside the
+startup timeout, and a failure fails that attempt (`health check failed: …` in
+`last_error`, its output in the server's log under an `attempt N/M: health` marker).
+With `health_check_interval_s` (10 seconds or more; blank = at startup only) it also runs
+while the server is running: a failure marks the server `unhealthy` — `/api/health/{slug}`
+answers 503 and `/s/<slug>` stops routing to it — without restarting it, and a later
+passing check returns it to `running`. Checks are never counted as usage, never run
+against an idle server, and never keep one awake. A change applies from the next start or
+check and never restarts a running server.
+
+Stopping a server mid-setup (a disable, a restart, or the setup's own timeout) kills the
+script. A package install killed part-way leaves dpkg interrupted, and from then on
+every `apt-get` refuses with "dpkg was interrupted, you must manually run
+'dpkg --configure -a'". So before each setup and checkout, when dpkg reports an
+interrupted run and the script runs as root, mcpelevator runs `dpkg --configure -a`
+first (the repair apt asks for, which removes nothing) and says so in the server's log.
+
+Server starts, failed attempts, terminal failures (with the hint and the last lines of
+the server's own output), crashes of a running server, idle stops and stops reach the
+container log at INFO without debug mode; `MCPE_LOG_LEVEL` adjusts that. The per-request
+access log stays out of it unless `MCPE_ACCESS_LOG=true` or debug mode is on.
 
 An enabled server in `failed` or `unhealthy` state can be retried in the UI without
 changing its saved configuration, or through the API:
@@ -326,14 +380,20 @@ A tool's name and description are the whole interface a model gets — and some 
 ship poor ones. When you can't fix that upstream (a closed-source or paid endpoint),
 override it here instead. Each tool row on the server detail page has an **edit**
 button that opens the label editor — one dialog, so a long upstream description never
-stands between you and the fields — with two optional entries:
+stands between you and the fields — with three optional entries:
 
 - **Name** — what clients call the tool. A renamed tool answers to its **new name
-  only**, exactly as if the upstream server had been rebuilt, so update any client
-  that referenced the old one.
+  only**, exactly as if the upstream server had been rebuilt, unless you keep the
+  old name as an alias.
 - **Description** — the text the model actually reads.
+- **Also answers to** — aliases: extra names, one per line, that still call the tool
+  but never appear in its tool list. Use them to keep an old name working after a
+  rename, yours or the upstream's (an OpenAPI document that drops its `operationId`s
+  renames every tool, for instance). They work on `/s` and through groups, not on
+  REST. A name another tool already answers to is refused when you save, and if the
+  upstream later adds a tool of that name, the real tool wins.
 
-Leave a field empty to keep what the upstream declares; the two are independent, so
+Leave a field empty to keep what the upstream declares; they're independent, so
 you can rewrite a description without renaming, or vice versa. Overrides apply to
 **every** surface at once — MCP, REST (the tool is served at `/rest/<new-name>` and
 appears that way in the generated OpenAPI), and any group the server belongs to.
@@ -344,7 +404,7 @@ Apply bar follows the page, so a change staged at the top of a long tool list ca
 saved without scrolling back to it. They're
 keyed by the tool's upstream name, so an override survives being renamed again. Over
 the API: `PATCH /api/servers/<id>` with
-`{"tool_overrides": {"do_thing": {"name": "run_report", "description": "Runs the report."}}}`
+`{"tool_overrides": {"do_thing": {"name": "run_report", "description": "Runs the report.", "aliases": ["do_thing"]}}}`
 (send `{}` to restore every tool's upstream labels).
 
 ### Server requests: roots, sampling and elicitation
@@ -409,6 +469,26 @@ client it's for.
 
 Over the API: `PATCH /api/servers/<id>` with `{"serialize_client_requests": true}`.
 Changing it restarts the server's bridge.
+
+**Upstream stderr on failed calls.** When a stdio server's tool call fails, the real
+cause (a traceback, a diagnostic) usually goes to the process's stderr, which only lands
+in the server's log. With **Client requests** on, one call holds the process at a time,
+so what it writes to stderr meanwhile belongs to that call. Turn on **Attach stderr to
+failed calls** (`attach_stderr_on_error`, which needs `serialize_client_requests`) and a
+failed tool call (`isError`, or an error the bridge turns into one) gets one more text
+block: `[mcpelevator] upstream stderr during this call:` followed by the last 20 lines
+the process wrote during that call, at most 2 KB. The server's own secret env values
+are replaced with `<hidden>` first (whole, even one spanning lines such as a PEM key),
+then each line is scrubbed of credentials the way debug logs are. A successful call gets nothing, and the lines still go to the
+server's log as before. It reaches MCP clients, the REST `is_error` envelope and groups
+alike. Stdio runners only (`docker` too: the container's stderr); it's refused for
+`remote`, `openapi` and `graphql`, and without `serialize_client_requests`. It only helps when the
+failure comes back as a failed call: a process that crashes or hangs instead shows up in
+the server's log and status. The block is everything the process wrote to stderr while
+that call held it, so a server that keeps writing in the background (late output from
+work an earlier call started, say) can land some of that in a later caller's error; turn
+it on only for servers whose stderr is fine for their callers to see. Changing it
+restarts the server's bridge.
 
 ### Usage stats (per server, per tool)
 
@@ -513,6 +593,31 @@ Everything downstream treats it like any other server: hide or relabel tools (hi
 - Responses aren't validated against the document's declared schemas — real APIs drift from their own specs, and a strict check would fail working calls.
 - Like `remote`, it isn't a local runner: it only makes outbound HTTP calls, so a member without the "local runners" permission may create one (see **Security**).
 
+**A GraphQL API?** Use the `graphql` runner: mcpelevator loads the API's schema and serves **every query and mutation field as an MCP tool**. No code is generated and nothing runs locally. `command` is the GraphQL endpoint, `env` is the HTTP headers sent with every request, and the schema comes from one of three places:
+
+- **Introspection** (the default, `"args": []`): the endpoint is asked for its schema on every start, with the configured headers.
+- **A schema URL** (`"args": ["https://…/schema.graphql"]`): an SDL file or an introspection-result JSON published somewhere, for an API with introspection turned off. Fetched without the headers; a 401/403 is retried with them only when the file lives on the endpoint's own origin, never following a redirect.
+- **The schema itself**, pasted or uploaded in the form (over the API: SDL or introspection JSON in `"graphql_schema"`). Checked on save; edit it to pick up a changed API.
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/servers -H 'content-type: application/json' -d '{
+  "name": "GitHub GraphQL", "runner": "graphql",
+  "command": "https://api.github.com/graphql",
+  "env": {"Authorization": "Bearer <token>"}, "secret_env": ["Authorization"], "enabled": true
+}'
+```
+
+How a field becomes a tool:
+
+- **Arguments → the tool's JSON Schema.** Scalars map to JSON types (`ID` takes a string or an integer, a custom scalar takes any JSON), enums to string enums, input objects to `$defs` (recursive ones included), `@oneOf` inputs to exactly-one-property objects; defaults and descriptions carry over, and required arguments are required.
+- **Arguments travel as GraphQL variables**, never spliced into the query text, so no argument value can change the operation.
+- **The result's fields** come from a generated selection set: every scalar and enum, plus nested objects two levels down (a Relay connection is walked through `edges { node }` / `nodes` without using up a level), leaving out deprecated fields and fields that need arguments. A tool's `selection_set` argument replaces it (`{ id name owner { login } }`); its description shows the default. A field returning a scalar has no selection.
+- **Queries are marked read-only**, mutations aren't. A mutation sharing a query's name is served as `mutation_<name>`. Subscriptions need a long-lived connection MCP tools don't have, so they aren't served (the start log counts them).
+- **One more tool, `graphql_query`**, runs any query or mutation you write (aliases, several fields in one request, fragments), with `variables` and `operation_name`. (If the API has a root field with that name, the raw tool takes a leading underscore, one more for each further clash.) Hide it, like any tool, if you'd rather expose only the per-field tools.
+- **Every operation is validated against the schema before it's sent**, so a mistyped field or a bad `selection_set` comes back as the validation error ("Cannot query field 'nope' on type 'User'. Did you mean 'name'?") rather than an API round trip. GraphQL `errors` come back as a tool error when there's no data, alongside the data when it's partial.
+- **The schema is read on every start**: **Restart** to pick up a changed API. If it can't be loaded, the start fails with one `graphql: …` line in the server's log (an API with introspection off says so; paste its schema or give a schema URL).
+- As for openapi: the configured headers are the only ones the API sees (nothing of the caller's is forwarded), requests only ever go to the endpoint (no redirect is followed), and it isn't a local runner, so a member without the "local runners" permission may create one.
+
 Pasting an `mcpServers` config with remote entries now imports them as `remote` servers instead of skipping: a `url` (or Gemini CLI's `httpUrl`) becomes the upstream, and a `type` / `transport` field selects the transport (defaulting to `streamable-http`).
 
 **One URL for a bundle of servers (groups).** Declare a **group** in Settings (or `PUT /api/groups/<name>`) and `http://…/g/<name>/mcp` serves the tools of that group's running members as a single MCP bundle — each tool prefixed by the member's slug (e.g. `memory_create_entities`), so one client entry covers the whole set. A group's members are **all servers** (`"*"` — every registered server, present and future, except the built-in mcpelevator server, which joins only when named) or a **picked list** of server ids. There's no special name: create a group called `all` with members `"*"` for a bundle of everything. Groups follow the default auth provider; see **Security** for the exclusion rule that keeps bearer-protected servers out of an unauthenticated bundle, and **Route reference** below for the full grammar and the registry config format.
@@ -604,23 +709,24 @@ never in the database, so authenticating never restarts the bridge on its own.
 > secrecy. Full rationale: [docs/security.md](docs/security.md) § *Credentials at rest*.
 
 **Secret env values and headers.** Click the lock next to any env var (or header, for
-`remote` and `openapi` servers) to make it secret. A secret value is encrypted in the
+`remote`, `openapi` and `graphql` servers) to make it secret. A secret value is encrypted in the
 database with a key in `<data_dir>/env.key` (`0600`) and never shown again: the form, the
 API and the control MCP all read `<hidden>`, and a `.mcpb` export asks for it at install
-instead of carrying it. Leave the field blank to keep the stored value, or type a new one
-to replace it. Changing what the server runs (runner, command, args, image options,
-working directory, setup script, repository, OpenAPI document) needs the secret values
-typed in again, and so does unlocking one, so nobody with edit rights can point a server
-at `printenv` or their own URL and read the values back. On a local server that includes
-adding, changing or removing any other env value, since something like `NODE_OPTIONS` changes what
-runs just as much as the command does. Headers on remote and openapi servers only go to
-the upstream, so those can change freely, except `Host`, which picks where they go. Back up `env.key` with the
+instead of carrying it. Leave the field blank to keep the stored value, whatever else you
+change, or type a new one to replace it. Making a value secret is one-way: it can be
+replaced but never read back, so unlocking one needs a new value typed in (the form warns
+when you lock a value). This protects against a leaked database or an over-the-shoulder
+look, not against an admin or a member with the local-runner permission, who can run code
+that reads `env.key`. A member without that permission is the one exception: moving where a
+remote, openapi or graphql server sends its headers (its URL, base URL, document or `Host`)
+needs the secret values typed in again, so an admin-provisioned key can't be redirected to
+their own host. Back up `env.key` with the
 database: without it the secret values can't be decrypted, and the server's start error
 names the ones to re-enter.
 
 ## Manage mcpelevator from an agent (the built-in MCP server)
 
-Every install has one built-in server named **mcpelevator**, provisioned on boot (existing installs get it on upgrade). It serves the control plane itself over MCP at `/s/mcpelevator/mcp`, so an agent can do what the UI does. If a server of yours already had that slug, the built-in one gets `mcpelevator-2` instead. Boot prints the URL it actually lands on, and the dashboard shows it. It has 43 tools: list, create, edit, enable, disable, restart and delete servers (any runner, including an `openapi` server that serves a REST API from its OpenAPI document), import an `mcpServers` config, install a catalog entry or a GitHub repository in one call, wait for a server to settle, try a server's tools, read its logs and usage, export a `.mcpb` bundle, manage groups, tokens, users and settings, and ask `whoami`. The read-only views are also MCP resources (`mcpelevator://servers`, `mcpelevator://servers/{id}`, `mcpelevator://servers/{id}/logs`, `mcpelevator://groups`, `mcpelevator://settings`). The `install_server` and `diagnose_server` prompts walk an agent through the two most common jobs, and the server sends instructions on connect that explain the flows, among them serving a REST API through the `openapi` runner (`command` is the document URL, `args` an optional base-URL override, `env` the API's headers).
+Every install has one built-in server named **mcpelevator**, provisioned on boot (existing installs get it on upgrade). It serves the control plane itself over MCP at `/s/mcpelevator/mcp`, so an agent can do what the UI does. If a server of yours already had that slug, the built-in one gets `mcpelevator-2` instead. Boot prints the URL it actually lands on, and the dashboard shows it. It has 43 tools: list, create, edit, enable, disable, restart and delete servers (any runner, including an `openapi` server that serves a REST API from its OpenAPI document and a `graphql` server that serves a GraphQL API from its schema), import an `mcpServers` config, install a catalog entry or a GitHub repository in one call, wait for a server to settle, try a server's tools, read its logs and usage, export a `.mcpb` bundle, manage groups, tokens, users and settings, and ask `whoami`. The read-only views are also MCP resources (`mcpelevator://servers`, `mcpelevator://servers/{id}`, `mcpelevator://servers/{id}/logs`, `mcpelevator://groups`, `mcpelevator://settings`). The `install_server` and `diagnose_server` prompts walk an agent through the two most common jobs, and the server sends instructions on connect that explain the flows, among them serving a REST API through the `openapi` runner (`command` is the document URL, `args` an optional base-URL override, `env` the API's headers) and a GraphQL API through the `graphql` runner (`command` is the endpoint, `args` an optional schema URL, `env` the API's headers).
 
 It's a server like the others. It shows on the dashboard, and you can hide or rename tools, rewrite descriptions, set its idle timeout, rename its slug, or set its auth to `none` or `bearer`. Its launch line is fixed (there's nothing to launch), and it can't be deleted, cloned, or handed to another owner. REST/OpenAPI stays off, because a REST call can't carry your token through to the control plane. It joins a group only when you name it in the group's member list: `"*"` skips it, so a wildcard bundle you hand to agents never picks up admin tools on upgrade.
 
@@ -697,17 +803,27 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_CONTROL_MCP` | `true` | Provision the built-in mcpelevator MCP server on boot when it's missing; `false` skips that (an existing one stays, turn it off in Settings) |
 | `MCPE_CF_ACCESS_TEAM_DOMAIN` | _(none)_ | Cloudflare Access team domain (`myteam.cloudflareaccess.com`). With `MCPE_CF_ACCESS_AUD`, the built-in server accepts Cloudflare Access sign-ins; see **Manage mcpelevator from an agent** |
 | `MCPE_CF_ACCESS_AUD` | _(none)_ | The Access application's AUD tag (comma-separated for several applications) |
+| `MCPE_ACCESS_LOG` | `false` | uvicorn's one-line-per-request access log (`"GET /api/servers/… 200 OK"`) in the container log when debug mode is off. Off by default because the UI polls; debug mode always logs requests |
+| `MCPE_LOG_LEVEL` | `INFO` | Level of mcpelevator's own log lines when debug mode is off: server starts, failures with the reason and the server's last output lines, crashes, idle stops. `WARNING` keeps only failures |
 | `MCPE_DEBUG` | `false` | Debug mode: TRACE-level logs everywhere (bridges too), a full trace of every request with secrets scrubbed, crash reporting, and `GET /api/debug`; see **Debug mode** |
 | `MCPE_APT_PACKAGES` | _(none)_ | Global, space-separated extra Debian packages installed before mcpelevator starts (Docker image only), not per-server `setup_script`. A failed install warns and boot continues; packages must be reinstalled after container replacement |
-| `MCPE_DATA_DIR` | `./data` | SQLite + caches |
+| `MCPE_DATA_DIR` | `./data` | SQLite + caches, including each local server's own `cache/<server id>` (`XDG_CACHE_HOME` / `PLAYWRIGHT_BROWSERS_PATH` for its setup script and child; see **Per-server cache**) |
 | `MCPE_FRONTEND_DIR` | `../frontend/build` | Built SPA to serve |
 | `MCPE_PORT_RANGE_START` / `_END` | `49200` / `49400` | Loopback ports for bridge processes |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrent running servers |
-| `MCPE_START_TIMEOUT_S` | `120` | Separate timeout for setup and for readiness on each startup attempt (covers npx/uvx cold start) |
-| `MCPE_REPO_BUILD_TIMEOUT_S` | `900` | Timeout for a repository server's checkout + post-clone build on each startup attempt (a first build can take minutes) |
+| `MCPE_START_TIMEOUT_S` | `120` | Separate timeout for setup and for readiness on each startup attempt (covers npx/uvx cold start); a server's own `start_timeout_s` overrides it |
+| `MCPE_REPO_BUILD_TIMEOUT_S` | `900` | Timeout for a repository server's checkout + post-clone build on each startup attempt (a first build can take minutes); a server's own `repo_build_timeout_s` overrides it |
 | `MCPE_RESTART_BUDGET` | `5` | Startup attempts before `failed`; retry waits are 2/4/8/16 seconds and cap at 16 |
 | `MCPE_RESTART_STABLE_S` | `60` | Uninterrupted running time before the retry budget is restored |
 | `MCPE_VERSION` | _(image: release tag)_ | Version the instance reports (`/api/health`, UI badge). Set by the published image from the release tag; you don't normally set it. Unset → derived from the adjacent `pyproject.toml` (source tree), else installed package metadata |
+
+The Docker image also points every cache at the `/data` volume, so a container recreate
+doesn't throw downloads away: `npm_config_cache=/data/.npm-cache`,
+`UV_CACHE_DIR=/data/.uv-cache`, `XDG_CACHE_HOME=/data/.cache` and
+`PLAYWRIGHT_BROWSERS_PATH=/data/.cache/ms-playwright`. Local servers get their own
+`XDG_CACHE_HOME` / `PLAYWRIGHT_BROWSERS_PATH` under `/data/cache/<id>` on top of that (see
+**Per-server cache**). The volume grows with the models and browsers servers download; all
+of it is regenerable.
 
 ## Debug mode
 
@@ -783,7 +899,7 @@ When control-plane auth is enforced, the SPA shows a login screen. The admin tok
 
 **Multi-user control plane** — the control plane supports multiple identities with two roles. An **admin** sees and manages everything (this is what every credential above resolves to, including pre-multi-user tokens and `MCPE_ADMIN_TOKEN`, so upgrades change nothing). A **member** sees and manages only the servers they create (or are assigned by an admin reassigning a server's owner) and mints data-plane tokens only for those servers — never `all`-, `control`-, or group-scoped ones; settings, groups, and user management are admin-only, and servers a member can't see 404 exactly like nonexistent ones (slugs and ids don't leak, including on `/api/health/*`). Users hold no passwords: an admin creates a user in **Settings → Users** and mints them a **login token** (a `control`-scoped token bound to the user, shown once) that they paste at the same login screen. Deleting a user revokes all their tokens and is refused while they still own servers, and the last admin login can't be demoted or deleted (`MCPE_ADMIN_TOKEN` lifts that guard).
 
-> **Trust caveat — authorization, not isolation.** The **local runners** (`npx`, `uvx`, `command`, and `docker`) execute operator-supplied code as the mcpelevator process user, with filesystem access to the data directory (the SQLite database, other servers' env values, OAuth token files). The per-user **"local runners"** permission (off by default for new users) controls who may configure such servers — a member without it can only create `remote` and `openapi` servers and can start/stop but not reshape a local server an admin provisioned for them. Grant it only to people you trust with the machine itself: multi-user separates *management* views, it does not sandbox server processes from each other.
+> **Trust caveat — authorization, not isolation.** The **local runners** (`npx`, `uvx`, `command`, and `docker`) execute operator-supplied code as the mcpelevator process user, with filesystem access to the data directory (the SQLite database, other servers' env values, OAuth token files). The per-user **"local runners"** permission (off by default for new users) controls who may configure such servers — a member without it can only create `remote`, `openapi` and `graphql` servers and can start/stop but not reshape a local server an admin provisioned for them. Grant it only to people you trust with the machine itself: multi-user separates *management* views, it does not sandbox server processes from each other.
 
 **Server-initiated requests on stdio servers** — one stdio process serves every client of that server, and a `roots/list`, sampling or elicitation request it sends doesn't say which client it's for. By default those requests are therefore refused: no roots, and sampling and elicitation declined. That way one client's roots, prompts or form answers can never reach another client. **Client requests** (`serialize_client_requests`) routes them to the calling client instead, by running one request at a time on that server. See [Server requests](#server-requests-roots-sampling-and-elicitation).
 
@@ -801,9 +917,9 @@ Dockerfile     multi-stage: build SPA → python+node+uv runtime
 
 ## Status / roadmap
 
-**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop / retry / **restart** (bounce a running server to pick up its upstream's new tools), with optional setup scripts for local runners and **source-repository** servers (clone + editable post-clone build, auto-detected from a GitHub URL). **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh), and `openapi` (serve a plain REST API's operations as MCP tools, translated from its OpenAPI document). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: local bearer tokens or external-AS OAuth JWTs for `/s` and `/g`, control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
+**Working today:** add a server (guided form, paste an `mcpServers` config — stdio or remote, or **browse a registry** and install with one review), supervise it, and use it over Streamable HTTP from any MCP client. Per-server detail with **live log streaming**, config, and discovered tools; edit / clone / delete / start / stop / retry / **restart** (bounce a running server to pick up its upstream's new tools), with optional setup scripts for local runners and **source-repository** servers (clone + editable post-clone build, auto-detected from a GitHub URL). **Clone** a server to spin up a like-configured copy in one click, and **rename a server's slug** to re-point its `/s/<slug>/` URLs (clients pointed at the old slug need re-pointing). **Per-client copy** menu grouped by ecosystem — Claude Code, Claude Desktop (via `mcp-remote`), Claude web / mobile connectors, Codex, ChatGPT connectors, Gemini CLI, VS Code, generic `mcpServers`, and raw URLs. Runners: `npx`, `uvx`, `command`, `docker` (image-packaged servers — opt-in, root-equivalent), `remote` (proxy an already-remote Streamable-HTTP/SSE MCP URL, authenticating to the upstream with static token **headers** or **OAuth** — a control-plane-run sign-in with automatic token refresh), `openapi` (serve a plain REST API's operations as MCP tools, translated from its OpenAPI document), and `graphql` (serve a GraphQL API's query and mutation fields as MCP tools, from its schema). **Catalog** browse with a **by-type filter** (npm/pypi/oci/nuget/mcpb/remote) and one-review install, including OCI/Docker images (when the docker runner is enabled) and remote endpoints. **Auth**: local bearer tokens or external-AS OAuth JWTs for `/s` and `/g`, control-plane bearer auth for `/api` with an admin login, a Host/Origin allowlist (Settings) for safe exposure, and an opt-in LAN-access toggle for self-hosted boxes. **Groups**: declare named bundles, each served at `/g/<name>/mcp`, whose members are every registered server or a picked list — the tools surface slug-prefixed under one URL.
 
-Also working: a **tool playground** on the server page (invoke any discovered tool from a schema-built form, no client needed), **per-tool disable** (toggle individual tools off to hide them from every surface — MCP, REST, and groups — and refuse them if called), **per-tool overrides** (rename a tool or rewrite its description when the upstream's wording trips up models — applied to every surface, no upstream rebuild needed), **idle shutdown with wake-on-request** (quiesce inactive servers, restart transparently on the next request), an opt-in **REST/OpenAPI surface** per server (`/s/<slug>/rest/<tool>` + a generated `openapi.json`), and a **multi-user control plane** (admin/member roles, per-user server ownership and token scoping, a per-user local-runner permission, and login-token credentials minted from Settings → Users — see README Security for the trust model).
+Also working: a **tool playground** on the server page (invoke any discovered tool from a schema-built form, no client needed), **per-tool disable** (toggle individual tools off to hide them from every surface — MCP, REST, and groups — and refuse them if called), **per-tool overrides** (rename a tool, rewrite its description, or give it unlisted aliases that keep old names working — applied to every surface, no upstream rebuild needed), **idle shutdown with wake-on-request** (quiesce inactive servers, restart transparently on the next request), an opt-in **REST/OpenAPI surface** per server (`/s/<slug>/rest/<tool>` + a generated `openapi.json`), and a **multi-user control plane** (admin/member roles, per-user server ownership and token scoping, a per-user local-runner permission, and login-token credentials minted from Settings → Users — see README Security for the trust model).
 
 **Planned:** more catalog directories · polish.
 

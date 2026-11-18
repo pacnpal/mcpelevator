@@ -31,5 +31,5 @@ def build(server: Server) -> ProcessSpec:
         disabled_tools=list(server.disabled_tools or []),
         tool_overrides={k: dict(v) for k, v in (server.tool_overrides or {}).items()},
         normalize_schema_dialect=bool(server.normalize_schema_dialect),
-        openapi_document=server.openapi_document or "",  # pasted/uploaded; blank = fetch
+        document=server.openapi_document or "",  # pasted/uploaded; blank = fetch
     )

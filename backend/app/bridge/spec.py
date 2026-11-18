@@ -51,6 +51,13 @@ def bridge_payload(spec, name: str, *, mcp_http: bool, rest_openapi: bool) -> di
     # key as off (`spec.get("serialize_client_requests")` in `_build_transport`).
     if spec.serialize_client_requests:
         payload["serialize_client_requests"] = True
+    if spec.attach_stderr_on_error:
+        payload["attach_stderr_on_error"] = True
+        # Names only (the values are already in ``env``): which ones the attached stderr
+        # must hide. Present only with the flag, so no other spec grows.
+        secret_keys = list(getattr(spec, "secret_env_keys", None) or [])
+        if secret_keys:
+            payload["secret_env_keys"] = secret_keys
     if spec.forward_authorization:
         payload["forward_authorization"] = True
     if spec.instructions:
@@ -59,9 +66,10 @@ def bridge_payload(spec, name: str, *, mcp_http: bool, rest_openapi: bool) -> di
     # must not inherit the control plane's own virtualenv (`_child_env`).
     if spec.repo:
         payload["checkout"] = True
-    # Same rule: the stored OpenAPI document itself follows on the bridge's stdin (it can
-    # run to megabytes, far past this env var's limit), so only the flag rides here.
-    if spec.openapi_document:
+    # Same rule: a stored API document (OpenAPI document or GraphQL schema) follows on the
+    # bridge's stdin (it can run to megabytes, far past this env var's limit), so only the
+    # flag rides here.
+    if spec.document:
         payload["document_on_stdin"] = True
     return payload
 

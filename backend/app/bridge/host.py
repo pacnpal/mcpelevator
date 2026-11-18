@@ -9,7 +9,7 @@ The control plane resolves the runner -> a literal ProcessSpec, then launches th
 module as a subprocess, passing the spec + port via environment variables:
 
     MCPE_BRIDGE_SPEC  JSON: {command, args, env, cwd, name, transport, mcp_http, rest_openapi,
-                      serialize_client_requests, ...}
+                      serialize_client_requests, attach_stderr_on_error, ...}
     MCPE_BRIDGE_HOST  loopback host (default 127.0.0.1)
     MCPE_BRIDGE_PORT  port to listen on
 
@@ -17,7 +17,9 @@ module as a subprocess, passing the spec + port via environment variables:
 ``streamable-http`` / ``sse`` (front a remote URL; ``command`` is the URL and ``env``
 is the upstream HTTP headers), or ``openapi`` (no MCP upstream: serve a REST API's
 operations as tools, translated from the OpenAPI document at ``command`` — see
-:mod:`app.bridge.openapi`).
+:mod:`app.bridge.openapi`), or ``graphql`` (serve a GraphQL API's query and mutation
+fields as tools, from its schema; ``command`` is the endpoint — see
+:mod:`app.bridge.graphql`).
 
 Session isolation: the proxy serves each request from a fresh upstream client (no
 cross-client context mixing). A remote upstream gets a fresh session per request; a
@@ -45,7 +47,10 @@ import logging
 import os
 import re
 import secrets
+import select
+import struct
 import sys
+import threading
 import weakref
 from collections.abc import Callable, Iterator, Sequence
 from contextvars import ContextVar
@@ -74,7 +79,7 @@ from fastmcp.server.transforms import ToolTransform
 from fastmcp.tools import Tool
 from fastmcp.prompts.base import InputRequiredPromptResult
 from fastmcp.resources.base import InputRequiredResourceResult
-from fastmcp.tools.base import InputRequiredToolResult
+from fastmcp.tools.base import InputRequiredToolResult, ToolResult
 from fastmcp.tools.tool_transform import ToolTransformConfig
 from fastmcp.utilities.timeout import normalize_timeout_to_seconds
 from mcp import ClientSession
@@ -95,6 +100,7 @@ from mcp.types import (
     Root,
     RootsCapability,
     SamplingCapability,
+    TextContent,
 )
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
@@ -304,6 +310,9 @@ class _StdioRouting:
         # The child may still ask something for one, and nothing says which, so while any
         # is outstanding no server request is forwarded at all.
         self.abandoned: set[asyncio.Future] = set()
+        # The child's stderr, teed so a failed call can carry its own lines back
+        # (``attach_stderr_on_error``, see _StderrTee); None when that's off.
+        self.stderr: _StderrTee | None = None
         self._forward_sampling = create_sampling_callback(default_proxy_sampling_handler)
         self._forward_elicitation = create_elicitation_callback(
             default_proxy_elicitation_handler
@@ -718,6 +727,226 @@ class _ModernTurns(Middleware):
         return await call_next(context)
 
 
+# --- a failed call's upstream stderr (attach_stderr_on_error, issue #227) -------------
+
+# The marker that heads the block appended to a failed call's result.
+STDERR_MARKER = "[mcpelevator] upstream stderr during this call:"
+# How many of the child's latest stderr bytes the ring keeps, and how much of one line
+# a window returns.
+_STDERR_RING_BYTES = 256 * 1024
+_STDERR_LINE_MAX = 4096
+# What the appended block carries at most: the window's last lines, then a byte cap.
+_STDERR_ATTACH_LINES = 20
+_STDERR_ATTACH_BYTES = 2048
+# On the error path only: a short settle for lines the child (or a relaying `docker run`)
+# writes just after its response, then a bounded wait for the pump to catch up.
+_STDERR_SETTLE_S = 0.02
+_STDERR_GRACE_S = 0.1
+
+
+def _pipe_pending(fd: int) -> int:
+    """Bytes written into the pipe ``fd`` reads that nobody has read yet (0 where the
+    platform can't say, which only loosens where a window starts, see _StderrTee.mark)."""
+    try:
+        import fcntl
+        import termios
+
+        return struct.unpack("i", fcntl.ioctl(fd, termios.FIONREAD, b"\0\0\0\0"))[0]
+    except (ImportError, OSError):
+        return 0
+
+
+class _StderrTee:
+    """The stdio child's stderr, teed: every byte still goes to the bridge's own stderr
+    (so the server's log is unchanged), and the latest bytes are also kept in a ring, so
+    a call that fails can carry what was written during it (``attach_stderr_on_error``).
+
+    The child writes into a pipe the bridge owns (``writer`` becomes its stderr, kept
+    across respawns), and a daemon thread pumps it. The ring is the raw byte STREAM,
+    addressed by position: a call's window is ``[mark() when it takes the child, mark()
+    when it fails)``, and ``mark()`` is everything pumped so far plus what still waits in
+    the pipe, read under the lock the pump reads under. So bytes the child wrote before a
+    call began belong to the call before it even when the pump only gets to them later,
+    and a call queued behind another never sees that one's output.
+
+    The server's secret values (``secrets``) are hidden over the raw bytes of the window
+    (looking a secret's length past each edge) BEFORE it is split into lines or cut, so a
+    secret spanning lines (a PEM key), chunks, or any cap is replaced whole, and one cut
+    off by a window or ring edge has its visible part hidden too.
+    """
+
+    def __init__(self) -> None:
+        self._fd, write_fd = os.pipe()
+        # A real file: the child's stderr is duplicated from its descriptor at spawn.
+        self.writer = os.fdopen(write_fd, "w")
+        self._lock = threading.Lock()
+        self._read = 0  # bytes pumped so far, i.e. the offset of the next byte
+        self._buf = bytearray()  # the latest bytes, the first at offset ``_base``
+        self._base = 0
+        self._thread: threading.Thread | None = None
+        # The server's secret env values, hidden from every window.
+        self.secrets: list[str] = []
+
+    def start(self) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(
+                target=self._pump, name="mcpe-upstream-stderr", daemon=True
+            )
+            self._thread.start()
+
+    def mark(self) -> int:
+        """The stream position right now: where a window starts or ends."""
+        with self._lock:
+            return self._read + _pipe_pending(self._fd)
+
+    async def settled_mark(self) -> int:
+        """Where a failed call's window ends: after a short settle for lines written
+        just behind the response, wait (boundedly) for the pump to file everything
+        written up to there."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _STDERR_GRACE_S
+        await asyncio.sleep(_STDERR_SETTLE_S)
+        end = self.mark()
+        while loop.time() < deadline:
+            with self._lock:
+                if self._read >= end:
+                    break
+            await asyncio.sleep(0.005)
+        return end
+
+    def window(self, start: int, end: int) -> list[str]:
+        """The non-blank lines written in ``[start, end)``, secrets hidden, each line cut
+        to ``_STDERR_LINE_MAX`` characters only after that."""
+        look = max((len(v.encode()) for v in self.secrets), default=0)
+        with self._lock:
+            lo, hi = max(start, self._base), min(end, self._read)
+            if hi <= lo:
+                return []
+            ext_lo, ext_hi = max(self._base, lo - look), min(self._read, hi + look)
+            raw = bytes(self._buf[ext_lo - self._base : ext_hi - self._base])
+            head_lost = self._base > 0 and ext_lo == self._base
+        from app import sealed
+
+        text = sealed.hide_values(
+            raw,
+            self.secrets,
+            lo - ext_lo,
+            hi - ext_lo,
+            # The stream (so far) ends in the window: a secret may be only half written.
+            open_end=hi == ext_hi,
+            # The ring dropped what came before: a secret may be only half kept.
+            open_start=head_lost,
+        )
+        lines = (line.rstrip("\r")[:_STDERR_LINE_MAX] for line in text.split("\n"))
+        return [line for line in lines if line.strip()]
+
+    def _pump(self) -> None:
+        while True:
+            try:
+                select.select([self._fd], [], [])
+                with self._lock:
+                    chunk = os.read(self._fd, 65536)
+                    self._file(chunk)
+            except (OSError, ValueError):
+                return
+            if not chunk:
+                return
+            _echo_stderr(chunk)
+
+    def _file(self, chunk: bytes) -> None:
+        self._read += len(chunk)
+        self._buf += chunk
+        if len(self._buf) > _STDERR_RING_BYTES:
+            drop = len(self._buf) - _STDERR_RING_BYTES
+            del self._buf[:drop]
+            self._base += drop
+
+
+def _echo_stderr(chunk: bytes) -> None:
+    """Pass the child's bytes on to the bridge's stderr, as they went before the tee."""
+    out = sys.stderr
+    try:
+        buffer = getattr(out, "buffer", None)
+        if buffer is not None:
+            out.flush()
+            buffer.write(chunk)
+            buffer.flush()
+        else:
+            out.write(chunk.decode("utf-8", "replace"))
+            out.flush()
+    except Exception:
+        pass  # a broken stderr must not stop the pump: the child would block on a full pipe
+
+
+def _stderr_block(lines: list[str], secrets: list[str] | tuple[str, ...] = ()) -> TextContent:
+    """The block appended to a failed call: the window's last lines, each cleaned BEFORE
+    the cap, so a cut can't expose half a token — the server's own secret env values
+    (``secrets``, longest first) become ``<hidden>``, since a child may echo one bare,
+    then app.debug.scrub hides labelled credentials."""
+    from app import sealed
+    from app.debug import scrub
+
+    kept: list[str] = []
+    room = _STDERR_ATTACH_BYTES
+    for line in reversed(lines[-_STDERR_ATTACH_LINES:]):
+        for value in secrets:
+            line = line.replace(value, sealed.HIDDEN)
+        line = scrub(line)
+        size = len(line.encode()) + 1
+        if size > room:
+            if not kept:  # one huge line: keep its end, where the error usually is
+                kept.append("…" + line.encode()[-(room - 4) :].decode("utf-8", "ignore"))
+            break
+        kept.append(line)
+        room -= size
+    return TextContent(type="text", text="\n".join([STDERR_MARKER, *reversed(kept)]))
+
+
+async def _with_stderr(routing: _StdioRouting, method: str, call):
+    """Run ``call`` (one request holding the child), and if it's a ``tools/call`` that
+    fails, append the child's stderr from its window to the result.
+
+    An ``isError`` result gets one more ``TextContent`` block. A raised ``ToolError`` (the
+    upstream answered with a JSON-RPC error, timed out, or the connection broke) becomes
+    the ``isError`` result FastMCP would have sent for it (its message as the first
+    block) plus the stderr block, so both failures read the same on every surface: MCP,
+    REST's ``is_error`` envelope, a group. Nothing is attached to a success, to an empty
+    window, or while a call its caller abandoned still runs on the child (its lines
+    can't be told apart from this one's). The window is everything the child wrote while
+    this call held it, which is all the bridge can attribute: a child that writes in the
+    background (late output from work an earlier call started) can put that in it too,
+    as the README states.
+    """
+    tee = routing.stderr
+    if tee is None or method != "tools/call" or routing.abandoned:
+        return await call()
+    start = tee.mark()
+    try:
+        result = await call()
+    except ToolError as exc:
+        lines = tee.window(start, await tee.settled_mark())
+        if not lines:
+            raise
+        return ToolResult(
+            content=[TextContent(type="text", text=str(exc)), _stderr_block(lines, tee.secrets)],
+            is_error=True,
+        )
+    if (
+        isinstance(result, ToolResult)
+        and result.is_error
+        and not isinstance(result, InputRequiredToolResult)
+    ):
+        lines = tee.window(start, await tee.settled_mark())
+        if lines:
+            return ToolResult(
+                content=[*result.content, _stderr_block(lines, tee.secrets)],
+                structured_content=result.structured_content,
+                meta=result.meta,
+                is_error=True,
+            )
+    return result
+
+
 class _SerializeClientRequests(Middleware):
     """``serialize_client_requests``: one proxied request at a time per stdio child, with
     the caller slot naming it (see :class:`_StdioRouting`).
@@ -733,6 +962,10 @@ class _SerializeClientRequests(Middleware):
     An interactive request (``tools/call``, ``resources/read``, ``prompts/get``) from a
     caller on the 2026-07-28 protocol runs as a :class:`_Turn` instead, which owns the lock
     until the upstream request is done, across every round trip.
+
+    Holding the child for the whole request is also what makes its stderr attributable:
+    with ``attach_stderr_on_error`` a failed ``tools/call`` carries the lines written
+    while it held the lock (:func:`_with_stderr`), on either path.
     """
 
     def __init__(self, routing: _StdioRouting) -> None:
@@ -742,16 +975,19 @@ class _SerializeClientRequests(Middleware):
         if context.method == "initialize":
             return await call_next(context)
         ctx = context.fastmcp_context
+
+        def run():
+            return _with_stderr(self.routing, context.method, lambda: call_next(context))
+
         if context.method in _INTERACTIVE and _is_modern(ctx):
-            return await _turn_leg(
-                ctx, context.method, lambda: call_next(context), self.routing.parked, self.routing
-            )
+            # The turn's task starts once the lock is taken, so its window does too.
+            return await _turn_leg(ctx, context.method, run, self.routing.parked, self.routing)
         caller = _caller_of(ctx)
         async with self.routing.lock:
             self.routing.caller = caller
             turn = _TURN.set(caller)
             try:
-                return await call_next(context)
+                return await run()
             finally:
                 _TURN.reset(turn)
                 self.routing.caller = None
@@ -768,11 +1004,27 @@ class _SharedStdioTransport(StdioTransport):
     on its own ``_connect_lock`` and later callers attach to the session it produced.)
     """
 
-    def __init__(self, *args, serialize_client_requests: bool = False, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        serialize_client_requests: bool = False,
+        attach_stderr_on_error: bool = False,
+        secret_values: list[str] | None = None,
+        **kwargs,
+    ) -> None:
+        # Only a serialized child's stderr can be attributed to a call; otherwise the
+        # child keeps writing straight to the bridge's stderr, as it always has.
+        stderr = _StderrTee() if serialize_client_requests and attach_stderr_on_error else None
+        if stderr is not None:
+            stderr.secrets = list(secret_values or [])
+            kwargs["log_file"] = stderr.writer
         super().__init__(*args, **kwargs)
         self.routing = _StdioRouting(serialize_client_requests)
+        self.routing.stderr = stderr
 
     async def connect(self, **session_kwargs):
+        if self.routing.stderr is not None:
+            self.routing.stderr.start()
         return await super().connect(**{**session_kwargs, **self.routing.session_callbacks()})
 
 
@@ -954,6 +1206,7 @@ class _HandshakeOnceProxyClient(_TurnAwareProxyClient):
 # the broader "a container must not supply this" set (adds Go proxy vars).
 from app.config import is_control_plane_env_var as _is_control_plane_env_var  # noqa: E402
 from app.runners.repo import FOREIGN_ENV as _CHECKOUT_FOREIGN_ENV  # noqa: E402
+from app.runners import cache as _server_cache  # noqa: E402
 from app.runners.docker import (  # noqa: E402
     is_forbidden_container_env as _is_forbidden_container_env,
     is_reserved_docker_env as _is_reserved_docker_env,
@@ -1002,7 +1255,11 @@ def _child_env(spec: dict) -> dict[str, str]:
         # A source checkout runs from its own .venv, never the control plane's.
         for key in _CHECKOUT_FOREIGN_ENV:
             base.pop(key, None)
-    return {**base, **server_env}
+    # The server's own cache directory (app.runners.cache), handed over by the unit in the
+    # bridge's env: XDG_CACHE_HOME / PLAYWRIGHT_BROWSERS_PATH, unless the server sets them.
+    cache_dir = os.environ.get(_server_cache.BRIDGE_ENV_KEY)
+    cache = _server_cache.cache_env(cache_dir) if cache_dir else {}
+    return {**base, **cache, **server_env}
 
 
 def _build_oauth_auth(oauth: dict):
@@ -1616,6 +1873,13 @@ def _has_incompatible_draft07_construct(
     )
 
 
+def represents(tool: Tool, upstream: str) -> bool:
+    """Whether ``tool`` is the upstream tool named ``upstream``: by the identity a rename
+    stamps in its ``_meta``, or, unrenamed, by its own name."""
+    stamped = (tool.meta or {}).get(UPSTREAM_META_KEY)
+    return stamped == {"name": upstream} if stamped else tool.name == upstream
+
+
 class _ToolTransform(ToolTransform):
     """FastMCP's ``ToolTransform`` with the gaps that matter to elevation closed.
 
@@ -1670,6 +1934,7 @@ class _ToolTransform(ToolTransform):
         transforms: dict[str, ToolTransformConfig],
         *,
         normalize_schema_dialect: bool = False,
+        aliases: dict[str, str] | None = None,
     ) -> None:
         # Own the reverse map rather than inheriting it: a HIDDEN tool exposes no name, so
         # it must not reserve one. FastMCP's constructor reserves a target for every entry
@@ -1686,6 +1951,8 @@ class _ToolTransform(ToolTransform):
         # exists to prevent.
         self._transforms = transforms
         self._normalize_schema_dialect = normalize_schema_dialect
+        # alias -> the UPSTREAM name of the tool it calls (see get_tool).
+        self._aliases = dict(aliases or {})
         self._name_reverse = {}
         for source, config in transforms.items():
             if not config.enabled or not config.name or config.name == source:
@@ -1800,6 +2067,26 @@ class _ToolTransform(ToolTransform):
         return self._apply(source, config, rename=True)
 
     async def get_tool(self, name: str, call_next, *, version=None) -> Tool | None:
+        tool = await self._get_tool(name, call_next, version=version)
+        source = self._aliases.get(name)
+        if tool is not None or source is None:
+            return tool
+        # An alias: an extra name that calls its tool but is never listed. It applies only
+        # when nothing else answers to the name (a live tool of that name, or a rename onto
+        # it, wins, as above), and resolves the tool exactly as clients see it listed,
+        # under its rename or its own name. What answers there must BE the source: another
+        # tool renamed onto a hidden or vanished source's name is not it.
+        if self._hides(source):
+            return None
+        for candidate in (self._renames_to(source), source):
+            if candidate is None:
+                continue
+            found = await self._get_tool(candidate, call_next, version=version)
+            if found is not None and represents(found, source):
+                return found
+        return None
+
+    async def _get_tool(self, name: str, call_next, *, version=None) -> Tool | None:
         # Whoever natively answers to this name wins it — that settles the misrouting
         # cases (a rename shadowing a live tool, and a stale rename stranding one).
         direct = await call_next(name, version=version)
@@ -1885,8 +2172,15 @@ def _tool_transform(spec: dict) -> ToolTransform:
             fields["enabled"] = False
         if fields:
             configs[tool] = ToolTransformConfig(**fields)
+    aliases = {
+        alias: tool
+        for tool, override in overrides.items()
+        for alias in (override or {}).get("aliases") or ()
+    }
     return _ToolTransform(
-        configs, normalize_schema_dialect=bool(spec.get("normalize_schema_dialect"))
+        configs,
+        normalize_schema_dialect=bool(spec.get("normalize_schema_dialect")),
+        aliases=aliases,
     )
 
 
@@ -1920,7 +2214,23 @@ def _build_transport(spec: dict):
         env=_child_env(spec),
         cwd=spec.get("cwd") or None,
         serialize_client_requests=bool(spec.get("serialize_client_requests")),
+        attach_stderr_on_error=bool(spec.get("attach_stderr_on_error")),
+        secret_values=_secret_values(spec),
     )
+
+
+def _secret_values(spec: dict) -> list[str]:
+    """The plaintext of the server's sealed env values (``secret_env_keys``), longest
+    first so a value containing another is hidden whole. Every non-empty one, however
+    short: the attached block goes to callers, and a sealed value is secret at any length
+    (a one-character one makes the block harder to read, never leaks)."""
+    env = spec.get("env") or {}
+    values = {
+        str(env[key])
+        for key in spec.get("secret_env_keys") or []
+        if key in env and str(env[key])
+    }
+    return sorted(values, key=len, reverse=True)
 
 
 def build_proxy(spec: dict) -> FastMCP:
@@ -1942,6 +2252,14 @@ def build_proxy(spec: dict) -> FastMCP:
         from app.bridge import openapi
 
         server = openapi.build_server(spec)
+        server.add_transform(_tool_transform(spec))
+        return server
+    if spec.get("transport") == "graphql":
+        # Same idea for a GraphQL API: its query and mutation fields are the tools,
+        # built in-process from its schema (app.bridge.graphql).
+        from app.bridge import graphql
+
+        server = graphql.build_server(spec)
         server.add_transform(_tool_transform(spec))
         return server
     transport = _build_transport(spec)
@@ -2119,13 +2437,16 @@ def build_app(spec: dict, proxy: FastMCP):
 def main() -> None:
     """Entry point: read the ProcessSpec + port from the environment and serve."""
     spec = json.loads(os.environ["MCPE_BRIDGE_SPEC"])
-    if spec.get("document_on_stdin"):  # a stored OpenAPI document (app.bridge.spec)
+    if spec.get("document_on_stdin"):  # a stored OpenAPI document / GraphQL schema
         spec["document"] = sys.stdin.buffer.read()
     host = os.environ.get("MCPE_BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ["MCPE_BRIDGE_PORT"])
 
     # MCPE_DEBUG reaches bridges through the inherited environment (see app.debug).
-    from app import debug
+    from app import debug, logconfig
+
+    # A caller hanging up mid-POST is logged by the SDK as a failure with a traceback.
+    logconfig.quiet_client_disconnects()
 
     level = "info"
     if debug.enabled():
@@ -2151,6 +2472,13 @@ def main() -> None:
             # A bad document is an operator fix (URL, auth, format), not a crash: one line
             # in the server's log says which, instead of a traceback burying it.
             raise SystemExit(f"openapi: {exc}") from None
+    elif spec.get("transport") == "graphql":
+        from app.bridge.graphql import SchemaError
+
+        try:
+            proxy = build_proxy(spec)
+        except SchemaError as exc:
+            raise SystemExit(f"graphql: {exc}") from None
     else:
         proxy = build_proxy(spec)
     if spec.get("rest_openapi"):

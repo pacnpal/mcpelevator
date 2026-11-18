@@ -92,14 +92,38 @@ def upstream(tmp_path: Path) -> Path:
     return up
 
 
-def _run(tmp_path: Path, url: str, ref: str = "", post: str = "") -> subprocess.CompletedProcess:
+def _run(
+    tmp_path: Path, url: str, ref: str = "", post: str = "", env: dict | None = None
+) -> subprocess.CompletedProcess:
     script = checkout_script(
         url, ref, post, tmp_path / "repos" / "srv", tmp_path / "repos" / "srv.built"
     )
     (tmp_path / "repos").mkdir(exist_ok=True)
     return subprocess.run(
-        ["/bin/sh", "-e", "-c", script], cwd=tmp_path, capture_output=True, text=True
+        ["/bin/sh", "-e", "-c", script], cwd=tmp_path, capture_output=True, text=True,
+        env=env,
     )
+
+
+def test_a_new_cache_location_reruns_the_post_clone_script(tmp_path, upstream):
+    """A build that installed into the cache (browsers, models) must rerun when the cache
+    moves, e.g. the first start after per-server caches were introduced, whose stamp
+    predates them: the same commit + script is not 'already built' for a new cache."""
+    import os
+
+    count = tmp_path / "builds"
+    post = f"echo build >> {count}"
+    cache_vars = ("XDG_CACHE_HOME", "PLAYWRIGHT_BROWSERS_PATH")
+    base = {k: v for k, v in os.environ.items() if k not in cache_vars}
+    assert _run(tmp_path, str(upstream), post=post, env=base).returncode == 0
+    cache = {**base, "XDG_CACHE_HOME": str(tmp_path / "cache" / "srv")}
+    moved = _run(tmp_path, str(upstream), post=post, env=cache)
+    assert moved.returncode == 0, moved.stderr
+    assert "already built" not in moved.stdout
+    assert count.read_text().count("build") == 2
+    again = _run(tmp_path, str(upstream), post=post, env=cache)
+    assert "already built" in again.stdout
+    assert count.read_text().count("build") == 2
 
 
 def test_checkout_clones_builds_once_and_rebuilds_on_change(tmp_path, upstream):

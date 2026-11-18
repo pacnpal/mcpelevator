@@ -23,7 +23,9 @@ export function shellSplit(line: string): string[] | null {
 		const ch = line[i];
 		if (quote) {
 			if (ch === quote) quote = null;
-			else if (ch === '\\' && quote === '"' && i + 1 < line.length) cur += line[++i];
+			// In double quotes a backslash escapes only $ ` " \ (POSIX); before
+			// anything else it stays literal ("\d+", "C:\tmp").
+			else if (ch === '\\' && quote === '"' && '$`"\\'.includes(line[i + 1] ?? '')) cur += line[++i];
 			else cur += ch;
 		} else if (ch === '"' || ch === "'") {
 			quote = ch;
@@ -57,7 +59,11 @@ export function parseLaunchLine(text: string): LaunchLine | null {
 	if (runner === 'npx') while (words[i] === '-y' || words[i] === '--yes') i++;
 	const pkg = words[i];
 	if (!pkg || pkg.startsWith('-')) return null;
-	return { runner, pkg, extra: words.slice(i + 1) };
+	const extra = words.slice(i + 1);
+	// The form keeps one trimmed argument per line, so an empty or space-padded
+	// argument can't survive the split; leave that paste as typed.
+	if (extra.some((a) => a === '' || a !== a.trim() || a.includes('\n'))) return null;
+	return { runner, pkg, extra };
 }
 
 /** A starting name from a package: `@scope/server-memory@1.2` -> `server-memory`. */

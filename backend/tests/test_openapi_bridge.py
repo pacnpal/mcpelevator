@@ -598,3 +598,39 @@ def test_preview_refuses_an_oversized_pasted_document(monkeypatch):
     with TestClient(app) as c:
         r = c.post("/api/openapi/preview", json={"openapi_document": "x" * 200}, headers=LOOPBACK)
     assert r.status_code == 200 and "larger than" in r.json()["error"]
+
+
+@pytest.mark.parametrize(
+    ("error", "cause"),
+    [
+        (httpx2.ConnectError("All connection attempts failed"), "All connection attempts failed"),
+        (httpx2.ReadTimeout(""), "ReadTimeout"),
+    ],
+)
+async def test_unreachable_api_names_the_api_in_one_line(error, cause, caplog):
+    """A call that can't reach the API (wrong base URL, API down, DNS) says WHICH API it
+    tried and why, in the tool result, and logs one line instead of a traceback — the
+    operator's question is "what URL", which the bare httpx message never answered."""
+    doc = {
+        "openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+        "paths": {"/pets": {"get": {
+            "operationId": "listPets", "responses": {"200": {"description": "ok"}}}}},
+    }
+
+    def api(request):
+        raise error
+
+    server = openapi.build_server(
+        {"command": DOC_URL, "args": ["http://n8n.internal:5678/api/v1"],
+         "env": {"X-Api-Key": "SECRET"}},
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=doc)),
+        api_transport=httpx2.MockTransport(api),
+    )
+    async with Client(server) as client:
+        result = await client.call_tool("listPets", {}, raise_on_error=False)
+    assert result.is_error
+    text = result.content[0].text
+    assert "can't reach the API at http://n8n.internal:5678" in text
+    assert cause in text
+    failures = [r for r in caplog.records if "listPets" in r.getMessage()]
+    assert failures and not any(r.exc_info for r in failures)  # one line, no traceback

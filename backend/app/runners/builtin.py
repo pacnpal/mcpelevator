@@ -67,15 +67,36 @@ Typical flows:
   then wait_for_server. Each operation becomes a tool. A failed start is
   explained by one "openapi: ..." line in get_server_logs. restart_server
   re-reads the document.
+- Serve a GraphQL API: create_server with runner "graphql", command the GraphQL
+  endpoint's http(s) URL, env the API's HTTP headers, args [] to introspect the
+  endpoint (or [schema_url] for an SDL/introspection-JSON file elsewhere, or the
+  schema itself in graphql_schema when introspection is off), enabled true;
+  then wait_for_server. Each query and mutation field becomes a tool (arguments
+  sent as variables; a selection_set argument picks the returned fields), plus
+  graphql_query for any operation (with a leading underscore added for each
+  root field already named that way). A failed start is explained by one
+  "graphql: ..." line in get_server_logs. restart_server re-reads the schema.
 - Bulk add: import_servers with a standard {"mcpServers": {...}} config. Imported
   servers start disabled. Review them, then enable_server and wait_for_server.
 - Hide or relabel a server's tools: update_server with disabled_tools or
-  tool_overrides.
+  tool_overrides (keyed by the upstream tool name: name, description, and
+  aliases, extra unlisted names that still call the tool, e.g. its old name).
+- Clear a local server's cache (its XDG_CACHE_HOME and Playwright browsers,
+  under <data_dir>/cache/<id>), e.g. a model download cached corrupt:
+  clear_server_cache, then wait_for_server (an enabled server restarts).
+- Check that a server really works, not just that it lists tools: set
+  health_check_tool (+ health_check_arguments) to a cheap tool call, or, for
+  npx/uvx/command, health_check_command to a shell command (exit 0 = healthy).
+  It runs at startup (a failure fails the start, explained in last_error and
+  get_server_logs), and every health_check_interval_s seconds if set, where a
+  failure marks the server "unhealthy" until a check passes. Editing it never
+  restarts the server.
 - Keep secrets write-only: list the env keys (or headers) in secret_env on
   create_server or update_server. Their values are encrypted and read "<hidden>"
-  from then on; send "<hidden>" back to keep one. Making one visible, or changing
-  what the server runs (on a local server, any other env value too), needs the
-  secret values sent in full.
+  from then on; send "<hidden>" back to keep one, whatever else the call changes.
+  Making one visible needs a new value sent in full (the stored one is never
+  shown); so does moving a server's URL or Host if your account can't run local
+  servers.
 - Try a tool: call_server_tool on a running server (not counted as usage).
 - Reach a server from a client: mint a token with create_token (scope "all", a
   server id, or "group:<name>"). The plaintext is returned once.

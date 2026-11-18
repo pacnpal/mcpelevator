@@ -27,13 +27,24 @@ function isPrivateIpv4(host: string): boolean {
 	);
 }
 
+/** `::ffff:a.b.c.d`, which the URL parser normalises to `::ffff:hhhh:hhhh`, as dotted IPv4. */
+function mappedIpv4(host: string): string | null {
+	const m = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+	if (!m) return null;
+	const [hi, lo] = [parseInt(m[1], 16), parseInt(m[2], 16)];
+	return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+}
+
 function isLocalHost(hostname: string): boolean {
-	const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+	// A terminal dot is the DNS root (`localhost.` is still loopback).
+	const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
 	if (host === 'localhost' || host.endsWith('.localhost')) return true;
 	if (host.endsWith('.local') || host.endsWith('.lan') || host.endsWith('.internal')) return true;
 	if (!host.includes('.') && !host.includes(':')) return true; // bare LAN hostname
 	if (isPrivateIpv4(host)) return true;
 	if (host.includes(':')) {
+		const v4 = mappedIpv4(host);
+		if (v4) return isPrivateIpv4(v4);
 		// IPv6: loopback, unique-local (fc00::/7), link-local (fe80::/10).
 		return host === '::1' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host);
 	}

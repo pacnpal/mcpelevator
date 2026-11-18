@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from typing import Union
 
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_serializer
 
 # The auth providers a server may select. Constrained here so a malformed value
 # (e.g. "bearer " / "Bearer") is rejected at the API boundary with a 422 rather
@@ -19,7 +19,9 @@ AuthProvider = Literal["inherit", "none", "bearer", "oauth"]
 # ('auto' = self-probe CIMD with DCR fallback, 'cimd'/'dcr' = explicit, probe-free).
 OauthClientMode = Literal["inherit", "auto", "cimd", "dcr"]
 EffectiveAuthProvider = Literal["none", "bearer", "oauth"]
-StartupPhase = Literal["queued", "checkout", "setup", "bridge", "readiness", "retry_wait"]
+StartupPhase = Literal[
+    "queued", "checkout", "setup", "bridge", "readiness", "health", "retry_wait"
+]
 
 
 class Transports(BaseModel):
@@ -59,9 +61,19 @@ class ToolOverride(BaseModel):
     name: Optional[StrictStr] = None
     # Replace the tool's description — the text the model actually reads.
     description: Optional[StrictStr] = None
+    # Extra names that call this tool without being listed: an old name keeps working
+    # after a rename (upstream's or the operator's). Same name rule as `name`, at most 16.
+    aliases: Optional[list[StrictStr]] = Field(
+        default=None,
+        description=(
+            "Extra names that call this tool but never appear in tools/list, e.g. a "
+            "tool's old name after it was renamed. Up to 16, each up to 64 letters, "
+            "digits, '_', '.' or '-'; a name another tool already answers to is refused."
+        ),
+    )
 
     @model_serializer
-    def _sparse(self) -> dict[str, str]:
+    def _sparse(self) -> dict[str, Any]:
         """Serialize only the fields that are actually set.
 
         Storage is sparse — the normalizer drops blank and absent fields — so an override
@@ -73,7 +85,11 @@ class ToolOverride(BaseModel):
         ``model_dump()``) agrees with what the normalizer would store."""
         return {
             field: value
-            for field, value in (("name", self.name), ("description", self.description))
+            for field, value in (
+                ("name", self.name),
+                ("description", self.description),
+                ("aliases", self.aliases),
+            )
             if value is not None
         }
 
@@ -256,7 +272,7 @@ class ServerDetail(ServerSummary):
     run_args: list[str] = []
     # A secret value (app.sealed) reads "<hidden>"; send "<hidden>" back to keep it.
     env: dict[str, str] = {}
-    # The env keys (or headers, for remote/openapi) whose values are secret.
+    # The env keys (or headers, for remote/openapi/graphql) whose values are secret.
     secret_env: list[str] = []
     cwd: Optional[str] = None
     setup_script: str = ""
@@ -268,6 +284,12 @@ class ServerDetail(ServerSummary):
     # openapi runner only: the pasted/uploaded document, returned only for
     # ``?include_document=true`` (a blank ``command`` says one is stored either way).
     openapi_document: str = ""
+    # graphql runner only: the pasted/uploaded schema, likewise only with
+    # ``?include_document=true``.
+    graphql_schema: str = ""
+    # Whether an openapi document / graphql schema is stored, so a view that leaves the
+    # document itself out can still say where the tools come from.
+    document_stored: bool = False
     # uvx runner only: the mcp<2 SDK compatibility pin. Always false elsewhere.
     pin_mcp1: bool = False
     auth_provider: str = "inherit"
@@ -282,6 +304,16 @@ class ServerDetail(ServerSummary):
     oauth_status: OAuthStatus = OAuthStatus()
     # Idle quiescence: None = inherit the global `idle_timeout_s` setting; 0 = never.
     idle_timeout_s: Optional[int] = None
+    # Startup deadlines (seconds): None = inherit MCPE_START_TIMEOUT_S /
+    # MCPE_REPO_BUILD_TIMEOUT_S.
+    start_timeout_s: Optional[int] = None
+    repo_build_timeout_s: Optional[int] = None
+    # Health check (issue #225): a tool call or (local runners) a shell command, run at
+    # readiness and, with an interval, periodically. All null = no check. See ServerCreate.
+    health_check_tool: Optional[str] = None
+    health_check_arguments: Optional[dict] = None
+    health_check_command: Optional[str] = None
+    health_check_interval_s: Optional[int] = None
     # Upstream tool names hidden from every exposed surface. Empty = expose all (default).
     disabled_tools: list[str] = []
     # Upstream tool name -> replacement name/description. Empty = serve tools as declared.
@@ -293,6 +325,9 @@ class ServerDetail(ServerSummary):
     # Stdio runners: forward the child's roots/sampling/elicitation requests to the calling
     # client, serving one request at a time (issue #143). Default false refuses them.
     serialize_client_requests: bool = False
+    # Stdio runners with serialize_client_requests: append the child's stderr from a failed
+    # tool call's window to its error result (issue #227). Default false.
+    attach_stderr_on_error: bool = False
     config_hash: str = ""
     source: str = "manual"
     # Whether GET /servers/{id}/mcpb would produce a bundle (app.mcpb.exportable);
@@ -325,8 +360,11 @@ class ServerCreate(BaseModel):
     repo_ref: str = ""
     post_clone_script: str = ""
     # openapi runner only: the OpenAPI 3 document itself (JSON or YAML), for an API whose
-    # spec isn't at a URL. Set = leave ``command`` blank. Forced "" for other runners.
+    # spec isn't at a URL (then leave ``command`` blank). Forced "" for other runners.
     openapi_document: str = ""
+    # graphql runner only: the API's schema, SDL or an introspection result, for an API
+    # with introspection off (``command`` stays the endpoint). Forced "" for other runners.
+    graphql_schema: str = ""
     # uvx runner only: launch with the Python mcp SDK pinned below 2.0
     # (`uvx --with "mcp<2" …`) for servers not yet compatible with the 2.x line.
     # Forced false for every other runner server-side.
@@ -344,6 +382,9 @@ class ServerCreate(BaseModel):
     # Stdio runners: forward the child's roots/sampling/elicitation requests to the calling
     # client, serving one request at a time (issue #143). Opt-in; ignored for `remote`.
     serialize_client_requests: bool = False
+    # Stdio runners only, and only with serialize_client_requests (refused otherwise):
+    # append the child's stderr from a failed tool call to its error result (issue #227).
+    attach_stderr_on_error: bool = False
     auth_provider: AuthProvider = "inherit"
     # Upstream OAuth (remote runner only; forced off elsewhere server-side).
     oauth: bool = False
@@ -356,6 +397,21 @@ class ServerCreate(BaseModel):
     # StrictInt: lax mode coerces a JSON `true` to 1, which would silently
     # configure a one-second shutdown instead of failing validation.
     idle_timeout_s: Optional[StrictInt] = None
+    # Startup deadlines in seconds (≥ 1): ``start_timeout_s`` bounds setup and readiness,
+    # ``repo_build_timeout_s`` the checkout + post-clone build. None = the instance default.
+    start_timeout_s: Optional[StrictInt] = None
+    repo_build_timeout_s: Optional[StrictInt] = None
+    # Optional health check, one form: ``health_check_tool`` (an exposed tool name, called
+    # through the bridge with ``health_check_arguments``; fails on an error result) or
+    # ``health_check_command`` (npx/uvx/command only: a shell command run like the setup
+    # script, with the server's env and cwd; fails on a non-zero exit). It runs once the
+    # server answers, inside the startup deadline (a failure fails the attempt), and every
+    # ``health_check_interval_s`` seconds (≥ 10; null = at startup only) while it runs,
+    # where a failure marks it unhealthy until a check passes. Never counted as usage.
+    health_check_tool: Optional[StrictStr] = None
+    health_check_arguments: Optional[dict] = None
+    health_check_command: Optional[StrictStr] = None
+    health_check_interval_s: Optional[StrictInt] = None
     enabled: bool = False
     # Provenance. Only a "catalog:<id>" (registry install) or "github:<owner>/<repo>"
     # (repository install) value is honored; anything else falls back to "manual"
@@ -376,7 +432,7 @@ class ServerUpdate(BaseModel):
     # A secret value of "<hidden>" keeps the stored one; anything else replaces it.
     env: Optional[dict[str, str]] = None
     # The secret keys of ``env``. Omitted (null) = each key keeps its current secrecy.
-    # Making a secret visible, or changing what the server runs, needs its value sent again.
+    # A kept secret survives any other change; making one visible needs a new value sent.
     secret_env: Optional[list[StrictStr]] = None
     cwd: Optional[str] = None
     setup_script: Optional[str] = None
@@ -386,6 +442,8 @@ class ServerUpdate(BaseModel):
     post_clone_script: Optional[str] = None
     # openapi runner only. Omitted (null) = unchanged; "" = fetch ``command`` instead.
     openapi_document: Optional[str] = None
+    # graphql runner only. Omitted (null) = unchanged; "" = introspect, or use the schema URL.
+    graphql_schema: Optional[str] = None
     # uvx runner only: the mcp<2 SDK compatibility pin. Omitted (null) = unchanged.
     pin_mcp1: Optional[bool] = None
     mcp_http: Optional[bool] = None
@@ -399,6 +457,8 @@ class ServerUpdate(BaseModel):
     normalize_schema_dialect: Optional[bool] = None
     # Omitted (null) = unchanged.
     serialize_client_requests: Optional[bool] = None
+    # Omitted (null) = unchanged.
+    attach_stderr_on_error: Optional[bool] = None
     auth_provider: Optional[AuthProvider] = None
     # StrictBool (unlike mcp_http/rest_openapi above): oauth gates a security-sensitive
     # upstream-auth mode, so a truthy-coerced "yes"/1 must never silently flip it on — the
@@ -413,6 +473,16 @@ class ServerUpdate(BaseModel):
     # global default" and is preserved by the PATCH handler (model_fields_set).
     # StrictInt so a JSON `true` can't lax-coerce to a 1-second shutdown.
     idle_timeout_s: Optional[StrictInt] = None
+    # Startup deadlines; an explicit null means "inherit the instance default", like
+    # idle_timeout_s.
+    start_timeout_s: Optional[StrictInt] = None
+    repo_build_timeout_s: Optional[StrictInt] = None
+    # Health check; an explicit null clears the field (all null = no check), like the
+    # startup deadlines. Outside config_hash: never restarts a running bridge.
+    health_check_tool: Optional[StrictStr] = None
+    health_check_arguments: Optional[dict] = None
+    health_check_command: Optional[StrictStr] = None
+    health_check_interval_s: Optional[StrictInt] = None
     # Admin-only reassignment; explicit null = make it admin-owned. Ignored (403)
     # for members. Preserved-on-null like the OAuth client fields.
     owner_id: Optional[str] = None
@@ -451,10 +521,36 @@ class OpenapiPreview(BaseModel):
     error: Optional[str] = None
 
 
+class GraphqlPreviewRequest(BaseModel):
+    # The GraphQL endpoint, and where the schema comes from: a schema URL (``args``), the
+    # schema itself pasted (``graphql_schema``), or neither (introspect the endpoint).
+    command: str = ""
+    args: list[str] = []
+    graphql_schema: str = ""
+
+
+class GraphqlPreview(BaseModel):
+    # What the server would serve: its query and mutation field names (one tool each),
+    # and how many subscription fields it skips. ``error`` says why the schema couldn't
+    # be read (introspection off, auth required, not a valid schema).
+    queries: list[str] = []
+    mutations: list[str] = []
+    subscriptions: int = 0
+    error: Optional[str] = None
+
+
 class ImportResult(BaseModel):
     created: list[ServerSummary]
     skipped: list[ImportSkipped]
     warnings: list[ImportWarning] = []
+
+
+class CacheCleared(BaseModel):
+    """``POST /servers/{id}/cache/clear``: what the clear freed, and the server after it
+    (an enabled one was restarted, so it reads as a queued start)."""
+    freed_bytes: int
+    restarted: bool
+    server: ServerSummary
 
 
 ControlPlaneAuthMode = Literal["auto", "always"]

@@ -10,6 +10,7 @@
 		docker: 'docker',
 		remote: 'remote',
 		openapi: 'openapi',
+		graphql: 'graphql',
 		mcpelevator: 'built-in'
 	};
 </script>

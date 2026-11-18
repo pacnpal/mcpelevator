@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
+
 	import { isQuietAccessLine } from '#lib/logFilter.js';
 	import { ApiError, streamLogs } from '#lib/api.js';
 	import type { ServerState, StartupStatus } from '#lib/types.js';
@@ -7,12 +9,14 @@
 		serverId,
 		serverState,
 		startupStatus = null,
-		compact = false
+		compact = false,
+		slug = null
 	}: {
 		serverId: string;
 		serverState: ServerState;
 		startupStatus?: StartupStatus | null;
 		compact?: boolean;
+		slug?: string | null;
 	} = $props();
 
 	const MAX_LINES = 1000;
@@ -29,18 +33,39 @@
 	const hiddenCount = $derived(lines.length - shown.length);
 	let conn = $state<Conn>('idle');
 	let notRunning = $state(false);
+	let paused = $state(false);
+	let filter = $state('');
 	let stuckToBottom = $state(true);
+
+	// Filter hides non-matching lines (case-insensitive substring). We render the
+	// whole buffer, so the browser's own Find still works on the unfiltered view;
+	// this is the "hide the noise" cut that native find can't do.
+	const visible = $derived.by(() => {
+		const q = filter.trim().toLowerCase();
+		return q ? shown.filter((l) => l.toLowerCase().includes(q)) : shown;
+	});
 	let pane = $state<HTMLDivElement | undefined>(undefined);
 	let seenServerId = '';
 	let seenActivation: string | null = null;
 
+	// Memoized: the server page passes props straight off the server object it re-fetches
+	// every poll (each second during startup), so reading a prop directly in the stream
+	// effect would re-run it — abort the stream and reopen it — on every poll. A derived
+	// only notifies when its value changes.
+	const streamServerId = $derived(serverId);
 	const startupActive = $derived(startupStatus !== null);
 	const activationStartedAt = $derived(startupStatus?.activation_started_at ?? null);
-	const resetKey = $derived(`${serverId}\u0000${activationStartedAt ?? ''}`);
+	const resetKey = $derived(`${streamServerId}\u0000${activationStartedAt ?? ''}`);
 	// Setup can produce logs before the bridge changes observed runtime state.
-	const shouldConnect = $derived(startupActive || serverState !== 'stopped');
+	const serverUp = $derived(startupActive || serverState !== 'stopped');
+	// Pause stops the live tail entirely (drops the stream) rather than buffering,
+	// so the pane freezes for reading/selection; Resume reopens and the endpoint
+	// replays its backlog, swapped in atomically (no empty blink, see run()).
+	const shouldConnect = $derived(serverUp && !paused);
 
 	const dot = $derived.by(() => {
+		if (paused && serverUp)
+			return { color: 'var(--color-state-starting)', pulse: false, label: 'paused' };
 		if (notRunning || conn === 'idle')
 			return { color: 'var(--color-state-stopped)', pulse: false, label: 'idle' };
 		if (conn === 'live') return { color: 'var(--color-state-running)', pulse: false, label: 'live' };
@@ -50,6 +75,48 @@
 	function onScroll() {
 		if (!pane) return;
 		stuckToBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 24;
+	}
+
+	let copied = $state(false);
+	let copyTimer: ReturnType<typeof setTimeout> | undefined;
+
+	async function copyLogs() {
+		const text = lines.join('\n');
+		if (!text) return;
+		try {
+			await navigator.clipboard.writeText(text);
+		} catch {
+			// Fallback for non-secure contexts (LAN/http) where Clipboard API is blocked.
+			const ta = document.createElement('textarea');
+			ta.value = text;
+			ta.style.position = 'fixed';
+			ta.style.opacity = '0';
+			document.body.appendChild(ta);
+			ta.select();
+			try {
+				document.execCommand('copy');
+			} catch {
+				/* give up silently */
+			}
+			ta.remove();
+		}
+		copied = true;
+		clearTimeout(copyTimer);
+		copyTimer = setTimeout(() => (copied = false), 1400);
+	}
+
+	$effect(() => () => clearTimeout(copyTimer));
+
+	function downloadLogs() {
+		const text = lines.join('\n');
+		if (!text) return;
+		const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+		const url = URL.createObjectURL(new Blob([text + '\n'], { type: 'text/plain' }));
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = `${slug ?? serverId}-logs-${stamp}.txt`;
+		a.click();
+		URL.revokeObjectURL(url);
 	}
 
 	$effect(() => {
@@ -68,37 +135,53 @@
 		seenServerId = currentServer;
 	});
 
-	// Stream lifecycle reopens when the server, activation, or connection gate changes.
+	// Stream lifecycle reopens when the server, activation, or connection gate changes —
+	// and ONLY then: those three memoized values are the effect's whole dependency set,
+	// and the stream loop itself starts untracked, so nothing it reads on the way in can
+	// make a page poll tear the stream down.
 	// Fetch + ReadableStream (not EventSource) so the Authorization header is sent.
 	// Reconnect is manual: a dropped stream retries after a short backoff until the
-	// effect is torn down (serverId change / unmount).
+	// effect is torn down (server / activation change, gate change, unmount).
 	$effect(() => {
 		void resetKey;
+		const id = streamServerId;
 		const active = startupActive;
 		if (!shouldConnect) {
-			conn = 'idle';
+			untrack(() => (conn = 'idle'));
 			return;
 		}
-		notRunning = false;
-		conn = 'connecting';
 		const ctrl = new AbortController();
 		let stopped = false;
+		untrack(() => {
+			notRunning = false;
+			conn = 'connecting';
+			void run();
+		});
 
-		void (async () => {
+		async function run() {
+			// The endpoint replays its bounded activation backlog on every open. Swap
+			// it in atomically on the first replayed line instead of clearing up front,
+			// so a reopen (the supervisor replaces the unit on every retry/idle cycle)
+			// doesn't blink the pane empty between the clear and the refill.
+			let replaceOnNext = false;
 			while (!stopped && !ctrl.signal.aborted) {
 				try {
 					await streamLogs(
-						serverId,
+						id,
 						{
 							onOpen: () => {
-								// The endpoint replays its bounded activation backlog on every open.
-								// Replace the previous copy before accepting replayed lines.
-								lines = [];
+								replaceOnNext = true;
 								notRunning = false;
 								conn = 'live';
 							},
 							onLine: (line) => {
-								lines.push(line.replace(ANSI, ''));
+								const clean = line.replace(ANSI, '');
+								if (replaceOnNext) {
+									lines = [clean];
+									replaceOnNext = false;
+								} else {
+									lines.push(clean);
+								}
 								if (lines.length > MAX_LINES) {
 									const removeAt = lines[0]?.includes(TRUNCATION_MARKER) ? 1 : 0;
 									lines.splice(removeAt, lines.length - MAX_LINES);
@@ -110,6 +193,10 @@
 									conn = 'reconnecting';
 									return;
 								}
+								// Nothing was replayed this open (no backlog), so drop any
+								// lines left from a prior activation. A replayed terminal
+								// backlog (replaceOnNext already consumed) stays visible.
+								if (replaceOnNext) lines = [];
 								notRunning = true;
 								conn = 'idle';
 								stopped = true;
@@ -132,7 +219,7 @@
 				if (stopped || ctrl.signal.aborted) return;
 				await new Promise((r) => setTimeout(r, 1000)); // backoff before re-opening
 			}
-		})();
+		}
 
 		return () => {
 			stopped = true;
@@ -140,11 +227,16 @@
 		};
 	});
 
-	// Auto-scroll to the newest line unless the user has scrolled up.
+	// Auto-scroll ("follow") to the newest line unless the user has scrolled up.
 	$effect(() => {
-		void lines.length;
+		void visible.length;
 		if (pane && stuckToBottom) pane.scrollTop = pane.scrollHeight;
 	});
+
+	function toggleFollow() {
+		stuckToBottom = !stuckToBottom;
+		if (stuckToBottom && pane) pane.scrollTop = pane.scrollHeight;
+	}
 </script>
 
 <div
@@ -162,26 +254,67 @@
 				{dot.label}
 			</span>
 		</div>
-		<div class="flex items-center gap-2">
-		<button
-			type="button"
-			onclick={() => (hideRequests = !hideRequests)}
-			aria-pressed={hideRequests}
-			title="Hide successful HTTP request lines; errors always show"
-			class="rounded-md border border-[var(--color-line)] px-2.5 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
-		>
-			{hideRequests
-				? `Show OK requests${hiddenCount ? ` (${hiddenCount})` : ''}`
-				: 'Hide OK requests'}
-		</button>
-		<button
-			type="button"
-			onclick={() => (lines = [])}
-			disabled={lines.length === 0}
-			class="rounded-md border border-[var(--color-line)] px-2.5 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-40"
-		>
-			Clear
-		</button>
+		<div class="flex flex-wrap items-center justify-end gap-2">
+			<input
+				type="search"
+				bind:value={filter}
+				placeholder="Filter…"
+				aria-label="Filter logs"
+				class="h-[26px] w-28 rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2 text-xs text-[var(--color-ink)] placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-accent)] focus:outline-none"
+			/>
+			<button
+				type="button"
+				onclick={toggleFollow}
+				title={stuckToBottom ? 'Following new output' : 'Jump to latest and follow'}
+				class="rounded-md border px-2.5 py-1 text-xs font-medium transition {stuckToBottom
+					? 'border-[var(--color-accent)] text-[var(--color-accent)]'
+					: 'border-[var(--color-line)] text-[var(--color-ink-muted)] hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]'}"
+			>
+				Follow
+			</button>
+			<button
+				type="button"
+				onclick={() => (paused = !paused)}
+				disabled={!serverUp}
+				class="rounded-md border border-[var(--color-line)] px-2.5 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-40"
+			>
+				{paused ? 'Resume' : 'Pause'}
+			</button>
+			<button
+				type="button"
+				onclick={copyLogs}
+				disabled={lines.length === 0}
+				class="rounded-md border border-[var(--color-line)] px-2.5 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-40"
+			>
+				{copied ? 'Copied' : 'Copy'}
+			</button>
+			<button
+				type="button"
+				onclick={downloadLogs}
+				disabled={lines.length === 0}
+				class="rounded-md border border-[var(--color-line)] px-2.5 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-40"
+			>
+				Download
+			</button>
+			<button
+				type="button"
+				onclick={() => (hideRequests = !hideRequests)}
+				aria-pressed={hideRequests}
+				title="Hide successful HTTP request lines; errors always show"
+				class="rounded-md border border-[var(--color-line)] px-2.5 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+			>
+				{hideRequests
+					? `Show OK requests${hiddenCount ? ` (${hiddenCount})` : ''}`
+					: 'Hide OK requests'}
+			</button>
+			<button
+				type="button"
+				onclick={() => (lines = [])}
+				disabled={lines.length === 0}
+				class="rounded-md border border-[var(--color-line)] px-2.5 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-40"
+			>
+				Clear
+			</button>
 		</div>
 	</div>
 
@@ -192,10 +325,12 @@
 		aria-label="Server logs"
 		class="overflow-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] p-3 font-mono text-xs leading-relaxed {compact ? 'h-44' : 'h-72'}"
 	>
-		{#if shown.length > 0}
-			{#each shown as line}
+		{#if visible.length > 0}
+			{#each visible as line}
 				<div class="whitespace-pre-wrap break-all text-[var(--color-ink-muted)]">{line}</div>
 			{/each}
+		{:else if shown.length > 0}
+			<p class="text-[var(--color-ink-dim)]">No lines match “{filter.trim()}”.</p>
 		{:else if lines.length > 0}
 			<p class="text-[var(--color-ink-dim)]">
 				Only successful requests so far ({hiddenCount} hidden).

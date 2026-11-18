@@ -24,7 +24,7 @@ def utcnow() -> datetime:
 
 # --- enums kept as plain string constants for deterministic SQLite storage ---
 
-RUNNERS = ("npx", "uvx", "command", "docker", "remote", "openapi")
+RUNNERS = ("npx", "uvx", "command", "docker", "remote", "openapi", "graphql")
 # The built-in control-plane server (app.control_mcp): provisioned on boot, exactly one
 # row, never creatable through the API, so deliberately NOT in RUNNERS.
 BUILTIN_RUNNER = "mcpelevator"
@@ -73,20 +73,27 @@ class Server(SQLModel, table=True):
 
     # launch spec
     runner: str = "npx"  # one of RUNNERS
-    command: str = ""  # package name / image ref / argv0 / upstream URL (remote) / OpenAPI doc URL (openapi)
+    command: str = ""  # package name / image ref / argv0 / upstream URL (remote) / OpenAPI doc URL (openapi) / endpoint (graphql)
     # JSON array; always set by service. For runner="remote" this is [transport],
-    # e.g. ["streamable-http"] or ["sse"]; for runner="openapi" it is [] or [base_url].
+    # e.g. ["streamable-http"] or ["sse"]; for runner="openapi" it is [] or [base_url];
+    # for runner="graphql" it is [] (introspect) or [schema_url].
     args: list = Field(sa_column=Column(JSON))
-    # JSON object; always set by service. For runner="remote"/"openapi" this is the
+    # JSON object; always set by service. For remote/openapi/graphql this is the
     # upstream HTTP headers (e.g. {"Authorization": "Bearer …"}), not process env.
     # A secret value (app.sealed) is stored here encrypted and the API returns it as
     # "<hidden>". Being in ``env`` itself, the sealed values are covered by config_hash.
     env: dict = Field(sa_column=Column(JSON))
-    # runner="openapi" only: the OpenAPI document itself, pasted or uploaded, for an API
+    # runner="openapi": the OpenAPI document itself, pasted or uploaded, for an API
     # whose spec isn't published at a URL. Set = ``command`` is blank and the bridge reads
     # this instead of fetching (it reaches the bridge on stdin, not in the size-capped
     # spec env var). Blank = fetch ``command``. Part of config_hash (as a digest).
+    # Every other runner: always blank.
     openapi_document: str = ""
+    # runner="graphql" only: the API's schema (SDL or an introspection result), pasted or
+    # uploaded, for an API with introspection off; ``command`` stays the endpoint. Blank =
+    # introspect the endpoint, or fetch the schema URL in ``args``. Reaches the bridge on
+    # stdin like an OpenAPI document; part of config_hash (as a digest).
+    graphql_schema: str = ""
     # JSON array; runner="docker" only — extra `docker run` options placed before the
     # image (e.g. --name, --shm-size=1g), validated at the service boundary
     # (runners.docker.run_args_error) and forced [] for every other runner. Nullable:
@@ -148,6 +155,13 @@ class Server(SQLModel, table=True):
     # the bridge.
     serialize_client_requests: bool = False
 
+    # Stdio runners with ``serialize_client_requests`` only (the service rejects it
+    # otherwise): when a tool call fails, append the child's stderr from that call's
+    # window (scrubbed, last lines, capped) to the error result (issue #227). Serializing
+    # is what makes the window attributable: one request holds the child at a time. Part
+    # of the launch spec (config_hash, only when on), so a change restarts the bridge.
+    attach_stderr_on_error: bool = False
+
     # uvx runner only: launch with the Python mcp SDK held below 2.0
     # (``uvx --with "mcp<2" <package>``) — a compatibility escape hatch for servers
     # that haven't caught up with the SDK's 2.x line. The runner injects the pin at
@@ -185,6 +199,27 @@ class Server(SQLModel, table=True):
     # inherit the `idle_timeout_s` runtime setting; 0 = never idle this server.
     # Excluded from config_hash — changing it must not bounce a running bridge.
     idle_timeout_s: Optional[int] = None
+
+    # Startup deadlines, in seconds: ``start_timeout_s`` bounds the setup script and the
+    # readiness wait (each, per attempt), ``repo_build_timeout_s`` the checkout + post-clone
+    # build. NULL = inherit MCPE_START_TIMEOUT_S / MCPE_REPO_BUILD_TIMEOUT_S. Supervisor
+    # concerns, not launch config: outside config_hash, read when an activation starts.
+    start_timeout_s: Optional[int] = None
+    repo_build_timeout_s: Optional[int] = None
+
+    # Optional health check, one form per server (issue #225): a TOOL call through the
+    # bridge's own /mcp (``health_check_tool`` = the exposed name, with
+    # ``health_check_arguments``; fails on an exception or isError), or — local runners
+    # only — a shell COMMAND run like the setup script, with the child's env and cwd (fails
+    # on a non-zero exit). It runs at readiness, inside the startup deadline, and every
+    # ``health_check_interval_s`` seconds against a running unit (NULL = readiness only),
+    # where a failure marks the unit unhealthy until a later check passes. Supervisor
+    # concerns, like the startup deadlines: outside config_hash, so an edit never bounces
+    # a healthy bridge. NULL/blank = no check.
+    health_check_tool: Optional[str] = None
+    health_check_arguments: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    health_check_command: Optional[str] = None
+    health_check_interval_s: Optional[int] = None
 
     # desired runtime
     enabled: bool = False

@@ -218,7 +218,7 @@ Quiet and exact: flat, labeled, a 1px `translateY` press on `:active`, color tra
 The heart of the system. A fully round pill: 12px label at 500 weight with +0.025em tracking, 4px × 10px padding, and a 6px leading dot. Text and dot use the state color, with a 12% state fill and 35% state border. Transient states (Starting, Stopping, startup phases such as "Installing") pulse the dot (opacity 1 → 0.35 over 1.4s, ease-out-quint).
 
 ### Runner Badge
-A small mono tag naming how a server runs (`npx`, `uvx`, `cmd`, `docker`, `remote`, `openapi`, `built-in`): 11px mono at 500 weight, Panel Raised fill, Hairline border, Ink Muted text, 6px radius, 2px × 6px padding. Exposure tags appear only when exposure differs from the default (MCP on, REST off): `+ REST` in the same neutral shape, `MCP off` with a dashed border. Never emerald: a tag that is true on every card is decoration, not signal.
+A small mono tag naming how a server runs (`npx`, `uvx`, `cmd`, `docker`, `remote`, `openapi`, `graphql`, `built-in`): 11px mono at 500 weight, Panel Raised fill, Hairline border, Ink Muted text, 6px radius, 2px × 6px padding. Exposure tags appear only when exposure differs from the default (MCP on, REST off): `+ REST` in the same neutral shape, `MCP off` with a dashed border. Never emerald: a tag that is true on every card is decoration, not signal.
 
 ### Cards
 - **Corner Style:** 14px card radius.
