@@ -25,7 +25,7 @@
 	/* Text */
 	--color-ink: #f4f4f5;
 	--color-ink-muted: #a1a1aa;
-	--color-ink-dim: #71717a;
+	--color-ink-dim: #87878f;
 
 	/* Single accent: emerald = healthy / live. */
 	--color-accent: #34d399;
@@ -37,7 +37,7 @@
 	--color-state-starting: #fbbf24;
 	--color-state-unhealthy: #fb923c;
 	--color-state-failed: #f87171;
-	--color-state-stopped: #71717a;
+	--color-state-stopped: #87878f;
 	/* Deliberately asleep (idle quiescence) — calm blue, wakes on demand. */
 	--color-state-idle: #60a5fa;
 

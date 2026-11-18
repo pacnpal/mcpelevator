@@ -56,7 +56,7 @@
           "#1c1c20",
           "#26262b",
           "#34343a",
-          "#71717a",
+          "#87878f",
           "#a1a1aa",
           "#f4f4f5"
         ]
@@ -71,7 +71,7 @@
           "#1c1c20",
           "#26262b",
           "#34343a",
-          "#71717a",
+          "#87878f",
           "#a1a1aa",
           "#f4f4f5"
         ]
@@ -86,7 +86,7 @@
           "#1c1c20",
           "#26262b",
           "#34343a",
-          "#71717a",
+          "#87878f",
           "#a1a1aa",
           "#f4f4f5"
         ]
@@ -101,7 +101,7 @@
           "#1c1c20",
           "#26262b",
           "#34343a",
-          "#71717a",
+          "#87878f",
           "#a1a1aa",
           "#f4f4f5"
         ]
@@ -116,7 +116,7 @@
           "#1c1c20",
           "#26262b",
           "#34343a",
-          "#71717a",
+          "#87878f",
           "#a1a1aa",
           "#f4f4f5"
         ]
@@ -131,7 +131,7 @@
           "#1c1c20",
           "#26262b",
           "#34343a",
-          "#71717a",
+          "#87878f",
           "#a1a1aa",
           "#f4f4f5"
         ]
@@ -146,7 +146,7 @@
           "#1c1c20",
           "#26262b",
           "#34343a",
-          "#71717a",
+          "#87878f",
           "#a1a1aa",
           "#f4f4f5"
         ]
@@ -161,7 +161,7 @@
           "#1c1c20",
           "#26262b",
           "#34343a",
-          "#71717a",
+          "#87878f",
           "#a1a1aa",
           "#f4f4f5"
         ]
@@ -176,7 +176,7 @@
           "#1c1c20",
           "#26262b",
           "#34343a",
-          "#71717a",
+          "#87878f",
           "#a1a1aa",
           "#f4f4f5"
         ]
@@ -319,7 +319,7 @@
       "refersTo": "input",
       "description": "Raised zinc well with a hairline; label above, dim help below.",
       "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">Name</span><input class=\"ds-input\" placeholder=\"memory\"><span class=\"ds-field-help\">A human label. The slug is derived from it automatically.</span></label>",
-      "css": ".ds-field{display:flex;flex-direction:column;gap:8px;max-width:360px}.ds-field-label{font:500 14px/20px 'Inter var',system-ui,sans-serif;color:var(--color-ink,#f4f4f5)}.ds-input{padding:8px 12px;border-radius:8px;border:1px solid var(--color-line,#26262b);background:var(--color-surface-2,#161619);color:var(--color-ink,#f4f4f5);font:400 14px/20px 'Inter var',system-ui,sans-serif;outline:none;transition:border-color .15s}.ds-input::placeholder{color:var(--color-ink-dim,#71717a)}.ds-input:focus{border-color:var(--color-line-strong,#34343a)}.ds-input:focus-visible{outline:2px solid var(--color-accent,#34d399);outline-offset:2px}.ds-field-help{font:400 12px/16px 'Inter var',system-ui,sans-serif;color:var(--color-ink-dim,#71717a)}"
+      "css": ".ds-field{display:flex;flex-direction:column;gap:8px;max-width:360px}.ds-field-label{font:500 14px/20px 'Inter var',system-ui,sans-serif;color:var(--color-ink,#f4f4f5)}.ds-input{padding:8px 12px;border-radius:8px;border:1px solid var(--color-line,#26262b);background:var(--color-surface-2,#161619);color:var(--color-ink,#f4f4f5);font:400 14px/20px 'Inter var',system-ui,sans-serif;outline:none;transition:border-color .15s}.ds-input::placeholder{color:var(--color-ink-dim,#87878f)}.ds-input:focus{border-color:var(--color-line-strong,#34343a)}.ds-input:focus-visible{outline:2px solid var(--color-accent,#34d399);outline-offset:2px}.ds-field-help{font:400 12px/16px 'Inter var',system-ui,sans-serif;color:var(--color-ink-dim,#87878f)}"
     },
     {
       "name": "Server Card",
@@ -327,7 +327,7 @@
       "refersTo": "card",
       "description": "The dashboard unit: identity, state, runner, then Copy and the lifecycle action.",
       "html": "<article class=\"ds-card\"><header class=\"ds-card-head\"><div><h3 class=\"ds-card-title\">Memory</h3><p class=\"ds-card-slug\">memory</p></div><span class=\"ds-pill\" style=\"--s:#34d399\"><span class=\"ds-pill-dot\"></span>Running</span></header><div><span class=\"ds-badge\">npx</span></div><footer class=\"ds-card-foot\"><button class=\"ds-btn-quiet\">Copy</button><button class=\"ds-btn-quiet\">Stop</button></footer></article>",
-      "css": ".ds-card{display:flex;flex-direction:column;gap:16px;width:320px;padding:20px;border-radius:14px;border:1px solid var(--color-line,#26262b);background:var(--color-surface,#101012);transition:border-color .15s}.ds-card:hover{border-color:var(--color-line-strong,#34343a)}.ds-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.ds-card-title{margin:0;font:600 15px/20px 'Inter var',system-ui,sans-serif;color:var(--color-ink,#f4f4f5)}.ds-card-slug{margin:2px 0 0;font:400 12px/16px ui-monospace,'SF Mono',Menlo,monospace;color:var(--color-ink-dim,#71717a)}.ds-card-foot{display:flex;justify-content:space-between;padding-top:16px;border-top:1px solid var(--color-line,#26262b)}.ds-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:9999px;border:1px solid color-mix(in oklab,var(--s) 35%,transparent);background:color-mix(in oklab,var(--s) 12%,transparent);color:var(--s);font:500 12px/16px 'Inter var',system-ui,sans-serif}.ds-pill-dot{width:6px;height:6px;border-radius:9999px;background:var(--s)}.ds-badge{padding:2px 6px;border-radius:6px;border:1px solid var(--color-line,#26262b);background:var(--color-surface-2,#161619);color:var(--color-ink-muted,#a1a1aa);font:500 11px/16px ui-monospace,Menlo,monospace}.ds-btn-quiet{padding:6px 12px;background:transparent;color:var(--color-ink-muted,#a1a1aa);border:1px solid var(--color-line,#26262b);border-radius:8px;font:600 12px/16px 'Inter var',system-ui,sans-serif}"
+      "css": ".ds-card{display:flex;flex-direction:column;gap:16px;width:320px;padding:20px;border-radius:14px;border:1px solid var(--color-line,#26262b);background:var(--color-surface,#101012);transition:border-color .15s}.ds-card:hover{border-color:var(--color-line-strong,#34343a)}.ds-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.ds-card-title{margin:0;font:600 15px/20px 'Inter var',system-ui,sans-serif;color:var(--color-ink,#f4f4f5)}.ds-card-slug{margin:2px 0 0;font:400 12px/16px ui-monospace,'SF Mono',Menlo,monospace;color:var(--color-ink-dim,#87878f)}.ds-card-foot{display:flex;justify-content:space-between;padding-top:16px;border-top:1px solid var(--color-line,#26262b)}.ds-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:9999px;border:1px solid color-mix(in oklab,var(--s) 35%,transparent);background:color-mix(in oklab,var(--s) 12%,transparent);color:var(--s);font:500 12px/16px 'Inter var',system-ui,sans-serif}.ds-pill-dot{width:6px;height:6px;border-radius:9999px;background:var(--s)}.ds-badge{padding:2px 6px;border-radius:6px;border:1px solid var(--color-line,#26262b);background:var(--color-surface-2,#161619);color:var(--color-ink-muted,#a1a1aa);font:500 11px/16px ui-monospace,Menlo,monospace}.ds-btn-quiet{padding:6px 12px;background:transparent;color:var(--color-ink-muted,#a1a1aa);border:1px solid var(--color-line,#26262b);border-radius:8px;font:600 12px/16px 'Inter var',system-ui,sans-serif}"
     },
     {
       "name": "Top Navigation",
@@ -363,6 +363,11 @@
       {
         "name": "The Tint, Don't Paint Rule",
         "body": "Status surfaces are tinted (`color-mix` at about 12% fill and 35% border), never solid blocks of state color. Solid emerald is reserved for the primary action.",
+        "section": "colors"
+      },
+      {
+        "name": "The Dim Floor Rule",
+        "body": "Ink Dim (#87878f) is the dimmest color text may use, and it clears 4.5:1 on every surface up to Floating (#1c1c20) and on emerald tints. Never set text in Hairline or any value darker than Ink Dim. Fade decoration, not words.",
         "section": "colors"
       },
       {

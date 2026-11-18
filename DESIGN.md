@@ -13,12 +13,12 @@ colors:
   line-strong: "#34343a"
   ink: "#f4f4f5"
   ink-muted: "#a1a1aa"
-  ink-dim: "#71717a"
+  ink-dim: "#87878f"
   state-running: "#34d399"
   state-starting: "#fbbf24"
   state-unhealthy: "#fb923c"
   state-failed: "#f87171"
-  state-stopped: "#71717a"
+  state-stopped: "#87878f"
   state-idle: "#60a5fa"
 typography:
   headline:
@@ -139,7 +139,7 @@ A near-black zinc ramp holding a single emerald signal, plus a fixed set of life
 - **Hairline Strong** (#34343a): hovered card borders, menu borders, focused input borders.
 - **Ink** (#f4f4f5): primary text and headings.
 - **Ink Muted** (#a1a1aa): secondary text, resting button labels, menu items.
-- **Ink Dim** (#71717a): slugs, help text, placeholders, timestamps, icon buttons at rest.
+- **Ink Dim** (#87878f): slugs, help text, placeholders, timestamps, icon buttons at rest.
 
 ### Lifecycle states
 Fixed meanings, shared by every surface (pills, dots, chart markers, log highlights):
@@ -147,7 +147,7 @@ Fixed meanings, shared by every surface (pills, dots, chart markers, log highlig
 - **Starting / Stopping / startup phases**: Amber (#fbbf24), with a pulsing dot.
 - **Unhealthy**: Orange (#fb923c).
 - **Failed**: Coral Red (#f87171).
-- **Stopped**: Zinc (#71717a).
+- **Stopped**: Zinc (#87878f).
 - **Idle** (deliberately quiesced, wakes on request): Calm Blue (#60a5fa). Calm, not alarming.
 
 State tints are built with `color-mix(in oklab, <state> N%, transparent)`: about 12% for a fill, 35–40% for a border, the full color for text and dots.
@@ -158,6 +158,8 @@ State tints are built with `color-mix(in oklab, <state> N%, transparent)`: about
 **The Label-Always Rule.** A state color never appears without its word. A dot sits inside a pill that says "Running", "Failed" or "Idle", so meaning survives color-blindness and grayscale.
 
 **The Tint, Don't Paint Rule.** Status surfaces are tinted (`color-mix` at about 12% fill and 35% border), never solid blocks of state color. Solid emerald is reserved for the primary action.
+
+**The Dim Floor Rule.** Ink Dim (#87878f) is the dimmest color text may use, and it clears 4.5:1 on every surface up to Floating (#1c1c20) and on emerald tints. Never set text in Hairline or any value darker than Ink Dim. Fade decoration, not words.
 
 ## Typography
 
