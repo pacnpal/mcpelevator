@@ -13,13 +13,18 @@ export interface LaunchLine {
 	extra: string[];
 }
 
-/** Outside quotes these are shell syntax (pipes, redirects, expansions, subshells). */
-const SHELL_META = '|&;<>`$()';
+/**
+ * Outside quotes a shell rewrites these before the program sees them: pipes,
+ * redirects, `$`/backtick expansions, subshells, globs and brace expansion. Launch
+ * args go to the program as argv with no shell, so a split that kept them literal
+ * would change the command's meaning.
+ */
+const SHELL_META = '|&;<>`$()*?[]{}';
 
 /**
  * Split like a POSIX shell for plain words and single/double quotes; null if
  * unbalanced. `shell` is set when the line uses syntax a real shell would act on
- * (an unquoted metacharacter, or `$`/backtick inside double quotes), which a plain
+ * (an unquoted metacharacter or tilde, or `$`/backtick inside double quotes), which a plain
  * argv can't reproduce.
  */
 function scan(line: string): { words: string[]; shell: boolean } | null {
@@ -51,6 +56,8 @@ function scan(line: string): { words: string[]; shell: boolean } | null {
 			has = false;
 		} else {
 			if (SHELL_META.includes(ch)) shell = true;
+			// `~` expands at a word's start or after `=` (`--root=~/x`); `#` starts a comment.
+			if ((ch === '~' && (!has || cur.endsWith('='))) || (ch === '#' && !has)) shell = true;
 			cur += ch;
 			has = true;
 		}

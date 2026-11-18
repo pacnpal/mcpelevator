@@ -26,6 +26,13 @@ describe('parseLaunchLine', () => {
 			'--sep=a;b',
 			'$HOME'
 		]);
+		expect(parseLaunchLine(`npx pkg "~/Desktop" \\~/x '*.md' a~b x#y`)?.extra).toEqual([
+			'~/Desktop',
+			'~/x',
+			'*.md',
+			'a~b',
+			'x#y'
+		]);
 	});
 
 	it('parses uvx lines', () => {
@@ -55,6 +62,12 @@ describe('parseLaunchLine', () => {
 		expect(parseLaunchLine('npx pkg --token="$TOKEN"')).toBeNull();
 		expect(parseLaunchLine('npx pkg --out=a>b')).toBeNull();
 		expect(parseLaunchLine('npx pkg --x=`id`')).toBeNull();
+		// Tilde, globs, braces and comments are shell rewrites too.
+		expect(parseLaunchLine('npx -y @modelcontextprotocol/server-filesystem ~/Desktop')).toBeNull();
+		expect(parseLaunchLine('npx pkg --root=~/x')).toBeNull();
+		expect(parseLaunchLine('npx pkg /data/*')).toBeNull();
+		expect(parseLaunchLine('npx pkg file{1,2}')).toBeNull();
+		expect(parseLaunchLine('npx pkg --flag # note')).toBeNull();
 	});
 });
 
