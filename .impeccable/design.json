@@ -1,0 +1,403 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-18T15:29:54.615068+00:00",
+  "title": "Design System: mcpelevator",
+  "extensions": {
+    "colorMeta": {
+      "signal-emerald": {
+        "role": "primary",
+        "displayName": "Signal Emerald",
+        "tonalRamp": [
+          "#022c22",
+          "#064e3b",
+          "#065f46",
+          "#047857",
+          "#10b981",
+          "#34d399",
+          "#6ee7b7",
+          "#d1fae5"
+        ]
+      },
+      "signal-emerald-deep": {
+        "role": "primary",
+        "displayName": "Deep Emerald",
+        "tonalRamp": [
+          "#022c22",
+          "#064e3b",
+          "#065f46",
+          "#047857",
+          "#10b981",
+          "#34d399",
+          "#6ee7b7",
+          "#d1fae5"
+        ]
+      },
+      "emerald-ink": {
+        "role": "primary",
+        "displayName": "Emerald Ink",
+        "tonalRamp": [
+          "#022c22",
+          "#064e3b",
+          "#065f46",
+          "#047857",
+          "#10b981",
+          "#34d399",
+          "#6ee7b7",
+          "#d1fae5"
+        ]
+      },
+      "base": {
+        "role": "neutral",
+        "displayName": "Base Night",
+        "tonalRamp": [
+          "#09090b",
+          "#101012",
+          "#161619",
+          "#1c1c20",
+          "#26262b",
+          "#34343a",
+          "#71717a",
+          "#a1a1aa",
+          "#f4f4f5"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Panel",
+        "tonalRamp": [
+          "#09090b",
+          "#101012",
+          "#161619",
+          "#1c1c20",
+          "#26262b",
+          "#34343a",
+          "#71717a",
+          "#a1a1aa",
+          "#f4f4f5"
+        ]
+      },
+      "surface-2": {
+        "role": "neutral",
+        "displayName": "Panel Raised",
+        "tonalRamp": [
+          "#09090b",
+          "#101012",
+          "#161619",
+          "#1c1c20",
+          "#26262b",
+          "#34343a",
+          "#71717a",
+          "#a1a1aa",
+          "#f4f4f5"
+        ]
+      },
+      "elevated": {
+        "role": "neutral",
+        "displayName": "Floating",
+        "tonalRamp": [
+          "#09090b",
+          "#101012",
+          "#161619",
+          "#1c1c20",
+          "#26262b",
+          "#34343a",
+          "#71717a",
+          "#a1a1aa",
+          "#f4f4f5"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "tonalRamp": [
+          "#09090b",
+          "#101012",
+          "#161619",
+          "#1c1c20",
+          "#26262b",
+          "#34343a",
+          "#71717a",
+          "#a1a1aa",
+          "#f4f4f5"
+        ]
+      },
+      "line-strong": {
+        "role": "neutral",
+        "displayName": "Hairline Strong",
+        "tonalRamp": [
+          "#09090b",
+          "#101012",
+          "#161619",
+          "#1c1c20",
+          "#26262b",
+          "#34343a",
+          "#71717a",
+          "#a1a1aa",
+          "#f4f4f5"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "tonalRamp": [
+          "#09090b",
+          "#101012",
+          "#161619",
+          "#1c1c20",
+          "#26262b",
+          "#34343a",
+          "#71717a",
+          "#a1a1aa",
+          "#f4f4f5"
+        ]
+      },
+      "ink-muted": {
+        "role": "neutral",
+        "displayName": "Ink Muted",
+        "tonalRamp": [
+          "#09090b",
+          "#101012",
+          "#161619",
+          "#1c1c20",
+          "#26262b",
+          "#34343a",
+          "#71717a",
+          "#a1a1aa",
+          "#f4f4f5"
+        ]
+      },
+      "ink-dim": {
+        "role": "neutral",
+        "displayName": "Ink Dim",
+        "tonalRamp": [
+          "#09090b",
+          "#101012",
+          "#161619",
+          "#1c1c20",
+          "#26262b",
+          "#34343a",
+          "#71717a",
+          "#a1a1aa",
+          "#f4f4f5"
+        ]
+      },
+      "state-running": {
+        "role": "state",
+        "displayName": "Running"
+      },
+      "state-starting": {
+        "role": "state",
+        "displayName": "Starting / Stopping (Amber)"
+      },
+      "state-unhealthy": {
+        "role": "state",
+        "displayName": "Unhealthy (Orange)"
+      },
+      "state-failed": {
+        "role": "state",
+        "displayName": "Failed (Coral Red)"
+      },
+      "state-stopped": {
+        "role": "state",
+        "displayName": "Stopped (Zinc)"
+      },
+      "state-idle": {
+        "role": "state",
+        "displayName": "Idle (Calm Blue)"
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Page titles, one per page."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Card titles (server names) and in-page section heads."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Form labels, button labels, menu items, copy."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "State pills, help text, metadata; the most-used size."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Slugs, URLs, commands, env keys, tool names, logs."
+      }
+    },
+    "shadows": [
+      {
+        "name": "float",
+        "value": "0 25px 50px -12px rgb(0 0 0 / 0.25)",
+        "purpose": "Menus, popovers, dialogs, toasts only."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-out-quint",
+        "value": "cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Default easing for entrances and the state pulse."
+      },
+      {
+        "name": "pulse-dot",
+        "value": "opacity 1 → 0.35, 1.4s ease-out-quint infinite",
+        "purpose": "Transient lifecycle states (starting, stopping, startup phases)."
+      },
+      {
+        "name": "rise-in",
+        "value": "opacity 0→1, translateY 8px→0, 0.4s ease-out-quint",
+        "purpose": "Toast and panel entrances."
+      },
+      {
+        "name": "press",
+        "value": "translateY(1px) on :active",
+        "purpose": "Every button and nav item."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "sm",
+        "value": "640px"
+      },
+      {
+        "name": "md",
+        "value": "768px"
+      },
+      {
+        "name": "lg",
+        "value": "1024px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one action a view exists for (Add server, Start, Save).",
+      "html": "<button class=\"ds-btn-primary\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\"><path d=\"M12 5v14M5 12h14\"/></svg>Add server</button>",
+      "css": ".ds-btn-primary{display:inline-flex;align-items:center;gap:6px;background:var(--color-accent,#34d399);color:var(--color-accent-ink,#022c22);padding:8px 12px;border:0;border-radius:8px;font:600 14px/20px 'Inter var',system-ui,sans-serif;cursor:pointer;transition:background .15s,transform .15s}.ds-btn-primary:hover{background:var(--color-accent-strong,#10b981)}.ds-btn-primary:active{transform:translateY(1px)}.ds-btn-primary:focus-visible{outline:2px solid var(--color-accent,#34d399);outline-offset:2px}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Refresh, Copy and nav items; resting zinc with a hairline.",
+      "html": "<button class=\"ds-btn-secondary\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"><path d=\"M21 12a9 9 0 1 1-3-6.7L21 8\"/><path d=\"M21 3v5h-5\"/></svg>Refresh</button>",
+      "css": ".ds-btn-secondary{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 12px;background:var(--color-surface,#101012);color:var(--color-ink-muted,#a1a1aa);border:1px solid var(--color-line,#26262b);border-radius:8px;font:500 14px/20px 'Inter var',system-ui,sans-serif;cursor:pointer;transition:color .15s,border-color .15s,transform .15s}.ds-btn-secondary:hover{color:var(--color-ink,#f4f4f5);border-color:var(--color-line-strong,#34343a)}.ds-btn-secondary:active{transform:translateY(1px)}.ds-btn-secondary:focus-visible{outline:2px solid var(--color-accent,#34d399);outline-offset:2px}"
+    },
+    {
+      "name": "Stop Button",
+      "kind": "button",
+      "refersTo": "button-quiet",
+      "description": "Routine lifecycle action, deliberately quiet.",
+      "html": "<button class=\"ds-btn-quiet\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"currentColor\"><rect x=\"7\" y=\"7\" width=\"10\" height=\"10\" rx=\"1.5\"/></svg>Stop</button>",
+      "css": ".ds-btn-quiet{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;background:transparent;color:var(--color-ink-muted,#a1a1aa);border:1px solid var(--color-line,#26262b);border-radius:8px;font:600 12px/16px 'Inter var',system-ui,sans-serif;cursor:pointer;transition:color .15s,border-color .15s,transform .15s}.ds-btn-quiet:hover{color:var(--color-ink,#f4f4f5);border-color:var(--color-line-strong,#34343a)}.ds-btn-quiet:active{transform:translateY(1px)}.ds-btn-quiet:focus-visible{outline:2px solid var(--color-accent,#34d399);outline-offset:2px}"
+    },
+    {
+      "name": "State Pill",
+      "kind": "chip",
+      "refersTo": "state-pill",
+      "description": "Signature lifecycle indicator: tinted pill, dot, and the state's word.",
+      "html": "<span class=\"ds-pill\" style=\"--s:#34d399\"><span class=\"ds-pill-dot\"></span>Running</span> <span class=\"ds-pill ds-pill-pulse\" style=\"--s:#fbbf24\"><span class=\"ds-pill-dot\"></span>Starting</span> <span class=\"ds-pill\" style=\"--s:#60a5fa\"><span class=\"ds-pill-dot\"></span>Idle</span> <span class=\"ds-pill\" style=\"--s:#f87171\"><span class=\"ds-pill-dot\"></span>Failed</span>",
+      "css": ".ds-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:9999px;border:1px solid color-mix(in oklab,var(--s) 35%,transparent);background:color-mix(in oklab,var(--s) 12%,transparent);color:var(--s);font:500 12px/16px 'Inter var',system-ui,sans-serif;letter-spacing:.025em}.ds-pill-dot{width:6px;height:6px;border-radius:9999px;background:var(--s)}.ds-pill-pulse .ds-pill-dot{animation:ds-pulse 1.4s cubic-bezier(.22,1,.36,1) infinite}@keyframes ds-pulse{50%{opacity:.35}}"
+    },
+    {
+      "name": "Runner Badge",
+      "kind": "chip",
+      "refersTo": "runner-badge",
+      "description": "Mono tag naming how a server runs, plus emerald exposure tag.",
+      "html": "<span class=\"ds-badge\">npx</span> <span class=\"ds-badge ds-badge-on\">MCP</span>",
+      "css": ".ds-badge{display:inline-flex;align-items:center;padding:2px 6px;border-radius:6px;border:1px solid var(--color-line,#26262b);background:var(--color-surface-2,#161619);color:var(--color-ink-muted,#a1a1aa);font:500 11px/16px ui-monospace,'SF Mono',Menlo,monospace}.ds-badge-on{color:var(--color-accent,#34d399);border-color:color-mix(in oklab,var(--color-accent,#34d399) 35%,transparent);background:color-mix(in oklab,var(--color-accent,#34d399) 10%,transparent)}"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Raised zinc well with a hairline; label above, dim help below.",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">Name</span><input class=\"ds-input\" placeholder=\"memory\"><span class=\"ds-field-help\">A human label. The slug is derived from it automatically.</span></label>",
+      "css": ".ds-field{display:flex;flex-direction:column;gap:8px;max-width:360px}.ds-field-label{font:500 14px/20px 'Inter var',system-ui,sans-serif;color:var(--color-ink,#f4f4f5)}.ds-input{padding:8px 12px;border-radius:8px;border:1px solid var(--color-line,#26262b);background:var(--color-surface-2,#161619);color:var(--color-ink,#f4f4f5);font:400 14px/20px 'Inter var',system-ui,sans-serif;outline:none;transition:border-color .15s}.ds-input::placeholder{color:var(--color-ink-dim,#71717a)}.ds-input:focus{border-color:var(--color-line-strong,#34343a)}.ds-input:focus-visible{outline:2px solid var(--color-accent,#34d399);outline-offset:2px}.ds-field-help{font:400 12px/16px 'Inter var',system-ui,sans-serif;color:var(--color-ink-dim,#71717a)}"
+    },
+    {
+      "name": "Server Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "The dashboard unit: identity, state, runner, then Copy and the lifecycle action.",
+      "html": "<article class=\"ds-card\"><header class=\"ds-card-head\"><div><h3 class=\"ds-card-title\">Memory</h3><p class=\"ds-card-slug\">memory</p></div><span class=\"ds-pill\" style=\"--s:#34d399\"><span class=\"ds-pill-dot\"></span>Running</span></header><div><span class=\"ds-badge\">npx</span></div><footer class=\"ds-card-foot\"><button class=\"ds-btn-quiet\">Copy</button><button class=\"ds-btn-quiet\">Stop</button></footer></article>",
+      "css": ".ds-card{display:flex;flex-direction:column;gap:16px;width:320px;padding:20px;border-radius:14px;border:1px solid var(--color-line,#26262b);background:var(--color-surface,#101012);transition:border-color .15s}.ds-card:hover{border-color:var(--color-line-strong,#34343a)}.ds-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.ds-card-title{margin:0;font:600 15px/20px 'Inter var',system-ui,sans-serif;color:var(--color-ink,#f4f4f5)}.ds-card-slug{margin:2px 0 0;font:400 12px/16px ui-monospace,'SF Mono',Menlo,monospace;color:var(--color-ink-dim,#71717a)}.ds-card-foot{display:flex;justify-content:space-between;padding-top:16px;border-top:1px solid var(--color-line,#26262b)}.ds-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:9999px;border:1px solid color-mix(in oklab,var(--s) 35%,transparent);background:color-mix(in oklab,var(--s) 12%,transparent);color:var(--s);font:500 12px/16px 'Inter var',system-ui,sans-serif}.ds-pill-dot{width:6px;height:6px;border-radius:9999px;background:var(--s)}.ds-badge{padding:2px 6px;border-radius:6px;border:1px solid var(--color-line,#26262b);background:var(--color-surface-2,#161619);color:var(--color-ink-muted,#a1a1aa);font:500 11px/16px ui-monospace,Menlo,monospace}.ds-btn-quiet{padding:6px 12px;background:transparent;color:var(--color-ink-muted,#a1a1aa);border:1px solid var(--color-line,#26262b);border-radius:8px;font:600 12px/16px 'Inter var',system-ui,sans-serif}"
+    },
+    {
+      "name": "Top Navigation",
+      "kind": "nav",
+      "refersTo": "nav",
+      "description": "Sticky blurred bar; secondary-button nav items with the emerald active tint.",
+      "html": "<nav class=\"ds-nav\"><span class=\"ds-nav-logo\"><b>mcp</b>elevator</span><div class=\"ds-nav-items\"><a class=\"ds-nav-item\" aria-current=\"page\">Browse</a><a class=\"ds-nav-item\">Usage</a></div></nav>",
+      "css": ".ds-nav{display:flex;align-items:center;justify-content:space-between;height:56px;padding:0 24px;border-bottom:1px solid var(--color-line,#26262b);background:color-mix(in oklab,var(--color-base,#09090b) 85%,transparent);backdrop-filter:blur(12px)}.ds-nav-logo{font:600 17px/1 'Inter var',system-ui,sans-serif;color:var(--color-ink,#f4f4f5)}.ds-nav-logo b{color:var(--color-accent,#34d399);font-weight:600}.ds-nav-items{display:flex;gap:12px}.ds-nav-item{display:inline-flex;align-items:center;height:36px;padding:0 12px;border-radius:8px;border:1px solid var(--color-line,#26262b);background:var(--color-surface,#101012);color:var(--color-ink-muted,#a1a1aa);font:500 14px/20px 'Inter var',system-ui,sans-serif;text-decoration:none;cursor:pointer}.ds-nav-item[aria-current=page]{color:var(--color-accent,#34d399);border-color:color-mix(in oklab,var(--color-accent,#34d399) 40%,transparent);background:color-mix(in oklab,var(--color-accent,#34d399) 8%,transparent)}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Switchboard",
+    "overview": "**Creative North Star: \"The Quiet Switchboard\"**\n\nmcpelevator looks like an operator's switchboard at night: a near-black zinc panel with rows of identical units, where a small green light says a line is live and everything else stays dim until it needs a hand. Most visits are check-ins, so a healthy instance should read as calm, and the eye should land only on what has changed state or needs an action.\n\nIt is a dense, flat, dark-only interface. Depth comes from stepping the zinc surface a shade lighter, not from shadows. Color is reserved for meaning: the lifecycle state of a server, and the one primary action on a screen. Technical identity (slugs, URLs, runners, commands) is set in mono, so a glance tells \"a name a human chose\" apart from \"a string a machine routes on\". The only atmosphere is a faint emerald glow (7%) falling from the top of the page, behind everything.\n\nComponents are quiet and exact: hairline borders, 8px corners, a one-pixel press on click, and no decoration that doesn't carry state.",
+    "keyCharacteristics": [
+      "Dark only (`color-scheme: dark`), on a warm-neutral zinc ramp.",
+      "One accent, Signal Emerald, meaning live/healthy and marking the primary action. No gradients except the ambient top glow.",
+      "Lifecycle state colors are fixed semantics and always come with a text label.",
+      "Mono for machine identifiers, Inter for everything a human reads.",
+      "Flat surfaces with tonal layering. Shadows only on things that float (menus, dialogs, toasts).",
+      "Small type, tight rhythm: most UI text is 12–14px."
+    ],
+    "rules": [
+      {
+        "name": "The One Signal Rule",
+        "body": "Signal Emerald means live, healthy, active or \"do this\". It is never decoration, never a heading color, and never more than one filled emerald button per view.",
+        "section": "colors"
+      },
+      {
+        "name": "The Label-Always Rule",
+        "body": "A state color never appears without its word. A dot sits inside a pill that says \"Running\", \"Failed\" or \"Idle\", so meaning survives color-blindness and grayscale.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tint, Don't Paint Rule",
+        "body": "Status surfaces are tinted (`color-mix` at about 12% fill and 35% border), never solid blocks of state color. Solid emerald is reserved for the primary action.",
+        "section": "colors"
+      },
+      {
+        "name": "The Machine-in-Mono Rule",
+        "body": "If a string is routed on, copied into a config or typed into a terminal (slug, URL, command, env key, tool name), it is mono. If a human named it, it is Inter.",
+        "section": "typography"
+      },
+      {
+        "name": "The Small-Steps Rule",
+        "body": "The scale stays between 10px and 24px. New hierarchy comes from weight (500/600) and Ink vs Ink Muted vs Ink Dim, not from new sizes.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat-Until-Floating Rule",
+        "body": "Nothing in the page flow casts a shadow. A shadow means the element sits above the page and will go away (a menu, dialog or toast).",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** pair every state color with its word, using the State Pill or its dot-plus-label pattern.",
+      "**Do** build state tints with `color-mix(in oklab, <state> 12%, transparent)` fills and 35–40% borders.",
+      "**Do** set slugs, URLs, commands, env keys and tool names in mono at 11–12px.",
+      "**Do** step depth through Base Night → Panel → Panel Raised → Floating, and separate with 1px Hairlines.",
+      "**Do** keep one filled Signal Emerald button per view, and make it the action the screen exists for.",
+      "**Do** use the global 2px Signal Emerald focus outline (2px offset) for every interactive element.",
+      "**Do** show busy work in place: a spinner, a gerund label, `aria-busy`."
+    ],
+    "donts": [
+      "**Don't** introduce a second accent hue or use emerald as decoration, heading color or illustration fill.",
+      "**Don't** use gradients beyond the existing ambient top glow.",
+      "**Don't** put shadows on cards or anything in the page flow. Shadows are only for floating layers.",
+      "**Don't** make a light theme variant ad hoc. The system is dark only (`color-scheme: dark`).",
+      "**Don't** render Stop or other routine lifecycle actions as red or filled. They stay quiet.",
+      "**Don't** add type sizes above 24px or display faces to the app UI.",
+      "**Don't** show Idle in a warning color. It is a deliberate, healthy state (Calm Blue)."
+    ]
+  }
+}
