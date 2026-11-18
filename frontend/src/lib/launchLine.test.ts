@@ -45,6 +45,10 @@ describe('parseLaunchLine', () => {
 
 	it('joins backslash-continued lines', () => {
 		expect(parseLaunchLine('npx -y pkg \\\n  --flag')?.extra).toEqual(['--flag']);
+		expect(parseLaunchLine('npx -y pkg \\\r\n  --flag')?.extra).toEqual(['--flag']);
+		// A continuation inside a word joins it, with no argument break (POSIX).
+		expect(parseLaunchLine('npx pkg --path=/srv/\\\ndata')?.extra).toEqual(['--path=/srv/data']);
+		expect(parseLaunchLine('npx pkg "--path=/srv/\\\ndata"')?.extra).toEqual(['--path=/srv/data']);
 	});
 
 	it('refuses shapes it cannot represent', () => {

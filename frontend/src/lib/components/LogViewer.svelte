@@ -299,7 +299,6 @@
 			<button
 				type="button"
 				onclick={() => (hideRequests = !hideRequests)}
-				aria-pressed={hideRequests}
 				title="Hide successful HTTP request lines; errors always show"
 				class="rounded-md border border-[var(--color-line)] px-2.5 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
 			>

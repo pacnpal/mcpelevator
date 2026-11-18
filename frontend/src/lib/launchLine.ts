@@ -37,6 +37,9 @@ function scan(line: string): { words: string[]; shell: boolean } | null {
 		const ch = line[i];
 		if (quote) {
 			if (ch === quote) quote = null;
+			// Backslash-newline is a line continuation: removed, joining the halves
+			// without a word break (`--path=/srv/\⏎data` is one argument).
+			else if (ch === '\\' && quote === '"' && line[i + 1] === '\n') i++;
 			// In double quotes a backslash escapes only $ ` " \ (POSIX); before
 			// anything else it stays literal ("\d+", "C:\tmp").
 			else if (ch === '\\' && quote === '"' && '$`"\\'.includes(line[i + 1] ?? '')) cur += line[++i];
@@ -47,10 +50,14 @@ function scan(line: string): { words: string[]; shell: boolean } | null {
 		} else if (ch === '"' || ch === "'") {
 			quote = ch;
 			has = true;
+		} else if (ch === '\\' && line[i + 1] === '\n') {
+			i++;
 		} else if (ch === '\\' && i + 1 < line.length) {
 			cur += line[++i];
 			has = true;
 		} else if (/\s/.test(ch)) {
+			if (ch === '\n') shell = true; // an unescaped newline ends the command
+
 			if (has) out.push(cur);
 			cur = '';
 			has = false;
@@ -72,8 +79,8 @@ export function shellSplit(line: string): string[] | null {
 }
 
 export function parseLaunchLine(text: string): LaunchLine | null {
-	const line = text.trim().replace(/\\\r?\n\s*/g, ' '); // join backslash-continued lines
-	if (!/^(npx|uvx)\s/.test(line) || line.includes('\n')) return null;
+	const line = text.trim().replace(/\r\n/g, '\n');
+	if (!/^(npx|uvx)\s/.test(line)) return null;
 	const scanned = scan(line);
 	// Nothing expands a launch arg (it's passed as argv, not through a shell), so
 	// `--key=$API_KEY` would be stored literally: leave such a paste as typed.
@@ -83,7 +90,7 @@ export function parseLaunchLine(text: string): LaunchLine | null {
 	let i = 1;
 	if (runner === 'npx') while (words[i] === '-y' || words[i] === '--yes') i++;
 	const pkg = words[i];
-	if (!pkg || pkg.startsWith('-')) return null;
+	if (!pkg || pkg.startsWith('-') || pkg.includes('\n')) return null;
 	const extra = words.slice(i + 1);
 	// The form keeps one trimmed argument per line, so an empty or space-padded
 	// argument can't survive the split; leave that paste as typed.

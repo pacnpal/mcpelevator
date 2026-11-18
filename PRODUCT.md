@@ -57,7 +57,7 @@ One self-hosted container on one port does all of it. The protocol bridging come
 
 1. **Add, start, copy URL.** The shortest path from a launch command to a working endpoint comes first. Everything else is reachable but never in the way.
 2. **State is truth, shown honestly.** The UI reports desired versus observed state as the supervisor sees it, including idle, starting and failed, and every failure explains itself (last error, logs).
-3. **Secure by default, caveats stated.** Write-only secrets and Host/Origin checks are always on. Control-plane auth defaults to `auto`: it requires a token once the instance is reachable off-host, and a loopback-only install accepts `/api` calls without one. The UI is explicit about what is and isn't protected.
+3. **Secure by default, caveats stated.** Write-only secrets and Host/Origin checks are always on. Control-plane auth defaults to `auto`, which requires a token when the configuration declares off-host access: `bind_mode=expose`, a public base URL or extra allowed hosts, or private-LAN access. With none of those set, `/api` calls are accepted without a token, including through a reverse proxy on the same host that forwards a loopback Host, so a proxied install should declare its public base URL. The UI is explicit about what is and isn't protected.
 4. **One control plane, any operator.** Whatever a person can do in the UI, an agent can do through the control MCP, with the same permissions and the same vocabulary.
 5. **Calm when it works.** Most visits are quick check-ins. A healthy instance should read as quiet, and attention goes to whatever needs action.
 

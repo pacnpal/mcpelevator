@@ -709,7 +709,8 @@
 		command: 'Add a command.',
 		docker: 'Add an image.',
 		remote: "Add the server's URL.",
-		openapi: 'Add the OpenAPI document URL, or paste the document.'
+		openapi: 'Add the OpenAPI document URL, or paste the document.',
+		graphql: 'Add the GraphQL endpoint URL.'
 	};
 	const submitBlocker = $derived.by(() => {
 		if (busy) return null;
@@ -717,6 +718,10 @@
 		if (!commandValid) return COMMAND_MISSING[runner] ?? 'Add a command.';
 		if (!remoteUrlValid) return 'Enter a full http(s) URL.';
 		if (!baseUrlValid) return 'The base URL must be a full http(s) URL.';
+		if (!schemaValid)
+			return schemaSource === 'url'
+				? "The schema URL must be a full http(s) URL."
+				: 'Paste the GraphQL schema, or choose another schema source.';
 		if (!idleTimeoutValid) return 'Idle shutdown must be a whole number of seconds.';
 		if (!startupTimeoutsValid) return 'Fix the startup timeout under Exposure & access.';
 		if (!isBuiltin && !healthValid)
