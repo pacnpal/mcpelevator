@@ -1207,8 +1207,13 @@
 				<div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
 					<div class="min-w-0 flex-1">
 						<p class="text-xs font-medium text-[var(--color-ink-muted)]">MCP</p>
-						<p class="font-mono text-xs break-all text-[var(--color-ink)] sm:truncate">
-							{server.urls.mcp ?? '— not exposed —'}
+						<p class="font-mono text-xs [overflow-wrap:anywhere] text-[var(--color-ink)] sm:truncate">
+							{#if server.urls.mcp}
+								<!-- Break only after a slash, so no path segment splits mid-word. -->
+								{#each server.urls.mcp.split('/') as part, i (i)}{#if i > 0}/<wbr />{/if}{part}{/each}
+							{:else}
+								— not exposed —
+							{/if}
 						</p>
 					</div>
 					<div class="flex shrink-0 items-center gap-2">
@@ -1490,7 +1495,9 @@
 					Source <span class="font-mono text-[var(--color-ink-muted)]">{server.source}</span>
 				</span>
 				<span class="text-[var(--color-ink-dim)]">
-					Auth <span class="font-mono text-[var(--color-ink-muted)]">{server.auth_provider}</span>
+					Auth <span class="font-mono text-[var(--color-ink-muted)]"
+						>{server.auth}{server.auth_provider === 'inherit' ? ' (default)' : ''}</span
+					>
 				</span>
 			</div>
 		</div>
@@ -1511,7 +1518,7 @@
 							: 'Tools are discovered once the server is running.'}
 					</p>
 				{:else}
-					<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
+					<p class="max-w-md text-xs text-[var(--color-ink-dim)]">
 						Switch a tool off to hide it from every client and refuse calls to it.
 						<strong>Edit</strong> renames a tool or rewrites its description. Changes wait for
 						<strong>Apply</strong>, which restarts the server once.

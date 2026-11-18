@@ -221,6 +221,25 @@ def test_create_token_scope_defaults_to_all_and_echoes_server_scope():
         client.delete(f"/api/servers/{server['id']}", headers=host)
 
 
+def test_copy_urls_honor_forwarded_proto():
+    """Behind an HTTPS-terminating proxy the app hop is plain http; the copyable URLs
+    must still be https, or Claude web/mobile refuse the connector."""
+    with TestClient(app) as client:
+        h = {"host": "127.0.0.1"}
+        a = client.post("/api/servers", json={"name": "Proto", "command": "echo"}, headers=h).json()
+        try:
+            plain = client.get(f"/api/servers/{a['id']}", headers=h).json()
+            assert plain["urls"]["mcp"].startswith("http://127.0.0.1/")
+            proxied = client.get(
+                f"/api/servers/{a['id']}", headers={**h, "x-forwarded-proto": "https"}
+            ).json()
+            assert proxied["urls"]["mcp"].startswith("https://127.0.0.1/")
+            listed = client.get("/api/servers", headers={**h, "x-forwarded-proto": "https"}).json()
+            assert all(s["urls"]["mcp"].startswith("https://") for s in listed if s["urls"]["mcp"])
+        finally:
+            client.delete(f"/api/servers/{a['id']}", headers=h)
+
+
 def test_patch_renames_slug_and_repoints_urls():
     """PATCH {slug} normalizes and re-points the server's public URLs; a conflicting
     or reserved slug is a 400."""

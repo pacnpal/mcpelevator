@@ -319,16 +319,24 @@
 	// runner, package and extra args (and names an unnamed server) instead of landing
 	// as one long "package".
 	let pasteNote = $state('');
-	function onPkgPaste(event: ClipboardEvent) {
-		const parsed = parseLaunchLine(event.clipboardData?.getData('text') ?? '');
-		if (!parsed) return;
-		event.preventDefault();
+	function applyLaunchLine(text: string): boolean {
+		const parsed = parseLaunchLine(text);
+		if (!parsed) return false;
 		runner = parsed.runner;
 		pkg = parsed.pkg;
 		extraArgsText = parsed.extra.join('\n');
 		if (!name.trim()) name = nameFromPackage(parsed.pkg);
 		onRunnerChange();
-		pasteNote = `Split the pasted ${parsed.runner} command into package and arguments.`;
+		pasteNote = `Split the ${parsed.runner} command into package and arguments.`;
+		return true;
+	}
+	function onPkgPaste(event: ClipboardEvent) {
+		if (applyLaunchLine(event.clipboardData?.getData('text') ?? '')) event.preventDefault();
+	}
+	// Typed (or autofilled) rather than pasted: split it when the field is left, and
+	// again on submit, so `npx -y npx -y @pkg` can never reach the launch line.
+	function splitTypedLaunchLine() {
+		if (friendly) applyLaunchLine(pkg);
 	}
 
 	function onRunnerChange() {
@@ -581,6 +589,7 @@
 
 	function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
+		splitTypedLaunchLine();
 		if (!canSubmit) return;
 		const payload: ServerCreate & { slug?: string } = {
 			name: name.trim(),
@@ -785,6 +794,7 @@
 						syncFromFriendly();
 					}}
 					onpaste={onPkgPaste}
+					onchange={splitTypedLaunchLine}
 					autocomplete="off"
 					spellcheck="false"
 					placeholder={pkgPlaceholder}
@@ -1905,6 +1915,34 @@
 	</fieldset>
 		</div>
 	</details>
+
+	<!-- Say the auth posture before the server exists, not only after it's live. -->
+	{#if mode === 'create' && !isBuiltin && (authProvider === 'none' || (authProvider === 'inherit' && defaults?.auth === 'none'))}
+		<p class="-mt-3 flex items-start gap-1.5 text-xs text-[var(--color-ink-dim)]">
+			<svg
+				class="mt-px size-3.5 shrink-0 text-[var(--color-ink-muted)]"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<rect x="5" y="11" width="14" height="10" rx="2" />
+				<path d="M8 11V7a4 4 0 0 1 7.9-1" />
+			</svg>
+			<span>
+				No auth: once it's running, anyone who can reach its URL can call its tools.
+				<button
+					type="button"
+					onclick={() => (accessOpen = true)}
+					class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
+					>Require a token</button
+				>.
+			</span>
+		</p>
+	{/if}
 
 	<!-- Start after creating (create only) -->
 	{#if mode === 'create'}

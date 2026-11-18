@@ -82,3 +82,5 @@
 		<span>{text ?? label}</span>
 	{/if}
 </button>
+<!-- The visual swap to "Copied" is otherwise silent to a screen reader. -->
+<span class="sr-only" aria-live="polite">{copied ? `${label} URL copied` : ''}</span>
