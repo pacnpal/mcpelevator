@@ -137,7 +137,7 @@
 					aria-haspopup="menu"
 					aria-expanded={menuOpen}
 					aria-label="Server actions"
-					class="rounded-md p-1 text-[var(--color-ink-dim)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
+					class="rounded-md p-1.5 text-[var(--color-ink-dim)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
 				>
 					<svg class="size-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 						<circle cx="12" cy="5" r="1.6" />
@@ -296,19 +296,22 @@
 		</div>
 	</header>
 
-	<!-- Meta row: runner + transports -->
+	<!-- Meta row: runner, plus exposure only where it differs from the default (MCP on,
+	     REST off). An always-true green "MCP" on every card was decoration, not signal. -->
 	<div class="flex flex-wrap items-center gap-1.5">
 		<RunnerBadge runner={server.runner} />
-		<span
-			class="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-medium transition-colors"
-			class:opacity-40={!server.transports.mcp_http}
-			style={server.transports.mcp_http
-				? 'color: var(--color-accent); border-color: color-mix(in oklab, var(--color-accent) 30%, transparent); background-color: color-mix(in oklab, var(--color-accent) 10%, transparent);'
-				: 'color: var(--color-ink-dim); border-color: var(--color-line);'}
-		>
-			MCP
-		</span>
-		<!-- REST/OpenAPI badge omitted: the surface isn't served yet (planned, M6). -->
+		{#if server.transports.rest_openapi}
+			<span
+				class="inline-flex items-center rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-muted)]"
+				>+ REST</span
+			>
+		{/if}
+		{#if !server.transports.mcp_http}
+			<span
+				class="inline-flex items-center rounded-md border border-dashed border-[var(--color-line-strong)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-ink-muted)]"
+				>MCP off</span
+			>
+		{/if}
 	</div>
 
 	{#if startup}
@@ -349,7 +352,7 @@
 		</p>
 	{/if}
 
-	<!-- Footer: copy endpoints + start/stop -->
+	<!-- Footer: the endpoint (raw URL, or a client's snippet) + start/stop -->
 	<footer
 		class="mt-auto flex items-center justify-between gap-2 border-t border-[var(--color-line)] pt-4"
 	>

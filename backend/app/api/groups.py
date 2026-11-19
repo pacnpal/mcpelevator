@@ -20,7 +20,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from app.api.schemas import GroupInfo, GroupRestart, GroupUpsert
-from app.api.util import base_url, resync_groups
+from app.api.util import copy_base_url, resync_groups
 from app.auth import principal as principal_mod
 from app.auth.principal import Principal, require_admin
 from app.db import get_engine, get_session, repo
@@ -33,7 +33,7 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 def _url(request: Request, name: str) -> str:
-    return f"{base_url(request)}/g/{name}/mcp"
+    return f"{copy_base_url(request)}/g/{name}/mcp"
 
 
 logger = logging.getLogger(__name__)

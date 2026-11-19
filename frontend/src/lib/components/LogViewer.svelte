@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 
+	import { isQuietAccessLine } from '#lib/logFilter.js';
 	import { ApiError, streamLogs } from '#lib/api.js';
 	import type { ServerState, StartupStatus } from '#lib/types.js';
 
@@ -26,6 +27,10 @@
 	type Conn = 'idle' | 'connecting' | 'live' | 'reconnecting';
 
 	let lines = $state<string[]>([]);
+	// Successful request lines are noise next to startup output and errors.
+	let hideRequests = $state(true);
+	const shown = $derived(hideRequests ? lines.filter((l) => !isQuietAccessLine(l)) : lines);
+	const hiddenCount = $derived(lines.length - shown.length);
 	let conn = $state<Conn>('idle');
 	let notRunning = $state(false);
 	let paused = $state(false);
@@ -37,7 +42,7 @@
 	// this is the "hide the noise" cut that native find can't do.
 	const visible = $derived.by(() => {
 		const q = filter.trim().toLowerCase();
-		return q ? lines.filter((l) => l.toLowerCase().includes(q)) : lines;
+		return q ? shown.filter((l) => l.toLowerCase().includes(q)) : shown;
 	});
 	let pane = $state<HTMLDivElement | undefined>(undefined);
 	let seenServerId = '';
@@ -255,7 +260,7 @@
 				bind:value={filter}
 				placeholder="Filter…"
 				aria-label="Filter logs"
-				class="h-[26px] w-28 rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2 text-xs text-[var(--color-ink)] placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-accent)] focus:outline-none"
+				class="h-[26px] w-28 rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2 text-xs text-[var(--color-ink)] placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-accent)] focus:outline-none"
 			/>
 			<button
 				type="button"
@@ -293,6 +298,16 @@
 			</button>
 			<button
 				type="button"
+				onclick={() => (hideRequests = !hideRequests)}
+				title="Hide successful HTTP request lines; errors always show"
+				class="rounded-md border border-[var(--color-line)] px-2.5 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+			>
+				{hideRequests
+					? `Show OK requests${hiddenCount ? ` (${hiddenCount})` : ''}`
+					: 'Hide OK requests'}
+			</button>
+			<button
+				type="button"
 				onclick={() => (lines = [])}
 				disabled={lines.length === 0}
 				class="rounded-md border border-[var(--color-line)] px-2.5 py-1 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-40"
@@ -307,14 +322,18 @@
 		onscroll={onScroll}
 		role="region"
 		aria-label="Server logs"
-		class="overflow-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] p-3 font-mono text-xs leading-relaxed {compact ? 'h-44' : 'h-72'}"
+		class="overflow-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] p-3 font-mono text-xs leading-relaxed {compact ? 'h-44' : 'h-72'}"
 	>
 		{#if visible.length > 0}
 			{#each visible as line}
 				<div class="whitespace-pre-wrap break-all text-[var(--color-ink-muted)]">{line}</div>
 			{/each}
-		{:else if lines.length > 0}
+		{:else if shown.length > 0}
 			<p class="text-[var(--color-ink-dim)]">No lines match “{filter.trim()}”.</p>
+		{:else if lines.length > 0}
+			<p class="text-[var(--color-ink-dim)]">
+				Only successful requests so far ({hiddenCount} hidden).
+			</p>
 		{:else if notRunning}
 			<p class="text-[var(--color-ink-dim)]">Server isn't running — no live logs.</p>
 		{:else}

@@ -866,7 +866,7 @@
 		>
 			<div class="flex flex-col gap-1">
 				<h2 class="text-sm font-semibold text-[var(--color-ink)]">Access tokens</h2>
-				<p class="text-xs text-[var(--color-ink-dim)]">
+				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
 					Bearer tokens for servers set to <code class="font-mono">bearer</code> auth.
 					Sent as <code class="font-mono">Authorization: Bearer &lt;token&gt;</code>.
 				</p>
@@ -903,7 +903,7 @@
 					</div>
 					<div class="flex items-center gap-2">
 						<code
-							class="min-w-0 flex-1 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5 font-mono text-xs whitespace-nowrap text-[var(--color-accent)]"
+							class="min-w-0 flex-1 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5 font-mono text-xs whitespace-nowrap text-[var(--color-accent)]"
 						>
 							{createdToken.token}
 						</code>
@@ -1019,7 +1019,7 @@
 									</span>
 									{#if token.scope === 'control'}
 										<span
-											class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
+											class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap"
 											title="Control-plane admin token, authenticates /api"
 											style="border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);"
 										>
@@ -1027,7 +1027,7 @@
 										</span>
 									{:else}
 										<span
-											class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
+											class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap"
 											title={token.scope === 'all'
 												? 'Authorizes every bearer-protected server and group'
 												: token.scope.startsWith('group:')
@@ -1099,7 +1099,7 @@
 		>
 			<div class="flex flex-col gap-1">
 				<h2 class="text-sm font-semibold text-[var(--color-ink)]">Users</h2>
-				<p class="text-xs text-[var(--color-ink-dim)]">
+				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
 					Members see and manage only the servers and tokens they own. Users log in with
 					a login token you mint here — shown once, like every token.
 					<span class="font-medium text-[var(--color-ink-muted)]">Local runners execute
@@ -1195,7 +1195,7 @@
 								<span class="flex min-w-0 items-center gap-2">
 									<span class="truncate text-sm font-medium text-[var(--color-ink)]">{user.name}</span>
 									<span
-										class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
+										class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap"
 										style={user.role === 'admin'
 											? 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'
 											: 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'}
@@ -1204,7 +1204,7 @@
 									</span>
 									{#if user.local_runners}
 										<span
-											class="shrink-0 rounded-full border border-[var(--color-line)] px-2 py-0.5 text-[10px] font-medium whitespace-nowrap text-[var(--color-ink-muted)]"
+											class="shrink-0 rounded-full border border-[var(--color-line)] px-2 py-0.5 text-[11px] font-medium whitespace-nowrap text-[var(--color-ink-muted)]"
 											title="May configure npx / uvx / command / docker servers (code execution on this box)"
 										>
 											local runners
@@ -1212,7 +1212,7 @@
 									{/if}
 									{#if !user.control_mcp}
 										<span
-											class="shrink-0 rounded-full border border-[var(--color-line)] px-2 py-0.5 text-[10px] font-medium whitespace-nowrap text-[var(--color-ink-muted)]"
+											class="shrink-0 rounded-full border border-[var(--color-line)] px-2 py-0.5 text-[11px] font-medium whitespace-nowrap text-[var(--color-ink-muted)]"
 											title="Can't use the built-in mcpelevator MCP server"
 										>
 											no control MCP
@@ -1329,7 +1329,7 @@
 						</label>
 					{/each}
 				</div>
-				<p class="text-xs text-[var(--color-ink-dim)]">
+				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
 					Servers set to <code class="font-mono">inherit</code> use this.
 					<code class="font-mono">bearer</code> requires a token in
 					<code class="font-mono">Authorization: Bearer …</code>.
@@ -1341,7 +1341,7 @@
 			<form class="flex flex-col gap-3" onsubmit={saveOauthSettings}>
 				<div class="flex flex-col gap-1">
 					<h3 class="text-sm font-medium text-[var(--color-ink)]">OAuth resource server</h3>
-					<p class="text-xs text-[var(--color-ink-dim)]">
+					<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
 						Validates access tokens clients send to servers and groups using
 						<code class="font-mono">oauth</code>. This is separate from OAuth used to reach a remote upstream.
 					</p>
@@ -1368,7 +1368,7 @@
 						/>
 					</label>
 				</div>
-				<p class="text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
+				<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
 					Both fields are required before OAuth endpoints serve metadata or accept tokens. Audience validation prevents a token minted for another app from being reused here.
 				</p>
 				<div class="grid gap-3 sm:grid-cols-2">
@@ -1402,7 +1402,7 @@
 					/>
 					<span class="flex flex-col gap-0.5">
 						<span class="text-sm font-medium text-[var(--color-ink)]">Also accept local bearer tokens</span>
-						<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+						<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
 							Lets <code class="font-mono">mcpe_…</code> automation tokens use OAuth-protected endpoints with their normal server or group scope checks.
 						</span>
 					</span>
@@ -1452,7 +1452,7 @@
 									{choice.label}
 								</span>
 							</span>
-							<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+							<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
 								{choice.hint}
 							</span>
 						</label>
@@ -1464,7 +1464,7 @@
 						class="flex flex-col gap-2.5 rounded-lg border p-3"
 						style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
 					>
-						<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+						<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
 							This will lock this browser
 							(<code class="font-mono text-[var(--color-ink)]">{browserHost}</code>)
 							out of the control plane — <code class="font-mono">local</code> allows loopback
@@ -1497,7 +1497,7 @@
 						</div>
 					</div>
 				{/if}
-				<p class="text-xs text-[var(--color-ink-dim)]">
+				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
 					Host/Origin is always checked (DNS-rebinding defense): loopback is always
 					allowed; <code class="font-mono">expose</code> also allows the hosts below.
 				</p>
@@ -1525,7 +1525,7 @@
 						<span class="text-sm font-medium text-[var(--color-ink)]">
 							Allow access from devices on your local network
 						</span>
-						<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+						<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
 							Reach this box at its private IP (e.g.
 							<code class="font-mono">http://192.168.1.50:8080</code>) from other LAN devices —
 							no per-host allowlisting. Private-IP literals only, from a private-network peer,
@@ -1540,7 +1540,7 @@
 						class="flex flex-col gap-2.5 rounded-lg border p-3"
 						style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
 					>
-						<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+						<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
 							This will lock this browser
 							(<code class="font-mono text-[var(--color-ink)]">{browserHost}</code>)
 							out of the control plane — you're connected through a private IP. Open
@@ -1594,7 +1594,7 @@
 						<span class="text-sm font-medium text-[var(--color-ink)]">
 							Enable running MCP servers packaged as Docker images
 						</span>
-						<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+						<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
 							<span class="font-semibold text-[var(--color-state-failed)]">Root-equivalent.</span>
 							Launches arbitrary images on the mounted Docker daemon (a sibling container on
 							the host, or an isolated dind sidecar). Only enable it if you trust every image
@@ -1609,7 +1609,7 @@
 						class="flex flex-col gap-2.5 rounded-lg border p-3"
 						style="border-color: color-mix(in oklab, var(--color-state-failed) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 8%, transparent);"
 					>
-						<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+						<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
 							The docker runner is <span class="font-semibold text-[var(--color-ink)]">root-equivalent</span>:
 							a server you run can execute any image on the host's Docker daemon. Enable it only
 							if you trust the images you'll run.
@@ -1654,7 +1654,7 @@
 						<span class="text-sm font-medium text-[var(--color-ink)]">
 							Serve the control plane as an MCP server
 						</span>
-						<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+						<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
 							Lets an agent manage servers, groups, tokens, users and settings through the
 							built-in <code class="font-mono">mcpelevator</code> server on the dashboard, where it
 							is edited like any other server (hide or rename tools, auth, idle). Every tool call
@@ -1668,7 +1668,7 @@
 			<!-- Idle shutdown (wake-on-request) -->
 			<fieldset class="flex flex-col gap-2 border-0 p-0">
 				<legend class="text-sm font-medium text-[var(--color-ink)]">Idle shutdown</legend>
-				<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+				<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
 					Stop a running server after this many seconds without traffic; the next request
 					wakes it automatically (the proxy holds the request while it starts). Saves memory
 					when many servers are registered but only a few are in use.
@@ -1708,7 +1708,7 @@
 			<!-- Usage retention -->
 			<fieldset class="flex flex-col gap-2 border-0 p-0">
 				<legend class="text-sm font-medium text-[var(--color-ink)]">Usage retention</legend>
-				<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
+				<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
 					How long to keep per-server and per-tool call counts, shown on each server's
 					Usage panel — counts and when each was last seen, never arguments or results.
 					<code class="font-mono text-[var(--color-ink-muted)]">0</code> keeps them forever;
@@ -1777,13 +1777,13 @@
 									{choice.label}
 								</span>
 							</span>
-							<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+							<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
 								{choice.hint}
 							</span>
 						</label>
 					{/each}
 				</div>
-				<p class="text-xs text-[var(--color-ink-dim)]">
+				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
 					How OAuth sign-ins to a remote server identify this instance when no static client
 					id is set. <code class="font-mono">auto</code> offers the URL-based client id (CIMD)
 					only after confirming
@@ -1798,7 +1798,7 @@
 			<!-- Groups -->
 			<fieldset class="flex flex-col gap-3 border-0 p-0">
 				<legend class="text-sm font-medium text-[var(--color-ink)]">Groups</legend>
-				<p class="text-xs text-[var(--color-ink-dim)]">
+				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
 					A group is served at <code class="font-mono">/g/&lt;name&gt;/mcp</code> — one URL
 					bundling its running members' tools, each prefixed by the member's slug (e.g.
 					<code class="font-mono">github_create_issue</code>). Members are
@@ -1887,7 +1887,7 @@
 									</div>
 								</div>
 								{#if confirmDeleteGroup === group.name}
-									<p class="text-[11px] leading-tight text-[var(--color-state-failed)]">
+									<p class="text-xs leading-normal text-[var(--color-state-failed)]">
 										This takes <code class="font-mono">{group.url}</code> offline and revokes tokens
 										scoped to this group.
 									</p>
@@ -1996,7 +1996,7 @@
 							class="flex flex-col gap-2.5 rounded-lg border p-3"
 							style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
 						>
-							<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+							<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
 								A group named <code class="font-mono text-[var(--color-ink)]">{confirmReplaceName}</code>
 								already exists{#if replaceTarget} (currently <strong>{membersLabel(replaceTarget.members)}</strong>){/if}.
 								Replace its members with your selection above? Its
@@ -2055,7 +2055,7 @@
 										{choice.label}
 									</span>
 								</span>
-								<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+								<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
 									{choice.hint}
 								</span>
 							</label>
@@ -2063,7 +2063,7 @@
 					</div>
 					{#if newGroupMode === 'selected'}
 						{#if servers.length === 0}
-							<p class="text-xs text-[var(--color-ink-dim)]">No servers yet — add one first.</p>
+							<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">No servers yet — add one first.</p>
 						{:else}
 							<div
 								class="flex flex-col gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-2"
@@ -2083,12 +2083,12 @@
 											{serverLabel(server)}
 										</span>
 										{#if !server.enabled}
-											<span class="text-[10px] text-[var(--color-ink-dim)]">disabled</span>
+											<span class="text-[11px] text-[var(--color-ink-dim)]">disabled</span>
 										{/if}
 									</label>
 								{/each}
 							</div>
-							<p class="text-xs text-[var(--color-ink-dim)]">
+							<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
 								Only running members appear in the bundle; a disabled pick joins when it starts.
 							</p>
 						{/if}
@@ -2129,13 +2129,13 @@
 									{choice.label}
 								</span>
 							</span>
-							<span class="text-[11px] leading-tight text-[var(--color-ink-dim)]">
+							<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
 								{choice.hint}
 							</span>
 						</label>
 					{/each}
 				</div>
-				<p class="text-xs text-[var(--color-ink-dim)]">
+				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
 					When required, <code class="font-mono">/api</code> needs an admin (control-scope)
 					token; the SPA logs in with it.
 					{#if !hasUsableAdminCredential}
@@ -2230,7 +2230,7 @@
 						class="flex flex-col gap-2.5 rounded-lg border p-3"
 						style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
 					>
-						<p class="text-xs leading-relaxed text-[var(--color-ink-muted)]">
+						<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
 							Removing
 							<code class="font-mono text-[var(--color-ink)]">{confirmRemoveHost}</code>
 							will lock this browser out of the control plane — it's the host you're

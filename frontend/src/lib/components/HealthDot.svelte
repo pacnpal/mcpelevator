@@ -54,17 +54,11 @@
 	aria-live="polite"
 >
 	<span class="relative flex size-2.5 items-center justify-center">
-		{#if status === 'ok'}
-			<span
-				class="absolute inline-flex size-full animate-ping rounded-full opacity-60"
-				style="background-color: {color};"
-			></span>
-		{/if}
 		<span
 			class="relative size-2 rounded-full"
 			class:animate-pulse-dot={status === 'pending'}
 			style="background-color: {color};"
 		></span>
 	</span>
-	<span class="hidden sm:inline">{label}</span>
+	<span class="sr-only sm:not-sr-only">{label}</span>
 </span>

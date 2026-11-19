@@ -4,6 +4,7 @@
 	import { getAuthStatus, getSettings, previewGraphql, previewOpenapi } from '#lib/api.js';
 	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '#lib/remote.js';
 	import { quoteIfNeeded, withPin } from '#lib/uvxPin.js';
+	import { nameFromPackage, parseLaunchLine } from '#lib/launchLine.js';
 	import { HIDDEN_ENV } from '#lib/types.js';
 	import type {
 		GraphqlPreview,
@@ -92,9 +93,14 @@
 	// form just hides what would only 403. Default true so a fetch failure (or a
 	// pre-multi-user backend) keeps the full form.
 	let localRunnersAllowed = $state(true);
+	// What `inherit` resolves to, so the form can say it instead of making you recall it.
+	let defaults = $state<{ auth: string; idle: number } | null>(null);
 	onMount(() => {
 		getSettings()
-			.then((s) => (dockerEnabled = s.docker_runner))
+			.then((s) => {
+				dockerEnabled = s.docker_runner;
+				defaults = { auth: s.default_auth_provider, idle: s.idle_timeout_s };
+			})
 			.catch(() => (dockerEnabled = null));
 		getAuthStatus()
 			.then((a) => (localRunnersAllowed = a.user ? a.user.local_runners : true))
@@ -347,7 +353,10 @@
 	let healthIntervalText = $state(seed.healthIntervalText);
 	let authProvider = $state<ServerAuthProvider>(seed.authProvider);
 	let startAfter = $state(seed.startAfter);
-	let advancedOpen = $state(seed.setupScript.trim().length > 0);
+	let advancedOpen = $state(seed.setupScript.trim().length > 0 || seed.cwd.trim().length > 0);
+	// Exposure, auth and idle sit behind one disclosure: a first server needs none of
+	// them changed. The built-in server's edit form is ONLY these, so it opens there.
+	let accessOpen = $state(seed.runner === 'mcpelevator');
 
 	let envRows = $state<EnvRow[]>(seed.envRows);
 	let envSeq = seed.envRows.length;
@@ -373,6 +382,30 @@
 			argsText = [...(pkg ? [pkg] : []), ...extra].join('\n');
 		}
 		// runner === 'command': command + argsText are edited directly.
+	}
+
+	// A whole `npx …` / `uvx …` line pasted into the package field is split into the
+	// runner, package and extra args (and names an unnamed server) instead of landing
+	// as one long "package".
+	let pasteNote = $state('');
+	function applyLaunchLine(text: string): boolean {
+		const parsed = parseLaunchLine(text);
+		if (!parsed) return false;
+		runner = parsed.runner;
+		pkg = parsed.pkg;
+		extraArgsText = parsed.extra.join('\n');
+		if (!name.trim()) name = nameFromPackage(parsed.pkg);
+		onRunnerChange();
+		pasteNote = `Split the ${parsed.runner} command into package and arguments.`;
+		return true;
+	}
+	function onPkgPaste(event: ClipboardEvent) {
+		if (applyLaunchLine(event.clipboardData?.getData('text') ?? '')) event.preventDefault();
+	}
+	// Typed (or autofilled) rather than pasted: split it when the field is left, and
+	// again on submit, so `npx -y npx -y @pkg` can never reach the launch line.
+	function splitTypedLaunchLine() {
+		if (friendly) applyLaunchLine(pkg);
 	}
 
 	function onRunnerChange() {
@@ -626,21 +659,81 @@
 	const normalizedSlug = $derived(slugify(slug));
 	const slugChanged = $derived(mode === 'edit' && normalizedSlug !== originalSlug);
 
+	// Every check that blocks Save for a field inside the collapsible "Exposure &
+	// access" group. A closed group would hide the field and its message, leaving
+	// Save dimmed with no reason, so any of these failing opens it.
+	const startupTimeoutsValid = $derived(
+		startTimeoutValid && (!hasCheckout || repoBuildTimeoutValid)
+	);
+	const accessGroupValid = $derived(
+		idleTimeoutValid && startupTimeoutsValid && (isBuiltin || healthValid)
+	);
+
 	const canSubmit = $derived(
 		nameValid &&
 			commandValid &&
 			remoteUrlValid &&
 			baseUrlValid &&
 			schemaValid &&
-			idleTimeoutValid &&
-			startTimeoutValid &&
-			(!hasCheckout || repoBuildTimeoutValid) &&
-			(isBuiltin || healthValid) &&
+			accessGroupValid &&
 			!dockerBlocked &&
 			!setupBlocked &&
 			!repoBlocked &&
 			!busy
 	);
+
+	// What the collapsed "Exposure & access" row says, so closing it hides nothing.
+	const accessSummary = $derived.by(() => {
+		const surfaces =
+			mcpHttp && restOpenapi ? 'MCP + REST' : mcpHttp ? 'MCP' : restOpenapi ? 'REST only' : 'not exposed';
+		const auth =
+			authProvider === 'inherit'
+				? `auth: ${defaults ? `${defaults.auth} (default)` : 'Settings default'}`
+				: `auth: ${authProvider}`;
+		const idle = idleTimeoutText.trim();
+		const idleSecs = idle === '' ? (defaults?.idle ?? null) : Number(idle);
+		const idleText =
+			idleSecs === null
+				? 'idle: default'
+				: (idleSecs === 0 ? 'always on' : `idle: ${idleSecs}s`) + (idle === '' ? ' (default)' : '');
+		return `${surfaces} · ${auth} · ${idleText}`;
+	});
+	$effect(() => {
+		if (!accessGroupValid) accessOpen = true;
+	});
+
+	// Why Create is disabled, said next to it instead of a silently dimmed button.
+	const COMMAND_MISSING: Record<string, string> = {
+		npx: 'Add the npm package.',
+		uvx: 'Add the Python package.',
+		command: 'Add a command.',
+		docker: 'Add an image.',
+		remote: "Add the server's URL.",
+		openapi: 'Add the OpenAPI document URL, or paste the document.',
+		graphql: 'Add the GraphQL endpoint URL.'
+	};
+	const submitBlocker = $derived.by(() => {
+		if (busy) return null;
+		if (!nameValid) return 'Add a name.';
+		if (!commandValid) return COMMAND_MISSING[runner] ?? 'Add a command.';
+		if (!remoteUrlValid) return 'Enter a full http(s) URL.';
+		if (!baseUrlValid) return 'The base URL must be a full http(s) URL.';
+		if (!schemaValid)
+			return schemaSource === 'url'
+				? "The schema URL must be a full http(s) URL."
+				: 'Paste the GraphQL schema, or choose another schema source.';
+		if (!idleTimeoutValid) return 'Idle shutdown must be a whole number of seconds.';
+		if (!startupTimeoutsValid) return 'Fix the startup timeout under Exposure & access.';
+		if (!isBuiltin && !healthValid)
+			return healthCommandBlocked
+				? "This runner can't run a health-check command: call a tool instead."
+				: 'Finish the health check under Exposure & access.';
+		if (dockerBlocked) return 'The Docker runner is off: turn off “Start after creating” to save it.';
+		if (setupBlocked) return "This runner can't run a setup script: clear it under Advanced.";
+		if (repoBlocked) return 'Fix the source repository settings above.';
+		return null;
+	});
+	const submitHintId = $props.id();
 
 	function buildEnv(): Record<string, string> {
 		const out: Record<string, string> = {};
@@ -676,6 +769,7 @@
 
 	function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
+		splitTypedLaunchLine();
 		if (!canSubmit) return;
 		const payload: ServerCreate & { slug?: string } = {
 			name: name.trim(),
@@ -847,7 +941,7 @@
 			<div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
 				{#each offeredRunners as r (r.value)}
 					<label
-						class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+						class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-[var(--color-accent)]"
 						style={runner === r.value
 							? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
 							: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
@@ -894,12 +988,21 @@
 					id="srv-pkg"
 					type="text"
 					bind:value={pkg}
-					oninput={syncFromFriendly}
+					oninput={() => {
+						pasteNote = '';
+						syncFromFriendly();
+					}}
+					onpaste={onPkgPaste}
+					onchange={splitTypedLaunchLine}
 					autocomplete="off"
 					spellcheck="false"
 					placeholder={pkgPlaceholder}
 					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 				/>
+				<p class="text-xs text-[var(--color-ink-dim)]" aria-live="polite">
+					{pasteNote ||
+						`Or paste the whole ${runner} command; it's split into package and arguments.`}
+				</p>
 				<label
 					for="srv-extra-args"
 					class="mt-1 text-xs font-medium text-[var(--color-ink-muted)]"
@@ -1501,7 +1604,7 @@
 					aria-expanded={repoOpen}
 					class="flex w-full items-center justify-between gap-3 px-3.5 py-3 text-left transition hover:bg-[var(--color-surface-2)]"
 				>
-					<span class="flex flex-col gap-0.5">
+					<span class="flex min-w-0 flex-col gap-0.5">
 						<span class="text-sm font-medium text-[var(--color-ink)]">
 							Source repository <span class="font-normal text-[var(--color-ink-dim)]">(optional)</span>
 						</span>
@@ -1540,7 +1643,7 @@
 									autocomplete="off"
 									spellcheck="false"
 									placeholder="https://github.com/owner/repo"
-									class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+									class="rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 								/>
 							</div>
 							<div class="flex flex-col gap-1.5 sm:w-40">
@@ -1554,7 +1657,7 @@
 									autocomplete="off"
 									spellcheck="false"
 									placeholder="default branch"
-									class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+									class="rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 								/>
 							</div>
 						</div>
@@ -1568,7 +1671,7 @@
 								rows="3"
 								spellcheck="false"
 								placeholder="npm ci&#10;npm run build"
-								class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 							></textarea>
 						</div>
 						{#if repoBlocked}
@@ -1595,7 +1698,7 @@
 			<!-- Remote endpoint preview (no local process to spawn) -->
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Proxies</span>
-				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
+				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5">
 					{#if command.trim()}
 						<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
 							{transport} → {command.trim()}
@@ -1609,7 +1712,7 @@
 			<!-- OpenAPI preview: where the tools come from (no local process to spawn) -->
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Translates</span>
-				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
+				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5">
 					{#if specFromDocument ? openapiDocument.trim() : command.trim()}
 						<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
 							{specFromDocument ? '(stored document)' : command.trim()} → {baseUrl.trim() || '(document servers)'}
@@ -1625,7 +1728,7 @@
 			<!-- GraphQL preview: where the tools come from (no local process to spawn) -->
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Translates</span>
-				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
+				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5">
 					{#if command.trim()}
 						<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
 							{schemaSource === 'pasted'
@@ -1643,7 +1746,7 @@
 			<!-- Docker: show the hardened `docker run …` the backend synthesizes. -->
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
-				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5">
+				<div class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5">
 					<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
 						{dockerPreview}
 					</code>
@@ -1654,7 +1757,7 @@
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Will run</span>
 				<div
-					class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5"
+					class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5"
 				>
 					{#if previewCommand}
 						<code class="font-mono text-xs whitespace-nowrap text-[var(--color-accent)]">
@@ -1683,7 +1786,14 @@
 				<span class="flex flex-col gap-0.5">
 					<span class="text-sm font-medium text-[var(--color-ink)]">Advanced</span>
 					<span class="text-xs text-[var(--color-ink-dim)]">
-						Setup script{setupAllowed ? ' and raw launch configuration' : ''}
+						{[
+							!isHttpUpstream && !isDocker ? 'Working directory' : null,
+							'setup script',
+							setupAllowed ? 'raw launch configuration' : null
+						]
+							.filter(Boolean)
+							.join(', ')
+							.replace(/^./, (c) => c.toUpperCase())}
 					</span>
 				</span>
 				<svg
@@ -1705,6 +1815,25 @@
 				<div
 					class="flex flex-col gap-3 border-t border-[var(--color-line)] px-3.5 py-3.5"
 				>
+					<!-- Working directory (not applicable to an HTTP upstream or a docker container) -->
+					{#if !isHttpUpstream && !isDocker}
+						<div class="flex flex-col gap-1.5">
+							<label for="srv-cwd" class="text-xs font-medium text-[var(--color-ink-muted)]">
+								Working directory <span class="text-[var(--color-ink-dim)]">(optional)</span>
+							</label>
+							<input
+								id="srv-cwd"
+								type="text"
+								bind:value={cwd}
+								autocomplete="off"
+								spellcheck="false"
+								placeholder={repoUrl.trim()
+									? 'relative to the checkout, e.g. packages/server'
+									: '/path/to/project'}
+								class="rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							/>
+						</div>
+					{/if}
 					<div class="flex flex-col gap-1.5">
 						<label for="srv-setup-script" class="text-xs font-medium text-[var(--color-ink-muted)]">
 							Setup script <span class="text-[var(--color-ink-dim)]">(optional)</span>
@@ -1717,7 +1846,7 @@
 							placeholder="npm install @playwright/test&#10;npx playwright install"
 							aria-describedby={setupBlocked ? 'setup-warning setup-validation' : 'setup-warning'}
 							aria-invalid={setupBlocked}
-							class="resize-y rounded-md border bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+							class="resize-y rounded-md border bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 							style={setupBlocked
 								? 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'
 								: 'border-color: var(--color-line);'}
@@ -1753,7 +1882,7 @@
 								oninput={onCommandInput}
 								autocomplete="off"
 								spellcheck="false"
-								class="rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+								class="rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 							/>
 						</div>
 						<div class="flex flex-col gap-1.5">
@@ -1768,7 +1897,7 @@
 								bind:value={argsText}
 								rows="4"
 								spellcheck="false"
-								class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+								class="resize-y rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 							></textarea>
 						</div>
 						{#if friendly}
@@ -1936,25 +2065,35 @@
 			{/if}
 		</fieldset>
 
-		<!-- Working directory (not applicable to an HTTP upstream or a docker container) -->
-		{#if !isHttpUpstream && !isDocker}
-			<div class="flex flex-col gap-2">
-				<label for="srv-cwd" class="text-sm font-medium text-[var(--color-ink)]">
-					Working directory <span class="font-normal text-[var(--color-ink-dim)]">(optional)</span>
-				</label>
-				<input
-					id="srv-cwd"
-					type="text"
-					bind:value={cwd}
-					autocomplete="off"
-					spellcheck="false"
-					placeholder={repoUrl.trim() ? 'relative to the checkout, e.g. packages/server' : '/path/to/project'}
-					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-				/>
-			</div>
-		{/if}
 	{/if}
 
+	<!-- Exposure & access: everything a first server can leave at its defaults. A native
+	     <details> keeps the fields mounted, so values and validation survive closing it. -->
+	<details
+		bind:open={accessOpen}
+		class="group overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]"
+	>
+		<summary
+			class="flex cursor-pointer list-none items-center justify-between gap-3 px-3.5 py-3 transition hover:bg-[var(--color-surface-2)] [&::-webkit-details-marker]:hidden"
+		>
+			<span class="flex min-w-0 flex-col gap-0.5">
+				<span class="text-sm font-medium text-[var(--color-ink)]">Exposure &amp; access</span>
+				<span class="truncate font-mono text-xs text-[var(--color-ink-dim)]">{accessSummary}</span>
+			</span>
+			<svg
+				class="size-4 shrink-0 text-[var(--color-ink-muted)] transition-transform group-open:rotate-180"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<path d="m6 9 6 6 6-6" />
+			</svg>
+		</summary>
+		<div class="flex flex-col gap-7 border-t border-[var(--color-line)] px-3.5 py-4">
 	<!-- Exposure toggles -->
 	<fieldset class="flex flex-col gap-3 border-0 p-0">
 		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Exposure</legend>
@@ -2233,7 +2372,7 @@
 							spellcheck="false"
 							placeholder={'{"url": "https://example.com"}'}
 							aria-invalid={!healthArgs.ok}
-							class="resize-y rounded-md border bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+							class="resize-y rounded-md border bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 							style={healthArgs.ok
 								? 'border-color: var(--color-line);'
 								: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
@@ -2256,7 +2395,7 @@
 							spellcheck="false"
 							placeholder="curl -fsS http://127.0.0.1:3000/health"
 							aria-invalid={healthCommandBlocked || healthCommand.trim() === ''}
-							class="resize-y rounded-md border bg-[var(--color-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+							class="resize-y rounded-md border bg-[var(--color-canvas)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
 							style={healthCommandBlocked
 								? 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'
 								: 'border-color: var(--color-line);'}
@@ -2346,6 +2485,36 @@
 			</a> page.
 		</p>
 	</fieldset>
+		</div>
+	</details>
+
+	<!-- Say the auth posture before the server exists, not only after it's live. -->
+	{#if mode === 'create' && !isBuiltin && (authProvider === 'none' || (authProvider === 'inherit' && defaults?.auth === 'none'))}
+		<p class="-mt-3 flex items-start gap-1.5 text-xs text-[var(--color-ink-dim)]">
+			<svg
+				class="mt-px size-3.5 shrink-0 text-[var(--color-ink-muted)]"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<rect x="5" y="11" width="14" height="10" rx="2" />
+				<path d="M8 11V7a4 4 0 0 1 7.9-1" />
+			</svg>
+			<span>
+				No auth: once it's running, anyone who can reach its URL can call its tools.
+				<button
+					type="button"
+					onclick={() => (accessOpen = true)}
+					class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
+					>Require a token</button
+				>.
+			</span>
+		</p>
+	{/if}
 
 	<!-- Start after creating (create only) -->
 	{#if mode === 'create'}
@@ -2393,8 +2562,13 @@
 		</p>
 	{/if}
 
-	<!-- Actions -->
-	<div class="flex items-center justify-end gap-2 pt-1">
+	<!-- Actions: pinned to the bottom of the screen on phones, where the form is long. -->
+	<div
+		class="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t border-[var(--color-line)] bg-[color-mix(in_oklab,var(--color-canvas)_92%,transparent)] px-4 py-3 backdrop-blur-sm sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:pt-1 sm:pb-0 sm:backdrop-blur-none"
+	>
+		{#if submitBlocker}
+			<p id={submitHintId} class="mr-auto text-xs text-[var(--color-ink-muted)]">{submitBlocker}</p>
+		{/if}
 		{#if oncancel}
 			<button
 				type="button"
@@ -2407,6 +2581,7 @@
 		<button
 			type="submit"
 			disabled={!canSubmit}
+			aria-describedby={submitBlocker ? submitHintId : undefined}
 			aria-busy={busy}
 			class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-5 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
 		>

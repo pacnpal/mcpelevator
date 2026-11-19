@@ -423,6 +423,7 @@
 			{/if}
 		</div>
 	{:else}
+		<h2 class="sr-only">Results</h2>
 		<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
 			{#each visibleServers as server (rowKey(server))}
 				<div class="flex flex-col gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-4">
@@ -431,7 +432,7 @@
 							<h3 class="truncate text-sm font-semibold text-[var(--color-ink)]" title={server.name}>
 								{server.title || server.name}
 							</h3>
-							<p class="truncate font-mono text-[11px] text-[var(--color-ink-dim)]" title={server.name}>
+							<p class="truncate font-mono text-xs text-[var(--color-ink-dim)]" title={server.name}>
 								{server.name}
 							</p>
 						</div>
@@ -453,7 +454,7 @@
 					</p>
 
 					<div class="flex items-center justify-between gap-2">
-						<div class="flex items-center gap-2 text-[11px]">
+						<div class="flex items-center gap-2 text-xs">
 							{#if server.version}
 								<!-- Version picker: lazily loads all versions on focus; defaults to latest. -->
 								<div class="relative inline-flex items-center">

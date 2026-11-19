@@ -45,6 +45,24 @@ def base_url(request: Request) -> str:
     return settings.base_url
 
 
+def copy_base_url(request: Request) -> str:
+    """Base URL for the copyable endpoint links the UI hands out (``urls`` on server
+    summaries, group endpoints). ``base_url`` plus one display-only step: behind an
+    HTTPS-terminating reverse proxy without ``MCPE_PUBLIC_BASE_URL``, the app hop is
+    plain ``http``, and an ``http://`` link is refused by hosted clients (Claude
+    web/mobile, ChatGPT) even though the box is reachable over https. Honoring
+    ``X-Forwarded-Proto: https`` here only changes the scheme of a URL shown back to
+    the same requester, so it is trusted from any client. Security-relevant URLs
+    (inbound-OAuth resource metadata, ``auth/oauth.py``) keep their own stricter
+    rule and do not use this."""
+    base = base_url(request)
+    if not get_settings().public_base_url and base.startswith("http://"):
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        if forwarded == "https":
+            base = "https://" + base[len("http://"):]
+    return base
+
+
 def oauth_public_base(request: Request) -> str:
     """The base URL upstream-OAuth artifacts are anchored on: the redirect callback
     the provider sends the browser back to, and the client metadata document (CIMD)

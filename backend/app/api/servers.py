@@ -44,7 +44,7 @@ from app.api.schemas import (
     Urls,
 )
 from app import mcpb, sealed, usage
-from app.api.util import base_url, oauth_public_base, resync_groups
+from app.api.util import copy_base_url, oauth_public_base, resync_groups
 from app.auth import cf_access, oauth_flow, policy
 from app.auth import principal as principal_mod
 from app.auth.principal import Principal, current_principal
@@ -349,7 +349,7 @@ async def list_servers(
     principal: Principal = Depends(current_principal),
 ):
     sup = request.app.state.supervisor
-    base = base_url(request)
+    base = copy_base_url(request)
     servers = policy.visible_servers(principal, repo.list_servers(session))
     return [_summary(s, sup, session, base) for s in servers]
 
@@ -406,7 +406,7 @@ async def create_server(
     sup = request.app.state.supervisor
     if server.enabled:
         sup.request_activation(server.id)
-    return _summary(server, sup, session, base_url(request))
+    return _summary(server, sup, session, copy_base_url(request))
 
 
 @router.get("/servers/{server_id}", response_model=ServerDetail)
@@ -422,7 +422,7 @@ async def get_server(
         server,
         request.app.state.supervisor,
         session,
-        base_url(request),
+        copy_base_url(request),
         include_document=include_document,
     )
 
@@ -649,7 +649,7 @@ async def update_server(
 
     if not auth_changed and changes.keys() & {"mcp_http", "slug"}:
         await resync_groups(request)  # membership/namespace changed — no async gap
-    return _summary(server, sup, session, base_url(request))
+    return _summary(server, sup, session, copy_base_url(request))
 
 
 def _prune_then_delete(session: Session, server_id: str, principal: Principal) -> bool:
@@ -860,7 +860,7 @@ async def disconnect_oauth(
     # state (matches the connect path, which also restarts to pick up fresh tokens).
     if server.enabled:
         sup.request_activation(server_id)
-    return _detail(server, sup, session, base_url(request))
+    return _detail(server, sup, session, copy_base_url(request))
 
 
 _HTTP_METHODS = {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
@@ -1014,7 +1014,7 @@ async def clone_server(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     # Clone is created disabled; nothing to reconcile until the user enables it.
-    return _summary(server, request.app.state.supervisor, session, base_url(request))
+    return _summary(server, request.app.state.supervisor, session, copy_base_url(request))
 
 
 @router.post("/servers/{server_id}/enable", response_model=ServerSummary)
@@ -1040,7 +1040,7 @@ async def enable_server(
         sup.request_activation(server_id)
     else:
         sup.nudge()
-    return _summary(server, sup, session, base_url(request))
+    return _summary(server, sup, session, copy_base_url(request))
 
 
 @router.post("/servers/{server_id}/disable", response_model=ServerSummary)
@@ -1059,7 +1059,7 @@ async def disable_server(
     sup = request.app.state.supervisor
     sup.cancel_activation_request(server_id)
     sup.nudge()
-    return _summary(server, sup, session, base_url(request))
+    return _summary(server, sup, session, copy_base_url(request))
 
 
 @router.post("/servers/{server_id}/retry", response_model=ServerSummary)
@@ -1086,7 +1086,7 @@ async def retry_server(
 
     if not await sup.retry(server_id, authorized=_authorize):
         raise HTTPException(status_code=409, detail="server is no longer retryable")
-    return _summary(server, sup, session, base_url(request))
+    return _summary(server, sup, session, copy_base_url(request))
 
 
 @router.post("/servers/{server_id}/restart", response_model=ServerSummary)
@@ -1124,7 +1124,7 @@ async def restart_server(
             raise HTTPException(status_code=409, detail="disabled servers cannot be restarted")
 
     await sup.restart(server_id, authorized=_authorize)
-    return _summary(server, sup, session, base_url(request))
+    return _summary(server, sup, session, copy_base_url(request))
 
 
 @router.post("/servers/{server_id}/cache/clear", response_model=CacheCleared)
@@ -1206,7 +1206,7 @@ async def clear_server_cache(
     return CacheCleared(
         freed_bytes=freed,
         restarted=restarted,
-        server=_summary(current, sup, session, base_url(request)),
+        server=_summary(current, sup, session, copy_base_url(request)),
     )
 
 
@@ -1246,7 +1246,7 @@ async def import_servers(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sup = request.app.state.supervisor
-    base = base_url(request)
+    base = copy_base_url(request)
     return ImportResult(
         created=[_summary(s, sup, session, base) for s in created],
         skipped=[ImportSkipped(**s) for s in skipped],

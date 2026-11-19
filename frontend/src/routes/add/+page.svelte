@@ -447,7 +447,7 @@
 							<li
 								class="flex flex-col gap-1 rounded-lg border px-3.5 py-2.5"
 								style={entry.skip
-									? 'border-color: var(--color-line); background-color: var(--color-surface); opacity: 0.7;'
+									? 'border-color: var(--color-line); background-color: var(--color-surface);'
 									: 'border-color: color-mix(in oklab, var(--color-accent) 28%, transparent); background-color: color-mix(in oklab, var(--color-accent) 6%, transparent);'}
 							>
 								<div class="flex items-center justify-between gap-2">
@@ -458,7 +458,7 @@
 									</span>
 									{#if entry.skip}
 										<span
-											class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide text-[var(--color-ink-dim)]"
+											class="shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium tracking-wide text-[var(--color-ink-dim)]"
 											style="border-color: var(--color-line-strong);"
 										>
 											SKIPPED

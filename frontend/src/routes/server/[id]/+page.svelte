@@ -25,6 +25,8 @@
 	import type { ServerDetail, ServerTool, ServerUsage, ToolOverride } from '#lib/types.js';
 	import { effectiveWindowDays, toolBadge } from '#lib/usage.js';
 	import CopyButton from '#lib/components/CopyButton.svelte';
+	import CopyMenu from '#lib/components/CopyMenu.svelte';
+	import { endpointReach } from '#lib/endpoint.js';
 	import LogViewer from '#lib/components/LogViewer.svelte';
 	import RestartButton from '#lib/components/RestartButton.svelte';
 	import RunnerBadge from '#lib/components/RunnerBadge.svelte';
@@ -112,6 +114,64 @@
 		!!server && !activeStartup && (server.state === 'failed' || server.state === 'unhealthy')
 	);
 	const priorityLogs = $derived(activeStartup || terminalFailure);
+
+	// The first readiness probes usually fail while the child is still booting, and
+	// the backend reports each one as the startup message. Shown at once, a normal
+	// start reads as a failure, so a readiness message waits until the phase has run
+	// for a few seconds (or this is a retry) before it's worth the operator's eye.
+	const PROBE_GRACE_MS = 8000;
+	// A timer, not Date.now() in a $derived: elapsed time isn't a reactive
+	// dependency, so the grace must end even when no poll lands to re-derive it.
+	const phaseKey = $derived(startup ? `${server?.id}:${startup.attempt}:${startup.phase}` : '');
+	let graceOver = $state(false);
+	$effect(() => {
+		void phaseKey;
+		graceOver = false;
+		const timer = setTimeout(() => (graceOver = true), PROBE_GRACE_MS);
+		return () => clearTimeout(timer);
+	});
+	const startupMessageShown = $derived(
+		!!startup?.message &&
+			(startup.phase !== 'readiness' || startup.attempt > 1 || graceOver)
+	);
+
+	// Going live is the payoff of the whole flow (add, start, copy URL), so a start
+	// this page watched happen ends in a "Ready" strip carrying the URL, instead of
+	// the startup panel just vanishing. Keyed by server id: clone reuses this page.
+	let watchedId = $state<string | null>(null);
+	let watchedStart = $state(false);
+	let readyShown = $state(false);
+	$effect(() => {
+		const id = server?.id ?? null;
+		if (id !== watchedId) {
+			watchedId = id;
+			watchedStart = false;
+			readyShown = false;
+		}
+		if (activeStartup) {
+			watchedStart = true;
+			readyShown = false;
+		} else if (watchedStart && server?.state === 'running') {
+			watchedStart = false;
+			readyShown = true;
+		} else if (watchedStart && server && server.state !== 'starting') {
+			watchedStart = false; // ended some other way (failed, stopped): no strip
+		}
+	});
+	const showReady = $derived(readyShown && server?.state === 'running');
+	const toolCount = $derived(server?.tools.length ?? 0);
+	const reach = $derived(endpointReach(server?.urls.mcp));
+
+	// One polite line for assistive tech: the visual state changes (pill, panel,
+	// strip) are otherwise silent to a screen reader.
+	const liveStatus = $derived.by(() => {
+		if (!server) return '';
+		if (activeStartup && startup) return `${server.name}: ${startupPhaseLabel(startup.phase)}`;
+		if (showReady)
+			return `${server.name} is ready, ${toolCount} tool${toolCount === 1 ? '' : 's'}.`;
+		if (server.state === 'failed') return `${server.name} failed to start.`;
+		return '';
+	});
 
 	let downloadingMcpb = $state(false);
 
@@ -940,7 +1000,9 @@
 				</p>
 			</div>
 
-			<div class="flex flex-wrap items-center justify-end gap-2">
+			<div
+				class="grid w-full grid-cols-2 gap-2 *:justify-center sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:justify-end"
+			>
 				<ServerActionButton
 					{server}
 					bind:busy
@@ -1046,18 +1108,60 @@
 					{#if startupCountdown}
 						<span>
 							{startup.next_retry_at
-								? `Retry in ${startupCountdown}`
-								: `${startupCountdown} until this phase times out`}
+								? `Retrying in ${startupCountdown}`
+								: `Gives up in ${startupCountdown}`}
 						</span>
 					{/if}
 				</div>
-				{#if startup.message}
+				{#if startupMessageShown}
 					<p class="font-mono text-xs leading-relaxed text-[var(--color-ink-muted)]">
 						{startup.message}
 					</p>
+				{:else if startup.phase === 'readiness'}
+					<p class="text-xs text-[var(--color-ink-muted)]">Waiting for the server to answer…</p>
 				{/if}
 			</div>
+		{:else if showReady}
+			<!-- Same slot the startup panel held, so going live doesn't reflow the page. -->
+			<div
+				class="animate-rise-in relative z-20 flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border px-4 py-3"
+				style="border-color: color-mix(in oklab, var(--color-state-running) 35%, transparent); background-color: color-mix(in oklab, var(--color-state-running) 8%, transparent);"
+			>
+				<div class="flex min-w-0 flex-col gap-0.5">
+					<p class="text-sm font-semibold text-[var(--color-ink)]">
+						Ready <span class="font-normal text-[var(--color-ink-muted)]"
+							>· {toolCount} tool{toolCount === 1 ? '' : 's'}</span
+						>
+					</p>
+					<p class="text-xs text-[var(--color-ink-muted)]">
+						Copy the URL, or add it straight to a client.
+					</p>
+				</div>
+				<div class="flex items-center gap-2">
+					<CopyButton value={server.urls.mcp} label="MCP" text="Copy URL" />
+					<CopyMenu {server} align="end" />
+					<button
+						type="button"
+						onclick={() => (readyShown = false)}
+						aria-label="Dismiss"
+						class="rounded-md p-1.5 text-[var(--color-ink-dim)] transition hover:bg-[var(--color-surface-2)] hover:text-[var(--color-ink)]"
+					>
+						<svg
+							class="size-4"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							aria-hidden="true"
+						>
+							<path d="M18 6 6 18M6 6l12 12" />
+						</svg>
+					</button>
+				</div>
+			</div>
 		{/if}
+		<p class="sr-only" aria-live="polite">{liveStatus}</p>
 
 		{#if !activeStartup && server.last_error}
 			<p
@@ -1068,15 +1172,6 @@
 			</p>
 		{/if}
 
-		{#if priorityLogs}
-			<LogViewer
-				serverId={server.id}
-				serverState={server.state}
-				startupStatus={startup}
-				slug={server.slug}
-				compact
-			/>
-		{/if}
 
 		<!-- Upstream OAuth: connect / status banner -->
 		{#if oauthState?.enabled}
@@ -1182,14 +1277,23 @@
 		>
 			<h2 class="text-sm font-semibold text-[var(--color-ink)]">Endpoints</h2>
 			<div class="flex flex-col gap-2.5">
-				<div class="flex items-center justify-between gap-3">
+				<!-- On a phone the URL takes its own full line: truncated, it can't be checked. -->
+				<div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
 					<div class="min-w-0 flex-1">
 						<p class="text-xs font-medium text-[var(--color-ink-muted)]">MCP</p>
-						<p class="truncate font-mono text-xs text-[var(--color-ink)]">
-							{server.urls.mcp ?? '— not exposed —'}
+						<p class="font-mono text-xs [overflow-wrap:anywhere] text-[var(--color-ink)] sm:truncate">
+							{#if server.urls.mcp}
+								<!-- Break only after a slash, so no path segment splits mid-word. -->
+								{#each server.urls.mcp.split('/') as part, i (i)}{#if i > 0}/<wbr />{/if}{part}{/each}
+							{:else}
+								— not exposed —
+							{/if}
 						</p>
 					</div>
-					<CopyButton value={server.urls.mcp} label="Copy" />
+					<div class="flex shrink-0 items-center gap-2">
+						<CopyButton value={server.urls.mcp} label="MCP" text="Copy URL" />
+						<CopyMenu {server} align="end" />
+					</div>
 				</div>
 				{#if server.transports.rest_openapi}
 					<div class="flex items-center justify-between gap-3">
@@ -1206,26 +1310,7 @@
 								</p>
 							{/if}
 						</div>
-						<CopyButton value={server.urls.rest} label="Copy" />
-					</div>
-				{/if}
-				{#if server.mcpb_exportable}
-					<div class="flex items-center justify-between gap-3">
-						<div class="min-w-0 flex-1">
-							<p class="text-xs font-medium text-[var(--color-ink-muted)]">Run locally</p>
-							<p class="text-xs text-[var(--color-ink-dim)]">
-								Download a <code class="font-mono">.mcpb</code> bundle of this server's launch
-								config — install it in Claude Desktop to run the server on your own machine.
-							</p>
-						</div>
-						<button
-							type="button"
-							onclick={saveMcpb}
-							disabled={downloadingMcpb}
-							class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
-						>
-							Download .mcpb
-						</button>
+						<CopyButton value={server.urls.rest} label="REST" text="Copy URL" />
 					</div>
 				{/if}
 			</div>
@@ -1284,8 +1369,127 @@
 						</a>.
 					</span>
 				</p>
+			{:else if effectiveAuth === 'none'}
+				<p
+					class="flex items-start gap-1.5 border-t border-[var(--color-line)] pt-2.5 text-xs text-[var(--color-ink-dim)]"
+				>
+					<svg
+						class="mt-px size-3.5 shrink-0 text-[var(--color-ink-muted)]"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<rect x="5" y="11" width="14" height="10" rx="2" />
+						<path d="M8 11V7a4 4 0 0 1 7.9-1" />
+					</svg>
+					<span>
+						No auth: anyone who can reach this URL can call its tools. Require a token under
+						<a
+							href={`/server/${server.id}/edit`}
+							class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
+							>Edit</a
+						>, or change the default in
+						<a
+							href="/settings"
+							class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
+							>Settings</a
+						>.
+					</span>
+				</p>
+			{/if}
+			{#if reach === 'local' || reach === 'insecure'}
+				<p class="flex items-start gap-1.5 text-xs text-[var(--color-ink-dim)]">
+					<svg
+						class="mt-px size-3.5 shrink-0 text-[var(--color-ink-muted)]"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<circle cx="12" cy="12" r="9" />
+						<path d="M12 11v5M12 8h.01" />
+					</svg>
+					<span>
+						{#if reach === 'local'}
+							This address only works from this machine or network. Claude web and mobile
+							need a public HTTPS URL:
+						{:else}
+							Plain http: Claude web and mobile only connect over HTTPS. Serve this box over
+							HTTPS and
+						{/if}
+						set <code class="font-mono text-[var(--color-ink-muted)]">MCPE_PUBLIC_BASE_URL</code>.
+					</span>
+				</p>
+			{/if}
+			{#if !server.enabled}
+				<p class="flex items-start gap-1.5 text-xs text-[var(--color-ink-dim)]">
+					<svg
+						class="mt-px size-3.5 shrink-0 text-[var(--color-ink-muted)]"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<circle cx="12" cy="12" r="9" />
+						<path d="M12 11v5M12 8h.01" />
+					</svg>
+					<span>Stopped: this URL won't answer until you start the server.</span>
+				</p>
+			{:else if server.state === 'idle'}
+				<p class="flex items-start gap-1.5 text-xs text-[var(--color-ink-dim)]">
+					<svg
+						class="mt-px size-3.5 shrink-0 text-[var(--color-ink-muted)]"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<circle cx="12" cy="12" r="9" />
+						<path d="M12 11v5M12 8h.01" />
+					</svg>
+					<span>Idle: the first request wakes it, so it may take a few seconds to answer.</span>
+				</p>
+			{/if}
+			{#if server.mcpb_exportable}
+				<!-- A different way to run it, not an endpoint: one quiet line, last. -->
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					Rather run it on your own machine?
+					<button
+						type="button"
+						onclick={saveMcpb}
+						disabled={downloadingMcpb}
+						class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
+					>
+						{downloadingMcpb ? 'Preparing .mcpb…' : 'Download a .mcpb bundle'}
+					</button>
+					for Claude Desktop.
+				</p>
 			{/if}
 		</div>
+
+		<!-- While starting or failed, logs sit right under the endpoint (which never moves). -->
+		{#if priorityLogs}
+			<LogViewer
+				serverId={server.id}
+				serverState={server.state}
+				startupStatus={startup}
+				slug={server.slug}
+				compact
+			/>
+		{/if}
 
 		<!-- Configuration -->
 		<div
@@ -1313,7 +1517,7 @@
 				{#if server.post_clone_script}
 					<div class="flex flex-col gap-1.5">
 						<span class="text-xs font-medium text-[var(--color-ink-muted)]">Post-clone script</span>
-						<pre class="m-0 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5 font-mono text-xs whitespace-pre-wrap text-[var(--color-ink)]">{server.post_clone_script}</pre>
+						<pre class="m-0 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5 font-mono text-xs whitespace-pre-wrap text-[var(--color-ink)]">{server.post_clone_script}</pre>
 					</div>
 				{/if}
 			{/if}
@@ -1321,14 +1525,14 @@
 			{#if server.setup_script}
 				<div class="flex flex-col gap-1.5">
 					<span class="text-xs font-medium text-[var(--color-ink-muted)]">Setup script</span>
-					<pre class="m-0 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5 font-mono text-xs whitespace-pre-wrap text-[var(--color-ink)]">{server.setup_script}</pre>
+					<pre class="m-0 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5 font-mono text-xs whitespace-pre-wrap text-[var(--color-ink)]">{server.setup_script}</pre>
 				</div>
 			{/if}
 
 			<div class="flex flex-col gap-1.5">
 				<span class="text-xs font-medium text-[var(--color-ink-muted)]">Command</span>
 				<div
-					class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-base)] px-3 py-2.5"
+					class="overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5"
 				>
 					<code class="font-mono text-xs whitespace-pre text-[var(--color-ink)]">{commandLine}</code>
 				</div>
@@ -1366,7 +1570,9 @@
 					Source <span class="font-mono text-[var(--color-ink-muted)]">{server.source}</span>
 				</span>
 				<span class="text-[var(--color-ink-dim)]">
-					Auth <span class="font-mono text-[var(--color-ink-muted)]">{server.auth_provider}</span>
+					Auth <span class="font-mono text-[var(--color-ink-muted)]"
+						>{server.auth}{server.auth_provider === 'inherit' ? ' (default)' : ''}</span
+					>
 				</span>
 			</div>
 		</div>
@@ -1387,13 +1593,11 @@
 							: 'Tools are discovered once the server is running.'}
 					</p>
 				{:else}
-					<p class="text-xs text-[var(--color-ink-dim)]">
-						Toggle tools off to hide them from clients (MCP, REST, and groups); hidden tools
-						are also refused if called. Use <strong>edit</strong> to <strong>rename</strong>
-						a tool, rewrite its description when the upstream's wording trips up models, or
-						give it aliases (extra names that still call it, unlisted) — clients see only
-						your version. Changes are staged — <strong>Apply</strong>
-						saves them all in one restart, from the bar that follows the page.
+					<p class="max-w-md text-xs text-[var(--color-ink-dim)]">
+						Switch a tool off to hide it from every client and refuse calls to it.
+						<strong>Edit</strong> renames a tool, rewrites its description, or gives it aliases
+						(extra, unlisted names that still call it). Changes wait for
+						<strong>Apply</strong>, which restarts the server once.
 					</p>
 					<ul class="flex flex-col divide-y divide-[var(--color-line)]">
 						{#each toolRows as { key, tool, enabled, discovered } (key)}
@@ -1531,11 +1735,11 @@
 										type="button"
 										role="switch"
 										aria-checked={enabled}
-										aria-label={`${enabled ? 'Disable' : 'Enable'} ${key}`}
+										aria-label={`Expose ${key}`}
 										title={enabled ? 'Exposed — click to hide from clients' : 'Hidden — click to expose'}
 										disabled={toolEditsBlocked}
 										onclick={() => toggleToolPending(key, !enabled)}
-										class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 {enabled
+										class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition before:absolute before:-inset-2 before:content-[''] disabled:cursor-not-allowed disabled:opacity-50 {enabled
 											? 'bg-[var(--color-accent)]'
 											: 'bg-[var(--color-line)]'}"
 									>
@@ -1633,7 +1837,7 @@
 										{row.name}
 										{#if row.badge}
 											<span
-												class="ml-1 font-sans text-[10px] text-[var(--color-ink-dim)]"
+												class="ml-1 font-sans text-[11px] text-[var(--color-ink-dim)]"
 												title={row.badge === 'unrecognised'
 													? 'Calls to names this server does not expose, pooled past the per-hour budget'
 													: 'Called under a name this server no longer exposes'}
