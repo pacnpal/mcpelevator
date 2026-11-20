@@ -7,7 +7,8 @@ from sqlmodel import Session
 from starlette.requests import Request
 
 from app.api.schemas import SettingsInfo, SettingsUpdate
-from app.api.util import resync_groups
+from app.api.util import oauth_public_base, resync_groups
+from app.auth import oidc
 from app.auth import principal as principal_mod
 from app.auth.control_plane import (
     admin_credential_presented,
@@ -22,19 +23,21 @@ from app.registry import settings as runtime_settings
 router = APIRouter()
 
 
-def _info(values: dict, session: Session) -> SettingsInfo:
+def _info(values: dict, session: Session, request: Request) -> SettingsInfo:
     # SettingsInfo declares the SPA-facing subset; the group registry is served by its
     # own /api/groups router, so drop any keys (e.g. "groups") not in the model.
     info = SettingsInfo(**{k: values[k] for k in SettingsInfo.model_fields if k in values})
     # control_mcp isn't a stored setting: it IS the built-in server's enabled flag.
     builtin = service.get_builtin(session)
     info.control_mcp = bool(builtin and builtin.enabled)
+    # Anchored on the same base as the upstream-OAuth callback.
+    info.oidc_redirect_uri = f"{oauth_public_base(request)}/api/auth/oidc/callback"
     return info
 
 
 @router.get("/settings", response_model=SettingsInfo)
-async def get_settings(session: Session = Depends(get_session)):
-    return _info(runtime_settings.read_all(session), session)
+async def get_settings(request: Request, session: Session = Depends(get_session)):
+    return _info(runtime_settings.read_all(session), session, request)
 
 
 # GET stays readable by any authenticated principal — the SPA's add-server form
@@ -54,6 +57,10 @@ async def update_settings(
             status_code=409,
             detail="the built-in mcpelevator server isn't provisioned (MCPE_CONTROL_MCP=false)",
         )
+    try:
+        await oidc.check_settings(runtime_settings.read_all(session), changes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     toggled: list[str] = []
 
@@ -135,7 +142,7 @@ async def update_settings(
         else:
             sup.cancel_activation_request(toggled[0])
             sup.nudge()
-    result = _info(values, session)
+    result = _info(values, session, request)
     # A default-auth change must converge the group hub BEFORE this returns, not on the
     # next reconcile: every /g dispatcher enforces the NEW default auth on the very next
     # request, so a bearer->none downgrade must not leave a group's OLD mounted set

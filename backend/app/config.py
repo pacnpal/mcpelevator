@@ -34,7 +34,7 @@ def is_control_plane_env_var(key: str) -> bool:
 # (trusted) bridge process's inherited environment too, so an untrusted child can't recover it by
 # reading its immediate parent's ``/proc/<ppid>/environ`` on a same-UID host. Non-secret ``MCPE_*``
 # config (data dir, base URL, host allowlist) is left for the bridge's own ``get_settings()``.
-CONTROL_PLANE_SECRET_ENV = frozenset({"MCPE_ADMIN_TOKEN"})
+CONTROL_PLANE_SECRET_ENV = frozenset({"MCPE_ADMIN_TOKEN", "MCPE_OIDC_CLIENT_SECRET"})
 
 
 def is_control_plane_secret_env_var(key: str) -> bool:
@@ -109,6 +109,17 @@ class Settings(BaseSettings):
     # name is the signed-in email (see app.auth.cf_access).
     cf_access_team_domain: str = ""
     cf_access_aud: str = ""
+    # First-boot seeds for the oidc_* runtime settings (single sign-on), each written only
+    # when that setting has never been written; the Settings UI is authoritative after.
+    # oidc_scopes is comma-separated. The client secret is no seed: when set it always wins
+    # over the stored one, and bridges never inherit it (CONTROL_PLANE_SECRET_ENV).
+    oidc_enabled: bool = False
+    oidc_discovery_url: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_label: str = ""
+    oidc_scopes: str = ""
+    oidc_identity_claim: str = ""
     # Catalog: keep a local copy of each directory (data_dir/catalog-mirror.db), synced
     # in the background, so browsing doesn't depend on the upstream being up. The MCP
     # Registry promises no uptime and asks consumers to sync about hourly.

@@ -51,6 +51,13 @@ def test_settings_defaults_and_write(session):
         "idle_timeout_s": 0,
         "usage_retention_days": 30,
         "upstream_oauth_client_mode": "auto",
+        "oidc_enabled": False,
+        "oidc_discovery_url": "",
+        "oidc_client_id": "",
+        "oidc_client_secret": "",
+        "oidc_label": "",
+        "oidc_scopes": [],
+        "oidc_identity_claim": "email",
     }
     runtime_settings.write(
         session,

@@ -604,6 +604,16 @@ class SettingsInfo(BaseModel):
     upstream_oauth_client_mode: UpstreamOauthClientMode = "auto"
     # The global switch for the built-in mcpelevator MCP server, which is its row's `enabled`.
     control_mcp: bool = True
+    oidc_enabled: bool = False
+    oidc_discovery_url: str = ""
+    oidc_client_id: str = ""
+    # "<hidden>" when a secret is configured, "" when none; never the value.
+    oidc_client_secret: str = ""
+    oidc_label: str = ""
+    oidc_scopes: list[str] = []
+    oidc_identity_claim: str = "email"
+    # Read-only: the redirect URI to register at the identity provider.
+    oidc_redirect_uri: str = ""
 
 
 class SettingsUpdate(BaseModel):
@@ -631,6 +641,15 @@ class SettingsUpdate(BaseModel):
     usage_retention_days: Optional[StrictInt] = None
     upstream_oauth_client_mode: Optional[UpstreamOauthClientMode] = None
     control_mcp: Optional[StrictBool] = None
+    oidc_enabled: Optional[StrictBool] = None
+    oidc_discovery_url: Optional[str] = None
+    oidc_client_id: Optional[str] = None
+    # "<hidden>" keeps the stored secret, "" clears it, anything else replaces it.
+    oidc_client_secret: Optional[str] = None
+    oidc_label: Optional[str] = None
+    oidc_scopes: Optional[list[str]] = None
+    # A plain str so the settings writer's 400 names the allowed values.
+    oidc_identity_claim: Optional[str] = None
 
 
 # ---- Groups (the /g/<name> registry) ----------------------------------------

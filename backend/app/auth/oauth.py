@@ -41,7 +41,6 @@ import logging
 import math
 import time
 from typing import Any, Optional
-from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -151,13 +150,7 @@ class _OAuthJWTVerifier(JWTVerifier):
         return {**document, "keys": usable_keys}
 
 
-def _normalize_config_url(config_url: str) -> str:
-    """Accept either a full metadata URL or a bare issuer; issuers get the OIDC
-    well-known path appended (the common case for operators pasting an issuer)."""
-    url = config_url.rstrip("/")
-    if "/.well-known/" in urlsplit(url).path:
-        return url
-    return f"{url}/.well-known/openid-configuration"
+_normalize_config_url = runtime_settings.normalize_config_url
 
 
 async def _discovery(config_url: str) -> dict[str, Any]:

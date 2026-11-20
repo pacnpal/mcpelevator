@@ -24,6 +24,7 @@
 		ControlPlaneAuth,
 		GroupInfo,
 		GroupMembers,
+		OidcIdentityClaim,
 		ServerSummary,
 		SettingsInfo,
 		TokenCreated,
@@ -83,6 +84,7 @@
 			oauthAllowedSubjects = s.oauth_allowed_subjects.join(', ');
 			oauthScopes = s.oauth_scopes.join(', ');
 			oauthAcceptBearer = s.oauth_accept_bearer;
+			fillOidc(s);
 			idleTimeoutText = String(s.idle_timeout_s);
 			usageRetentionText = String(s.usage_retention_days);
 			tokens = t;
@@ -368,6 +370,65 @@
 		} finally {
 			savingField = null;
 		}
+	}
+
+	// ---- Single sign-on (one OIDC provider) -------------------------------------
+	const HIDDEN = '<hidden>';
+	const OIDC_CLAIMS: { value: OidcIdentityClaim; hint: string }[] = [
+		{ value: 'email', hint: 'The user named by their email' },
+		{ value: 'preferred_username', hint: 'The provider username' },
+		{ value: 'sub', hint: 'The stable subject id' }
+	];
+	const savingOidc = $derived(savingField === 'oidc_enabled');
+	let oidcEnabled = $state(false);
+	let oidcDiscoveryUrl = $state('');
+	let oidcClientId = $state('');
+	// Empty unless the admin types a new secret; the stored one is never sent to the SPA.
+	let oidcClientSecret = $state('');
+	let oidcLabel = $state('');
+	let oidcScopes = $state('');
+	let oidcIdentityClaim = $state<OidcIdentityClaim>('email');
+	const oidcSecretStored = $derived(settings?.oidc_client_secret === HIDDEN);
+
+	function fillOidc(s: SettingsInfo) {
+		oidcEnabled = s.oidc_enabled;
+		oidcDiscoveryUrl = s.oidc_discovery_url;
+		oidcClientId = s.oidc_client_id;
+		oidcClientSecret = '';
+		oidcLabel = s.oidc_label;
+		oidcScopes = s.oidc_scopes.join(', ');
+		oidcIdentityClaim = s.oidc_identity_claim;
+	}
+
+	async function saveOidc(patch: Partial<SettingsInfo>, message: string) {
+		if (!settings || savingField) return;
+		savingField = 'oidc_enabled';
+		try {
+			settings = await updateSettings(patch);
+			fillOidc(settings);
+			flashToast(message, 'info');
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			savingField = null;
+		}
+	}
+
+	function saveOidcSettings(e: SubmitEvent) {
+		e.preventDefault();
+		saveOidc(
+			{
+				oidc_enabled: oidcEnabled,
+				oidc_discovery_url: oidcDiscoveryUrl.trim(),
+				oidc_client_id: oidcClientId.trim(),
+				// A typed value replaces the secret; nothing typed keeps the stored one.
+				oidc_client_secret: oidcClientSecret || (oidcSecretStored ? HIDDEN : ''),
+				oidc_label: oidcLabel.trim(),
+				oidc_scopes: splitCommaList(oidcScopes),
+				oidc_identity_claim: oidcIdentityClaim
+			},
+			'SSO settings saved'
+		);
 	}
 
 	async function patchSettings(patch: Partial<SettingsInfo>, field: keyof SettingsInfo) {
@@ -2265,6 +2326,137 @@
 				{/if}
 			</fieldset>
 		</div>
+
+		<!-- Single sign-on -->
+		<form
+			class="flex flex-col gap-4 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
+			onsubmit={saveOidcSettings}
+		>
+			<div class="flex flex-col gap-1">
+				<h2 class="text-sm font-semibold text-[var(--color-ink)]">Single sign-on</h2>
+				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
+					Let users sign in to this control plane through one OpenID Connect provider. Saving
+					while enabled fetches the provider's discovery document and refuses the save with
+					the reason if it can't.
+				</p>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<span class="text-xs font-medium text-[var(--color-ink-muted)]">
+					Redirect URI <span class="font-normal text-[var(--color-ink-dim)]">(register this at the provider)</span>
+				</span>
+				<div class="flex items-center gap-2">
+					<code
+						class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
+						title={settings.oidc_redirect_uri}>{settings.oidc_redirect_uri}</code
+					>
+					<CopyButton value={settings.oidc_redirect_uri} label="Copy redirect URI" text="Copy" />
+				</div>
+			</div>
+			<div class="grid gap-3 sm:grid-cols-2">
+				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+					Discovery URL or issuer
+					<input
+						type="url"
+						bind:value={oidcDiscoveryUrl}
+						disabled={savingField !== null}
+						placeholder="https://idp.example.com"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+					/>
+				</label>
+				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+					Button label
+					<input
+						type="text"
+						bind:value={oidcLabel}
+						disabled={savingField !== null}
+						placeholder="Company SSO"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+					/>
+				</label>
+				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+					Client id
+					<input
+						type="text"
+						bind:value={oidcClientId}
+						disabled={savingField !== null}
+						autocomplete="off"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+					/>
+				</label>
+				<div class="flex flex-col gap-1.5">
+					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+						Client secret
+						<input
+							type="password"
+							bind:value={oidcClientSecret}
+							disabled={savingField !== null}
+							autocomplete="new-password"
+							placeholder={oidcSecretStored ? `${HIDDEN} (type to replace)` : 'Not set'}
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+					</label>
+					{#if oidcSecretStored}
+						<p class="flex items-center gap-2 text-xs text-[var(--color-ink-dim)]">
+							A secret is saved and stays hidden.
+							<button
+								type="button"
+								disabled={savingField !== null}
+								onclick={() => saveOidc({ oidc_client_secret: '' }, 'Client secret removed')}
+								class="font-medium text-[var(--color-ink-muted)] underline transition hover:text-[var(--color-ink)] disabled:opacity-50"
+							>
+								Remove
+							</button>
+						</p>
+					{/if}
+				</div>
+				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+					Extra scopes <span class="font-normal text-[var(--color-ink-dim)]">(optional, comma-separated, beyond openid)</span>
+					<input
+						type="text"
+						bind:value={oidcScopes}
+						disabled={savingField !== null}
+						placeholder="email, profile, groups"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+					/>
+				</label>
+				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+					Identity claim
+					<select
+						bind:value={oidcIdentityClaim}
+						disabled={savingField !== null}
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
+					>
+						{#each OIDC_CLAIMS as claim (claim.value)}
+							<option value={claim.value}>{claim.value}: {claim.hint}</option>
+						{/each}
+					</select>
+				</label>
+			</div>
+			<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
+				<input
+					type="checkbox"
+					bind:checked={oidcEnabled}
+					disabled={savingField !== null}
+					class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+				/>
+				<span class="flex flex-col gap-0.5">
+					<span class="text-sm font-medium text-[var(--color-ink)]">Enable single sign-on</span>
+					<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+						Turns on sign-in through this provider.
+					</span>
+				</span>
+			</label>
+			<div class="flex justify-end">
+				<button
+					type="submit"
+					disabled={savingField !== null}
+					aria-busy={savingOidc}
+					class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-50"
+				>
+					{savingOidc ? 'Saving…' : 'Save SSO settings'}
+				</button>
+			</div>
+		</form>
 		{/if}
 	{/if}
 </section>
