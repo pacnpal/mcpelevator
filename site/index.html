@@ -222,15 +222,11 @@ h1 .lift { color: var(--accent); display: block; }
 }
 @keyframes bob { 50% { transform: translateY(-6px); } }
 
-/* marquee of clients */
-.clients-strip { border-block: 1px solid var(--line); padding: 18px 0; overflow: hidden; position: relative; }
+/* clients that can connect */
+.clients-strip { border-block: 1px solid var(--line); padding: 20px 0; }
 .clients-strip p { margin: 0 0 12px; text-align: center; font: 500 12px var(--mono); color: var(--ink-dim); letter-spacing: .04em; }
-.marquee { display: flex; gap: 12px; width: max-content; animation: scroll 40s linear infinite; }
-.marquee span { flex: none; font: 500 14px var(--sans); color: var(--ink-muted); padding: 7px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); }
-.clients-strip::before, .clients-strip::after { content: ""; position: absolute; top: 0; bottom: 0; width: 80px; z-index: 1; pointer-events: none; }
-.clients-strip::before { left: 0; background: linear-gradient(90deg, var(--canvas), transparent); }
-.clients-strip::after { right: 0; background: linear-gradient(-90deg, var(--canvas), transparent); }
-@keyframes scroll { to { transform: translateX(calc(-50% - 6px)); } }
+.client-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; list-style: none; padding: 0; margin-block: 0; }
+.client-row li { font: 500 13.5px var(--sans); color: var(--ink-muted); padding: 6px 13px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); }
 
 /* sections */
 section { padding: 88px 0; position: relative; }
@@ -544,8 +540,6 @@ footer { border-top: 1px solid var(--line); padding: 40px 0 44px; color: var(--i
   *, *::before, *::after { animation-duration: .001s !important; animation-iteration-count: 1 !important; transition-duration: .001s !important; }
   .rv, .chat .step { opacity: 1; transform: none; }
   .link::after, .caret { display: none; }
-  .marquee { animation: none; flex-wrap: wrap; width: auto; justify-content: center; padding-inline: 16px; }
-  .marquee span[aria-hidden] { display: none; }
 }
 </style>
 </head>
@@ -644,10 +638,9 @@ footer { border-top: 1px solid var(--line); padding: 40px 0 44px; color: var(--i
 
   <div class="clients-strip">
     <p>Reach your servers from</p>
-    <div class="marquee">
-      <span>Claude mobile</span><span>Claude web</span><span>Claude Desktop</span><span>Claude Code</span><span>ChatGPT</span><span>Codex</span><span>Gemini CLI</span><span>VS Code</span><span>any Streamable HTTP client</span><span>stdio clients via mcp-remote</span><span>curl</span><span>GPT Actions</span>
-      <span aria-hidden="true">Claude mobile</span><span aria-hidden="true">Claude web</span><span aria-hidden="true">Claude Desktop</span><span aria-hidden="true">Claude Code</span><span aria-hidden="true">ChatGPT</span><span aria-hidden="true">Codex</span><span aria-hidden="true">Gemini CLI</span><span aria-hidden="true">VS Code</span><span aria-hidden="true">any Streamable HTTP client</span><span aria-hidden="true">stdio clients via mcp-remote</span><span aria-hidden="true">curl</span><span aria-hidden="true">GPT Actions</span>
-    </div>
+    <ul class="wrap client-row">
+      <li>Claude mobile</li><li>Claude web</li><li>Claude Desktop</li><li>Claude Code</li><li>ChatGPT</li><li>Codex</li><li>Gemini CLI</li><li>VS Code</li><li>any Streamable HTTP client</li><li>stdio clients via mcp-remote</li><li>curl</li><li>GPT Actions</li>
+    </ul>
   </div>
 
   <!-- CONSOLIDATE -->
