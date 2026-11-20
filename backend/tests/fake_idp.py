@@ -374,6 +374,8 @@ PRESETS: dict[str, Preset] = {
         refresh="access_type=offline", rotating=False, admin_group=None,
         settings={"oidc_allowed_domains": ["example.com"]},
     ),
+    # Okta and Auth0: whether refresh tokens rotate is a per-app setting; non-rotating
+    # here is unconfirmed.
     "okta_org": Preset(
         issuer="https://acme.okta.com", id_token={**_ADA, "groups": ["admins"]},
         auth_methods=[*BOTH, "client_secret_jwt", "private_key_jwt", "none"],
@@ -410,7 +412,8 @@ PRESETS: dict[str, Preset] = {
                   "oidc_groups_claim": "urn:zitadel:iam:org:project:roles",
                   "oidc_admin_groups": ["admins"]},
     ),
-    # A per-client issuer, ES256 by default, basic auth; groups as SPN and UUID.
+    # A per-client issuer, ES256 by default, basic auth; groups as SPN and UUID. No
+    # end_session_endpoint per kanidm/kanidm#3752 (1.6.4); unconfirmed for later releases.
     "kanidm": Preset(
         issuer="https://idm.example.com/oauth2/openid/mcpelevator", alg="ES256",
         auth_methods=["client_secret_basic"], id_token=dict(_ADA),
@@ -420,6 +423,8 @@ PRESETS: dict[str, Preset] = {
         scopes_supported=[*STANDARD, "groups"], admin_group="admins@idm.example.com",
         settings={"oidc_admin_groups": ["admins@idm.example.com"]},
     ),
+    # Refresh tokens without offline_access, rotated (pocket-id.org/docs/guides/
+    # scopes-and-claims). The end_session_endpoint is unconfirmed.
     "pocket_id": Preset(
         issuer="https://id.example.com", alg="EdDSA", public=True,
         auth_methods=[*BOTH, "none"], id_token=dict(_ADA),
@@ -428,23 +433,26 @@ PRESETS: dict[str, Preset] = {
         admin_group="admins", settings={"oidc_admin_groups": ["admins"]},
     ),
     # Full group paths only in userinfo; the ID token's groups_direct is direct ones.
+    # No end_session_endpoint (gitlab.com's discovery document).
     "gitlab": Preset(
         issuer="https://gitlab.com", id_token={**_ADA, "groups_direct": ["acme"]},
         userinfo={**_ADA, "groups": ["acme", "acme/admins"]},
         admin_group="acme/admins", settings={"oidc_admin_groups": ["acme/admins"]},
     ),
-    # client_secret_post only; groups for the groups scope.
+    # Discovery lists no auth methods (so client_secret_basic, which Gitea accepts) and no
+    # end_session_endpoint (gitea.com's and codeberg.org's discovery documents); groups
+    # for the groups scope.
     "gitea_forgejo": Preset(
-        issuer="https://git.example.com", auth_methods=["client_secret_post"],
+        issuer="https://git.example.com", auth_methods=None,
         id_token=dict(_ADA), scope_claims={"groups": {"groups": ["admins"]}},
         scopes_supported=[*STANDARD, "groups"], admin_group="admins",
         settings={"oidc_admin_groups": ["admins"]},
     ),
-    # A user-pool issuer; email_verified as a string; groups in cognito:groups;
-    # refresh tokens never rotated; no end_session_endpoint.
+    # A user-pool issuer; groups in cognito:groups; no end_session_endpoint. Refresh
+    # tokens not rotating is unconfirmed.
     "aws_cognito": Preset(
         issuer="https://cognito-idp.us-east-1.amazonaws.com/us-east-1_AbCdEf123",
-        id_token={"email": "ada@example.com", "email_verified": "true",
+        id_token={"email": "ada@example.com", "email_verified": True,
                   "cognito:groups": ["admins"]},
         scopes_supported=["openid", "email", "phone", "profile"], rotating=False,
         admin_group="admins",
