@@ -12,21 +12,30 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
+import json
 import logging
+import secrets
+import time
 import traceback
+from urllib.parse import urlencode
 
 import httpx2
 from fastapi import APIRouter, Depends
 from mcp.client.auth import OAuthTokenError
 from starlette.requests import Request
-from starlette.responses import RedirectResponse
+from starlette.responses import JSONResponse, RedirectResponse
 from sqlmodel import Session
 
-from app.api.schemas import AuthStatus, AuthUser
+from app import sealed
+from app.api.schemas import AuthStatus, AuthUser, SsoInfo
 from app.api.util import oauth_public_base
-from app.auth import oauth_flow, principal as principal_mod
+from app.auth import oauth_flow, oidc, principal as principal_mod, sign_in
 from app.auth.control_plane import control_auth, enforcement_enabled
+from app.config import get_settings
 from app.db import get_session, repo
+from app.registry import settings as runtime_settings
+from app.util import host_only
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +48,156 @@ async def auth_status(request: Request, session: Session = Depends(get_session))
     # ``authenticated`` is false with enforcement off (the synthetic local admin) —
     # that's what lets the zero-config SPA render the full admin surface.
     p = principal_mod.resolve(request, session)
-    user = (
-        AuthUser(id=p.user_id, name=p.name, role=p.role, local_runners=p.local_runners)
-        if p is not None
-        else None
-    )
+    user = None
+    if p is not None:
+        row = repo.get_user(session, p.user_id) if p.user_id else None
+        user = AuthUser(
+            id=p.user_id, name=p.name, role=p.role, local_runners=p.local_runners,
+            linked=bool(row is not None and row.oidc_subject),
+        )
+    values = runtime_settings.read_all(session)
+    # Handed out whenever the cookie names a live session, enforcement or not: with
+    # enforcement off the SPA still needs it for the session to count (e.g. as the
+    # admin credential that turns enforcement on).
+    live = sign_in.current(request, session) if sign_in.accepts(request) else None
     return AuthStatus(
         enforced=enforcement_enabled(session),
         authenticated=control_auth(request, session) == "ok",
         user=user,
+        sso=SsoInfo(enabled=True, label=values["oidc_label"] or "SSO")
+        if values["oidc_enabled"] else None,
+        csrf=sign_in.csrf(live.id) if live is not None else None,
     )
+
+
+# ---- SSO sign-in (authorization code + PKCE; app.auth.oidc) -------------------
+
+# The flow's state, nonce, PKCE verifier and next path ride in a sealed cookie named per
+# state, so nothing is held server-side and two tabs signing in at once don't collide.
+_FLOW_COOKIE_PREFIX = "mcpe_oidc_"
+_FLOW_PATH = "/api/auth/oidc"
+_FLOW_TTL_S = 600
+
+
+def _flow_cookie(state: str) -> str:
+    return _FLOW_COOKIE_PREFIX + state[:16]
+
+
+def _safe_next(value: str | None) -> str:
+    """A same-origin path, else ``/``."""
+    if not value or not value.startswith("/") or value.startswith(("//", "/\\")):
+        return "/"
+    return value
+
+
+def _sso_error(reason: str, detail: str, state: str | None = None) -> RedirectResponse:
+    """Failure redirect carrying one of oidc's literal reason codes. ``detail`` (which
+    may hold provider text) goes to the log only."""
+    logger.warning("SSO sign-in failed (%s): %s", reason, oauth_flow.log_safe(detail))
+    resp = RedirectResponse(f"/login?sso=error&reason={reason}", status_code=303)
+    if state:
+        resp.delete_cookie(_flow_cookie(state), path=_FLOW_PATH)
+    return resp
+
+
+def _redirect_uri(request: Request) -> str:
+    return f"{oauth_public_base(request)}/api/auth/oidc/callback"
+
+
+@router.get("/auth/oidc/login")
+async def oidc_login(
+    request: Request, next: str | None = None, session: Session = Depends(get_session)
+):
+    target = _safe_next(next)
+    config = get_settings()
+    if config.public_host and host_only(request.headers.get("host", "")) != config.public_host:
+        # Start on the canonical host, so the flow cookie and the session cookie land
+        # where the provider sends the browser back to.
+        query = urlencode({"next": target})
+        return RedirectResponse(f"{config.base_url}/api/auth/oidc/login?{query}", status_code=303)
+    try:
+        discovery = await oidc.begin(session)
+    except oidc.SignInFailed as exc:
+        return _sso_error(exc.reason, str(exc))
+    values = runtime_settings.read_all(session)
+    state, nonce, verifier = (secrets.token_urlsafe(32) for _ in range(3))
+    redirect_uri = _redirect_uri(request)
+    resp = RedirectResponse(
+        oidc.authorization_url(
+            discovery, client_id=values["oidc_client_id"], redirect_uri=redirect_uri,
+            scopes=values["oidc_scopes"], state=state, nonce=nonce, verifier=verifier,
+        ),
+        status_code=303,
+    )
+    flow = {"state": state, "nonce": nonce, "verifier": verifier, "next": target,
+            "exp": time.time() + _FLOW_TTL_S}
+    resp.set_cookie(
+        _flow_cookie(state), sealed.seal(json.dumps(flow)), max_age=_FLOW_TTL_S,
+        path=_FLOW_PATH, secure=redirect_uri.startswith("https://"), httponly=True,
+        samesite="lax",
+    )
+    return resp
+
+
+def _flow(request: Request, state: str | None) -> dict | None:
+    """The sealed flow cookie for ``state``, or None when it's missing, expired or isn't
+    this state's."""
+    if not state:
+        return None
+    opened = sealed.unseal(request.cookies.get(_flow_cookie(state), ""))
+    try:
+        flow = json.loads(opened) if opened else None
+    except ValueError:
+        return None
+    if not isinstance(flow, dict) or flow.get("exp", 0) < time.time():
+        return None
+    if not hmac.compare_digest(str(flow.get("state", "")).encode(), state.encode()):
+        return None
+    return flow
+
+
+@router.get("/auth/oidc/callback")
+async def oidc_callback(
+    request: Request,
+    session: Session = Depends(get_session),
+    code: str | None = None,
+    state: str | None = None,
+    iss: str | None = None,
+    error: str | None = None,
+):
+    """Finish an SSO sign-in and start a Sign-in session. Every redirect target is a
+    literal or the ``next`` path checked at login: no query value reaches the Location."""
+    flow = _flow(request, state)
+    if error:
+        return _sso_error(oidc.provider_error_reason(error), f"provider error {error!r}", state)
+    if flow is None:
+        return _sso_error(oidc.EXPIRED, "unknown or expired state", state)
+    if not code:
+        return _sso_error(oidc.PROVIDER_REJECTED, "callback carried no code", state)
+    redirect_uri = _redirect_uri(request)
+    try:
+        user, id_token = await oidc.finish(
+            session, code=code, verifier=flow["verifier"], nonce=flow["nonce"],
+            redirect_uri=redirect_uri, iss=iss,
+        )
+    except oidc.SignInFailed as exc:
+        return _sso_error(exc.reason, str(exc), state)
+    raw = sign_in.start(session, user.id, id_token)
+    resp = RedirectResponse(_safe_next(flow.get("next")), status_code=303)
+    resp.delete_cookie(_flow_cookie(state), path=_FLOW_PATH)
+    sign_in.set_cookie(resp, raw, https=redirect_uri.startswith("https://"))
+    return resp
+
+
+@router.post("/auth/logout")
+async def logout(request: Request, session: Session = Depends(get_session)) -> JSONResponse:
+    """End this browser's Sign-in session (locally) and clear its cookie. A Login token
+    is the SPA's to forget."""
+    if sign_in.accepts(request) and sign_in.current(request, session) is not None:
+        sign_in.end(request, session)
+    resp = JSONResponse({"ok": True})
+    sign_in.clear_cookie(resp)
+    return resp
 
 
 @router.get("/oauth/client-metadata.json")

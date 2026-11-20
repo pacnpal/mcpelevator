@@ -66,13 +66,17 @@ def admin_credential_presented(request: Request, session: Session) -> bool:
     login token is a valid control credential but must NOT satisfy this — enabling
     enforcement while holding only member logins would strand the box with no way
     to reach Settings or Users."""
+    from app.auth import sign_in
     from app.auth.principal import credential_principal  # circular-import guard
     from app.runners.builtin import is_internal
 
-    # The env token, a user-less control token, an admin's login, or (through the
-    # built-in bridge) an admin's Cloudflare Access identity: the same resolution
-    # principal.resolve uses, so a credential it would call admin counts here too.
-    caller = credential_principal(request, session, cloudflare=is_internal(request))
+    # The env token, a user-less control token, an admin's login, (through the
+    # built-in bridge) an admin's Cloudflare Access identity, or an admin's Sign-in
+    # session: the same resolution principal.resolve uses, so a credential it would
+    # call admin counts here too.
+    caller = credential_principal(
+        request, session, cloudflare=is_internal(request), sign_in=sign_in.accepts(request)
+    )
     return caller is not None and caller.is_admin
 
 
@@ -107,16 +111,21 @@ def is_env_admin_token(token: str) -> bool:
 def control_auth(request: Request, session: Session) -> Literal["ok", "missing", "wrong_scope"]:
     """Classify the request's control-plane credential. Pure (no raising) so the
     gate and ``/api/auth/status`` share one decision: ``ok`` = a control token, the
-    break-glass env token, or a trusted Cloudflare Access identity; ``wrong_scope`` =
+    break-glass env token, a trusted Cloudflare Access identity, or a Sign-in session
+    with its CSRF header; ``wrong_scope`` =
     a valid non-control token;
     ``missing`` = no token or no match."""
+    from app.auth import sign_in
     from app.auth.principal import credential_principal  # circular-import guard
     from app.runners.builtin import is_internal
 
     # The same decision principal.resolve makes, so the gate and identity agree:
     # a user-bound credential whose user row is gone fails closed, and a Cloudflare
     # Access identity counts only on requests the built-in bridge carried.
-    if credential_principal(request, session, cloudflare=is_internal(request)) is not None:
+    caller = credential_principal(
+        request, session, cloudflare=is_internal(request), sign_in=sign_in.accepts(request)
+    )
+    if caller is not None:
         return "ok"
     token = _bearer(request)
     row = repo.get_token_by_hash(session, hash_token(token)) if token else None

@@ -84,14 +84,36 @@ export function errorMessage(err: unknown): string {
 	return 'Unexpected error';
 }
 
+// The Sign-in session's CSRF header value, from the latest /auth/status (ADR-0004).
+let csrf: string | null = null;
+// The first status fetch. Every other request waits for it, so a signed-in browser's
+// first request already carries the CSRF header.
+let firstStatus: Promise<unknown> | null = null;
+
+/**
+ * The credential headers for an `/api` request: the pasted login token as a bearer,
+ * and `X-MCPE-CSRF` once status has handed one out. The session cookie itself rides
+ * on `fetch`'s default same-origin credentials.
+ */
+async function authHeaders(waitForStatus = true): Promise<Record<string, string>> {
+	if (waitForStatus) {
+		if (!firstStatus) firstStatus = getAuthStatus().catch(() => undefined);
+		await firstStatus;
+	}
+	const token = getToken();
+	return {
+		...(token ? { authorization: `Bearer ${token}` } : {}),
+		...(csrf ? { 'x-mcpe-csrf': csrf } : {})
+	};
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const url = `${BASE}${path}`;
-	const token = getToken();
 	const res = await fetch(url, {
 		...init,
 		headers: {
 			accept: 'application/json',
-			...(token ? { authorization: `Bearer ${token}` } : {}),
+			...(await authHeaders(path !== '/auth/status')),
 			...init?.headers
 		}
 	});
@@ -305,10 +327,7 @@ export function updateServer(
  */
 export async function downloadMcpb(id: string): Promise<Blob> {
 	const url = `${BASE}/servers/${encodeURIComponent(id)}/mcpb`;
-	const token = getToken();
-	const res = await fetch(url, {
-		headers: token ? { authorization: `Bearer ${token}` } : {}
-	});
+	const res = await fetch(url, { headers: await authHeaders() });
 	if (!res.ok) {
 		// Same 401 handling as request(): drop the stale token and bounce to /login.
 		if (res.status === 401) {
@@ -444,11 +463,10 @@ export async function streamLogs(
 	signal: AbortSignal
 ): Promise<void> {
 	const url = `${BASE}/servers/${encodeURIComponent(id)}/logs`;
-	const token = getToken();
 	const res = await fetch(url, {
 		headers: {
 			accept: 'text/event-stream',
-			...(token ? { authorization: `Bearer ${token}` } : {})
+			...(await authHeaders())
 		},
 		signal
 	});
@@ -501,7 +519,21 @@ export async function streamLogs(
 /** Whether control-plane auth is enforced, and whether this client is authenticated.
  * Public endpoint — the layout calls it to decide whether to redirect to /login. */
 export function getAuthStatus(): Promise<AuthStatus> {
-	return request<AuthStatus>('/auth/status');
+	const status = request<AuthStatus>('/auth/status').then((s) => {
+		csrf = s.csrf ?? null;
+		return s;
+	});
+	if (!firstStatus) firstStatus = status.catch(() => undefined);
+	return status;
+}
+
+/** End this browser's Sign-in session (if any) and forget its CSRF value. */
+export async function logout(): Promise<void> {
+	try {
+		await request<unknown>('/auth/logout', { method: 'POST' });
+	} finally {
+		csrf = null;
+	}
 }
 
 /** Current security settings: bind mode, allowed hosts, default auth provider. */

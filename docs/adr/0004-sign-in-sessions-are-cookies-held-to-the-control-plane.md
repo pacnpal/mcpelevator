@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Sign-in sessions are cookies, held to the control plane

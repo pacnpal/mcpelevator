@@ -2,7 +2,7 @@
 	import '../app.css';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { getAuthStatus } from '#lib/api.js';
+	import { getAuthStatus, logout as endSession } from '#lib/api.js';
 	import { clearToken } from '#lib/auth.js';
 	import { completeOauthPopup } from '#lib/oauthPopup.js';
 	import favicon from '#lib/assets/favicon.svg';
@@ -44,7 +44,10 @@
 			.then((status) => {
 				if (cancelled) return; // a newer navigation superseded this check
 				loggedIn = status.authenticated;
-				if (status.enforced && !status.authenticated) goto('/login');
+				if (status.enforced && !status.authenticated) {
+					// Carry the page being opened, so signing in lands back on it.
+					goto(`/login?next=${encodeURIComponent(page.url.pathname + page.url.search)}`);
+				}
 			})
 			.catch(() => {
 				// status is public and best-effort; a transient failure shouldn't trap the user.
@@ -54,9 +57,14 @@
 		};
 	});
 
-	function logout() {
+	async function logout() {
 		clearToken();
 		loggedIn = false;
+		try {
+			await endSession(); // ends a Sign-in session, if this browser holds one
+		} catch {
+			// best effort: the token is already gone and the cookie expires on its own
+		}
 		goto('/login');
 	}
 </script>

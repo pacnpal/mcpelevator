@@ -94,3 +94,66 @@ describe('api request()', () => {
 		expect(lines).toEqual(['a', 'b']);
 	});
 });
+
+describe('Sign-in session CSRF header', () => {
+	beforeEach(() => {
+		localStorage.clear();
+		vi.resetModules(); // a fresh api.ts: no status fetched yet
+	});
+	afterEach(() => vi.unstubAllGlobals());
+
+	function respond(body: unknown) {
+		return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+	}
+
+	function headersOf(fetchMock: ReturnType<typeof vi.fn>, url: string): Record<string, string> {
+		const call = fetchMock.mock.calls.find(([u]) => u === url);
+		return (call?.[1] as RequestInit).headers as Record<string, string>;
+	}
+
+	it('waits for the first status, then sends X-MCPE-CSRF on request() and the log stream', async () => {
+		const api = await import('./api');
+		let releaseStatus: () => void = () => {};
+		const order: string[] = [];
+		const fetchMock = vi.fn((url: string) => {
+			order.push(url);
+			if (url === '/api/auth/status') {
+				return new Promise((resolve) => {
+					releaseStatus = () =>
+						resolve(
+							respond({ enforced: true, authenticated: true, user: null, sso: null, csrf: 'c5rf' })
+						);
+				});
+			}
+			if (url.endsWith('/logs')) {
+				const body = new ReadableStream<Uint8Array>({ start: (c) => c.close() });
+				return Promise.resolve({ ok: true, status: 200, body });
+			}
+			return Promise.resolve(respond({ status: 'ok', version: '1' }));
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		const health = api.getHealth();
+		await new Promise((r) => setTimeout(r, 0));
+		expect(order).toEqual(['/api/auth/status']); // health waits for status
+		releaseStatus();
+		await health;
+		await api.streamLogs('srv', { onLine: () => {}, onInfo: () => {} }, new AbortController().signal);
+
+		expect(headersOf(fetchMock, '/api/health')['x-mcpe-csrf']).toBe('c5rf');
+		expect(headersOf(fetchMock, '/api/servers/srv/logs')['x-mcpe-csrf']).toBe('c5rf');
+		expect(headersOf(fetchMock, '/api/auth/status')['x-mcpe-csrf']).toBeUndefined();
+	});
+
+	it('sends no CSRF header when status returned none', async () => {
+		const api = await import('./api');
+		const fetchMock = vi.fn(async (url: string) =>
+			url === '/api/auth/status'
+				? respond({ enforced: false, authenticated: false, user: null, sso: null, csrf: null })
+				: respond({ status: 'ok', version: '1' })
+		);
+		vi.stubGlobal('fetch', fetchMock);
+		await api.getHealth();
+		expect(headersOf(fetchMock, '/api/health')['x-mcpe-csrf']).toBeUndefined();
+	});
+});

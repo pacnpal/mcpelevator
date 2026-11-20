@@ -1,7 +1,42 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { errorMessage, getAuthStatus } from '#lib/api.js';
 	import { clearToken, setToken } from '#lib/auth.js';
+	import type { AuthStatus } from '#lib/types.js';
+
+	// One plain sentence per reason code the SSO callback sends back (app.auth.oidc).
+	const SSO_ERRORS: Record<string, string> = {
+		provider_denied: 'The identity provider did not let you sign in. Try again, or ask your admin.',
+		provider_unavailable: 'The identity provider could not be reached. Try again in a moment.',
+		provider_rejected:
+			"The identity provider's answer could not be verified, or it refused the request. Ask your admin to check the SSO settings.",
+		no_match: 'No user here matches your identity provider account. Ask an admin to add you.',
+		ambiguous_match:
+			'More than one user here matches your identity provider account. Ask an admin to sort it out.',
+		expired: 'That sign-in took too long or was already used. Start it again.',
+		sso_disabled: 'SSO sign-in is turned off on this instance.'
+	};
+
+	// A same-origin path only, as the backend checks it too.
+	const rawNext = page.url.searchParams.get('next') ?? '/';
+	const next =
+		rawNext.startsWith('/') && !rawNext.startsWith('//') && !rawNext.startsWith('/\\')
+			? rawNext
+			: '/';
+	const ssoError =
+		page.url.searchParams.get('sso') === 'error'
+			? (SSO_ERRORS[page.url.searchParams.get('reason') ?? ''] ?? 'SSO sign-in failed.')
+			: null;
+
+	let sso = $state<AuthStatus['sso']>(null);
+	$effect(() => {
+		getAuthStatus()
+			.then((status) => (sso = status.sso))
+			.catch(() => {
+				// best effort: the token form works without it
+			});
+	});
 
 	let token = $state('');
 	let busy = $state(false);
@@ -20,7 +55,7 @@
 		try {
 			const status = await getAuthStatus();
 			if (status.authenticated) {
-				await goto('/');
+				await goto(next);
 			} else {
 				clearToken();
 				error = 'That token was not accepted. Check the value and try again.';
@@ -49,6 +84,20 @@
 			>.
 		</p>
 	</div>
+
+	{#if ssoError}
+		<p class="text-sm" role="alert" style="color: var(--color-state-failed);">{ssoError}</p>
+	{/if}
+
+	{#if sso?.enabled}
+		<a
+			href={`/api/auth/oidc/login?next=${encodeURIComponent(next)}`}
+			data-sveltekit-reload
+			class="inline-flex items-center justify-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)]"
+		>
+			Sign in with {sso.label}
+		</a>
+	{/if}
 
 	<form
 		onsubmit={submit}

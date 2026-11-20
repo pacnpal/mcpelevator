@@ -64,6 +64,7 @@ def test_user_lifecycle_and_login():
                 "name": "Ada",
                 "role": "member",
                 "local_runners": False,
+                "linked": False,
             }
 
             # patch: rename + grant local runners

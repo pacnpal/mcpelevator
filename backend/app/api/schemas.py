@@ -696,12 +696,24 @@ class AuthUser(BaseModel):
     name: str
     role: Role
     local_runners: bool = True
+    # Does this user have a Linked identity (have they signed in through SSO)?
+    linked: bool = False
+
+
+class SsoInfo(BaseModel):
+    """What the login page needs to offer SSO: on, and the button's label."""
+
+    enabled: bool
+    label: str
 
 
 class AuthStatus(BaseModel):
     enforced: bool  # is a control token required right now?
     authenticated: bool  # did this request carry a valid control token?
     user: Optional[AuthUser] = None  # the resolved principal when authenticated
+    sso: Optional[SsoInfo] = None  # null when SSO is off
+    # The X-MCPE-CSRF value for a request authenticated by a Sign-in session; null otherwise.
+    csrf: Optional[str] = None
 
 
 # ---- Users (multi-user control plane) ---------------------------------------

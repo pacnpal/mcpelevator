@@ -122,6 +122,7 @@ _PROVIDERS = {"none", "bearer", "oauth"}
 _CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
 _UPSTREAM_OAUTH_CLIENT_MODES = {"auto", "cimd", "dcr"}
 _OIDC_IDENTITY_CLAIMS = {"email", "preferred_username", "sub"}
+_SESSION_ENDING_KEYS = ("oidc_enabled", "oidc_discovery_url", "oidc_client_id")
 
 
 # Group names are the routing key in /g/<name>/mcp, so they must be URL-safe: lowercase
@@ -305,7 +306,20 @@ def write(
         if key == "allowed_hosts":
             value = _normalize_hosts(value)
         pending[key] = value
-    repo.setting_set_many(session, pending, guard=guard)
+    # Changing which provider signs people in (or turning SSO off) ends every Sign-in
+    # session in this same transaction.
+    ends_sessions = any(
+        key in pending and pending[key] != repo.setting_get(session, key, DEFAULTS[key])
+        for key in _SESSION_ENDING_KEYS
+    )
+
+    def staged(s: Session) -> None:
+        if guard is not None:
+            guard(s)
+        if ends_sessions:
+            repo.delete_sign_in_sessions(s)
+
+    repo.setting_set_many(session, pending, guard=staged if guard or ends_sessions else None)
     return read_all(session)
 
 

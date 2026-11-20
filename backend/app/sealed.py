@@ -60,6 +60,11 @@ def _opened(token: str) -> str | None:
         return None
 
 
+def unseal(value: str) -> str | None:
+    """One sealed value's plaintext, or None when it isn't sealed or can't be decrypted."""
+    return _opened(value) if is_sealed(value) else None
+
+
 def unseal_env(env: dict[str, str]) -> dict[str, str]:
     """``env`` with every sealed value decrypted. Raises ``ValueError`` naming the keys
     that can't be decrypted (the key file is missing or was replaced)."""

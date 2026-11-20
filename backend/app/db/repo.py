@@ -21,6 +21,7 @@ from app.db.models import (
     Server,
     ServerRuntime,
     Setting,
+    SignInSession,
     Token,
     UsageBucket,
     User,
@@ -600,7 +601,7 @@ def count_servers_owned(session: Session, user_id: str) -> int:
 def delete_user_and_tokens(session: Session, user_id: str) -> bool:
     """Delete a user and revoke EVERY token bound to them (control credentials and
     data-plane tokens alike) in one transaction, so a removed identity can't keep
-    authenticating. The caller has already refused the delete while the user owns
+    authenticating (their Sign-in sessions end too). The caller has already refused the delete while the user owns
     servers, so no Server.owner_id can dangle. Returns False when the user didn't
     exist (idempotent for a retried delete)."""
     user = session.get(User, user_id)
@@ -608,6 +609,7 @@ def delete_user_and_tokens(session: Session, user_id: str) -> bool:
         return False
     for token in session.exec(select(Token).where(Token.user_id == user_id)).all():
         session.delete(token)
+    session.execute(delete(SignInSession).where(SignInSession.user_id == user_id))
     session.delete(user)
     session.commit()
     return True
@@ -628,3 +630,17 @@ def admin_credential_exists(session: Session, *, excluding_user_id: Optional[str
         if user is not None and user.role == "admin":
             return True
     return False
+
+
+# --------------------------------------------------------------------------- #
+# sign-in sessions (cookie hash-only storage, like tokens)
+# --------------------------------------------------------------------------- #
+
+
+def get_sign_in_session_by_hash(session: Session, token_hash: str) -> Optional[SignInSession]:
+    return session.exec(select(SignInSession).where(SignInSession.token_hash == token_hash)).first()
+
+
+def delete_sign_in_sessions(session: Session) -> None:
+    """Stage ending EVERY Sign-in session; the caller commits."""
+    session.execute(delete(SignInSession))

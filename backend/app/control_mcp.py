@@ -50,7 +50,7 @@ from app import __version__
 from app.api import servers as servers_api
 from app.api.schemas import GroupMembers, Role, ServerCreate, ServerUpdate, SettingsUpdate
 from app.auth import principal as principal_mod
-from app.auth import cf_access
+from app.auth import cf_access, sign_in
 from app.auth.control_plane import enforcement_enabled, is_env_admin_token
 from app.db import get_engine, repo
 from app.groups import registry
@@ -106,6 +106,7 @@ def build(app: FastAPI) -> "_Gate":
         headers = {
             k: v for k, v in outer.headers.items()
             if k not in _TRANSPORT_HEADERS and k != ORIGINAL_HOST_HEADER
+            and k not in sign_in.BROWSER_HEADERS  # a Sign-in session never drives /api here
         }
         original_host = outer.headers.get(ORIGINAL_HOST_HEADER)
         if original_host and _internal(outer):
@@ -134,8 +135,9 @@ def build(app: FastAPI) -> "_Gate":
 
     @mcp.tool(annotations=_READ)
     async def whoami() -> Any:
-        """Who this connection acts as: user id, name, role, local-runner permission, and
-        whether control-plane auth is enforced."""
+        """Who this connection acts as: user id, name, role, local-runner permission,
+        whether the user has a Linked identity (has signed in through SSO), whether
+        control-plane auth is enforced, and whether SSO sign-in is on."""
         return await api("GET", "/api/auth/status")
 
     @mcp.tool(annotations=_READ)

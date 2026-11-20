@@ -28,6 +28,7 @@ from starlette.types import Receive, Scope, Send
 
 from app import usage
 from app.auth.middleware import enforce
+from app.auth.sign_in import BROWSER_HEADERS
 from app.config import get_settings
 from app.db import get_engine, repo
 from app.db.models import BUILTIN_RUNNER
@@ -165,8 +166,10 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
         fwd_headers = {
             k: v for k, v in request.headers.items()
             # Both are ours to set: a client's copy would forge its address or pose
-            # as a group request (and get group-prefixed prompt tool names).
+            # as a group request (and get group-prefixed prompt tool names). A Sign-in
+            # session's cookie and CSRF header are the control plane's, never a bridge's.
             if k.lower() not in _HOP and k.lower() not in (ORIGINAL_HOST_HEADER, GROUP_HEADER)
+            and k.lower() not in BROWSER_HEADERS
         }
         if server.runner == BUILTIN_RUNNER:
             fwd_headers[ORIGINAL_HOST_HEADER] = request.headers.get("host", "")

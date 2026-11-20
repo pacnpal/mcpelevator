@@ -96,6 +96,7 @@ def test_auth_status_reflects_enforcement_and_credential():
                 "name": "local operator",
                 "role": "admin",
                 "local_runners": True,
+                "linked": False,
             }
             control = _mint("control")
             with Session(get_engine()) as s:

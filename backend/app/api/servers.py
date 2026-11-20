@@ -1288,6 +1288,12 @@ async def call_server_tool(
     mirrored: a tool's own failure comes back as ``is_error`` in a 200, while an
     unreachable/broken bridge is a 502 and a timeout a 504."""
     server = _visible(principal, session, server_id)
+    if server.runner == BUILTIN_RUNNER and principal.session_id is not None:
+        # A Sign-in session has no credential to forward, and the cookie never is.
+        raise HTTPException(
+            status_code=400,
+            detail="sign in with a login token to call the built-in server's tools from here",
+        )
     sup = request.app.state.supervisor
     unit = sup.unit(server_id)
     if unit is None or unit.state != "running" or unit.port is None:
