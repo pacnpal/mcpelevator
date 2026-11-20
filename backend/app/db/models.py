@@ -90,8 +90,12 @@ class SignInSession(SQLModel, table=True):
     # the session runs to its hard expiry.
     soft_expires_at: Optional[datetime] = None
     # The provider's latest ID token, sealed (app.sealed): the logout hint, and the
-    # subject and nonce a refreshed one must repeat.
+    # subject a refreshed one must repeat.
     id_token: str = ""
+    # The sign-in's nonce, which a refreshed ID token that carries one must repeat. Kept
+    # apart from id_token, which a refreshed token without a nonce replaces. "" on a
+    # session from before this column: its id_token's nonce counts.
+    nonce: str = ""
     # The provider's latest refresh token, sealed. Replaced by every refresh response.
     refresh_token: str = ""
     # settings.sign_in_digest at sign-in: a refresh under other values ends the session.

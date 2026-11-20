@@ -134,16 +134,19 @@ def max_age(session: Session) -> timedelta:
 @dataclass(frozen=True)
 class Grant:
     """What a session keeps from a token response: the ID token, the refresh token
-    ("" when the provider issued none) and when the access token runs out."""
+    ("" when the provider issued none), when the access token runs out, and the
+    sign-in's nonce ("" on a refresh: the session keeps the one it has)."""
 
     id_token: str
     refresh_token: str
     access_expires_at: datetime
+    nonce: str = ""
 
     def columns(self) -> dict:
         """The session row's columns for this grant, sealed. Without a refresh token
         there's nothing to refresh with, so no soft expiry."""
         return {
+            **({"nonce": self.nonce} if self.nonce else {}),
             "id_token": sealed.seal(self.id_token) if self.id_token else "",
             "refresh_token": sealed.seal(self.refresh_token) if self.refresh_token else "",
             "soft_expires_at": self.access_expires_at if self.refresh_token else None,

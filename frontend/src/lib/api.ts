@@ -111,7 +111,8 @@ async function authHeaders(waitForStatus = true, withToken = true): Promise<Reco
  * Every `/api` fetch goes through here: credential headers, and the Sign-in session
  * refresh. A session past its provider access token gets 401 everywhere but
  * /auth/status, which refreshes it, so a 401 asks status once and retries once. A 401
- * that survives that drops the token and bounces to /login (unless already there).
+ * that survives that drops the token and bounces to /login (unless already there). A
+ * status call that fails (offline, a 5xx) throws the original 401 and keeps the token.
  * Returns the ok response; throws `ApiError` otherwise.
  */
 async function apiFetch(path: string, init?: RequestInit, withToken = true): Promise<Response> {
@@ -127,11 +128,14 @@ async function apiFetch(path: string, init?: RequestInit, withToken = true): Pro
 		});
 	let res = await send();
 	if (res.status === 401 && path !== '/auth/status') {
-		const refreshed = await getAuthStatus(withToken).then(
-			() => true,
-			() => false
-		);
-		if (refreshed) res = await send();
+		try {
+			await getAuthStatus(withToken);
+		} catch {
+			// Status itself failed (offline, a 5xx): that says nothing about the session,
+			// so keep the token and stay put; the original 401 is the error.
+			throw new ApiError(res.status, await res.text().catch(() => ''), url);
+		}
+		res = await send();
 	}
 
 	if (!res.ok) {

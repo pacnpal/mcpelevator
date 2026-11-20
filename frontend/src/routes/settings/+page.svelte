@@ -2449,7 +2449,8 @@
 					<input
 						type="number"
 						min="300"
-						step="60"
+						max="2592000"
+						step="1"
 						bind:value={oidcSessionMaxAge}
 						disabled={savingField !== null}
 						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"

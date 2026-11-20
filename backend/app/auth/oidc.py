@@ -145,6 +145,8 @@ _DEFAULT_SCOPES = ("openid", "email", "profile")
 _GROUP_LISTS = ("oidc_allowed_groups", "oidc_admin_groups", "oidc_local_runner_groups")
 # Settings that decide access from the provider's claims: a refresh must see fresh ones.
 _ACCESS_POLICY = (*_GROUP_LISTS, "oidc_allowed_domains", "oidc_allowed_tenants")
+# What a userinfo fetch gave (``_with_userinfo``).
+USERINFO_FRESH, USERINFO_OUTAGE, USERINFO_NONE = "fresh", "outage", "none"
 # Entra ID's multi-tenant discovery names its issuer with this placeholder; a token's
 # ``iss`` carries the tenant's GUID (its ``tid`` claim) in its place.
 _TENANT = "{tenantid}"
@@ -270,22 +272,26 @@ async def finish(
             http, discovery, id_token, client_id=client_id, nonce=nonce,
             allowed_tenants=values["oidc_allowed_tenants"],
         )
-        claims = await _with_userinfo(http, discovery, tokens.get("access_token"), claims)
+        claims, _ = await _with_userinfo(http, discovery, tokens.get("access_token"), claims)
     groups = _decide(values, claims)
     # Threadpool: the config write lock is a threading lock, never waited for on the loop.
     linked = await run_in_threadpool(_link, session, claims, values, groups, bound)
-    return linked, _grant(tokens, id_token, claims, "")
+    return linked, _grant(tokens, id_token, claims, "", nonce=nonce)
 
 
 def _grant(
-    tokens: dict[str, Any], id_token: str, claims: dict[str, Any], refresh_token: str
+    tokens: dict[str, Any], id_token: str, claims: dict[str, Any], refresh_token: str, *,
+    nonce: str = "", fallback: datetime | None = None,
 ) -> sign_in.Grant:
     """What the session keeps of a token response. A new refresh token replaces
     ``refresh_token`` (Authelia and others rotate single-use ones), and the access
-    token runs out after ``expires_in``, else at the ID token's ``exp``."""
+    token runs out after ``expires_in``, else at ``fallback`` when given (a refresh
+    with no new ID token), else at the ID token's ``exp``."""
     expires_in = tokens.get("expires_in")
     if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool):
         expires = datetime.now(timezone.utc) + timedelta(seconds=max(0, min(expires_in, 10**9)))
+    elif fallback is not None:
+        expires = fallback
     else:
         expires = datetime.fromtimestamp(claims["exp"], timezone.utc)
     new = tokens.get("refresh_token")
@@ -293,6 +299,7 @@ def _grant(
         id_token=id_token,
         refresh_token=new if isinstance(new, str) and new else refresh_token,
         access_expires_at=expires,
+        nonce=nonce,
     )
 
 
@@ -315,6 +322,9 @@ def _decide(values: dict[str, Any], claims: dict[str, Any]) -> set[str]:
 _REFRESH_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 # After a provider outage the session counts this much longer before the next try.
 _RETRY_AFTER = timedelta(minutes=1)
+# A refresh that says neither when the access token runs out (expires_in) nor brings a
+# new ID token: the session counts this long before the next refresh.
+_FALLBACK_LIFETIME = timedelta(minutes=5)
 
 
 async def refresh(session: Session, row: SignInSession) -> None:
@@ -354,7 +364,8 @@ async def refresh(session: Session, row: SignInSession) -> None:
 
 
 async def _refresh(session: Session, row: SignInSession) -> None:
-    session_id, bound = row.id, row.settings  # read now: the row may go mid-refresh
+    # Read now: the row may go mid-refresh.
+    session_id, bound, hard = row.id, row.settings, sign_in.hard_expiry(row)
     values = runtime_settings.read_all(session)
     if not values["oidc_enabled"] or runtime_settings.sign_in_digest(values) != bound:
         raise SignInFailed(EXPIRED, "the SSO settings changed since this session began")
@@ -368,10 +379,11 @@ async def _refresh(session: Session, row: SignInSession) -> None:
     stored, refresh_token = sealed.unseal(row.id_token), sealed.unseal(row.refresh_token)
     if not stored or not refresh_token:
         raise SignInFailed(PROVIDER_REJECTED, "the session's tokens can't be read")
-    try:  # validated when it was stored; read here for its issuer, subject and nonce
+    try:  # validated when it was stored; read here for its issuer and subject
         old = jwt.decode(stored, options={"verify_signature": False})
     except jwt.PyJWTError as exc:
         raise SignInFailed(PROVIDER_REJECTED, f"stored id_token: {exc}") from exc
+    nonce = row.nonce or str(old.get("nonce", ""))  # a session from before the column
     async with client() as http:
         tokens = await _token(http, discovery, client_id, secret, {
             "grant_type": "refresh_token", "refresh_token": refresh_token,
@@ -388,16 +400,16 @@ async def _refresh(session: Session, row: SignInSession) -> None:
             session.commit()
             refresh_token = rotated
         id_token = tokens.get("id_token")
-        identity: dict[str, Any] | None = None
-        if isinstance(id_token, str) and id_token:
+        fresh_id_token = isinstance(id_token, str) and bool(id_token)
+        if fresh_id_token:
             claims = await _validate(
                 http, discovery, id_token, client_id=client_id,
-                nonce=str(old.get("nonce", "")), allowed_tenants=values["oidc_allowed_tenants"],
+                nonce=nonce, allowed_tenants=values["oidc_allowed_tenants"],
                 refreshed=True,
             )
         else:  # no new ID token: the stored one vouches for who this is, never for access
             id_token = stored
-            identity = {k: old[k] for k in ("iss", "sub", "tid", "exp") if k in old}
+            identity = {k: old[k] for k in ("iss", "sub", "tid") if k in old}
             iss, tid = identity.get("iss"), identity.get("tid")
             concrete = _concrete_issuer(
                 discovery["issuer"], iss, tid if isinstance(tid, str) else ""
@@ -406,15 +418,26 @@ async def _refresh(session: Session, row: SignInSession) -> None:
                 raise SignInFailed(PROVIDER_REJECTED, f"stored id_token iss {iss!r} doesn't fit")
             identity["iss"] = concrete
             claims = identity
-        claims = await _with_userinfo(http, discovery, tokens.get("access_token"), claims)
-    if claims is identity and any(values[k] for k in _ACCESS_POLICY):
-        # Neither a new ID token nor userinfo: the groups, domain and tenant can't be
-        # checked again, so the person signs in again for a fresh ID token.
+        claims, userinfo = await _with_userinfo(
+            http, discovery, tokens.get("access_token"), claims
+        )
+    if userinfo == USERINFO_OUTAGE:
+        # Groups may live in userinfo alone: missing ones aren't a removal. Keep the
+        # session as it is and try again, like any other outage.
+        raise SignInFailed(PROVIDER_UNAVAILABLE, "userinfo is down")
+    if not fresh_id_token and userinfo != USERINFO_FRESH and any(
+        values[k] for k in _ACCESS_POLICY
+    ):
+        # The provider answered, but neither a new ID token nor userinfo: the groups,
+        # domain and tenant can't be checked again, so the person signs in again.
         raise SignInFailed(
             PROVIDER_REJECTED, "the refresh brought no fresh claims to check access with"
         )
     groups = _decide(values, claims)
-    grant = _grant(tokens, id_token, claims, refresh_token)
+    fallback = None if fresh_id_token else min(
+        datetime.now(timezone.utc) + _FALLBACK_LIFETIME, hard
+    )
+    grant = _grant(tokens, id_token, claims, refresh_token, fallback=fallback)
     await run_in_threadpool(
         _link, session, claims, values, groups, bound, (session_id, grant)
     )
@@ -614,6 +637,10 @@ async def _token(
         body = None
     if resp.status_code != 200 or not isinstance(body, dict):
         error = body.get("error", "") if isinstance(body, dict) else ""
+        if error in _UNAVAILABLE_ERRORS:  # RFC 6749 4.1.2.1: the provider is busy, not saying no
+            raise SignInFailed(
+                PROVIDER_UNAVAILABLE, f"token endpoint answered {resp.status_code} {error!r}"
+            )
         raise SignInFailed(
             PROVIDER_REJECTED, f"token endpoint answered {resp.status_code} {error!r}"
         )
@@ -690,25 +717,32 @@ async def _validate(
 async def _with_userinfo(
     http: httpx.AsyncClient, discovery: dict[str, Any], access_token: Any,
     claims: dict[str, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
     """``claims`` plus the userinfo endpoint's, which are taken only when its ``sub`` is
     the ID token's. ID token claims win a clash, except that ``email`` and
     ``email_verified`` come as a pair from one response (#291): the ID token's when it
     has an email, userinfo's when it has none. Userinfo's ``email_verified`` counts for
     the ID token's email only when userinfo sends that same email and the ID token
-    states no verification of its own. Returns ``claims`` itself when it took nothing
-    from userinfo (no endpoint, no access token, a failed fetch); a refresh relies on
-    that to tell whether it saw fresh claims."""
+    states no verification of its own. Also returns what userinfo gave: ``USERINFO_FRESH``
+    (its claims are merged), ``USERINFO_OUTAGE`` (no answer or a 5xx) or
+    ``USERINFO_NONE`` (no endpoint, no access token, or an answer without claims)."""
     endpoint = discovery.get("userinfo_endpoint")
     if not endpoint or not isinstance(access_token, str):
-        return claims
+        return claims, USERINFO_NONE
     try:
         resp = await http.get(endpoint, headers={"authorization": f"Bearer {access_token}"})
+    except httpx.HTTPError as exc:
+        logger.info("oidc userinfo fetch failed, using the ID token alone: %s", exc)
+        return claims, USERINFO_OUTAGE
+    if resp.status_code >= 500:
+        logger.info("oidc userinfo answered %s, using the ID token alone", resp.status_code)
+        return claims, USERINFO_OUTAGE
+    try:
         resp.raise_for_status()
         info = resp.json()
     except (httpx.HTTPError, ValueError) as exc:
-        logger.info("oidc userinfo fetch failed, using the ID token alone: %s", exc)
-        return claims
+        logger.info("oidc userinfo refused, using the ID token alone: %s", exc)
+        return claims, USERINFO_NONE
     if not isinstance(info, dict) or info.get("sub") != claims["sub"]:
         raise SignInFailed(PROVIDER_REJECTED, "userinfo sub differs from the ID token's")
     merged = {**info, **claims}
@@ -721,7 +755,7 @@ async def _with_userinfo(
     merged.pop("email_verified", None)
     if "email_verified" in pair:
         merged["email_verified"] = pair["email_verified"]
-    return merged
+    return merged, USERINFO_FRESH
 
 
 def _match(
