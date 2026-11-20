@@ -1,10 +1,19 @@
-# Route-only Worker: puts the project site at pacnp.al/mcpelevator.
-# Deploy once with `npx wrangler deploy` from this folder (see README.md).
+# Builds the project site and serves it at pacnp.al/mcpelevator as static assets.
+# Cloudflare Workers Builds runs `npx wrangler deploy` here on every push to main;
+# wrangler runs [build] first, so the deploy is the build.
 name = "mcpelevator-site"
-main = "worker.js"
 compatibility_date = "2026-03-01"
 workers_dev = false
 routes = [
   { pattern = "pacnp.al/mcpelevator", zone_name = "pacnp.al" },
   { pattern = "pacnp.al/mcpelevator/*", zone_name = "pacnp.al" },
 ]
+
+[build]
+command = "rm -rf dist && mkdir -p dist/mcpelevator/screenshots && cp ../index.html dist/mcpelevator/ && cp ../../docs/screenshots/*.png dist/mcpelevator/screenshots/ && cp ../../assets/mcpelevator.svg ../../assets/mcpelevator.png dist/mcpelevator/"
+
+# Files sit under dist/mcpelevator/ because the route keeps the /mcpelevator prefix.
+# auto-trailing-slash redirects /mcpelevator to /mcpelevator/.
+[assets]
+directory = "dist"
+html_handling = "auto-trailing-slash"
