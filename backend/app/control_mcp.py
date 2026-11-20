@@ -50,7 +50,7 @@ from app import __version__
 from app.api import servers as servers_api
 from app.api.schemas import GroupMembers, Role, ServerCreate, ServerUpdate, SettingsUpdate
 from app.auth import principal as principal_mod
-from app.auth import cf_access, sign_in
+from app.auth import cf_access, oidc, sign_in
 from app.auth.control_plane import enforcement_enabled, is_env_admin_token
 from app.db import get_engine, repo
 from app.groups import registry
@@ -115,7 +115,8 @@ def build(app: FastAPI) -> "_Gate":
         transport = httpx.ASGITransport(app=app, client=peer)
         query = {k: v for k, v in (params or {}).items() if v is not None}
         async with httpx.AsyncClient(transport=transport, base_url="http://mcpelevator") as client:
-            r = await client.request(method, path, json=json, params=query, headers=headers)
+            with principal_mod.control_call():  # the in-process app runs in this context
+                r = await client.request(method, path, json=json, params=query, headers=headers)
         if r.status_code >= 400:
             try:
                 detail = r.json().get("detail", r.text)
@@ -201,7 +202,14 @@ def build(app: FastAPI) -> "_Gate":
         refused with the reason when it's unreachable or lacks issuer,
         authorization_endpoint, token_endpoint or jwks_uri, or when it's
         multi-tenant and oidc_allowed_tenants is empty. get_settings returns oidc_redirect_uri, the
-        callback to register at the provider."""
+        callback to register at the provider.
+
+        One identity across planes: when oauth_config_url names the same issuer as
+        oidc_discovery_url (with oauth_audience set), an access token from it whose
+        iss and sub are a linked user's resolves to that user. It opens their own
+        "oauth" servers, and every one for an admin, past oauth_allowed_subjects, and
+        drives this MCP server as them; it is no login on the rest of /api, and it
+        never creates, links or changes a user."""
         if changes.control_mcp is False and _internal(get_http_request()):
             # Turning control_mcp off disables the built-in server, i.e. the bridge
             # carrying this call (see _refuse_self).
@@ -395,7 +403,7 @@ def build(app: FastAPI) -> "_Gate":
         lines = unit.logs.snapshot()[-tail:]
         # Ownership can move during the await above. Re-check with no await in between,
         # like the SSE route does before its first byte.
-        with Session(get_engine()) as session:
+        with Session(get_engine()) as session, principal_mod.control_call():
             principal = principal_mod.resolve(get_http_request(), session)
         if principal is None or not servers_api._visible_now(server_id, principal):
             raise ToolError("404: server not found")
@@ -803,6 +811,7 @@ class _Gate:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         request = Request(scope)
         with Session(get_engine()) as session:
+            await oidc.warm_access_tokens(session, request)
             try:
                 _authorize(request, session)
             except HTTPException as exc:
@@ -855,8 +864,8 @@ def _refusal(request: Request, cloudflare: bool) -> HTTPException:
     if principal_mod._bearer(request):
         return HTTPException(
             status_code=403,
-            detail="this server needs a control (login) token or MCPE_ADMIN_TOKEN; "
-            "the token sent isn't one",
+            detail="this server needs a control (login) token, MCPE_ADMIN_TOKEN, or an "
+            "access token from the SSO provider naming a linked user; the token sent isn't one",
         )
     return HTTPException(
         status_code=401,
@@ -881,7 +890,9 @@ def _authorize(request: Request, session: Session, *, edge: bool = False) -> Non
         return
     if enforcement_enabled(session):
         cloudflare = edge or internal
-        caller = principal_mod.credential_principal(request, session, cloudflare=cloudflare)
+        caller = principal_mod.credential_principal(
+            request, session, cloudflare=cloudflare, provider_jwt=True
+        )
         if caller is None:
             raise _refusal(request, cloudflare)
         user_id = caller.user_id

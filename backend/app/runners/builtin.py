@@ -116,6 +116,15 @@ Typical flows:
   token they hold is revoked, and SSO refuses them; their servers keep
   running. active true brings them back (mint a new login, the old ones
   stay revoked).
+- Let an OAuth client reach its own servers: point the oauth provider at the
+  SSO issuer (update_settings with oauth_config_url the same issuer as
+  oidc_discovery_url, and oauth_audience), and put the servers on the "oauth"
+  auth_provider. An access token from that provider whose sub is a linked
+  user's (they signed in through SSO once) then opens that user's own servers,
+  and every server for an admin, even when oauth_allowed_subjects doesn't list
+  them, and drives /api/mcp as that user. Other tokens follow the allowlist.
+  It never creates, links or changes a user, and isn't a login on the rest of
+  /api.
 Server ids (not slugs) identify servers in every tool. Lifecycle tools write
 desired state and the supervisor converges, so use wait_for_server after them.
 Read-only views are also resources (mcpelevator://servers, .../servers/{id},

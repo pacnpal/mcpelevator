@@ -317,5 +317,10 @@ async def enforce(request: Request, server: Server) -> None:
         # allowlist, and allow_private_lan adds private-IP-literal hosts from a
         # private-network peer.
         enforce_host(request, session)
+        # The oauth owner check and the built-in server's edge resolve a provider
+        # access token synchronously, from cached discovery.
+        from app.auth import oidc  # circular-import guard
+
+        await oidc.warm_access_tokens(session, request)
 
     await resolve(server, default).authenticate(request, server)

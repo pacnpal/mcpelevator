@@ -16,6 +16,10 @@ deterministic and upgrade-safe:
 - Sign-in session            -> that session's user, only on /api (not /api/mcp),
                                 with the CSRF header and no Authorization header
                                 (``app.auth.sign_in``)
+- provider access token      -> the user its Linked identity names, only where the
+                                control MCP accepts credentials: its gate, its edge,
+                                and the /api calls it makes (``control_call``), never
+                                the rest of /api (``app.auth.oidc.access_token_user``)
 
 WHAT a principal may do lives in ``app.auth.policy`` — keep the two concerns
 separate so authorization rules never re-derive identity.
@@ -23,6 +27,9 @@ separate so authorization rules never re-derive identity.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Optional
 
@@ -38,6 +45,24 @@ ROLE_MEMBER = "member"
 
 # Sentinel distinguishing "not yet resolved this request" from a cached None.
 _UNRESOLVED = object()
+
+# True while the control MCP runs one of its in-process /api calls. A client can't set
+# it (it's no header), so a provider access token counts there and nowhere else on /api.
+_CONTROL_CALL: ContextVar[bool] = ContextVar("mcpe_control_call", default=False)
+
+
+@contextmanager
+def control_call() -> Iterator[None]:
+    """Resolve requests made inside this block as the control MCP's own /api calls."""
+    reset = _CONTROL_CALL.set(True)
+    try:
+        yield
+    finally:
+        _CONTROL_CALL.reset(reset)
+
+
+def in_control_call() -> bool:
+    return _CONTROL_CALL.get()
 
 
 def _effective_local_runners(user) -> bool:
@@ -65,6 +90,8 @@ class Principal:
     token_id: Optional[str] = None
     # The Sign-in session that authenticated the request, when one did.
     session_id: Optional[str] = None
+    # The Linked identity (issuer, subject) a provider access token named, when one did.
+    identity: Optional[tuple[str, str]] = None
 
     @property
     def is_admin(self) -> bool:
@@ -117,19 +144,23 @@ def _resolve_uncached(request: Request, session: Session) -> Optional[Principal]
     # A Cloudflare Access identity counts only on requests the built-in bridge
     # carried; see app.auth.cf_access for why it isn't trusted on all of /api.
     return credential_principal(
-        request, session, cloudflare=is_internal(request), sign_in=sign_in.accepts(request)
+        request, session, cloudflare=is_internal(request), sign_in=sign_in.accepts(request),
+        provider_jwt=in_control_call(),
     )
 
 
 def credential_principal(
-    request: Request, session: Session, *, cloudflare: bool, sign_in: bool = False
+    request: Request, session: Session, *, cloudflare: bool, sign_in: bool = False,
+    provider_jwt: bool = False,
 ) -> Optional[Principal]:
     """The principal the request's credential names, regardless of enforcement: the
     break-glass token, a control token, (when ``cloudflare``) a Cloudflare Access
-    identity that matches a user, or (when ``sign_in``) a live Sign-in session with its
-    CSRF header. None when it names nobody, or names a Deactivated user. Callers pass ``sign_in`` only from
-    ``app.auth.sign_in.accepts``, so the cookie never counts on ``/s``, ``/g`` or
-    ``/api/mcp``."""
+    identity that matches a user, (when ``sign_in``) a live Sign-in session with its
+    CSRF header, or (when ``provider_jwt``) a provider access token whose Linked
+    identity names a user. None when it names nobody, or names a Deactivated user.
+    Callers pass ``sign_in`` only from ``app.auth.sign_in.accepts``, so the cookie never
+    counts on ``/s``, ``/g`` or ``/api/mcp``; ``provider_jwt`` only from the control
+    MCP's gate and calls and the ``oauth`` provider's owner check."""
     from app.auth import cf_access  # circular-import guard
     from app.auth import sign_in as sign_in_mod
     from app.auth.control_plane import is_env_admin_token
@@ -170,6 +201,16 @@ def credential_principal(
                 user_id=user.id, name=user.name, role=user.role,
                 local_runners=_effective_local_runners(user), session_id=row.id,
             )
+    if provider_jwt and token:
+        from app.auth import oidc  # circular-import guard
+
+        user = oidc.access_token_user(session, token)
+        if user is not None:
+            return Principal(
+                user_id=user.id, name=user.name, role=user.role,
+                local_runners=_effective_local_runners(user),
+                identity=(user.oidc_issuer, user.oidc_subject),
+            )
     return None
 
 
@@ -206,10 +247,13 @@ def refresh(session: Session, principal: Principal) -> Optional[Principal]:
     user = repo.get_user(session, principal.user_id)
     if user is None or not user.active:
         return None  # deleted or deactivated while we were queued
+    if principal.identity is not None and (user.oidc_issuer, user.oidc_subject) != principal.identity:
+        return None  # the Linked identity the access token named was unlinked
     return Principal(
         user_id=user.id, name=user.name, role=user.role,
         local_runners=_effective_local_runners(user),
         token_id=principal.token_id, session_id=principal.session_id,
+        identity=principal.identity,
     )
 
 

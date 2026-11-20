@@ -122,14 +122,16 @@ def control_auth(request: Request, session: Session) -> Literal["ok", "missing",
     a valid non-control token;
     ``missing`` = no token or no match."""
     from app.auth import sign_in
-    from app.auth.principal import credential_principal  # circular-import guard
+    from app.auth.principal import credential_principal, in_control_call  # circular-import guard
     from app.runners.builtin import is_internal
 
     # The same decision principal.resolve makes, so the gate and identity agree:
-    # a user-bound credential whose user row is gone fails closed, and a Cloudflare
-    # Access identity counts only on requests the built-in bridge carried.
+    # a user-bound credential whose user row is gone fails closed, a Cloudflare
+    # Access identity counts only on requests the built-in bridge carried, and a
+    # provider access token only on the control MCP's own calls.
     caller = credential_principal(
-        request, session, cloudflare=is_internal(request), sign_in=sign_in.accepts(request)
+        request, session, cloudflare=is_internal(request), sign_in=sign_in.accepts(request),
+        provider_jwt=in_control_call(),
     )
     if caller is not None:
         return "ok"

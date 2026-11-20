@@ -281,6 +281,18 @@ def _claims_are_current(claims: dict[str, Any]) -> bool:
     )
 
 
+def _owner_or_admin(request: Request, server: Server) -> bool:
+    """Does the token resolve, through its Linked identity, to this server's owner or
+    an admin? Then the allowlist doesn't apply (one identity across planes). A token
+    that resolves to no one leaves the allowlist's verdict alone."""
+    from app.auth import policy
+    from app.auth.principal import credential_principal  # circular-import guard
+
+    with Session(get_engine()) as session:
+        caller = credential_principal(request, session, cloudflare=False, provider_jwt=True)
+    return caller is not None and policy.can_view_server(caller, server)
+
+
 class OAuthProvider:
     name = "oauth"
 
@@ -350,7 +362,7 @@ class OAuthProvider:
                 detail="invalid token",
                 headers=_challenge(base, server, error="invalid_token"),
             )
-        if allowed and not _identity_allowed(claims, allowed):
+        if allowed and not _identity_allowed(claims, allowed) and not _owner_or_admin(request, server):
             raise HTTPException(
                 status_code=403,
                 detail="token subject not authorized for this server",
