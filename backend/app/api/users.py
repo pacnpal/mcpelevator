@@ -364,6 +364,10 @@ async def mint_credential(
             user = repo.get_user(session, user_id)
             if user is None:
                 return "not_found"
+            if not user.active:
+                # A login waiting on a Deactivated user would work the moment they're
+                # reactivated, and revoked tokens must stay revoked.
+                return "inactive"
             token = Token(
                 id=new_id(),
                 name=f"login: {user.name}",
@@ -380,4 +384,8 @@ async def mint_credential(
         raise _FORBIDDEN
     if result == "not_found":
         raise HTTPException(status_code=404, detail="user not found")
+    if result == "inactive":
+        raise HTTPException(
+            status_code=409, detail="user is deactivated: reactivate the user first"
+        )
     return UserCredential(token_id=result.id, token=raw, prefix=result.prefix)

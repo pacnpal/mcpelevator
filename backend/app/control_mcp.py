@@ -549,7 +549,8 @@ def build(app: FastAPI) -> "_Gate":
 
     @mcp.tool(annotations=_ADD)
     async def create_user_credential(user_id: str) -> Any:
-        """Mint a control-plane login token for a user; the plaintext is returned once."""
+        """Mint a control-plane login token for a user; the plaintext is returned once.
+        Refused (409) for a Deactivated user: reactivate them with update_user first."""
         return await api("POST", f"/api/users/{_seg(user_id)}/credentials")
 
     # ---- Catalog ------------------------------------------------------------

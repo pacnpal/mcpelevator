@@ -169,3 +169,19 @@ def test_a_request_queued_across_a_deactivation_fails_closed(idp):
         assert _deactivate(client, admin, uid).status_code == 200
         with Session(get_engine()) as s:
             assert principal_mod.refresh(s, queued) is None
+
+
+def test_no_token_can_be_minted_for_a_deactivated_user(idp):
+    uid = _user("ada@example.com", role="admin")
+    with TestClient(app) as client:
+        admin = _enforce()
+        ada = _bearer(_token(uid, "control"))
+        assert _deactivate(client, admin, uid).status_code == 200
+        r = client.post(f"/api/users/{uid}/credentials", headers=admin)
+        assert r.status_code == 409 and "reactivate the user first" in r.json()["detail"]
+        # POST /api/tokens binds the token to its caller, so a deactivated one gets none.
+        r = client.post("/api/tokens", json={"name": "t", "scope": "all"}, headers=ada)
+        assert r.status_code == 401
+        with Session(get_engine()) as s:
+            assert s.exec(select(Token).where(Token.user_id == uid)).all() == []
+        assert _deactivate(client, admin, uid, active=True).json()["tokens_count"] == 0
