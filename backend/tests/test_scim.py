@@ -365,3 +365,55 @@ def test_the_password_okta_sends_is_ignored_and_never_stored(idp):
         assert "password" not in r.json() and body["password"] not in r.text
         stored = repr(_user_row(r.json()["id"]).model_dump())
         assert body["password"] not in stored
+
+
+def test_a_scim_token_revoked_while_a_write_waits_on_the_lock_is_refused(idp, monkeypatch):
+    import threading
+    from contextlib import contextmanager
+
+    from app.api import scim as scim_api
+
+    real = service.config_write_lock
+    waiting, go = threading.Event(), threading.Event()
+
+    @contextmanager
+    def gated():
+        waiting.set()  # the write has passed require_scim and now wants the lock
+        assert go.wait(30)
+        with real():
+            yield
+
+    with TestClient(app) as client:
+        raw = mint_token("scim")
+        uid = _create(client, _headers(raw), fx.okta_create("ada@example.com")).json()["id"]
+        monkeypatch.setattr(scim_api.service, "config_write_lock", gated)
+        result = {}
+        patch = threading.Thread(target=lambda: result.update(r=client.patch(
+            f"/scim/v2/Users/{uid}", json=fx.okta_active(False), headers=_headers(raw))))
+        patch.start()
+        assert waiting.wait(30)
+        with Session(get_engine()) as s:
+            s.delete(repo.get_token_by_hash(s, hash_token(raw)))
+            s.commit()
+        go.set()
+        patch.join(30)
+        r = result["r"]
+        assert r.status_code == 401, r.text
+        assert r.json()["schemas"] == [ERROR]
+        assert _user_row(uid).active is True
+
+
+def test_the_filter_value_is_a_json_string(idp):
+    with TestClient(app) as client:
+        headers = _scim()
+        for name in ('ada "the countess"@example.com', "josé@example.com"):
+            assert _create(client, headers, fx.okta_create(name)).status_code == 201
+        for filter_, want in (
+            (r'userName eq "ada \"the countess\"@example.com"', 'ada "the countess"@example.com'),
+            (r'userName eq "josé@example.com"', "josé@example.com"),
+        ):
+            body = client.get("/scim/v2/Users", params={"filter": filter_}, headers=headers).json()
+            assert [u["userName"] for u in body["Resources"]] == [want], filter_
+        for bad in (r'userName eq "ada\x"', 'userName eq "ada'):
+            r = client.get("/scim/v2/Users", params={"filter": bad}, headers=headers)
+            assert r.status_code == 400 and r.json()["scimType"] == "invalidFilter", bad

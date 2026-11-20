@@ -209,12 +209,21 @@ def _write(session: Session, user: User, changes: dict[str, Any]) -> User:
     return result
 
 
-def _locked(fn):
+def _locked(request: Request, session: Session, fn):
     """Run ``fn`` under the config write lock in the threadpool, like every users-API
-    write (the lock is a threading lock; never wait for it on the event loop)."""
+    write (the lock is a threading lock; never wait for it on the event loop). The scim
+    token is checked again under the lock, so one revoked while the write waited for it
+    writes nothing."""
+    token_hash = hash_token(_bearer(request))
 
     def run():
         with service.config_write_lock():
+            session.expire_all()  # see what committed while we waited for the lock
+            row = repo.get_token_by_hash(session, token_hash)
+            if row is None or row.scope != "scim":
+                raise ScimError(
+                    401, "the scim token was revoked", headers={"WWW-Authenticate": "Bearer"}
+                )
             return fn()
 
     return run_in_threadpool(run)
@@ -231,7 +240,8 @@ def _existing(session: Session, user_id: str) -> User:
 # ---- Users -------------------------------------------------------------------
 
 
-_FILTER = re.compile(r'\s*username\s+eq\s+"([^"]*)"\s*', re.IGNORECASE)
+# The value is a JSON string literal (RFC 7644 section 3.4.2.2), escapes included.
+_FILTER = re.compile(r'\s*username\s+eq\s+("(?:[^"\\]|\\.)*")\s*', re.IGNORECASE)
 
 
 def _int_param(request: Request, name: str, default: int) -> int:
@@ -249,9 +259,13 @@ async def list_users(request: Request, session: Session = Depends(get_session)):
     filter_ = request.query_params.get("filter")
     if filter_:
         match = _FILTER.fullmatch(filter_)
-        if match is None:
+        try:
+            value = json.loads(match.group(1)) if match else None
+        except ValueError:
+            value = None
+        if not isinstance(value, str):
             raise ScimError(400, 'the only filter supported is userName eq "..."', "invalidFilter")
-        users = repo.users_named(session, match.group(1))
+        users = repo.users_named(session, value)
     else:
         users = repo.list_users(session)
     start = max(1, _int_param(request, "startIndex", 1))
@@ -274,7 +288,7 @@ async def create_user(request: Request, session: Session = Depends(get_session))
         user = User(id=new_id(), name=changes["name"], role="member", local_runners=False)
         return _write(session, user, changes)
 
-    user = await _locked(create)
+    user = await _locked(request, session, create)
     return _json(_resource(request, user), 201, {"Location": _location(request, f"/Users/{user.id}")})
 
 
@@ -292,19 +306,23 @@ async def replace_user(user_id: str, request: Request, session: Session = Depend
     # never reactivates anyone by accident.
     changes.setdefault("display_name", None)
     changes.setdefault("scim_external_id", None)
-    user = await _locked(lambda: _write(session, _existing(session, user_id), changes))
+    user = await _locked(
+        request, session, lambda: _write(session, _existing(session, user_id), changes)
+    )
     return _json(_resource(request, user))
 
 
 @router.patch("/Users/{user_id}")
 async def patch_user(user_id: str, request: Request, session: Session = Depends(get_session)):
     changes = _patch(await _body(request))
-    user = await _locked(lambda: _write(session, _existing(session, user_id), changes))
+    user = await _locked(
+        request, session, lambda: _write(session, _existing(session, user_id), changes)
+    )
     return _json(_resource(request, user))
 
 
 @router.delete("/Users/{user_id}")
-async def delete_user(user_id: str, session: Session = Depends(get_session)):
+async def delete_user(user_id: str, request: Request, session: Session = Depends(get_session)):
     """Deletes a User who owns nothing; a User who owns servers is deactivated instead,
     so their servers keep an owner."""
 
@@ -316,7 +334,7 @@ async def delete_user(user_id: str, session: Session = Depends(get_session)):
         if isinstance(result, int):
             _write(session, user, {"active": False})
 
-    await _locked(delete)
+    await _locked(request, session, delete)
     return Response(status_code=204)
 
 
