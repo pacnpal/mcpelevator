@@ -619,6 +619,7 @@ class SettingsInfo(BaseModel):
     oidc_admin_groups: list[str] = []
     oidc_local_runner_groups: list[str] = []
     oidc_allowed_domains: list[str] = []
+    oidc_provisioning: bool = False
     # Read-only: the redirect URI to register at the identity provider.
     oidc_redirect_uri: str = ""
 
@@ -670,6 +671,8 @@ class SettingsUpdate(BaseModel):
     oidc_local_runner_groups: Optional[list[str]] = None
     # Non-empty: only these verified email domains (or Google hd values) may sign in.
     oidc_allowed_domains: Optional[list[str]] = None
+    # On: a sign-in that matches no user creates one (a Member, local runners off).
+    oidc_provisioning: Optional[bool] = None
 
 
 # ---- Groups (the /g/<name> registry) ----------------------------------------

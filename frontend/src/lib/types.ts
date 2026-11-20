@@ -615,6 +615,8 @@ export interface SettingsInfo {
 	oidc_local_runner_groups: string[];
 	/** Non-empty: only these verified email domains (or Google `hd`) may sign in. */
 	oidc_allowed_domains: string[];
+	/** On: a sign-in that matches no user creates one (a Member, local runners off). */
+	oidc_provisioning: boolean;
 	/** Read-only: the redirect URI to register at the provider. */
 	oidc_redirect_uri: string;
 }

@@ -4,6 +4,7 @@ matches no User creates one, a Member with local runners off, linked at once."""
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 
 import httpx
 from fastapi.testclient import TestClient
@@ -29,6 +30,7 @@ from test_sso_sign_in import (
 from app.db import get_engine
 from app.db.models import SignInSession, User
 from app.main import app
+from app.registry import settings as runtime_settings
 
 
 def _users() -> list[User]:
@@ -144,3 +146,20 @@ def test_turning_provisioning_off_mid_flight_is_expired(idp):
         assert _reason(_sign_in(client, idp)) == "expired"
     assert _users() == []
     assert _sessions() == 0
+
+
+def test_provisioning_is_off_by_default_validated_and_seeds_once(idp, monkeypatch):
+    from app import main
+
+    with TestClient(app) as client:
+        assert client.get("/api/settings", headers=LOOPBACK).json()["oidc_provisioning"] is False
+        r = client.patch("/api/settings", headers=LOOPBACK, json={"oidc_provisioning": "maybe"})
+        assert r.status_code == 422
+    monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(oidc_provisioning=True))
+    main._bootstrap_oidc_provisioning()
+    with Session(get_engine()) as s:
+        assert runtime_settings.read_all(s)["oidc_provisioning"] is True
+        runtime_settings.write(s, {"oidc_provisioning": False})
+    main._bootstrap_oidc_provisioning()  # restart: already written, so the env is ignored
+    with Session(get_engine()) as s:
+        assert runtime_settings.read_all(s)["oidc_provisioning"] is False

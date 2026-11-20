@@ -171,7 +171,11 @@ def build(app: FastAPI) -> "_Gate":
         to sign in; required when the discovery issuer is multi-tenant, i.e. contains
         "{tenantid}", as with /common or /organizations), oidc_require_verified_email
         (default true: with the email identity claim, an ID token whose
-        email_verified is false is refused), and oidc_enabled.
+        email_verified is false is refused), oidc_provisioning (default false: on, a
+        sign-in that matches no user creates one named by the identity claim, a member
+        with local_runners off and control_mcp on, linked at once; the tenant, verified
+        email, allowed-groups and allowed-domains checks still run first, so those
+        lists are how to limit who gets an account), and oidc_enabled.
 
         Group mapping, applied at every SSO sign-in: oidc_groups_claim (default
         "groups"; tried as a literal key first, e.g. Auth0's

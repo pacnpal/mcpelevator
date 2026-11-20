@@ -26,6 +26,7 @@ from app.db import repo
 from app.db.models import User
 from app.registry import service
 from app.registry import settings as runtime_settings
+from app.util import new_id
 
 logger = logging.getLogger(__name__)
 
@@ -325,7 +326,10 @@ def _link(
     with service.config_write_lock():
         session.expire_all()  # see what committed while we waited
         try:
-            user = _match(session, claims, claims["iss"], values["oidc_identity_claim"])
+            user = _match(
+                session, claims, claims["iss"], values["oidc_identity_claim"],
+                provision=values["oidc_provisioning"],
+            )
         except IntegrityError:
             session.rollback()
             user = _holder(session, claims["iss"], str(claims["sub"]))
@@ -515,12 +519,16 @@ async def _with_userinfo(
     return {**info, **claims}
 
 
-def _match(session: Session, claims: dict[str, Any], issuer: str, claim: str) -> User:
+def _match(
+    session: Session, claims: dict[str, Any], issuer: str, claim: str, *, provision: bool,
+) -> User:
     """The User already linked to this issuer and subject, else the one User whose name
     equals the identity claim (case-insensitively) and who has no Linked identity yet,
-    which is then linked. A name match on a User linked to anything else is refused:
-    a provider that hands an email or username to a new subject must not hand it our
-    User too. Moving to a new issuer goes through an admin's unlink."""
+    which is then linked. With ``provision`` and no name match, a new User named by the
+    claim: a Member with local runners off, linked at creation. A name match on a User
+    linked to anything else is refused: a provider that hands an email or username to a
+    new subject must not hand it our User too. Moving to a new issuer goes through an
+    admin's unlink."""
     subject = str(claims["sub"])
     holder = _holder(session, issuer, subject)
     if holder is not None:
@@ -530,6 +538,12 @@ def _match(session: Session, claims: dict[str, Any], issuer: str, claim: str) ->
         raise SignInFailed(MISSING_CLAIM, f"the {claim} claim is missing", claim=claim)
     wanted = value.strip().casefold()
     matches = [u for u in repo.list_users(session) if u.name.strip().casefold() == wanted]
+    if not matches and provision:
+        user = User(
+            id=new_id(), name=value.strip(), role="member", local_runners=False,
+            control_mcp=True, oidc_issuer=issuer, oidc_subject=subject,
+        )
+        return repo.save_user(session, user, commit=False)  # _link commits
     if not matches:
         raise SignInFailed(NO_MATCH, f"no user is named {value!r}")
     if len(matches) > 1:
