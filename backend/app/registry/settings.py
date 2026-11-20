@@ -7,7 +7,9 @@ and the default auth provider for servers set to ``inherit``.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
+import json
 import re
 from collections.abc import Callable
 from typing import Any
@@ -384,9 +386,21 @@ def ends_sign_in_sessions(session: Session, changes: dict[str, Any]) -> bool:
     )
 
 
-def sign_in_settings(session: Session) -> list[Any]:
-    """The current values of ``SIGN_IN_KEYS``: a login is bound to them."""
-    return [repo.setting_get(session, key, DEFAULTS[key]) for key in SIGN_IN_KEYS]
+def sign_in_digest(values: dict[str, Any]) -> str:
+    """A fixed-size digest of the ``SIGN_IN_KEYS`` values in ``values`` (SHA-256 of
+    canonical JSON): a login is bound to it. Fixed size so the flow cookie stays
+    under the browser's cookie limit however long the group and tenant lists get."""
+    canonical = json.dumps(
+        {key: values[key] for key in SIGN_IN_KEYS}, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def sign_in_settings(session: Session) -> str:
+    """``sign_in_digest`` of the current settings."""
+    return sign_in_digest(
+        {key: repo.setting_get(session, key, DEFAULTS[key]) for key in SIGN_IN_KEYS}
+    )
 
 
 def bind_mode(session: Session) -> str:

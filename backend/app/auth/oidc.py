@@ -222,15 +222,16 @@ async def begin(session: Session) -> dict[str, Any]:
 
 async def finish(
     session: Session, *, code: str, verifier: str, nonce: str, redirect_uri: str,
-    iss: str | None, bound: list[Any],
+    iss: str | None, bound: str,
 ) -> tuple[User, str]:
     """Exchange ``code``, validate the ID token, and match the person to a User, linking
     the Linked identity and syncing provider groups. Every decision uses one settings
-    snapshot, the one the login began with (``bound``, ``settings.sign_in_settings``),
-    and nothing is written unless it still holds under the write lock. Returns the
+    snapshot: the current one, refused unless its digest is ``bound`` (the one the
+    login began with, ``settings.sign_in_digest``), so equal settings; nothing is
+    written unless it still holds under the write lock. Returns the
     user and the raw ID token. Raises ``SignInFailed``."""
     values = runtime_settings.read_all(session)
-    if [values[key] for key in runtime_settings.SIGN_IN_KEYS] != bound:
+    if runtime_settings.sign_in_digest(values) != bound:
         raise SignInFailed(EXPIRED, "the SSO settings changed since this login began")
     discovery = await begin(session)
     issuer = discovery["issuer"]
@@ -310,7 +311,7 @@ def _groups(claims: dict[str, Any], name: str) -> set[str]:
 
 def _link(
     session: Session, claims: dict[str, Any], values: dict[str, Any], groups: set[str],
-    bound: list[Any],
+    bound: str,
 ) -> User:
     """``_match``, the group sync and the provider recheck as ONE transaction under the
     config write lock, so they are one step against other sign-ins, an admin's unlink

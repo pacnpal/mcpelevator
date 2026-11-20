@@ -15,6 +15,7 @@ from conftest import LOOPBACK
 
 # idp is the fixture; the rest are the sign-in helpers.
 from test_sso_sign_in import (
+    _callback,
     _enforce,
     _linked_issuer,
     _reason,
@@ -359,3 +360,22 @@ def test_group_settings_seed_once_from_the_env(idp, monkeypatch):
     assert values["oidc_admin_groups"] == ["admins", "ops"]
     assert values["oidc_allowed_domains"] == ["example.com"]
     assert values["oidc_groups_claim"] == "roles"
+
+
+def test_a_login_with_long_group_and_tenant_lists_fits_its_flow_cookie(idp):
+    import uuid
+
+    uid = _ada()
+    groups = [str(uuid.uuid4()) for _ in range(300)]
+    idp.claims = {"email": "ada@example.com", "groups": groups[:1]}
+    _settings(
+        oidc_allowed_groups=groups,
+        oidc_admin_groups=groups[:1],
+        oidc_allowed_tenants=[str(uuid.uuid4()) for _ in range(100)],
+    )
+    with TestClient(app) as client:
+        start = _start(client)
+        flow = next(h for h in start.headers.get_list("set-cookie") if h.startswith("mcpe_oidc_"))
+        assert len(flow.split(";", 1)[0].encode()) < 4096
+        assert _signed_in(_callback(client, idp.authorize(start.headers["location"])))
+    assert _role(uid)[0] == "admin"
