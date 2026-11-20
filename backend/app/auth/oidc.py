@@ -12,7 +12,7 @@ import hmac
 import logging
 import re
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote_plus, urlencode
 
 import httpx
 import jwt
@@ -48,7 +48,13 @@ async def check_settings(current: dict[str, Any], changes: dict[str, Any]) -> No
     url = changes.get("oidc_discovery_url", current["oidc_discovery_url"])
     if not isinstance(url, str) or not url.strip():
         raise ValueError("set oidc_discovery_url before enabling SSO")
-    await fetch_discovery(url.strip())
+    doc = await fetch_discovery(url.strip())
+    tenants = changes.get("oidc_allowed_tenants", current["oidc_allowed_tenants"])
+    if _TENANT in doc["issuer"] and not tenants:
+        raise ValueError(
+            "this provider is multi-tenant (its issuer contains {tenantid}): a tenant list "
+            "is required, set oidc_allowed_tenants to the tenant GUIDs allowed to sign in"
+        )
 
 
 async def fetch_discovery(discovery_url: str) -> dict[str, Any]:
@@ -89,6 +95,9 @@ AMBIGUOUS_MATCH = "ambiguous_match"
 EXPIRED = "expired"  # unknown or expired state: start again
 SSO_DISABLED = "sso_disabled"
 MISSING_CLAIM = "missing_claim"  # the identity claim isn't among the provider's claims
+TENANT_NOT_ALLOWED = "tenant_not_allowed"  # a multi-tenant issuer, a tenant not listed
+UNVERIFIED_EMAIL = "unverified_email"  # the identity claim is email and email_verified is false
+IDENTITY_CONFLICT = "identity_conflict"  # the matched User is linked to another identity
 
 _JWT_LEEWAY_S = 60
 # Asymmetric only. EdDSA is Ed25519 (Pocket ID, Zitadel, Forgejo, Keycloak). RFC 9864's
@@ -98,7 +107,7 @@ _DEFAULT_SCOPES = ("openid", "email", "profile")
 # Entra ID's multi-tenant discovery names its issuer with this placeholder; a token's
 # ``iss`` carries the tenant's GUID (its ``tid`` claim) in its place.
 _TENANT = "{tenantid}"
-_GUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_GUID = runtime_settings.GUID_PATTERN
 # Google documents ``iss`` as either of these.
 _GOOGLE = "https://accounts.google.com"
 _UNAVAILABLE_ERRORS = frozenset({"server_error", "temporarily_unavailable"})
@@ -187,9 +196,28 @@ async def finish(
         id_token = tokens.get("id_token")
         if not isinstance(id_token, str) or not id_token:
             raise SignInFailed(PROVIDER_REJECTED, "the token response carried no id_token")
-        claims = await _validate(http, discovery, id_token, client_id=client_id, nonce=nonce)
+        claims = await _validate(
+            http, discovery, id_token, client_id=client_id, nonce=nonce,
+            allowed_tenants=values["oidc_allowed_tenants"],
+        )
         claims = await _with_userinfo(http, discovery, tokens.get("access_token"), claims)
-    return _match(session, claims, claims["iss"], values["oidc_identity_claim"]), id_token
+    claim = values["oidc_identity_claim"]
+    if claim == "email" and values["oidc_require_verified_email"] and not _email_verified(claims):
+        raise SignInFailed(
+            UNVERIFIED_EMAIL, f"email_verified is {claims.get('email_verified')!r}"
+        )
+    return _match(session, claims, claims["iss"], claim), id_token
+
+
+def _email_verified(claims: dict[str, Any]) -> bool:
+    """``email_verified`` as a boolean. Absent counts as verified; "true"/"false" in any
+    case are read as booleans; any other value counts as unverified (fail closed)."""
+    value = claims.get("email_verified", True)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    return False
 
 
 def _concrete_issuer(template: str, iss: str, tid: str | None = None) -> str | None:
@@ -221,7 +249,8 @@ async def _exchange(
     if secret:
         methods = discovery.get("token_endpoint_auth_methods_supported") or ["client_secret_basic"]
         if "client_secret_basic" in methods:
-            auth = httpx.BasicAuth(client_id, secret)
+            # RFC 6749 §2.3.1: form-encode each half before the Basic pair.
+            auth = httpx.BasicAuth(quote_plus(client_id), quote_plus(secret))
         else:
             form["client_secret"] = secret
     try:
@@ -244,7 +273,7 @@ async def _exchange(
 
 async def _validate(
     http: httpx.AsyncClient, discovery: dict[str, Any], id_token: str, *, client_id: str,
-    nonce: str,
+    nonce: str, allowed_tenants: list[str],
 ) -> dict[str, Any]:
     try:
         header = jwt.get_unverified_header(id_token)
@@ -290,6 +319,10 @@ async def _validate(
         not isinstance(key_issuer, str) or _concrete_issuer(key_issuer, iss, tid) is None
     ):
         raise SignInFailed(PROVIDER_REJECTED, f"JWKS key issuer {key_issuer!r} is not {iss!r}")
+    # A multi-tenant issuer fits every Entra tenant: only the listed ones may sign in
+    # (an empty list admits none), so another tenant's account can't claim a User here.
+    if _TENANT in discovery["issuer"] and tid.lower() not in allowed_tenants:
+        raise SignInFailed(TENANT_NOT_ALLOWED, f"tenant {tid!r} is not in oidc_allowed_tenants")
     claims["iss"] = concrete
     aud = claims["aud"]
     several = isinstance(aud, list) and len(aud) > 1
@@ -322,9 +355,17 @@ async def _with_userinfo(
 
 
 def _match(session: Session, claims: dict[str, Any], issuer: str, claim: str) -> User:
-    """The one User whose name equals the identity claim (case-insensitively), linked to
-    this issuer and subject. Name match only for now; #269 adds Linked-identity-first
-    matching, the recycled-email and issuer rules, and the write lock."""
+    """The User already linked to this issuer and subject, else the one User whose name
+    equals the identity claim (case-insensitively) and who has no Linked identity yet,
+    which is then linked. A name match on a User linked to anything else is refused:
+    a provider that hands an email or username to a new subject must not hand it our
+    User too. #269 adds issuer migration (through an admin unlink) and the write lock."""
+    subject = str(claims["sub"])
+    holder = session.exec(
+        select(User).where(User.oidc_issuer == issuer, User.oidc_subject == subject)
+    ).first()
+    if holder is not None:
+        return holder
     value = claims.get(claim)
     if not isinstance(value, str) or not value.strip():
         raise SignInFailed(MISSING_CLAIM, f"the {claim} claim is missing", claim=claim)
@@ -335,13 +376,10 @@ def _match(session: Session, claims: dict[str, Any], issuer: str, claim: str) ->
     if len(matches) > 1:
         raise SignInFailed(AMBIGUOUS_MATCH, f"{len(matches)} users are named {value!r}")
     user = matches[0]
-    subject = str(claims["sub"])
-    holder = session.exec(
-        select(User).where(User.oidc_issuer == issuer, User.oidc_subject == subject)
-    ).first()
-    if holder is not None and holder.id != user.id:
-        raise SignInFailed(AMBIGUOUS_MATCH, "another user already holds this Linked identity")
-    if (user.oidc_issuer, user.oidc_subject) != (issuer, subject):
-        user.oidc_issuer, user.oidc_subject = issuer, subject
-        user = repo.save_user(session, user)
-    return user
+    if user.oidc_issuer or user.oidc_subject:
+        raise SignInFailed(
+            IDENTITY_CONFLICT,
+            f"{user.name!r} is already linked to {user.oidc_issuer!r}, not subject {subject!r}",
+        )
+    user.oidc_issuer, user.oidc_subject = issuer, subject
+    return repo.save_user(session, user)

@@ -612,6 +612,8 @@ class SettingsInfo(BaseModel):
     oidc_label: str = ""
     oidc_scopes: list[str] = []
     oidc_identity_claim: str = "email"
+    oidc_allowed_tenants: list[str] = []
+    oidc_require_verified_email: bool = True
     # Read-only: the redirect URI to register at the identity provider.
     oidc_redirect_uri: str = ""
 
@@ -650,6 +652,9 @@ class SettingsUpdate(BaseModel):
     oidc_scopes: Optional[list[str]] = None
     # A plain str so the settings writer's 400 names the allowed values.
     oidc_identity_claim: Optional[str] = None
+    # Entra tenant GUIDs allowed to sign in through a multi-tenant issuer.
+    oidc_allowed_tenants: Optional[list[str]] = None
+    oidc_require_verified_email: Optional[bool] = None
 
 
 # ---- Groups (the /g/<name> registry) ----------------------------------------

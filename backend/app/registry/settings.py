@@ -100,6 +100,11 @@ DEFAULTS: dict[str, Any] = {
     "oidc_scopes": [],
     # The ID token claim that names the user: 'email' | 'preferred_username' | 'sub'.
     "oidc_identity_claim": "email",
+    # Entra ID tenant GUIDs (lowercase) whose people may sign in when the discovery
+    # issuer is multi-tenant (contains "{tenantid}"); required then, ignored otherwise.
+    "oidc_allowed_tenants": [],
+    # With the email identity claim, refuse an ID token whose email_verified is false.
+    "oidc_require_verified_email": True,
 }
 
 
@@ -122,6 +127,9 @@ _PROVIDERS = {"none", "bearer", "oauth"}
 _CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
 _UPSTREAM_OAUTH_CLIENT_MODES = {"auto", "cimd", "dcr"}
 _OIDC_IDENTITY_CLAIMS = {"email", "preferred_username", "sub"}
+_OIDC_BOOLS = ("oidc_enabled", "oidc_require_verified_email")
+GUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_GUID = re.compile(GUID_PATTERN)
 _SESSION_ENDING_KEYS = ("oidc_enabled", "oidc_discovery_url", "oidc_client_id")
 
 
@@ -273,8 +281,8 @@ def write(
                     f"invalid usage_retention_days: {value!r} "
                     f"(days, 0–{MAX_USAGE_RETENTION_DAYS}; 0 keeps forever)"
                 )
-        if key == "oidc_enabled" and not isinstance(value, bool):
-            raise ValueError(f"invalid oidc_enabled: {value!r}")
+        if key in _OIDC_BOOLS and not isinstance(value, bool):
+            raise ValueError(f"invalid {key}: {value!r}")
         if key == "oidc_discovery_url":
             if not isinstance(value, str):
                 raise ValueError(f"invalid oidc_discovery_url: {value!r}")
@@ -295,6 +303,12 @@ def write(
             raise ValueError(
                 f"invalid oidc_identity_claim: {value!r} (email, preferred_username or sub)"
             )
+        if key == "oidc_allowed_tenants":
+            if not isinstance(value, list) or not all(
+                isinstance(v, str) and _GUID.fullmatch(v.strip()) for v in value
+            ):
+                raise ValueError(f"invalid oidc_allowed_tenants: {value!r} (tenant GUIDs)")
+            value = list(dict.fromkeys(v.strip().lower() for v in value))
         if key in ("oauth_scopes", "oidc_scopes"):
             if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
                 raise ValueError(f"invalid {key}: {value!r}")

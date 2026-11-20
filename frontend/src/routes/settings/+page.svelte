@@ -388,6 +388,8 @@
 	let oidcLabel = $state('');
 	let oidcScopes = $state('');
 	let oidcIdentityClaim = $state<OidcIdentityClaim>('email');
+	let oidcAllowedTenants = $state('');
+	let oidcRequireVerifiedEmail = $state(true);
 	const oidcSecretStored = $derived(settings?.oidc_client_secret === HIDDEN);
 
 	function fillOidc(s: SettingsInfo) {
@@ -398,6 +400,8 @@
 		oidcLabel = s.oidc_label;
 		oidcScopes = s.oidc_scopes.join(', ');
 		oidcIdentityClaim = s.oidc_identity_claim;
+		oidcAllowedTenants = s.oidc_allowed_tenants.join(', ');
+		oidcRequireVerifiedEmail = s.oidc_require_verified_email;
 	}
 
 	async function saveOidc(patch: Partial<SettingsInfo>, message: string) {
@@ -425,7 +429,9 @@
 				oidc_client_secret: oidcClientSecret || (oidcSecretStored ? HIDDEN : ''),
 				oidc_label: oidcLabel.trim(),
 				oidc_scopes: splitCommaList(oidcScopes),
-				oidc_identity_claim: oidcIdentityClaim
+				oidc_identity_claim: oidcIdentityClaim,
+				oidc_allowed_tenants: splitCommaList(oidcAllowedTenants),
+				oidc_require_verified_email: oidcRequireVerifiedEmail
 			},
 			'SSO settings saved'
 		);
@@ -2431,6 +2437,16 @@
 						{/each}
 					</select>
 				</label>
+				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+					Allowed tenants <span class="font-normal text-[var(--color-ink-dim)]">(Entra ID tenant GUIDs, comma-separated; required for a multi-tenant issuer such as /common)</span>
+					<input
+						type="text"
+						bind:value={oidcAllowedTenants}
+						disabled={savingField !== null}
+						placeholder="9188040d-6c67-4c5b-b112-36a304b66dad"
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+					/>
+				</label>
 			</div>
 			<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
 				<input
@@ -2443,6 +2459,20 @@
 					<span class="text-sm font-medium text-[var(--color-ink)]">Enable single sign-on</span>
 					<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
 						Turns on sign-in through this provider.
+					</span>
+				</span>
+			</label>
+			<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
+				<input
+					type="checkbox"
+					bind:checked={oidcRequireVerifiedEmail}
+					disabled={savingField !== null}
+					class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+				/>
+				<span class="flex flex-col gap-0.5">
+					<span class="text-sm font-medium text-[var(--color-ink)]">Require a verified email</span>
+					<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+						With the email identity claim, refuses a sign-in whose provider says the email is not verified.
 					</span>
 				</span>
 			</label>

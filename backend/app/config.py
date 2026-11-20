@@ -111,8 +111,9 @@ class Settings(BaseSettings):
     cf_access_aud: str = ""
     # First-boot seeds for the oidc_* runtime settings (single sign-on), each written only
     # when that setting has never been written; the Settings UI is authoritative after.
-    # oidc_scopes is comma-separated. The client secret is no seed: when set it always wins
-    # over the stored one, and bridges never inherit it (CONTROL_PLANE_SECRET_ENV).
+    # oidc_scopes and oidc_allowed_tenants are comma-separated. The client secret is no
+    # seed: when set it always wins over the stored one, and bridges never inherit it
+    # (CONTROL_PLANE_SECRET_ENV).
     oidc_enabled: bool = False
     oidc_discovery_url: str = ""
     oidc_client_id: str = ""
@@ -120,6 +121,9 @@ class Settings(BaseSettings):
     oidc_label: str = ""
     oidc_scopes: str = ""
     oidc_identity_claim: str = ""
+    oidc_allowed_tenants: str = ""
+    # Unset (None) leaves the default (on); unlike the other seeds, false is a value.
+    oidc_require_verified_email: bool | None = None
     # Catalog: keep a local copy of each directory (data_dir/catalog-mirror.db), synced
     # in the background, so browsing doesn't depend on the upstream being up. The MCP
     # Registry promises no uptime and asks consumers to sync about hourly.

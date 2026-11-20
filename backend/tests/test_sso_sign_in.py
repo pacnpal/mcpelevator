@@ -523,6 +523,16 @@ def _entra(idp, *, tid: str = TENANT, iss_tenant: str = TENANT, key_issuer: str 
     idp.jwks_issuer = key_issuer
     idp.claims = {"email": "ada@example.com", "tid": tid,
                   "iss": ENTRA.replace("{tenantid}", iss_tenant)}
+    _settings(oidc_allowed_tenants=[TENANT])
+
+
+def test_entra_refuses_a_valid_token_from_a_tenant_not_listed(idp):
+    other = "00000000-0000-0000-0000-000000000001"
+    _user("ada@example.com")
+    _entra(idp, tid=other, iss_tenant=other, key_issuer=ENTRA)
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "tenant_not_allowed"
+    assert _linked_issuer("ada@example.com") is None
 
 
 def test_entra_multi_tenant_signs_in_and_links_the_concrete_issuer(idp):
@@ -610,5 +620,117 @@ def test_a_missing_identity_claim_is_its_own_reason(idp):
 def test_an_email_only_in_userinfo_signs_in(idp):
     _user("ada@example.com")
     idp.userinfo = {"sub": "sub-1", "email": "ada@example.com"}
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+
+
+# ---- verified email ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "verified", [False, "false", "FALSE", "yes", 0, None, ["true"]],
+    ids=["false", "string_false", "string_false_caps", "garbage_string", "zero", "null", "list"],
+)
+def test_an_unverified_email_is_refused_before_matching(idp, verified):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com", "email_verified": verified}
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "unverified_email"
+    assert _linked_issuer("ada@example.com") is None
+
+
+@pytest.mark.parametrize("verified", [True, "true", "True", "absent"])
+def test_a_verified_or_unstated_email_signs_in(idp, verified):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    if verified != "absent":
+        idp.claims["email_verified"] = verified
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+
+
+def test_turning_the_verified_email_rule_off_lets_false_through(idp):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com", "email_verified": False}
+    _settings(oidc_require_verified_email=False)
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+
+
+def test_the_verified_email_rule_applies_only_to_the_email_claim(idp):
+    _user("ada")
+    idp.claims = {"preferred_username": "ada", "email": "x@example.com", "email_verified": False}
+    _settings(oidc_identity_claim="preferred_username")
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+
+
+# ---- an existing Linked identity is never overwritten ------------------------------
+
+
+def _link(name: str) -> tuple[str | None, str | None]:
+    with Session(get_engine()) as s:
+        user = s.exec(select(User).where(User.name == name)).one()
+        return user.oidc_issuer, user.oidc_subject
+
+
+def test_a_reassigned_email_with_a_new_subject_is_refused(idp):
+    _user("ada@example.com", role="admin")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+        idp.claims = {"email": "ada@example.com", "sub": "sub-2"}  # the email moved on
+        assert _reason(_sign_in(client, idp)) == "identity_conflict"
+        assert _link("ada@example.com") == (ISSUER, "sub-1")
+        idp.claims = {"email": "ada@example.com"}  # the original subject still signs in
+        assert _signed_in(_sign_in(client, idp))
+
+
+def test_the_linked_subject_signs_in_after_its_name_changed(idp):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+        idp.claims = {"email": "ada.lovelace@example.com"}
+        assert _signed_in(_sign_in(client, idp))
+
+
+def test_a_name_match_on_a_user_linked_at_another_issuer_is_refused(idp):
+    uid = _user("ada@example.com")
+    with Session(get_engine()) as s:
+        user = s.get(User, uid)
+        user.oidc_issuer, user.oidc_subject = "https://old-idp.example.com", "sub-1"
+        repo.save_user(s, user)
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "identity_conflict"
+    assert _link("ada@example.com") == ("https://old-idp.example.com", "sub-1")
+
+
+def test_a_successful_sign_in_marks_the_landing_for_the_spa(idp):
+    """The SPA clears any stored login token when it sees this marker, so a token set
+    in another tab can't shadow the new session. A failed sign-in sets no marker."""
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        r = _sign_in(client, idp)
+        marker = next(h for h in r.headers.get_list("set-cookie") if h.startswith("mcpe_sso_landed="))
+        assert "httponly" not in marker.lower()
+        idp.claims = {"email": "nobody@example.com", "sub": "sub-9"}
+        r = _sign_in(client, idp)
+        assert not any(h.startswith("mcpe_sso_landed=") for h in r.headers.get_list("set-cookie"))
+
+
+# ---- client secrets with reserved characters ----------------------------------
+
+
+@pytest.mark.parametrize("methods", [["client_secret_basic"], ["client_secret_post"]])
+def test_a_secret_with_reserved_characters_authenticates(idp, methods):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    idp.client_id = "mcp:elevator+1"
+    idp.client_secret = "a+b%c:d e"
+    idp.auth_methods = methods
+    _settings(oidc_client_secret=idp.client_secret, oidc_client_id=idp.client_id)
     with TestClient(app) as client:
         assert _signed_in(_sign_in(client, idp))

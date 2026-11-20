@@ -22,3 +22,28 @@ export function clearToken(): void {
 	if (typeof localStorage === 'undefined') return;
 	localStorage.removeItem(KEY);
 }
+
+// A stored token rides every request as Authorization, and the backend then judges
+// the request on it alone, ignoring a Sign-in session. So SSO must never leave one
+// behind: starting SSO drops it, and so does landing from a successful callback.
+
+// Set by the backend's successful SSO callback (app.auth.sign_in.LANDED_COOKIE).
+const LANDED = 'mcpe_sso_landed';
+
+/** Begin SSO sign-in, landing on `next` afterwards. */
+export function startSsoSignIn(
+	next: string,
+	go: (url: string) => void = (url) => window.location.assign(url)
+): void {
+	clearToken();
+	go(`/api/auth/oidc/login?next=${encodeURIComponent(next)}`);
+}
+
+/** Call on every page load: after a successful SSO callback, drop any stored token
+ * (one set in another tab meanwhile, say) so the new session is what's used. */
+export function adoptSsoLanding(): void {
+	if (typeof document === 'undefined') return;
+	if (!document.cookie.split('; ').some((c) => c.startsWith(`${LANDED}=`))) return;
+	clearToken();
+	document.cookie = `${LANDED}=; Max-Age=0; Path=/`;
+}

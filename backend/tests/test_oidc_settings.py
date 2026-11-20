@@ -152,7 +152,8 @@ def test_env_seeds_once_and_a_later_ui_write_survives_restart(monkeypatch):
     env = SimpleNamespace(
         oidc_enabled=False, oidc_discovery_url=ISSUER, oidc_client_id="from-env",
         oidc_client_secret="", oidc_label="", oidc_scopes="groups, offline_access",
-        oidc_identity_claim="preferred_username",
+        oidc_identity_claim="preferred_username", oidc_allowed_tenants="",
+        oidc_require_verified_email=None,
     )
     monkeypatch.setattr(main, "get_settings", lambda: env)
     main._bootstrap_oidc()
@@ -180,3 +181,49 @@ def test_env_client_secret_wins_over_stored(monkeypatch):
             monkeypatch.delenv("MCPE_OIDC_CLIENT_SECRET")
             config.get_settings.cache_clear()
         assert runtime_settings.oidc_client_secret(s) == "stored"
+
+
+_ENTRA_DOC = {**DISCOVERY, "issuer": "https://login.microsoftonline.com/{tenantid}/v2.0"}
+_TENANT = "9188040D-6C67-4C5B-B112-36A304B66DAD"
+
+
+def test_enabling_multi_tenant_without_a_tenant_list_is_refused(monkeypatch):
+    monkeypatch.setattr(oidc, "TRANSPORT", _idp(_ENTRA_DOC))
+    enable = {"oidc_enabled": True, "oidc_discovery_url": ISSUER, "oidc_client_id": "c"}
+    with TestClient(app) as client:
+        r = client.patch("/api/settings", json=enable, headers=LOOPBACK)
+        assert r.status_code == 400
+        assert "oidc_allowed_tenants" in r.json()["detail"]
+        assert client.get("/api/settings", headers=LOOPBACK).json()["oidc_enabled"] is False
+        r = client.patch(
+            "/api/settings",
+            json={**enable, "oidc_allowed_tenants": [_TENANT, _TENANT.lower()]},
+            headers=LOOPBACK,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["oidc_allowed_tenants"] == [_TENANT.lower()]
+
+
+def test_a_tenant_that_is_not_a_guid_is_refused():
+    with TestClient(app) as client:
+        r = client.patch(
+            "/api/settings", json={"oidc_allowed_tenants": ["contoso"]}, headers=LOOPBACK
+        )
+        assert r.status_code == 400
+        assert "oidc_allowed_tenants" in r.json()["detail"]
+
+
+def test_verified_email_is_required_by_default_and_env_false_seeds_off(monkeypatch):
+    from app import main
+
+    with Session(get_engine()) as s:
+        assert runtime_settings.read_all(s)["oidc_require_verified_email"] is True
+    env = SimpleNamespace(
+        oidc_enabled=False, oidc_discovery_url="", oidc_client_id="", oidc_label="",
+        oidc_scopes="", oidc_identity_claim="", oidc_allowed_tenants="",
+        oidc_require_verified_email=False,
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: env)
+    main._bootstrap_oidc()
+    with Session(get_engine()) as s:
+        assert runtime_settings.read_all(s)["oidc_require_verified_email"] is False

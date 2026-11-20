@@ -34,6 +34,7 @@ from app.util import hash_token, new_id, new_token, secret_file
 SECURE_COOKIE = "__Host-mcpe_session"
 PLAIN_COOKIE = "mcpe_session"
 CSRF_HEADER = "x-mcpe-csrf"
+LANDED_COOKIE = "mcpe_sso_landed"  # frontend/src/lib/auth.ts reads and clears it
 # The browser-only headers the proxies and the control MCP's inner calls drop.
 BROWSER_HEADERS = frozenset({"cookie", CSRF_HEADER})
 # Hard expiry, fixed for now; #273 adds a soft expiry and refresh.
@@ -122,6 +123,11 @@ def set_cookie(response: Response, raw: str, *, https: bool) -> None:
         SECURE_COOKIE if https else PLAIN_COOKIE, raw,
         max_age=int(MAX_AGE.total_seconds()), path="/", secure=https, httponly=True,
         samesite="strict",
+    )
+    # A readable marker (no secret in it): the SPA that loads next clears any stored
+    # login token, which would otherwise be sent instead of the new session.
+    response.set_cookie(
+        LANDED_COOKIE, "1", max_age=300, path="/", secure=https, samesite="strict"
     )
 
 

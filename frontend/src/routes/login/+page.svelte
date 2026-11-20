@@ -2,7 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { errorMessage, getAuthStatus } from '#lib/api.js';
-	import { clearToken, setToken } from '#lib/auth.js';
+	import { clearToken, setToken, startSsoSignIn } from '#lib/auth.js';
 	import type { AuthStatus } from '#lib/types.js';
 
 	// The identity claim a missing_claim failure names: one of the setting's values only.
@@ -21,6 +21,12 @@
 		ambiguous_match:
 			'More than one user here matches your identity provider account. Ask an admin to sort it out.',
 		missing_claim: `Your identity provider did not send the ${claimName()} claim this instance matches users on. Ask your admin to set the identity claim to preferred_username, or to have the provider send ${claimName()}.`,
+		tenant_not_allowed:
+			'Your organization (Microsoft Entra tenant) is not allowed to sign in here. Ask your admin to add it.',
+		unverified_email:
+			'Your identity provider says your email address is not verified. Verify it at the provider, or ask your admin to match users by preferred_username or to turn off the verified email requirement.',
+		identity_conflict:
+			'The user that matches your account here is already linked to a different identity provider account. Ask an admin to unlink it, then sign in again.',
 		expired: 'That sign-in took too long or was already used. Start it again.',
 		sso_disabled: 'SSO sign-in is turned off on this instance.'
 	};
@@ -97,13 +103,13 @@
 	{/if}
 
 	{#if sso?.enabled}
-		<a
-			href={`/api/auth/oidc/login?next=${encodeURIComponent(next)}`}
-			data-sveltekit-reload
+		<button
+			type="button"
+			onclick={() => startSsoSignIn(next)}
 			class="inline-flex items-center justify-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)]"
 		>
 			Sign in with {sso.label}
-		</a>
+		</button>
 	{/if}
 
 	<form

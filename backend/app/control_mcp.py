@@ -167,10 +167,15 @@ def build(app: FastAPI) -> "_Gate":
         "" to clear it; MCPE_OIDC_CLIENT_SECRET overrides it), oidc_label (the
         sign-in button's text), oidc_scopes (extra scopes beyond "openid email profile"),
         oidc_identity_claim ("email", "preferred_username" or "sub": the ID token
-        claim that names the user), and oidc_enabled. While enabled, any oidc_*
-        change fetches the discovery document first and is refused with the reason
-        when it's unreachable or lacks issuer, authorization_endpoint,
-        token_endpoint or jwks_uri. get_settings returns oidc_redirect_uri, the
+        claim that names the user), oidc_allowed_tenants (Entra tenant GUIDs allowed
+        to sign in; required when the discovery issuer is multi-tenant, i.e. contains
+        "{tenantid}", as with /common or /organizations), oidc_require_verified_email
+        (default true: with the email identity claim, an ID token whose
+        email_verified is false is refused), and oidc_enabled. While
+        enabled, any oidc_* change fetches the discovery document first and is
+        refused with the reason when it's unreachable or lacks issuer,
+        authorization_endpoint, token_endpoint or jwks_uri, or when it's
+        multi-tenant and oidc_allowed_tenants is empty. get_settings returns oidc_redirect_uri, the
         callback to register at the provider."""
         if changes.control_mcp is False and _internal(get_http_request()):
             # Turning control_mcp off disables the built-in server, i.e. the bridge

@@ -597,10 +597,14 @@ export interface SettingsInfo {
 	oidc_client_secret: string;
 	/** The sign-in button's label. */
 	oidc_label: string;
-	/** Scopes requested beyond `openid`. */
+	/** Scopes requested beyond `openid email profile`. */
 	oidc_scopes: string[];
 	/** The ID token claim that names the user. */
 	oidc_identity_claim: OidcIdentityClaim;
+	/** Entra ID tenant GUIDs allowed to sign in through a multi-tenant issuer. */
+	oidc_allowed_tenants: string[];
+	/** With the email identity claim, refuse an unverified email. */
+	oidc_require_verified_email: boolean;
 	/** Read-only: the redirect URI to register at the provider. */
 	oidc_redirect_uri: string;
 }

@@ -28,7 +28,7 @@ import json
 import secrets
 import time
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote_plus, urlsplit
 
 import httpx
 import jwt
@@ -163,8 +163,12 @@ class FakeIdP:
             return (form.get("client_id") == self.client_id and not header
                     and "client_secret" not in form)
         methods = self.auth_methods or ["client_secret_basic"]
-        pair = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
         if header:
-            return "client_secret_basic" in methods and header == f"Basic {pair}"
+            # RFC 6749 §2.3.1: each half is form-encoded before the base64 pair.
+            scheme, _, encoded = header.partition(" ")
+            user, _, password = base64.b64decode(encoded).decode().partition(":")
+            return ("client_secret_basic" in methods and scheme == "Basic"
+                    and (unquote_plus(user), unquote_plus(password))
+                    == (self.client_id, self.client_secret))
         return ("client_secret_post" in methods and form.get("client_id") == self.client_id
                 and form.get("client_secret") == self.client_secret)
