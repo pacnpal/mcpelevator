@@ -499,7 +499,11 @@ async def _with_userinfo(
     claims: dict[str, Any],
 ) -> dict[str, Any]:
     """``claims`` plus the userinfo endpoint's, which are taken only when its ``sub`` is
-    the ID token's. ID token claims win a clash."""
+    the ID token's. ID token claims win a clash, except that ``email`` and
+    ``email_verified`` come as a pair from one response (#291): the ID token's when it
+    has an email, userinfo's when it has none. Userinfo's ``email_verified`` counts for
+    the ID token's email only when userinfo sends that same email and the ID token
+    states no verification of its own."""
     endpoint = discovery.get("userinfo_endpoint")
     if not endpoint or not isinstance(access_token, str):
         return claims
@@ -512,7 +516,17 @@ async def _with_userinfo(
         return claims
     if not isinstance(info, dict) or info.get("sub") != claims["sub"]:
         raise SignInFailed(PROVIDER_REJECTED, "userinfo sub differs from the ID token's")
-    return {**info, **claims}
+    merged = {**info, **claims}
+    if "email" not in claims:
+        pair = info
+    elif info.get("email") == claims["email"] and "email_verified" not in claims:
+        pair = info
+    else:
+        pair = claims
+    merged.pop("email_verified", None)
+    if "email_verified" in pair:
+        merged["email_verified"] = pair["email_verified"]
+    return merged
 
 
 def _match(session: Session, claims: dict[str, Any], issuer: str, claim: str) -> User:
