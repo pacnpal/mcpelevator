@@ -354,3 +354,14 @@ def test_a_scim_created_user_links_at_first_sign_in(idp):
         assert row.oidc_issuer is not None and row.oidc_subject is not None
         with Session(get_engine()) as s:
             assert len(repo.users_named(s, "ada@example.com")) == 1
+
+
+def test_the_password_okta_sends_is_ignored_and_never_stored(idp):
+    body = fx.okta_create("ada@example.com")
+    assert body["password"] == "<okta-generated>"
+    with TestClient(app) as client:
+        r = _create(client, _scim(), body)
+        assert r.status_code == 201, r.text
+        assert "password" not in r.json() and body["password"] not in r.text
+        stored = repr(_user_row(r.json()["id"]).model_dump())
+        assert body["password"] not in stored

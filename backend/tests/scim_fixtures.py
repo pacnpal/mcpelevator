@@ -56,7 +56,7 @@ def okta_create(user_name: str) -> dict:
         "locale": "en-US",
         "externalId": "00ujl29u0le5T6Aj10h7",
         "groups": [],
-        "password": "1mz050nq",
+        "password": "<okta-generated>",
         "active": True,
     }
 
