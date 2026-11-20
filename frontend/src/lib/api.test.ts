@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { goto } from '$app/navigation';
 
-import { ApiError, cloneServer, getHealth, retryServer, streamLogs } from './api';
+import {
+	ApiError,
+	cloneServer,
+	getHealth,
+	retryServer,
+	streamLogs,
+	unlinkUserIdentity
+} from './api';
 import { getToken, setToken } from './auth';
 
 // api.ts imports goto at module load; mock the SvelteKit module so the 401 path
@@ -65,6 +72,14 @@ describe('api request()', () => {
 		await cloneServer('src-id', 'Memory staging');
 		const init = fetchMock.mock.calls[0][1] as RequestInit;
 		expect(init.body).toBe(JSON.stringify({ name: 'Memory staging' }));
+	});
+
+	it('unlinkUserIdentity DELETEs the user identity route', async () => {
+		const fetchMock = stubFetch(204, null);
+		await unlinkUserIdentity('user/id');
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/users/user%2Fid/identity');
+		expect(init.method).toBe('DELETE');
 	});
 
 	it('retryServer POSTs to the retry endpoint', async () => {

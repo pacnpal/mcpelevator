@@ -679,6 +679,8 @@ export interface UserInfo {
 	servers_count: number;
 	tokens_count: number;
 	created_at: string;
+	/** Issuer of the user's Linked identity (SSO), null when they have none. */
+	linked_issuer: string | null;
 }
 
 /** Response of POST /api/users/{id}/credentials — the login token, plaintext exactly once. */

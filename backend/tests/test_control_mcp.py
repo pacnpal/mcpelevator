@@ -105,6 +105,23 @@ def test_tool_calls_go_through_the_api(client):
     assert not is_error
 
 
+def test_list_users_shows_the_linked_issuer_and_unlink_clears_it(client):
+    with Session(get_engine()) as s:
+        uid = repo.create_user(
+            s, User(id=new_id(), name="ada", oidc_issuer="https://idp.example.com",
+                    oidc_subject="sub-1")
+        ).id
+    _, users = _call(client, "list_users")
+    assert next(u for u in users["items"] if u["id"] == uid)["linked_issuer"] == "https://idp.example.com"
+    is_error, _ = _call(client, "unlink_user_identity", {"user_id": uid})
+    assert not is_error
+    _, users = _call(client, "list_users")
+    assert next(u for u in users["items"] if u["id"] == uid)["linked_issuer"] is None
+    is_error, detail = _call(client, "unlink_user_identity", {"user_id": "nope"})
+    assert is_error and "404" in json.dumps(detail)
+    assert "unlink_user_identity" in INSTRUCTIONS
+
+
 def test_get_server_returns_a_stored_openapi_document_on_request(client):
     doc = "openapi: 3.1.0\ninfo: {title: t, version: '1'}\nservers: [{url: 'https://api.example'}]\npaths: {}\n"
     _, created = _call(

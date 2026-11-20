@@ -471,7 +471,9 @@ def build(app: FastAPI) -> "_Gate":
 
     @mcp.tool(annotations=_READ)
     async def list_users() -> Any:
-        """Every user with role, local-runner permission, and owned server/token counts."""
+        """Every user with role, local-runner permission, owned server/token counts, and
+        ``linked_issuer``: the identity provider their SSO sign-in is linked to (null when
+        none)."""
         return await api("GET", "/api/users")
 
     @mcp.tool(annotations=_ADD)
@@ -508,6 +510,13 @@ def build(app: FastAPI) -> "_Gate":
     async def delete_user(user_id: str) -> Any:
         """Delete a user and their tokens (refused while they still own servers)."""
         return await api("DELETE", f"/api/users/{_seg(user_id)}")
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    async def unlink_user_identity(user_id: str) -> Any:
+        """Clear a user's Linked identity (their SSO link) and end their Sign-in sessions.
+        Their next SSO sign-in matches them by name again: use it to fix a wrong match or
+        to move users to a new identity provider."""
+        return await api("DELETE", f"/api/users/{_seg(user_id)}/identity")
 
     @mcp.tool(annotations=_ADD)
     async def create_user_credential(user_id: str) -> Any:
