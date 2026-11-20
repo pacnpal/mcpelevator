@@ -98,15 +98,25 @@ def _bootstrap_oidc() -> None:
     env skips the discovery check a Settings save runs; sign-in reports a bad provider."""
     env = get_settings()
     scopes = [s.strip() for s in env.oidc_scopes.split(",") if s.strip()]
+    tenants = [t.strip() for t in env.oidc_allowed_tenants.split(",") if t.strip()]
     for key, value in (
         ("oidc_discovery_url", env.oidc_discovery_url),
         ("oidc_client_id", env.oidc_client_id),
         ("oidc_label", env.oidc_label),
         ("oidc_scopes", scopes),
         ("oidc_identity_claim", env.oidc_identity_claim),
+        ("oidc_allowed_tenants", tenants),
         ("oidc_enabled", env.oidc_enabled),
     ):
         _seed_setting_from_env(value, key)
+    # A falsy value means "unset" to _seed_setting_from_env, but false is this one's
+    # point: seed it whenever the env var is set at all.
+    if env.oidc_require_verified_email is not None:
+        with Session(get_engine()) as session:
+            if repo.setting_get(session, "oidc_require_verified_email", _UNSET) is _UNSET:
+                runtime_settings.write(
+                    session, {"oidc_require_verified_email": env.oidc_require_verified_email}
+                )
 
 
 def _bootstrap_control_plane_auth() -> None:

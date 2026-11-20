@@ -84,14 +84,36 @@ export function errorMessage(err: unknown): string {
 	return 'Unexpected error';
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// The Sign-in session's CSRF header value, from the latest /auth/status (ADR-0004).
+let csrf: string | null = null;
+// The first status fetch. Every other request waits for it, so a signed-in browser's
+// first request already carries the CSRF header.
+let firstStatus: Promise<unknown> | null = null;
+
+/**
+ * The credential headers for an `/api` request: the pasted login token as a bearer,
+ * and `X-MCPE-CSRF` once status has handed one out. The session cookie itself rides
+ * on `fetch`'s default same-origin credentials.
+ */
+async function authHeaders(waitForStatus = true, withToken = true): Promise<Record<string, string>> {
+	if (waitForStatus) {
+		if (!firstStatus) getAuthStatus().catch(() => undefined);
+		await firstStatus;
+	}
+	const token = withToken ? getToken() : null;
+	return {
+		...(token ? { authorization: `Bearer ${token}` } : {}),
+		...(csrf ? { 'x-mcpe-csrf': csrf } : {})
+	};
+}
+
+async function request<T>(path: string, init?: RequestInit, withToken = true): Promise<T> {
 	const url = `${BASE}${path}`;
-	const token = getToken();
 	const res = await fetch(url, {
 		...init,
 		headers: {
 			accept: 'application/json',
-			...(token ? { authorization: `Bearer ${token}` } : {}),
+			...(await authHeaders(path !== '/auth/status', withToken)),
 			...init?.headers
 		}
 	});
@@ -305,10 +327,7 @@ export function updateServer(
  */
 export async function downloadMcpb(id: string): Promise<Blob> {
 	const url = `${BASE}/servers/${encodeURIComponent(id)}/mcpb`;
-	const token = getToken();
-	const res = await fetch(url, {
-		headers: token ? { authorization: `Bearer ${token}` } : {}
-	});
+	const res = await fetch(url, { headers: await authHeaders() });
 	if (!res.ok) {
 		// Same 401 handling as request(): drop the stale token and bounce to /login.
 		if (res.status === 401) {
@@ -444,11 +463,10 @@ export async function streamLogs(
 	signal: AbortSignal
 ): Promise<void> {
 	const url = `${BASE}/servers/${encodeURIComponent(id)}/logs`;
-	const token = getToken();
 	const res = await fetch(url, {
 		headers: {
 			accept: 'text/event-stream',
-			...(token ? { authorization: `Bearer ${token}` } : {})
+			...(await authHeaders())
 		},
 		signal
 	});
@@ -500,8 +518,29 @@ export async function streamLogs(
 
 /** Whether control-plane auth is enforced, and whether this client is authenticated.
  * Public endpoint — the layout calls it to decide whether to redirect to /login. */
-export function getAuthStatus(): Promise<AuthStatus> {
-	return request<AuthStatus>('/auth/status');
+export function getAuthStatus(withToken = true): Promise<AuthStatus> {
+	const status = request<AuthStatus>('/auth/status', undefined, withToken).then((s) => {
+		csrf = s.csrf ?? null;
+		return s;
+	});
+	if (!firstStatus) {
+		const first: Promise<unknown> = status.catch(() => {
+			// A failed first status must not stick: the next request asks again.
+			if (firstStatus === first) firstStatus = null;
+		});
+		firstStatus = first;
+	}
+	return status;
+}
+
+/** End this browser's Sign-in session (if any), then forget its CSRF value. Both calls
+ * go without the login token: a request carrying one is judged on the token alone, so
+ * status would hand out no CSRF value for the session. A failure throws and keeps the
+ * CSRF value, so the caller can retry. */
+export async function logout(): Promise<void> {
+	await getAuthStatus(false);
+	await request<unknown>('/auth/logout', { method: 'POST' }, false);
+	csrf = null;
 }
 
 /** Current security settings: bind mode, allowed hosts, default auth provider. */

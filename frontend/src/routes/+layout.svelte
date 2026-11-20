@@ -2,16 +2,20 @@
 	import '../app.css';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { getAuthStatus } from '#lib/api.js';
-	import { clearToken } from '#lib/auth.js';
+	import { errorMessage, getAuthStatus, logout as endSession } from '#lib/api.js';
+	import { adoptSsoLanding, clearToken } from '#lib/auth.js';
 	import { completeOauthPopup } from '#lib/oauthPopup.js';
 	import favicon from '#lib/assets/favicon.svg';
 	import HealthDot from '#lib/components/HealthDot.svelte';
 	import Logo from '#lib/components/Logo.svelte';
 	import Toast from '#lib/components/Toast.svelte';
-	import { toast, dismissToast } from '#lib/toast.svelte.js';
+	import { toast, dismissToast, flashToast } from '#lib/toast.svelte.js';
 
 	let { children } = $props();
+
+	// Before the auth guard's first status check: a successful SSO callback just
+	// landed here, so a stored login token must not shadow the new Sign-in session.
+	adoptSsoLanding();
 
 	// The OAuth callback can bounce to any page (`/server/{id}?oauth=connected` on
 	// success, `/?oauth=error` on failure), so the popup hand-off lives here in the
@@ -44,7 +48,10 @@
 			.then((status) => {
 				if (cancelled) return; // a newer navigation superseded this check
 				loggedIn = status.authenticated;
-				if (status.enforced && !status.authenticated) goto('/login');
+				if (status.enforced && !status.authenticated) {
+					// Carry the page being opened, so signing in lands back on it.
+					goto(`/login?next=${encodeURIComponent(page.url.pathname + page.url.search)}`);
+				}
 			})
 			.catch(() => {
 				// status is public and best-effort; a transient failure shouldn't trap the user.
@@ -54,8 +61,15 @@
 		};
 	});
 
-	function logout() {
+	async function logout() {
 		clearToken();
+		try {
+			await endSession(); // ends a Sign-in session, if this browser holds one
+		} catch (err) {
+			// The session may still be live: stay put, with "Log out" there to retry.
+			flashToast(`Log out failed: ${errorMessage(err)}. Try again.`);
+			return;
+		}
 		loggedIn = false;
 		goto('/login');
 	}

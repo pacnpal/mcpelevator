@@ -12,6 +12,9 @@ deterministic and upgrade-safe:
                                 boot/recovery mints, keep full power on upgrade)
 - Cloudflare Access identity -> the user named by its email, only on requests the
                                 built-in bridge carried (``app.auth.cf_access``)
+- Sign-in session            -> that session's user, only on /api (not /api/mcp),
+                                with the CSRF header and no Authorization header
+                                (``app.auth.sign_in``)
 
 WHAT a principal may do lives in ``app.auth.policy`` — keep the two concerns
 separate so authorization rules never re-derive identity.
@@ -59,6 +62,8 @@ class Principal:
     role: str
     local_runners: bool
     token_id: Optional[str] = None
+    # The Sign-in session that authenticated the request, when one did.
+    session_id: Optional[str] = None
 
     @property
     def is_admin(self) -> bool:
@@ -105,20 +110,27 @@ def _resolve_uncached(request: Request, session: Session) -> Optional[Principal]
     if not enforcement_enabled(session):
         return LOCAL_ADMIN
 
-    from app.runners.builtin import is_internal  # circular-import guard
+    from app.auth import sign_in  # circular-import guard
+    from app.runners.builtin import is_internal
 
     # A Cloudflare Access identity counts only on requests the built-in bridge
     # carried; see app.auth.cf_access for why it isn't trusted on all of /api.
-    return credential_principal(request, session, cloudflare=is_internal(request))
+    return credential_principal(
+        request, session, cloudflare=is_internal(request), sign_in=sign_in.accepts(request)
+    )
 
 
 def credential_principal(
-    request: Request, session: Session, *, cloudflare: bool
+    request: Request, session: Session, *, cloudflare: bool, sign_in: bool = False
 ) -> Optional[Principal]:
     """The principal the request's credential names, regardless of enforcement: the
-    break-glass token, a control token, or (when ``cloudflare``) a Cloudflare Access
-    identity that matches a user. None when it names nobody."""
+    break-glass token, a control token, (when ``cloudflare``) a Cloudflare Access
+    identity that matches a user, or (when ``sign_in``) a live Sign-in session with its
+    CSRF header. None when it names nobody. Callers pass ``sign_in`` only from
+    ``app.auth.sign_in.accepts``, so the cookie never counts on ``/s``, ``/g`` or
+    ``/api/mcp``."""
     from app.auth import cf_access  # circular-import guard
+    from app.auth import sign_in as sign_in_mod
     from app.auth.control_plane import is_env_admin_token
 
     token = _bearer(request)
@@ -149,6 +161,14 @@ def credential_principal(
                 user_id=user.id, name=user.name, role=user.role,
                 local_runners=_effective_local_runners(user),
             )
+    if sign_in and not request.headers.get("authorization"):
+        row = sign_in_mod.current(request, session)
+        user = repo.get_user(session, row.user_id) if row is not None else None
+        if user is not None:
+            return Principal(
+                user_id=user.id, name=user.name, role=user.role,
+                local_runners=_effective_local_runners(user), session_id=row.id,
+            )
     return None
 
 
@@ -163,7 +183,8 @@ def refresh(session: Session, principal: Principal) -> Optional[Principal]:
     synthetic principals (env token, enforcement-off local operator) are immutable
     and returned unchanged."""
     from app.auth.control_plane import enforcement_enabled  # circular-import guard
-    from app.db.models import Token  # local import: models must not import auth
+    from app.auth import sign_in
+    from app.db.models import SignInSession, Token  # local import: models must not import auth
 
     if principal is LOCAL_ADMIN:
         # The enforcement-off synthetic is only valid WHILE enforcement stays off:
@@ -175,6 +196,10 @@ def refresh(session: Session, principal: Principal) -> Optional[Principal]:
 
     if principal.token_id is not None and session.get(Token, principal.token_id) is None:
         return None  # the presented credential was revoked while we were queued
+    if principal.session_id is not None and not sign_in.live(
+        session.get(SignInSession, principal.session_id)
+    ):
+        return None  # the Sign-in session ended or expired while we were queued
     if principal.user_id is None:
         return principal
     user = repo.get_user(session, principal.user_id)
@@ -183,7 +208,7 @@ def refresh(session: Session, principal: Principal) -> Optional[Principal]:
     return Principal(
         user_id=user.id, name=user.name, role=user.role,
         local_runners=_effective_local_runners(user),
-        token_id=principal.token_id,
+        token_id=principal.token_id, session_id=principal.session_id,
     )
 
 

@@ -597,10 +597,14 @@ export interface SettingsInfo {
 	oidc_client_secret: string;
 	/** The sign-in button's label. */
 	oidc_label: string;
-	/** Scopes requested beyond `openid`. */
+	/** Scopes requested beyond `openid email profile`. */
 	oidc_scopes: string[];
 	/** The ID token claim that names the user. */
 	oidc_identity_claim: OidcIdentityClaim;
+	/** Entra ID tenant GUIDs allowed to sign in through a multi-tenant issuer. */
+	oidc_allowed_tenants: string[];
+	/** With the email identity claim, refuse an unverified email. */
+	oidc_require_verified_email: boolean;
 	/** Read-only: the redirect URI to register at the provider. */
 	oidc_redirect_uri: string;
 }
@@ -647,6 +651,8 @@ export interface AuthUser {
 	role: 'admin' | 'member';
 	/** May this user configure servers that execute code on the box (npx/uvx/command/docker)? */
 	local_runners: boolean;
+	/** Has this user a Linked identity (signed in through SSO at least once)? */
+	linked: boolean;
 }
 
 /** Shape of GET /api/auth/status — the SPA polls this to decide whether to show login. */
@@ -656,6 +662,10 @@ export interface AuthStatus {
 	/** The request's principal; present even when `authenticated` is false with
 	 * enforcement off (the synthetic local admin). Null = no principal. */
 	user: AuthUser | null;
+	/** SSO sign-in, when an identity provider is configured and on. */
+	sso: { enabled: boolean; label: string } | null;
+	/** The `X-MCPE-CSRF` value for this browser's Sign-in session; null without one. */
+	csrf: string | null;
 }
 
 /** A control-plane user (admin-only surface, GET /api/users). */

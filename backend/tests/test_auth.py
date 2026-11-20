@@ -58,6 +58,8 @@ def test_settings_defaults_and_write(session):
         "oidc_label": "",
         "oidc_scopes": [],
         "oidc_identity_claim": "email",
+        "oidc_allowed_tenants": [],
+        "oidc_require_verified_email": True,
     }
     runtime_settings.write(
         session,

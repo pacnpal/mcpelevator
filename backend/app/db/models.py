@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, Index
 from sqlmodel import Field, SQLModel
 
 
@@ -58,8 +58,31 @@ class User(SQLModel, table=True):
     # server? Admin-set, like local_runners; the global switch is that server's own
     # ``enabled`` flag.
     control_mcp: bool = True
+    # The Linked identity: the identity-provider account this user signs in as, by
+    # issuer and subject (never by email). Both NULL until the first SSO sign-in.
+    oidc_issuer: Optional[str] = None
+    oidc_subject: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+    # One user per Linked identity. SQLite lets the pair repeat while both are NULL.
+    __table_args__ = (Index("ix_user_oidc_identity", "oidc_issuer", "oidc_subject", unique=True),)
+
+
+class SignInSession(SQLModel, table=True):
+    """A Sign-in session (ADR-0004): a browser signed in through the identity provider.
+    The cookie holds a random value; only its SHA-256 is stored, like ``Token``. Ending
+    the session is deleting the row."""
+
+    __tablename__ = "sign_in_session"
+
+    id: str = Field(primary_key=True)
+    token_hash: str = Field(index=True)
+    user_id: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime
+    # The provider's ID token, sealed (app.sealed), kept as the logout hint.
+    id_token: str = ""
 
 
 class Server(SQLModel, table=True):

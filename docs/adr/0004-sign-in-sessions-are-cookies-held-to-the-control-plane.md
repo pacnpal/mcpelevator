@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Sign-in sessions are cookies, held to the control plane
@@ -20,6 +20,13 @@ Server's tools or drive the control MCP for whoever lured it there. The proxies 
 caller headers drop the cookie for the same reason. A request carrying `Authorization:
 Bearer` is judged on that token alone and never falls back to the cookie, so token and agent
 callers behave exactly as before.
+
+Logout is the one exception to both rules: it ends the session its cookie names without the
+CSRF header and even past an `Authorization` header. Forcing someone's logout gains an
+attacker nothing, and `SameSite=Strict` already keeps the cookie off cross-site requests. A
+sign-in whose SSO configuration (the enable flag, discovery URL or client id) changed while
+it was in flight is refused, so a change to those settings revokes every session with no
+way for one started under the old values to slip in after.
 
 ## Considered options
 

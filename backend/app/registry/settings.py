@@ -96,10 +96,15 @@ DEFAULTS: dict[str, Any] = {
     "oidc_client_secret": "",
     # The sign-in button's label.
     "oidc_label": "",
-    # Scopes requested beyond "openid".
+    # Scopes requested beyond "openid email profile", which are always requested.
     "oidc_scopes": [],
     # The ID token claim that names the user: 'email' | 'preferred_username' | 'sub'.
     "oidc_identity_claim": "email",
+    # Entra ID tenant GUIDs (lowercase) whose people may sign in when the discovery
+    # issuer is multi-tenant (contains "{tenantid}"); required then, ignored otherwise.
+    "oidc_allowed_tenants": [],
+    # With the email identity claim, refuse an ID token whose email_verified is false.
+    "oidc_require_verified_email": True,
 }
 
 
@@ -122,6 +127,12 @@ _PROVIDERS = {"none", "bearer", "oauth"}
 _CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
 _UPSTREAM_OAUTH_CLIENT_MODES = {"auto", "cimd", "dcr"}
 _OIDC_IDENTITY_CLAIMS = {"email", "preferred_username", "sub"}
+_OIDC_BOOLS = ("oidc_enabled", "oidc_require_verified_email")
+GUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_GUID = re.compile(GUID_PATTERN)
+# The settings that say which provider signs people in. Changing one ends every Sign-in
+# session, and a login started under other values can't finish.
+SESSION_ENDING_KEYS = ("oidc_enabled", "oidc_discovery_url", "oidc_client_id")
 
 
 # Group names are the routing key in /g/<name>/mcp, so they must be URL-safe: lowercase
@@ -272,8 +283,8 @@ def write(
                     f"invalid usage_retention_days: {value!r} "
                     f"(days, 0–{MAX_USAGE_RETENTION_DAYS}; 0 keeps forever)"
                 )
-        if key == "oidc_enabled" and not isinstance(value, bool):
-            raise ValueError(f"invalid oidc_enabled: {value!r}")
+        if key in _OIDC_BOOLS and not isinstance(value, bool):
+            raise ValueError(f"invalid {key}: {value!r}")
         if key == "oidc_discovery_url":
             if not isinstance(value, str):
                 raise ValueError(f"invalid oidc_discovery_url: {value!r}")
@@ -294,6 +305,12 @@ def write(
             raise ValueError(
                 f"invalid oidc_identity_claim: {value!r} (email, preferred_username or sub)"
             )
+        if key == "oidc_allowed_tenants":
+            if not isinstance(value, list) or not all(
+                isinstance(v, str) and _GUID.fullmatch(v.strip()) for v in value
+            ):
+                raise ValueError(f"invalid oidc_allowed_tenants: {value!r} (tenant GUIDs)")
+            value = list(dict.fromkeys(v.strip().lower() for v in value))
         if key in ("oauth_scopes", "oidc_scopes"):
             if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
                 raise ValueError(f"invalid {key}: {value!r}")
@@ -305,8 +322,31 @@ def write(
         if key == "allowed_hosts":
             value = _normalize_hosts(value)
         pending[key] = value
-    repo.setting_set_many(session, pending, guard=guard)
+    # Changing which provider signs people in (or turning SSO off) ends every Sign-in
+    # session in this same transaction.
+    ends_sessions = ends_sign_in_sessions(session, pending)
+
+    def staged(s: Session) -> None:
+        if guard is not None:
+            guard(s)
+        if ends_sessions:
+            repo.delete_sign_in_sessions(s)
+
+    repo.setting_set_many(session, pending, guard=staged if guard or ends_sessions else None)
     return read_all(session)
+
+
+def ends_sign_in_sessions(session: Session, changes: dict[str, Any]) -> bool:
+    """Would writing ``changes`` end every Sign-in session?"""
+    return any(
+        key in changes and changes[key] != repo.setting_get(session, key, DEFAULTS[key])
+        for key in SESSION_ENDING_KEYS
+    )
+
+
+def sign_in_provider(session: Session) -> list[Any]:
+    """The current values of ``SESSION_ENDING_KEYS``: a login is bound to them."""
+    return [repo.setting_get(session, key, DEFAULTS[key]) for key in SESSION_ENDING_KEYS]
 
 
 def bind_mode(session: Session) -> str:

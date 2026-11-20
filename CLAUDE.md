@@ -235,6 +235,19 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   launch config — it stays out of `config_hash`, so reassigning never bounces a bridge. This is
   authorization, not isolation: local runners execute as the process user (README "Security",
   trust caveat).
+- **SSO and Sign-in sessions** (`auth/oidc.py`, `auth/sign_in.py`, ADR-0004): `/api/auth/oidc/login`
+  and `/callback` (public `api/auth` router) run code + PKCE against the one configured provider,
+  with state/nonce/verifier/next in a sealed per-state cookie, and match the person to exactly one
+  User by name (the Linked identity, `User.oidc_issuer`/`oidc_subject`, is stored on success).
+  A `SignInSession` row (cookie hash, like `Token`) backs an HttpOnly SameSite=Strict cookie.
+  `principal.credential_principal(sign_in=...)` honors it only when `sign_in.accepts` (an `/api`
+  path other than `/api/mcp`, no `Authorization` header) and the `X-MCPE-CSRF` header (an HMAC
+  of the row id, handed out by `/api/auth/status`, the one route that reads the cookie without
+  it) matches. The bearer provider and the control MCP gate never pass it. `/s`, the group hub
+  and the control MCP's inner calls drop the cookie and CSRF header (`sign_in.BROWSER_HEADERS`).
+  Sessions end on logout, user deletion, and a settings write changing `oidc_enabled`,
+  `oidc_discovery_url` or `oidc_client_id` (`registry.settings.write`). Tests drive a fake
+  provider (`tests/fake_idp.py`) installed as `oidc.TRANSPORT`.
 - **Catalog** (`catalog/`): backend proxies public MCP directories (official registry, Glama) into
   reviewable launch specs; the SPA stays same-origin. `catalog/mirror.py` keeps a local copy of
   each directory (`<data_dir>/catalog-mirror.db`, a cache, never desired state) synced in the

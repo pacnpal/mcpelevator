@@ -58,7 +58,9 @@ def enforcement_enabled(session: Session) -> bool:
     )
 
 
-def admin_credential_presented(request: Request, session: Session) -> bool:
+def admin_credential_presented(
+    request: Request, session: Session, *, sign_in_counts: bool = True
+) -> bool:
     """Does the request carry a credential that resolves to ADMIN — the env token,
     a user-less control token, or an admin user's login? Unlike principal
     resolution this ignores enforcement state entirely: it classifies the
@@ -66,24 +68,32 @@ def admin_credential_presented(request: Request, session: Session) -> bool:
     login token is a valid control credential but must NOT satisfy this — enabling
     enforcement while holding only member logins would strand the box with no way
     to reach Settings or Users."""
+    from app.auth import sign_in
     from app.auth.principal import credential_principal  # circular-import guard
     from app.runners.builtin import is_internal
 
-    # The env token, a user-less control token, an admin's login, or (through the
-    # built-in bridge) an admin's Cloudflare Access identity: the same resolution
-    # principal.resolve uses, so a credential it would call admin counts here too.
-    caller = credential_principal(request, session, cloudflare=is_internal(request))
+    # The env token, a user-less control token, an admin's login, (through the
+    # built-in bridge) an admin's Cloudflare Access identity, or an admin's Sign-in
+    # session: the same resolution principal.resolve uses, so a credential it would
+    # call admin counts here too.
+    caller = credential_principal(
+        request, session, cloudflare=is_internal(request),
+        sign_in=sign_in_counts and sign_in.accepts(request),
+    )
     return caller is not None and caller.is_admin
 
 
-def would_lock_out(request: Request, session: Session, changes: dict[str, Any]) -> bool:
+def would_lock_out(
+    request: Request, session: Session, changes: dict[str, Any], *, sign_in_counts: bool = True
+) -> bool:
     """True if applying ``changes`` would turn enforcement on while THIS request
     can't authenticate as an ADMIN, locking the operator out of the admin surfaces
     the moment it takes effect. Enabling enforcement requires an admin-resolving
     credential on the request (``admin_credential_presented``) — a token row merely
     existing in the DB is not enough (this browser may not hold its plaintext),
-    and a member login is not enough (Settings/Users would become unreachable)."""
-    if admin_credential_presented(request, session):
+    and a member login is not enough (Settings/Users would become unreachable).
+    ``sign_in_counts=False`` leaves a Sign-in session out, for a write that ends it."""
+    if admin_credential_presented(request, session, sign_in_counts=sign_in_counts):
         return False  # the caller already holds a usable admin credential
     mode = changes.get("control_plane_auth", runtime_settings.control_plane_auth(session))
     bind = changes.get("bind_mode", runtime_settings.bind_mode(session))
@@ -107,16 +117,21 @@ def is_env_admin_token(token: str) -> bool:
 def control_auth(request: Request, session: Session) -> Literal["ok", "missing", "wrong_scope"]:
     """Classify the request's control-plane credential. Pure (no raising) so the
     gate and ``/api/auth/status`` share one decision: ``ok`` = a control token, the
-    break-glass env token, or a trusted Cloudflare Access identity; ``wrong_scope`` =
+    break-glass env token, a trusted Cloudflare Access identity, or a Sign-in session
+    with its CSRF header; ``wrong_scope`` =
     a valid non-control token;
     ``missing`` = no token or no match."""
+    from app.auth import sign_in
     from app.auth.principal import credential_principal  # circular-import guard
     from app.runners.builtin import is_internal
 
     # The same decision principal.resolve makes, so the gate and identity agree:
     # a user-bound credential whose user row is gone fails closed, and a Cloudflare
     # Access identity counts only on requests the built-in bridge carried.
-    if credential_principal(request, session, cloudflare=is_internal(request)) is not None:
+    caller = credential_principal(
+        request, session, cloudflare=is_internal(request), sign_in=sign_in.accepts(request)
+    )
+    if caller is not None:
         return "ok"
     token = _bearer(request)
     row = repo.get_token_by_hash(session, hash_token(token)) if token else None

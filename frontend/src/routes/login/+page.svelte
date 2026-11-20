@@ -1,7 +1,59 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { errorMessage, getAuthStatus } from '#lib/api.js';
-	import { clearToken, setToken } from '#lib/auth.js';
+	import { clearToken, setToken, startSsoSignIn } from '#lib/auth.js';
+	import type { AuthStatus } from '#lib/types.js';
+
+	// Everything below is derived from the current URL: SvelteKit reuses this component
+	// when only the query changes.
+	const params = $derived(page.url.searchParams);
+
+	// The identity claim a missing_claim failure names: one of the setting's values only.
+	const claimName = $derived.by(() => {
+		const claim = params.get('claim') ?? '';
+		return ['email', 'preferred_username', 'sub'].includes(claim) ? claim : 'identity';
+	});
+
+	// One plain sentence per reason code the SSO callback sends back (app.auth.oidc).
+	const SSO_ERRORS: Record<string, string> = $derived({
+		provider_denied: 'The identity provider did not let you sign in. Try again, or ask your admin.',
+		provider_unavailable: 'The identity provider could not be reached. Try again in a moment.',
+		provider_rejected:
+			"The identity provider's answer could not be verified, or it refused the request. Ask your admin to check the SSO settings.",
+		no_match: 'No user here matches your identity provider account. Ask an admin to add you.',
+		ambiguous_match:
+			'More than one user here matches your identity provider account. Ask an admin to sort it out.',
+		missing_claim: `Your identity provider did not send the ${claimName} claim this instance matches users on. Ask your admin to set the identity claim to preferred_username, or to have the provider send ${claimName}.`,
+		tenant_not_allowed:
+			'Your organization (Microsoft Entra tenant) is not allowed to sign in here. Ask your admin to add it.',
+		unverified_email:
+			'Your identity provider says your email address is not verified. Verify it at the provider, or ask your admin to match users by preferred_username or to turn off the verified email requirement.',
+		identity_conflict:
+			'The user that matches your account here is already linked to a different identity provider account. Ask an admin to unlink it, then sign in again.',
+		expired: 'That sign-in took too long or was already used. Start it again.',
+		sso_disabled: 'SSO sign-in is turned off on this instance.'
+	});
+
+	// A same-origin path only, as the backend checks it too.
+	const next = $derived.by(() => {
+		const raw = params.get('next') ?? '/';
+		return raw.startsWith('/') && !raw.startsWith('//') && !raw.startsWith('/\\') ? raw : '/';
+	});
+	const ssoError = $derived(
+		params.get('sso') === 'error'
+			? (SSO_ERRORS[params.get('reason') ?? ''] ?? 'SSO sign-in failed.')
+			: null
+	);
+
+	let sso = $state<AuthStatus['sso']>(null);
+	$effect(() => {
+		getAuthStatus()
+			.then((status) => (sso = status.sso))
+			.catch(() => {
+				// best effort: the token form works without it
+			});
+	});
 
 	let token = $state('');
 	let busy = $state(false);
@@ -20,7 +72,7 @@
 		try {
 			const status = await getAuthStatus();
 			if (status.authenticated) {
-				await goto('/');
+				await goto(next);
 			} else {
 				clearToken();
 				error = 'That token was not accepted. Check the value and try again.';
@@ -49,6 +101,20 @@
 			>.
 		</p>
 	</div>
+
+	{#if ssoError}
+		<p class="text-sm" role="alert" style="color: var(--color-state-failed);">{ssoError}</p>
+	{/if}
+
+	{#if sso?.enabled}
+		<button
+			type="button"
+			onclick={() => startSsoSignIn(next)}
+			class="inline-flex items-center justify-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)]"
+		>
+			Sign in with {sso.label}
+		</button>
+	{/if}
 
 	<form
 		onsubmit={submit}

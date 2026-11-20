@@ -38,6 +38,7 @@ from starlette.types import Message, Receive, Scope, Send
 
 from app import usage
 from app.auth.middleware import enforce
+from app.auth.sign_in import BROWSER_HEADERS
 from app.db import get_engine
 from app.groups import registry
 from app.groups.hub import GroupHub, _Counting, group_server
@@ -197,8 +198,12 @@ class GroupDispatch:
         # which names the caller's address in URLs from this header (as the /s proxy
         # sets it). Replace any client-sent copy with the Host enforce() validated.
         # GROUP_HEADER tells it the request came through a bundle, so its prompts
-        # name tools with the slug prefix the bundle gives them.
-        ours = (ORIGINAL_HOST_HEADER.encode(), GROUP_HEADER.encode())
+        # name tools with the slug prefix the bundle gives them. A Sign-in session's
+        # cookie and CSRF header never reach a member.
+        ours = (
+            ORIGINAL_HOST_HEADER.encode(), GROUP_HEADER.encode(),
+            *(h.encode() for h in BROWSER_HEADERS),
+        )
         sub_scope["headers"] = [(k, v) for k, v in scope["headers"] if k not in ours] + [
             (ORIGINAL_HOST_HEADER.encode(), request.headers.get("host", "").encode("latin-1")),
             (GROUP_HEADER.encode(), name.encode()),

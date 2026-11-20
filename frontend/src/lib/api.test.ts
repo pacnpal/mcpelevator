@@ -94,3 +94,127 @@ describe('api request()', () => {
 		expect(lines).toEqual(['a', 'b']);
 	});
 });
+
+describe('Sign-in session CSRF header', () => {
+	beforeEach(() => {
+		localStorage.clear();
+		vi.resetModules(); // a fresh api.ts: no status fetched yet
+	});
+	afterEach(() => vi.unstubAllGlobals());
+
+	function respond(body: unknown) {
+		return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+	}
+
+	function headersOf(fetchMock: ReturnType<typeof vi.fn>, url: string): Record<string, string> {
+		const call = fetchMock.mock.calls.find(([u]) => u === url);
+		return (call?.[1] as RequestInit).headers as Record<string, string>;
+	}
+
+	it('waits for the first status, then sends X-MCPE-CSRF on request() and the log stream', async () => {
+		const api = await import('./api');
+		let releaseStatus: () => void = () => {};
+		const order: string[] = [];
+		const fetchMock = vi.fn((url: string) => {
+			order.push(url);
+			if (url === '/api/auth/status') {
+				return new Promise((resolve) => {
+					releaseStatus = () =>
+						resolve(
+							respond({ enforced: true, authenticated: true, user: null, sso: null, csrf: 'c5rf' })
+						);
+				});
+			}
+			if (url.endsWith('/logs')) {
+				const body = new ReadableStream<Uint8Array>({ start: (c) => c.close() });
+				return Promise.resolve({ ok: true, status: 200, body });
+			}
+			return Promise.resolve(respond({ status: 'ok', version: '1' }));
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		const health = api.getHealth();
+		await new Promise((r) => setTimeout(r, 0));
+		expect(order).toEqual(['/api/auth/status']); // health waits for status
+		releaseStatus();
+		await health;
+		await api.streamLogs('srv', { onLine: () => {}, onInfo: () => {} }, new AbortController().signal);
+
+		expect(headersOf(fetchMock, '/api/health')['x-mcpe-csrf']).toBe('c5rf');
+		expect(headersOf(fetchMock, '/api/servers/srv/logs')['x-mcpe-csrf']).toBe('c5rf');
+		expect(headersOf(fetchMock, '/api/auth/status')['x-mcpe-csrf']).toBeUndefined();
+	});
+
+	it('sends no CSRF header when status returned none', async () => {
+		const api = await import('./api');
+		const fetchMock = vi.fn(async (url: string) =>
+			url === '/api/auth/status'
+				? respond({ enforced: false, authenticated: false, user: null, sso: null, csrf: null })
+				: respond({ status: 'ok', version: '1' })
+		);
+		vi.stubGlobal('fetch', fetchMock);
+		await api.getHealth();
+		expect(headersOf(fetchMock, '/api/health')['x-mcpe-csrf']).toBeUndefined();
+	});
+
+	const session = { enforced: true, authenticated: true, user: null, sso: null, csrf: 'c5rf' };
+
+	it('fetches status again when the first status request failed', async () => {
+		const api = await import('./api');
+		let statusCalls = 0;
+		const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+			if (url === '/api/auth/status') {
+				statusCalls += 1;
+				if (statusCalls === 1) throw new TypeError('network down');
+				return respond(session);
+			}
+			return respond({ status: 'ok', version: '1' });
+		});
+		vi.stubGlobal('fetch', fetchMock);
+		await api.getHealth();
+		await api.getHealth();
+		expect(statusCalls).toBe(2);
+		expect((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).headers).toMatchObject({
+			'x-mcpe-csrf': 'c5rf'
+		});
+	});
+
+	it('logout with a stored login token still ends the session', async () => {
+		const api = await import('./api');
+		setToken('mcpe_login');
+		const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+			const auth = (init?.headers as Record<string, string>).authorization;
+			// The backend hands a CSRF value only to a request without a bearer header.
+			if (url === '/api/auth/status') return respond({ ...session, csrf: auth ? null : 'c5rf' });
+			return respond({ ok: true });
+		});
+		vi.stubGlobal('fetch', fetchMock);
+		await api.logout();
+		const headers = headersOf(fetchMock, '/api/auth/logout');
+		expect(headers.authorization).toBeUndefined();
+		expect(headers['x-mcpe-csrf']).toBe('c5rf');
+	});
+
+	it('a failed logout keeps the CSRF value and can be retried', async () => {
+		const api = await import('./api');
+		let logoutCalls = 0;
+		const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+			if (url === '/api/auth/status') return respond(session);
+			if (url === '/api/auth/logout') {
+				logoutCalls += 1;
+				if (logoutCalls === 1) throw new TypeError('network down');
+				return respond({ ok: true });
+			}
+			return respond({ status: 'ok', version: '1' });
+		});
+		vi.stubGlobal('fetch', fetchMock);
+		await api.getHealth();
+		await expect(api.logout()).rejects.toThrow();
+		await api.getHealth();
+		expect((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).headers).toMatchObject({
+			'x-mcpe-csrf': 'c5rf'
+		});
+		await api.logout();
+		expect(logoutCalls).toBe(2);
+	});
+});
