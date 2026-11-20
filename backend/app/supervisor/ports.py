@@ -1,8 +1,11 @@
 """Loopback port allocation for bridge-host processes.
 
-Ports are *runtime*, never identity: we allocate from a bounded range, OS-probe
-for freeness, and on collision the child fails fast and the reconciler retries.
-A hard cap (max_running) prevents port exhaustion / runaway process counts.
+Ports are *runtime*, never identity: we allocate from a bounded range and hand out
+the listening socket itself, which the unit passes to its bridge as an open file
+descriptor (issue #302). The port is held from the moment it is chosen until the
+unit releases it, so nothing else can bind it in between and a retry reuses the
+same socket. A hard cap (max_running) prevents port exhaustion / runaway process
+counts.
 """
 
 from __future__ import annotations
@@ -10,27 +13,35 @@ from __future__ import annotations
 import socket
 
 
+def listen(host: str, port: int) -> socket.socket:
+    """A TCP socket bound to ``host:port`` and listening; raises OSError when taken."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+        sock.listen()
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
 class PortAllocator:
-    def __init__(self, start: int, end: int):
+    def __init__(self, start: int, end: int, host: str = "127.0.0.1"):
         self.start = start
         self.end = end
+        self.host = host
         self._used: set[int] = set()
 
-    def _free_on_os(self, port: int) -> bool:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("127.0.0.1", port))
-                return True
-            except OSError:
-                return False
-
-    def allocate(self) -> int:
+    def allocate(self) -> socket.socket:
         for port in range(self.start, self.end):
             if port in self._used:
                 continue
-            if self._free_on_os(port):
-                self._used.add(port)
-                return port
+            try:
+                sock = listen(self.host, port)
+            except OSError:
+                continue
+            self._used.add(port)
+            return sock
         raise RuntimeError(f"no free port in range {self.start}-{self.end}")
 
     def release(self, port: int) -> None:

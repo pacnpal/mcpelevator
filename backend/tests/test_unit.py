@@ -599,3 +599,41 @@ async def test_failure_tail_hides_the_servers_secret_env_values(tmp_path, monkey
     assert len(failed) == 1
     assert "upstream said: <hidden>" in failed[0]
     assert "plain-secret-value-123" not in failed[0]
+
+
+async def test_a_port_taken_before_the_bridge_binds_never_fails_the_activation(
+    tmp_path, monkeypatch
+):
+    # Issue #302: another process grabs the allocated port in the moment before the
+    # bridge starts listening. The activation must still come up, on every attempt.
+    from app.supervisor import unit as unit_module
+    from app.supervisor.supervisor import Supervisor
+
+    monkeypatch.setattr(
+        unit_module, "get_settings", lambda: _settings(tmp_path, start_timeout_s=60)
+    )
+    squatters: list[socket.socket] = []
+    launch = ServerUnit._launch_bridge
+
+    async def launch_after_a_squatter(self, attempt, max_attempts):
+        squatter = socket.socket()
+        try:
+            squatter.bind((self.host, self.port))
+            squatter.listen()
+            squatters.append(squatter)
+        except OSError:
+            squatter.close()
+        await launch(self, attempt, max_attempts)
+
+    monkeypatch.setattr(ServerUnit, "_launch_bridge", launch_after_a_squatter)
+    server = _server(tmp_path, setup_script="")
+    sup = Supervisor()
+    await sup._start(server)
+    unit = sup.units[server.id]
+    try:
+        await wait_for_unit(unit, lambda: unit.state == "running")
+        assert sup.endpoint(server.slug) == (unit.host, unit.port)
+    finally:
+        await unit.stop()
+        for squatter in squatters:
+            squatter.close()

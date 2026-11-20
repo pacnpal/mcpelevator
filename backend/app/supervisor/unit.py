@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -39,6 +40,7 @@ from app.runners.base import ProcessSpec
 from app.runners.docker import DOCKER_BIN, server_label
 from app.supervisor.hints import startup_hint
 from app.supervisor.logbuffer import LogBuffer
+from app.supervisor.ports import listen
 
 
 logger = logging.getLogger(__name__)
@@ -234,6 +236,10 @@ class ServerUnit:
 
         self.host = get_settings().bridge_host
         self.port: Optional[int] = None
+        # The listening socket behind ``port``, held for the whole activation and handed
+        # to each attempt's bridge as an open fd, so the port can't be taken between
+        # attempts or before a bridge starts (issue #302).
+        self._listener: Optional[socket.socket] = None
         self.proc: Optional[asyncio.subprocess.Process] = None
         self.setup_proc: Optional[asyncio.subprocess.Process] = None
         self.state = "stopped"
@@ -257,11 +263,20 @@ class ServerUnit:
         self._on_state_change = on_state_change
         self._release_port_callback = release_port
 
-    async def start(self, port: int, *, activation_started_at: Optional[datetime] = None) -> None:
+    async def start(
+        self,
+        port: int,
+        *,
+        sock: Optional[socket.socket] = None,
+        activation_started_at: Optional[datetime] = None,
+    ) -> None:
+        """Start an activation on ``port``. ``sock`` is the socket already listening on
+        it (the supervisor's allocator holds one); without it the unit binds the port."""
         if self._activation_task is not None and not self._activation_task.done():
             return
         settings = get_settings()
         max_attempts = max(1, int(settings.restart_budget))
+        self._listener = sock if sock is not None else listen(self.host, port)
         self.port = port
         self._port_released = False
         self._stopping = False
@@ -577,7 +592,7 @@ class ServerUnit:
 
     async def _launch_bridge(self, attempt: int, max_attempts: int) -> None:
         settings = get_settings()
-        assert self.port is not None
+        assert self.port is not None and self._listener is not None
         self._set_status("bridge", attempt=attempt, max_attempts=max_attempts)
         self.logs.append(f"[mcpelevator] attempt {attempt}/{max_attempts}: bridge")
         payload = self._bridge_payload()
@@ -594,6 +609,7 @@ class ServerUnit:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
+                pass_fds=(self._listener.fileno(),),
             )
         except (OSError, ValueError) as exc:
             raise _AttemptFailed(f"bridge could not start: {exc}") from exc
@@ -1054,6 +1070,8 @@ class ServerUnit:
             "MCPE_DATA_DIR": str(settings.data_dir.resolve()),
             "PYTHONPATH": str(settings.backend_root),
         }
+        if self._listener is not None:
+            env["MCPE_BRIDGE_FD"] = str(self._listener.fileno())
         # Never inherited: only a unit with a cache hands the bridge one.
         env.pop(server_cache.BRIDGE_ENV_KEY, None)
         if self.cache_dir is not None:
@@ -1121,6 +1139,9 @@ class ServerUnit:
         port = self.port
         self.port = None
         self._port_released = True
+        if self._listener is not None:
+            self._listener.close()
+            self._listener = None
         if port is not None and self._release_port_callback is not None:
             self._release_port_callback(port)
 
