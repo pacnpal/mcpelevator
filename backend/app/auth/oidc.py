@@ -126,6 +126,8 @@ IDENTITY_CONFLICT = "identity_conflict"  # the matched User is linked to another
 NOT_ALLOWED = "not_allowed"  # in none of oidc_allowed_groups
 GROUPS_OVERAGE = "groups_overage"  # Entra left the groups out (too many): can't tell
 DOMAIN_NOT_ALLOWED = "domain_not_allowed"  # no verified email domain or hd in the list
+# The groups would demote the last admin login: the role stays, the sign-in is refused
+LAST_ADMIN_DEMOTED = "last_admin_demoted"
 
 _JWT_LEEWAY_S = 60
 # Asymmetric only. EdDSA is Ed25519 (Pocket ID, Zitadel, Forgejo, Keycloak). RFC 9864's
@@ -220,13 +222,16 @@ async def begin(session: Session) -> dict[str, Any]:
 
 async def finish(
     session: Session, *, code: str, verifier: str, nonce: str, redirect_uri: str,
-    iss: str | None, provider: list[Any],
+    iss: str | None, bound: list[Any],
 ) -> tuple[User, str]:
     """Exchange ``code``, validate the ID token, and match the person to a User, linking
-    the Linked identity and syncing provider groups, written only while the provider
-    settings are still ``provider`` (``settings.sign_in_provider`` as the login began).
-    Returns the user and the raw ID token. Raises ``SignInFailed``."""
+    the Linked identity and syncing provider groups. Every decision uses one settings
+    snapshot, the one the login began with (``bound``, ``settings.sign_in_settings``),
+    and nothing is written unless it still holds under the write lock. Returns the
+    user and the raw ID token. Raises ``SignInFailed``."""
     values = runtime_settings.read_all(session)
+    if [values[key] for key in runtime_settings.SIGN_IN_KEYS] != bound:
+        raise SignInFailed(EXPIRED, "the SSO settings changed since this login began")
     discovery = await begin(session)
     issuer = discovery["issuer"]
     if iss is not None and _concrete_issuer(issuer, iss) is None:  # RFC 9207: a mix-up
@@ -253,7 +258,8 @@ async def finish(
         )
     groups = _gate(values, claims)
     # Threadpool: the config write lock is a threading lock, never waited for on the loop.
-    return await run_in_threadpool(_link, session, claims, claim, groups, provider), id_token
+    linked = await run_in_threadpool(_link, session, claims, values, groups, bound)
+    return linked, id_token
 
 
 def _gate(values: dict[str, Any], claims: dict[str, Any]) -> set[str]:
@@ -303,52 +309,56 @@ def _groups(claims: dict[str, Any], name: str) -> set[str]:
 
 
 def _link(
-    session: Session, claims: dict[str, Any], claim: str, groups: set[str], provider: list[Any]
+    session: Session, claims: dict[str, Any], values: dict[str, Any], groups: set[str],
+    bound: list[Any],
 ) -> User:
     """``_match``, the group sync and the provider recheck as ONE transaction under the
     config write lock, so they are one step against other sign-ins, an admin's unlink
     and the last-admin guard. The link and sync are flushed first, which takes the
-    database write lock a settings write also needs; then the provider settings are
-    read again, and only if they are still ``provider`` does anything commit. A writer
+    database write lock a settings write also needs; then the sign-in settings are
+    read again, and only if they are still ``bound`` (the snapshot ``values`` came
+    from) does anything commit. A demotion the last-admin guard blocks refuses the
+    sign-in and writes nothing: the role stays, so the guard holds. A writer
     outside the config lock (another instance on this database) can still link the
     pair first: the unique index refuses ours, and the pair is resolved again."""
     with service.config_write_lock():
         session.expire_all()  # see what committed while we waited
         try:
-            user = _match(session, claims, claims["iss"], claim)
+            user = _match(session, claims, claims["iss"], values["oidc_identity_claim"])
         except IntegrityError:
             session.rollback()
             user = _holder(session, claims["iss"], str(claims["sub"]))
             if user is None:  # couldn't tell who this is: fail closed
                 raise SignInFailed(IDENTITY_CONFLICT, "the link write lost a race") from None
-        user = _sync(session, user, groups)
+        name = user.name
+        synced = _sync(session, user, groups, values)
         session.expire_all()  # the settings as committed, not as this session cached them
-        if runtime_settings.sign_in_provider(session) != provider:
+        if runtime_settings.sign_in_settings(session) != bound:
             session.rollback()
             raise SignInFailed(EXPIRED, "the SSO settings changed while this login finished")
+        if isinstance(synced, str):  # "last_admin"; the callback logs the one warning
+            session.rollback()
+            raise SignInFailed(
+                LAST_ADMIN_DEMOTED,
+                f"the groups would demote {name!r}, the last admin login: the role stays admin",
+            )
+        user = synced
         session.commit()
         session.refresh(user)  # the pair as linked, before anything else can change it
         return user
 
 
-def _sync(session: Session, user: User, groups: set[str]) -> User:
-    """Set the fields provider groups manage, through the same mutation PATCH /users
-    uses (so a demotion sweeps the admin-only tokens), flushed for ``_link`` to commit.
-    A demotion that would leave no admin login is skipped with a warning; the sign-in
-    still succeeds."""
-    values = runtime_settings.read_all(session)
+def _sync(session: Session, user: User, groups: set[str], values: dict[str, Any]) -> User | str:
+    """Set the fields provider groups manage under ``values``, through the same
+    mutation PATCH /users uses (so a demotion sweeps the admin-only tokens), flushed
+    for ``_link`` to commit. Returns "last_admin" when the demotion would leave no
+    admin login."""
     admin_groups, runner_groups = values["oidc_admin_groups"], values["oidc_local_runner_groups"]
     role = ("admin" if groups.intersection(admin_groups) else "member") if admin_groups else None
     runners = bool(groups.intersection(runner_groups)) if runner_groups else None
     if role is None and runners is None:
         return user
-    result = change_user(session, user, role=role, local_runners=runners, commit=False)
-    if result == "last_admin":
-        logger.warning(
-            "SSO groups would demote %r, the last admin login: the role stays admin", user.name
-        )
-        result = change_user(session, user, local_runners=runners, commit=False)
-    return result
+    return change_user(session, user, role=role, local_runners=runners, commit=False)
 
 
 def _holder(session: Session, issuer: str, subject: str) -> User | None:

@@ -183,7 +183,8 @@ def build(app: FastAPI) -> "_Gate":
         the local-runner permission), and oidc_allowed_domains (non-empty: the domain of
         an email whose email_verified is true, or Google's hd claim, must be listed). An empty list
         leaves its field manual; a non-empty admin or local-runner list locks that field
-        against update_user. A demotion that would leave no admin login is skipped. While
+        against update_user. A demotion that would leave no admin login refuses that SSO
+        sign-in (last_admin_demoted) and keeps the role. While
         a group list is set, an Entra groups overage refuses the sign-in. The "groups" scope is requested when
         a group list is set and the provider advertises it. While
         enabled, any oidc_* change fetches the discovery document first and is

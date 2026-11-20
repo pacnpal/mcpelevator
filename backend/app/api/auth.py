@@ -141,7 +141,7 @@ async def oidc_login(
     # callback, the login is refused as expired.
     flow = {"state": state, "nonce": nonce, "verifier": verifier, "next": target,
             "exp": time.time() + _FLOW_TTL_S,
-            "provider": runtime_settings.sign_in_provider(session)}
+            "settings": runtime_settings.sign_in_settings(session)}
     resp.set_cookie(
         _flow_cookie(state), sealed.seal(json.dumps(flow)), max_age=_FLOW_TTL_S,
         path=_FLOW_PATH, secure=sign_in.https(request), httponly=True,
@@ -187,7 +187,7 @@ async def oidc_callback(
         return _sso_error(oidc.PROVIDER_REJECTED, "callback carried no code", state)
 
     def same_provider(s: Session) -> bool:
-        return flow.get("provider") == runtime_settings.sign_in_provider(s)
+        return flow.get("settings") == runtime_settings.sign_in_settings(s)
 
     if not same_provider(session):
         return _sso_error(oidc.EXPIRED, "the SSO settings changed since this login began", state)
@@ -195,7 +195,7 @@ async def oidc_callback(
     try:
         user, id_token = await oidc.finish(
             session, code=code, verifier=flow["verifier"], nonce=flow["nonce"],
-            redirect_uri=redirect_uri, iss=iss, provider=flow.get("provider"),
+            redirect_uri=redirect_uri, iss=iss, bound=flow.get("settings"),
         )
     except oidc.SignInFailed as exc:
         return _sso_error(exc.reason, str(exc), state, exc.claim)

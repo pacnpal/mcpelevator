@@ -215,20 +215,55 @@ def test_an_empty_list_leaves_the_field_manual(idp):
     assert _role(uid) == ("admin", True)
 
 
-def test_demoting_the_last_admin_is_skipped_with_a_warning(idp, caplog):
-    uid = _ada(role="admin")
-    with Session(get_engine()) as s:  # her login token is the only admin credential
+def _login_token(uid: str) -> None:
+    with Session(get_engine()) as s:
         repo.create_token(s, Token(
             id=new_id(), name="login", token_hash=hash_token(new_token()), prefix="x",
             scope="control", user_id=uid,
         ))
+
+
+def test_the_last_admin_removed_from_the_admin_groups_is_refused(idp, caplog):
+    uid = _ada(role="admin")
+    _login_token(uid)  # her login token is the only admin credential: kept for recovery
     idp.claims = {"email": "ada@example.com", "groups": ["builders"]}
-    _settings(oidc_admin_groups=["admins"], oidc_local_runner_groups=["builders"])
+    _settings(oidc_admin_groups=["admins"])
     with TestClient(app) as client, caplog.at_level(logging.WARNING, logger="app"):
-        assert _signed_in(_sign_in(client, idp))
-    assert _role(uid) == ("admin", True)
+        assert _reason(_sign_in(client, idp)) == "last_admin_demoted"
+    assert _role(uid)[0] == "admin"
+    assert _sessions() == 0
+    assert _linked_issuer("ada@example.com") is None
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1 and "last admin" in warnings[0].getMessage()
+
+
+def test_with_a_second_admin_login_the_demotion_applies(idp):
+    uid = _ada(role="admin")
+    _login_token(uid)
+    _login_token(_user("grace", role="admin"))
+    idp.claims = {"email": "ada@example.com", "groups": ["builders"]}
+    _settings(oidc_admin_groups=["admins"])
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+    assert _role(uid)[0] == "member"
+    assert _sessions() == 1
+
+
+def test_a_groups_claim_change_while_the_provider_answers_promotes_no_one(idp):
+    uid = _ada()
+    idp.claims = {"email": "ada@example.com", "groups": ["admins"], "app_roles": ["staff"]}
+    _settings(oidc_admin_groups=["admins"])
+    answer = idp._token
+
+    def slow_token(request):  # the admin points the mapping at another claim meanwhile
+        _settings(oidc_groups_claim="app_roles")
+        return answer(request)
+
+    idp._token = slow_token
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "expired"
+    assert _role(uid)[0] == "member"
+    assert _sessions() == 0
 
 
 def test_a_provider_change_while_the_provider_answers_writes_no_groups_or_link(idp):

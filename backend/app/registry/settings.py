@@ -151,6 +151,14 @@ _DOMAIN = re.compile(r"(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0
 # The settings that say which provider signs people in. Changing one ends every Sign-in
 # session, and a login started under other values can't finish.
 SESSION_ENDING_KEYS = ("oidc_enabled", "oidc_discovery_url", "oidc_client_id")
+# Every setting an SSO callback decides with. A login is bound to their values as it
+# began: a change to any of them before it finishes refuses it (expired), so one
+# sign-in never mixes two snapshots.
+SIGN_IN_KEYS = SESSION_ENDING_KEYS + (
+    "oidc_identity_claim", "oidc_require_verified_email", "oidc_allowed_tenants",
+    "oidc_groups_claim", "oidc_allowed_groups", "oidc_admin_groups",
+    "oidc_local_runner_groups", "oidc_allowed_domains",
+)
 
 
 # Group names are the routing key in /g/<name>/mcp, so they must be URL-safe: lowercase
@@ -376,9 +384,9 @@ def ends_sign_in_sessions(session: Session, changes: dict[str, Any]) -> bool:
     )
 
 
-def sign_in_provider(session: Session) -> list[Any]:
-    """The current values of ``SESSION_ENDING_KEYS``: a login is bound to them."""
-    return [repo.setting_get(session, key, DEFAULTS[key]) for key in SESSION_ENDING_KEYS]
+def sign_in_settings(session: Session) -> list[Any]:
+    """The current values of ``SIGN_IN_KEYS``: a login is bound to them."""
+    return [repo.setting_get(session, key, DEFAULTS[key]) for key in SIGN_IN_KEYS]
 
 
 def bind_mode(session: Session) -> str:
