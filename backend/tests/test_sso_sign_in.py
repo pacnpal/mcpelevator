@@ -1151,6 +1151,34 @@ def test_an_unlink_while_a_sign_in_finishes_leaves_no_session(idp, monkeypatch):
     assert _sessions() == 0
 
 
+def test_an_unlink_after_the_link_commits_leaves_no_session(idp, monkeypatch):
+    # Another instance's unlink lands between _link's commit and its refresh: the
+    # refreshed row holds no pair, which must not pass as the validated one (#291).
+    uid = _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    real_commit = Session.commit
+    unlinked = []
+
+    def commit_then_unlink(self):
+        real_commit(self)
+        if unlinked:
+            return
+        with Session(get_engine()) as s:
+            user = s.get(User, uid)
+            if user is None or user.oidc_subject is None:
+                return
+            unlinked.append(True)
+            user.oidc_issuer = user.oidc_subject = None
+            s.add(user)
+            real_commit(s)
+
+    monkeypatch.setattr(Session, "commit", commit_then_unlink)
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "expired"
+    assert unlinked
+    assert _sessions() == 0
+
+
 def test_a_deactivation_while_a_sign_in_finishes_leaves_no_session(idp, monkeypatch):
     uid = _user("ada@example.com")
     idp.claims = {"email": "ada@example.com"}

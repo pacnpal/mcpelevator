@@ -114,21 +114,21 @@ def change_user(
 ) -> User | str:
     """The one user mutation, shared by ``PATCH /users`` and the SSO group sync. The
     caller holds the config write lock. Fields left None stay. Returns the saved user,
-    or "last_admin" (nothing written) when a demotion or deactivation would leave no
-    admin login. ``commit=False`` only flushes, so the caller commits it with its
-    other writes.
+    or "last_admin" (the transaction rolled back) when a demotion or deactivation would
+    leave no admin login. ``commit=False`` only flushes, so the caller commits it with
+    its other writes.
+
+    The last-admin count runs after the change is flushed, inside the same database
+    write transaction: the config lock is process-local, the database write lock is
+    not, so a second writer on this database can't interleave (#291).
 
     Deactivating ends the user's Sign-in sessions and revokes every token they hold,
     in the same transaction as the flag. Their servers stay theirs. Reactivating only
     sets the flag: revoked tokens stay revoked."""
-    if active is False and user.active and user.role == "admin":
-        if not _admin_login_would_remain(session, excluding_user_id=user.id):
-            return "last_admin"
+    loses_admin = user.role == "admin" and (
+        (role is not None and role != user.role) or (active is False and user.active)
+    )
     if role is not None and role != user.role:
-        if user.role == "admin" and not _admin_login_would_remain(
-            session, excluding_user_id=user.id
-        ):
-            return "last_admin"
         if user.role == "admin" and role == "member":
             # Demotion revokes the data-plane tokens the user could only mint AS an
             # admin ("all", group scopes, and scopes for servers they don't own),
@@ -138,7 +138,7 @@ def change_user(
             # admin-grade credentials. Login (control) tokens stay: they simply
             # resolve to the member role from now on.
             repo.delete_tokens_by_ids(
-                session, _overprivileged_token_ids(session, user.id), commit=commit
+                session, _overprivileged_token_ids(session, user.id), commit=False
             )
         user.role = role
     if name is not None:
@@ -151,7 +151,14 @@ def change_user(
         repo.revoke_user_credentials(session, user.id)
     if active is not None:
         user.active = active
-    return repo.save_user(session, user, commit=commit)
+    repo.save_user(session, user, commit=False)
+    if loses_admin and not _admin_login_would_remain(session, excluding_user_id=user.id):
+        session.rollback()
+        return "last_admin"
+    if commit:
+        session.commit()
+        session.refresh(user)
+    return user
 
 
 @router.get("/users", response_model=list[UserInfo])
@@ -291,7 +298,15 @@ async def delete_user(
             owned = repo.count_servers_owned(session, user_id)
             if owned:
                 return owned
-            repo.delete_user_and_tokens(session, user_id)
+            repo.delete_user_and_tokens(session, user_id, commit=False)
+            # Counted again inside the delete's write transaction (#291): the check
+            # above only orders the refusals, the database decides.
+            if user.role == "admin" and not _admin_login_would_remain(
+                session, excluding_user_id=user_id
+            ):
+                session.rollback()
+                return "last_admin"
+            session.commit()
             return "ok"
 
     # Threadpool: the lock is a threading lock shared with imports deriving scrypt
