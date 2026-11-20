@@ -18,8 +18,10 @@ Provider quirks, one setting each: ``alg`` (``RS256``, ``EdDSA``, or ``HS256`` s
 from the ID token's ``iss``, e.g. Entra's ``{tenantid}`` template), ``jwks_issuer`` (an
 ``issuer`` field on every JWKS key, as Entra serves), ``client_secret`` (None = a public
 client: the token endpoint wants ``client_id`` in the body and no client authentication)
-and ``auth_methods`` (the advertised ``token_endpoint_auth_methods_supported``, enforced).
-``last_authorize`` holds the last authorization request's query.
+and ``auth_methods`` (the advertised ``token_endpoint_auth_methods_supported``, enforced),
+``end_session`` (discovery advertises an ``end_session_endpoint``).
+``last_authorize`` holds the last authorization request's query; ``seen`` the path of every
+request the app made to the provider.
 """
 
 from __future__ import annotations
@@ -58,7 +60,9 @@ class FakeIdP:
         self.jwks_issuer: str | None = None
         self.client_secret: str | None = None
         self.auth_methods: list[str] | None = None
+        self.end_session = False
         self.last_authorize: dict[str, str] = {}
+        self.seen: list[str] = []
         self._codes: dict[str, dict[str, Any]] = {}
         self._keys: list[tuple[str, Any]] = []
         self.rotate_key()
@@ -109,6 +113,7 @@ class FakeIdP:
     # ---- the back channel ---------------------------------------------------
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.seen.append(request.url.path)
         if self.down:
             return httpx.Response(503)
         path = request.url.path
@@ -123,6 +128,8 @@ class FakeIdP:
                 doc["userinfo_endpoint"] = f"{self.issuer}/userinfo"
             if self.auth_methods is not None:
                 doc["token_endpoint_auth_methods_supported"] = self.auth_methods
+            if self.end_session:
+                doc["end_session_endpoint"] = f"{self.issuer}/logout"
             return httpx.Response(200, json=doc)
         if path == "/jwks":
             keys = []
