@@ -225,9 +225,15 @@ async def logout(request: Request, session: Session = Depends(get_session)) -> J
     """End the Sign-in session this browser's cookie names (locally) and clear the
     cookie. An ``Authorization`` header doesn't stop it, and neither does a missing CSRF
     header (``sign_in.end`` says why). If the delete fails this raises, so success
-    always means the row is gone. A Login token is the SPA's to forget."""
-    sign_in.end(request, session)
-    resp = JSONResponse({"ok": True})
+    always means the row is gone. A Login token is the SPA's to forget.
+
+    Then, for a session that existed, ``provider_logout_url`` is where the SPA sends the
+    browser to end the provider session too (None: ends here only, see ``oidc.logout_url``)."""
+    id_token = sign_in.end(request, session)
+    url = None if id_token is None else oidc.logout_url(
+        session, id_token=id_token, post_logout_redirect_uri=f"{oauth_public_base(request)}/login"
+    )
+    resp = JSONResponse({"ok": True, "provider_logout_url": url})
     sign_in.clear_cookie(resp)
     return resp
 

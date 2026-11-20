@@ -18,9 +18,10 @@ Provider quirks, one setting each: ``alg`` (``RS256``, ``EdDSA``, or ``HS256`` s
 from the ID token's ``iss``, e.g. Entra's ``{tenantid}`` template), ``jwks_issuer`` (an
 ``issuer`` field on every JWKS key, as Entra serves), ``client_secret`` (None = a public
 client: the token endpoint wants ``client_id`` in the body and no client authentication)
-and ``auth_methods`` (the advertised ``token_endpoint_auth_methods_supported``, enforced).
-``scopes_supported`` (advertised in discovery when set). ``last_authorize`` holds the
-last authorization request's query.
+``auth_methods`` (the advertised ``token_endpoint_auth_methods_supported``, enforced),
+``scopes_supported`` (advertised in discovery when set) and ``end_session`` (discovery advertises an ``end_session_endpoint``).
+``last_authorize`` holds the last authorization request's query; ``seen`` the path of every
+request the app made to the provider.
 """
 
 from __future__ import annotations
@@ -60,7 +61,9 @@ class FakeIdP:
         self.client_secret: str | None = None
         self.auth_methods: list[str] | None = None
         self.scopes_supported: list[str] | None = None
+        self.end_session = False
         self.last_authorize: dict[str, str] = {}
+        self.seen: list[str] = []
         self._codes: dict[str, dict[str, Any]] = {}
         self._keys: list[tuple[str, Any]] = []
         self.rotate_key()
@@ -111,6 +114,7 @@ class FakeIdP:
     # ---- the back channel ---------------------------------------------------
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.seen.append(request.url.path)
         if self.down:
             return httpx.Response(503)
         path = request.url.path
@@ -127,6 +131,8 @@ class FakeIdP:
                 doc["token_endpoint_auth_methods_supported"] = self.auth_methods
             if self.scopes_supported is not None:
                 doc["scopes_supported"] = self.scopes_supported
+            if self.end_session:
+                doc["end_session_endpoint"] = f"{self.issuer}/logout"
             return httpx.Response(200, json=doc)
         if path == "/jwks":
             keys = []

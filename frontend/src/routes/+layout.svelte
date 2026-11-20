@@ -64,14 +64,15 @@
 	async function logout() {
 		clearToken();
 		try {
-			await endSession(); // ends a Sign-in session, if this browser holds one
+			// Ends a Sign-in session, if this browser holds one, then leaves for the
+			// provider's logout page or /login.
+			await endSession();
 		} catch (err) {
 			// The session may still be live: stay put, with "Log out" there to retry.
 			flashToast(`Log out failed: ${errorMessage(err)}. Try again.`);
 			return;
 		}
 		loggedIn = false;
-		goto('/login');
 	}
 </script>
 
