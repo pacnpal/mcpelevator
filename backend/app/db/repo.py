@@ -588,6 +588,21 @@ def list_users(session: Session) -> list[User]:
     return list(session.exec(select(User).order_by(User.created_at)).all())
 
 
+def users_named(session: Session, name: str) -> list[User]:
+    """Every User whose name is ``name``, trimmed and case-insensitively: the one name
+    rule SSO sign-in (``oidc._match``) and Cloudflare Access share. Reads only."""
+    wanted = name.strip().casefold()
+    return [u for u in list_users(session) if u.name.strip().casefold() == wanted]
+
+
+def match_user_by_name(session: Session, name: str) -> Optional[User]:
+    """The one active User named ``name`` (``users_named``), else None. User names
+    aren't unique, so two matches is no match: guessing could hand a member an admin's
+    identity. A Deactivated user never matches. Reads only, never links."""
+    matches = users_named(session, name)
+    return matches[0] if len(matches) == 1 and matches[0].active else None
+
+
 def save_user(session: Session, user: User, *, commit: bool = True) -> User:
     """``commit=False`` only flushes, for a caller that commits several writes as one."""
     user.updated_at = utcnow()

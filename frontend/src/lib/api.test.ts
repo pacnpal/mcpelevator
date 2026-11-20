@@ -299,6 +299,34 @@ describe('Sign-in session CSRF header', () => {
 		expect(goto).toHaveBeenCalledWith('/login');
 	});
 
+	const statusFailures = {
+		'a network error': () => Promise.reject(new TypeError('network down')),
+		'a 503': () =>
+			Promise.resolve({ ok: false, status: 503, json: async () => ({}), text: async () => '' })
+	};
+	for (const [name, fail] of Object.entries(statusFailures)) {
+		it(`status failing with ${name} during the retry keeps the token and stays put`, async () => {
+			const api = await import('./api');
+			vi.mocked(goto).mockClear();
+			setToken('mcpe_login');
+			let statusCalls = 0;
+			const order: string[] = [];
+			vi.stubGlobal(
+				'fetch',
+				vi.fn(async (url: string) => {
+					order.push(url);
+					if (url !== '/api/auth/status') return unauthorized();
+					statusCalls += 1;
+					return statusCalls === 1 ? respond(session) : fail(); // the retry's status fails
+				})
+			);
+			await expect(api.listServers()).rejects.toMatchObject({ status: 401 });
+			expect(order).toEqual(['/api/auth/status', '/api/servers', '/api/auth/status']);
+			expect(getToken()).toBe('mcpe_login');
+			expect(goto).not.toHaveBeenCalled();
+		});
+	}
+
 	// The raw fetches that don't return JSON take the same refresh path as request().
 	const rawCalls = {
 		downloadMcpb: {

@@ -33,6 +33,7 @@
 </script>
 
 <span
+	title={!startupStatus && state === 'idle' ? 'Idle: wakes on the next request' : undefined}
 	class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium tracking-wide"
 	style="color: {meta.color}; border-color: color-mix(in oklab, {meta.color} 35%, transparent); background-color: color-mix(in oklab, {meta.color} 12%, transparent);"
 >

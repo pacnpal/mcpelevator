@@ -1783,11 +1783,11 @@
 			<fieldset class="flex flex-col gap-2 border-0 p-0">
 				<legend class="text-sm font-medium text-[var(--color-ink)]">Idle shutdown</legend>
 				<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
-					Stop a running server after this many seconds without traffic; the next request
-					wakes it automatically (the proxy holds the request while it starts). Saves memory
-					when many servers are registered but only a few are in use.
-					<code class="font-mono text-[var(--color-ink-muted)]">0</code> turns idling off.
-					Each server can override this in its own settings.
+					<code class="font-mono text-[var(--color-ink-muted)]">0</code> (the default) keeps
+					every server running. Above 0, a server with no traffic for that many seconds stops,
+					and the next request wakes it, at the cost of a cold start and anything it held in
+					memory. Each server can override this in its own settings, where
+					<code class="font-mono text-[var(--color-ink-muted)]">0</code> means never idle.
 				</p>
 				<form class="flex items-center gap-2" onsubmit={saveIdleTimeout}>
 					<input
@@ -2449,7 +2449,8 @@
 					<input
 						type="number"
 						min="300"
-						step="60"
+						max="2592000"
+						step="1"
 						bind:value={oidcSessionMaxAge}
 						disabled={savingField !== null}
 						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"

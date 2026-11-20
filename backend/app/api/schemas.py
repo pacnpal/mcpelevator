@@ -675,7 +675,7 @@ class SettingsUpdate(BaseModel):
     oidc_allowed_domains: Optional[list[str]] = None
     # On: a sign-in that matches no user creates one (a Member, local runners off).
     oidc_provisioning: Optional[StrictBool] = None
-    # Hard cap on a Sign-in session in seconds (≥ 300). StrictInt like idle_timeout_s.
+    # Hard cap on a Sign-in session in seconds (300 to 2592000). StrictInt like idle_timeout_s.
     oidc_session_max_age_s: Optional[StrictInt] = None
 
 

@@ -7,7 +7,7 @@ mcpelevator token, so this is how the control plane learns who they are.
 
 Opt-in: both ``MCPE_CF_ACCESS_TEAM_DOMAIN`` and ``MCPE_CF_ACCESS_AUD`` must be set.
 The assertion is checked against the team's signing keys, issuer and AUD tag, and
-its email is matched (case-insensitively) to a user's name. No match, no identity.
+its email is matched to a user's name by the rule SSO sign-in uses. No match, no identity.
 
 Trust stays narrow. The edge attaches the assertion to every request, browser ones
 included, so accepting it on all of ``/api`` would make the SPA's routes forgeable
@@ -99,18 +99,15 @@ def email(request: Request) -> Optional[str]:
 
 
 def user(session: Session, request: Request) -> Optional[User]:
-    """The user whose name is the request's verified Cloudflare Access email. User
-    names aren't unique, so two matches is no match: guessing could hand a member an
-    admin's identity. A Deactivated user is no match either."""
+    """The one active User named the request's verified Cloudflare Access email, by
+    the rule SSO sign-in uses (``repo.match_user_by_name``). Read-only: it never
+    creates, links or replaces a Linked identity, and a User's Linked identity (the
+    OIDC issuer's) doesn't stop a name match here."""
     address = email(request)
     if address is None:
         return None
-    matches = [u for u in repo.list_users(session) if u.name.strip().lower() == address]
-    if len(matches) != 1:
-        logger.info("Cloudflare Access signed in %s, but %d users have that name",
-                    address, len(matches))
-        return None
-    if not matches[0].active:
-        logger.info("Cloudflare Access signed in %s, a deactivated user", address)
-        return None
-    return matches[0]
+    match = repo.match_user_by_name(session, address)
+    if match is None:
+        logger.info("Cloudflare Access signed in %s, but no single active user has that name",
+                    address)
+    return match
