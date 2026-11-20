@@ -579,6 +579,8 @@ export interface SettingsInfo {
 	oauth_allowed_subjects: string[];
 	/** Also accept local mcpe_ bearer tokens on OAuth-protected endpoints. */
 	oauth_accept_bearer: boolean;
+	/** What a provider token that resolves to a Member reaches: own servers plus the allowlist, or own servers only. */
+	oauth_member_access: 'additive' | 'owner_only';
 	/** Scopes advertised in RFC 9728 protected-resource metadata. */
 	oauth_scopes: string[];
 	/** Default idle quiescence in seconds for servers set to inherit (0 = off). */

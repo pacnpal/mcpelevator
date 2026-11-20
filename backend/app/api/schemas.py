@@ -598,6 +598,7 @@ class SettingsInfo(BaseModel):
     oauth_audience: str = ""
     oauth_allowed_subjects: list[str] = []
     oauth_accept_bearer: bool = False
+    oauth_member_access: str = "additive"
     oauth_scopes: list[str] = []
     # Default idle quiescence for servers whose idle_timeout_s is unset (0 = off).
     idle_timeout_s: int = 0
@@ -637,6 +638,8 @@ class SettingsUpdate(BaseModel):
     oauth_audience: Optional[str] = None
     oauth_allowed_subjects: Optional[list[str]] = None
     oauth_accept_bearer: Optional[StrictBool] = None
+    # A plain str so the settings writer's check answers a bad value with a 400.
+    oauth_member_access: Optional[str] = None
     oauth_scopes: Optional[list[str]] = None
     # StrictBool, not bool: Optional[bool] would coerce "yes"/"true"/1 to True at the
     # API boundary, so the registry's isinstance(bool) invariant would never fire for an

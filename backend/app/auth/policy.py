@@ -16,6 +16,12 @@ The rules (deterministic, documented once here):
   for servers they own — not ``all``, not ``control``, not ``group:*`` (groups
   are a global, admin-owned surface).
 - **Token visibility**: an admin sees every token; a member sees only their own.
+- **``oauth`` servers**: a provider access token that resolves to an admin passes,
+  and one that resolves to the server's owner passes. A resolved member on someone
+  else's server is refused under ``oauth_member_access`` ``owner_only`` even when the
+  allowlist names them; under ``additive`` they follow the allowlist. A token that
+  resolves to no one follows the allowlist in both modes. A group has no owner, so
+  under ``owner_only`` a member is refused on every ``oauth`` group.
 """
 
 from __future__ import annotations
@@ -53,6 +59,21 @@ def require_visible_server(principal: Principal, server: Optional[Server]) -> Se
     if server is None or not can_view_server(principal, server):
         raise HTTPException(status_code=404, detail="server not found")
     return server
+
+
+def oauth_refusal(
+    caller: Optional[Principal], server: Server, *, allowlisted: bool, owner_only: bool
+) -> Optional[str]:
+    """Why a verified provider access token may NOT reach this ``oauth`` server or group
+    (None = allowed). ``caller`` is who the token resolves to (None = no one);
+    ``allowlisted`` is whether ``oauth_allowed_subjects`` lets its claims in."""
+    if caller is not None and can_view_server(caller, server):
+        return None
+    if caller is not None and owner_only:
+        if server.id.startswith("group:"):
+            return "oauth_member_access is owner_only: groups are open only to admins"
+        return "this server belongs to another user"
+    return None if allowlisted else "token subject not authorized for this server"
 
 
 def can_use_runner(principal: Principal, runner: str) -> bool:

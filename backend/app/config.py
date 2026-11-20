@@ -130,6 +130,8 @@ class Settings(BaseSettings):
     oidc_admin_groups: str = ""
     oidc_local_runner_groups: str = ""
     oidc_allowed_domains: str = ""
+    # Seed for oauth_member_access ("additive" or "owner_only"); empty leaves the default.
+    oauth_member_access: str = ""
     # Seed for just-in-time provisioning of a User on a first sign-in that matches none.
     oidc_provisioning: bool = False
     # Seed for oidc_session_max_age_s, the hard cap on a Sign-in session (seconds, 300 to 2592000).

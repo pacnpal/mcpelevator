@@ -140,6 +140,11 @@ def _bootstrap_oidc_provisioning() -> None:
     _seed_setting_from_env(get_settings().oidc_provisioning, "oidc_provisioning")
 
 
+def _bootstrap_oauth_member_access() -> None:
+    """Seed ``oauth_member_access`` from ``MCPE_OAUTH_MEMBER_ACCESS``."""
+    _seed_setting_from_env(get_settings().oauth_member_access, "oauth_member_access")
+
+
 def _bootstrap_oidc_session_max_age() -> None:
     """Seed the Sign-in session hard cap from ``MCPE_OIDC_SESSION_MAX_AGE_S``."""
     _seed_setting_from_env(get_settings().oidc_session_max_age_s, "oidc_session_max_age_s")
@@ -222,6 +227,7 @@ async def lifespan(app: FastAPI):
     _bootstrap_oidc_groups()
     _bootstrap_oidc_provisioning()
     _bootstrap_oidc_session_max_age()
+    _bootstrap_oauth_member_access()
     _bootstrap_control_plane_auth()
     # No timeout: long-lived SSE streams. No connection cap either: the /s proxy holds a
     # pooled connection for every open client stream, so httpx's default cap of 100 was

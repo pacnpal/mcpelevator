@@ -95,6 +95,7 @@
 			oauthAllowedSubjects = s.oauth_allowed_subjects.join(', ');
 			oauthScopes = s.oauth_scopes.join(', ');
 			oauthAcceptBearer = s.oauth_accept_bearer;
+			oauthOwnerOnly = s.oauth_member_access === 'owner_only';
 			fillOidc(s);
 			idleTimeoutText = String(s.idle_timeout_s);
 			usageRetentionText = String(s.usage_retention_days);
@@ -350,6 +351,7 @@
 	let oauthAllowedSubjects = $state('');
 	let oauthScopes = $state('');
 	let oauthAcceptBearer = $state(false);
+	let oauthOwnerOnly = $state(false);
 
 	function splitCommaList(value: string): string[] {
 		return value
@@ -368,13 +370,15 @@
 				oauth_audience: oauthAudience.trim(),
 				oauth_allowed_subjects: splitCommaList(oauthAllowedSubjects),
 				oauth_scopes: splitCommaList(oauthScopes),
-				oauth_accept_bearer: oauthAcceptBearer
+				oauth_accept_bearer: oauthAcceptBearer,
+				oauth_member_access: oauthOwnerOnly ? 'owner_only' : 'additive'
 			});
 			oauthConfigUrl = settings.oauth_config_url;
 			oauthAudience = settings.oauth_audience;
 			oauthAllowedSubjects = settings.oauth_allowed_subjects.join(', ');
 			oauthScopes = settings.oauth_scopes.join(', ');
 			oauthAcceptBearer = settings.oauth_accept_bearer;
+			oauthOwnerOnly = settings.oauth_member_access === 'owner_only';
 			flashToast('OAuth settings saved', 'info');
 		} catch (err) {
 			flashToast(errorMessage(err));
@@ -1518,6 +1522,20 @@
 						<span class="text-sm font-medium text-[var(--color-ink)]">Also accept local bearer tokens</span>
 						<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
 							Lets <code class="font-mono">mcpe_…</code> automation tokens use OAuth-protected endpoints with their normal server or group scope checks.
+						</span>
+					</span>
+				</label>
+				<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
+					<input
+						type="checkbox"
+						bind:checked={oauthOwnerOnly}
+						disabled={savingField !== null}
+						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+					/>
+					<span class="flex flex-col gap-0.5">
+						<span class="text-sm font-medium text-[var(--color-ink)]">Members reach only their own servers</span>
+						<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+							A token from a linked Member opens only the servers they own, even when the allowlist names them, and no group. Admins and unlinked tokens are unaffected.
 						</span>
 					</span>
 				</label>

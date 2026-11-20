@@ -74,7 +74,9 @@ def plane(idp, monkeypatch):
         service.ensure_builtin(s)
     yield idp
     with Session(get_engine()) as s:
-        for key in ("oauth_config_url", "oauth_audience", "oauth_allowed_subjects"):
+        for key in (
+            "oauth_config_url", "oauth_audience", "oauth_allowed_subjects", "oauth_member_access",
+        ):
             row = s.get(Setting, key)
             if row is not None:
                 s.delete(row)
@@ -577,3 +579,110 @@ def test_a_queued_jwt_principal_fails_closed_at_refresh(plane, change):
         else:
             assert _unlink(client, ada, admin).status_code == 204
         assert _refreshed(queued) is None
+
+
+# ---- oauth_member_access: owner_only (#275) --------------------------------------
+
+
+def _member_access(mode: str) -> None:
+    with Session(get_engine()) as s:
+        runtime_settings.write(s, {"oauth_member_access": mode})
+
+
+def test_owner_only_refuses_a_member_on_another_members_server_even_when_allowlisted(plane):
+    ada = _linked("ada@example.com", "sub-ada")
+    bob = _linked("bob@example.com", "sub-bob")
+    with TestClient(app) as client:
+        admin = _enforce()
+        hers = _oauth_server(client, admin, "hers", ada)
+        his = _oauth_server(client, admin, "his", bob)
+        _proxying(client)
+        _member_access("owner_only")
+        _allowlist("sub-ada")
+        token = {**LOOPBACK, **_access(plane, "sub-ada")}
+        assert client.get(f"/s/{hers}/mcp", headers=token).status_code == 200
+        r = client.get(f"/s/{his}/mcp", headers=token)
+        assert r.status_code == 403 and "belongs to another user" in r.json()["detail"]
+
+
+def test_owner_only_refuses_a_member_when_no_allowlist_is_set(plane):
+    _linked("ada@example.com", "sub-ada")
+    bob = _linked("bob@example.com", "sub-bob")
+    with TestClient(app) as client:
+        admin = _enforce()
+        his = _oauth_server(client, admin, "his", bob)
+        _proxying(client)
+        token = {**LOOPBACK, **_access(plane, "sub-ada")}
+        assert client.get(f"/s/{his}/mcp", headers=token).status_code == 200  # additive
+        _member_access("owner_only")
+        assert client.get(f"/s/{his}/mcp", headers=token).status_code == 403
+
+
+def test_owner_only_lets_an_admin_through_everywhere(plane):
+    ada = _linked("ada@example.com", "sub-ada")
+    _linked("root@example.com", "sub-root", role="admin")
+    with TestClient(app) as client:
+        admin = _enforce()
+        hers = _oauth_server(client, admin, "hers", ada)
+        unowned = _oauth_server(client, admin, "unowned", None)
+        _proxying(client)
+        _member_access("owner_only")
+        _allowlist("someone-else")
+        token = {**LOOPBACK, **_access(plane, "sub-root")}
+        assert client.get(f"/s/{hers}/mcp", headers=token).status_code == 200
+        assert client.get(f"/s/{unowned}/mcp", headers=token).status_code == 200
+
+
+@pytest.mark.parametrize("mode", ["additive", "owner_only"])
+def test_an_unresolved_jwt_follows_the_allowlist_in_both_modes(plane, mode):
+    ada = _linked("ada@example.com", "sub-ada")
+    with TestClient(app) as client:
+        admin = _enforce()
+        slug = _oauth_server(client, admin, "hers", ada)
+        _proxying(client)
+        _member_access(mode)
+        _allowlist("sub-listed")
+        assert client.get(f"/s/{slug}/mcp", headers={
+            **LOOPBACK, **_access(plane, "sub-listed")}).status_code == 200
+        assert client.get(f"/s/{slug}/mcp", headers={
+            **LOOPBACK, **_access(plane, "sub-stranger")}).status_code == 403
+
+
+def test_an_invalid_oauth_member_access_is_a_400(plane):
+    with TestClient(app) as client:
+        admin = _enforce()
+        r = client.patch("/api/settings", json={"oauth_member_access": "everyone"}, headers=admin)
+        assert r.status_code == 400 and "oauth_member_access" in r.json()["detail"]
+        assert client.get("/api/settings", headers=admin).json()["oauth_member_access"] == "additive"
+        r = client.patch("/api/settings", json={"oauth_member_access": "owner_only"}, headers=admin)
+        assert r.status_code == 200 and r.json()["oauth_member_access"] == "owner_only"
+
+
+@pytest.mark.parametrize("mode", ["additive", "owner_only"])
+def test_an_oauth_group_under_each_member_access_mode(plane, mode):
+    from app.groups import registry
+
+    _linked("ada@example.com", "sub-ada")
+    _linked("root@example.com", "sub-root", role="admin")
+    with TestClient(app) as client:
+        _enforce()
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"default_auth_provider": "oauth"})
+            registry.write_group(s, "team", [])
+        try:
+            _member_access(mode)
+            _allowlist("sub-ada", "sub-listed")
+
+            def status(sub: str) -> int:
+                return client.get("/g/team/mcp", headers={**MCP, **_access(plane, sub)}).status_code
+
+            # Allowlisted, a resolved member passes under additive. Under owner_only a
+            # group is admin-owned, so they're refused even though the list names them.
+            assert (status("sub-ada") == 403) is (mode == "owner_only")
+            assert status("sub-root") != 403
+            assert status("sub-listed") != 403
+            assert status("sub-stranger") == 403
+        finally:
+            with Session(get_engine()) as s:
+                registry.delete_group(s, "team")
+                runtime_settings.write(s, {"default_auth_provider": "none"})
