@@ -353,6 +353,76 @@ def test_the_first_jwt_after_a_restart_resolves_with_a_cold_key_cache(plane, mon
         assert status == 200 and me["user"]["name"] == "ada@example.com", me
 
 
+# ---- only a JWT-shaped bearer ever reaches the provider ---------------------------
+
+
+@pytest.fixture
+def unreachable(plane, monkeypatch):
+    """The provider is down and nothing is cached: any discovery or key fetch is seen."""
+    from app.auth import oidc
+    from app.config import get_settings
+
+    fetched: list[str] = []
+
+    async def discovery(url):
+        fetched.append(url)
+        raise httpx.ConnectError("down")
+
+    def keys(url, token):
+        fetched.append(url)
+        raise jwt.PyJWKClientConnectionError("down")
+
+    plane.down = True
+    monkeypatch.setattr(oauth_mod, "_discovery_cache", {})
+    monkeypatch.setattr(oauth_mod, "_discovery", discovery)
+    monkeypatch.setattr(oidc, "fetch_discovery", discovery)
+    monkeypatch.setattr(jwks, "signing_key", keys)
+    monkeypatch.setattr(get_settings(), "admin_token", "breakglass-secret")
+    yield fetched
+    assert plane.seen == []
+
+
+def test_the_break_glass_token_never_waits_on_the_provider(unreachable):
+    with TestClient(app) as client:
+        _enforce()
+        _proxying(client)
+        glass = {"authorization": "Bearer breakglass-secret"}
+        assert _whoami(client, glass)[0] == 200
+        r = client.get(f"/s/{_builtin_slug()}/mcp", headers={**LOOPBACK, **glass})
+        assert r.status_code == 200, r.text
+    assert unreachable == []
+
+
+def test_a_bearer_that_isnt_jwt_shaped_never_reaches_the_provider(unreachable):
+    with TestClient(app) as client:
+        _enforce()
+        for junk in ("not-a-jwt", "a.b.c", "e30.e30", "W10.e30.sig"):  # W10 = "[]"
+            assert _whoami(client, {"authorization": f"Bearer {junk}"})[0] in (401, 403)
+    assert unreachable == []
+
+
+# ---- malformed headers are refused, never a 500 ----------------------------------
+
+
+@pytest.mark.parametrize("header", [
+    {"alg": ["RS256"]}, {"alg": {"RS256": 1}}, {"alg": None}, {"alg": "RS256", "kid": 7},
+])
+def test_a_malformed_jwt_header_is_refused_cleanly(plane, header):
+    import base64
+
+    def part(obj) -> str:
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+    _linked("ada@example.com", "sub-ada")
+    good = _access(plane, "sub-ada")["authorization"].split()[1]  # live: only the header is bad
+    body, sig = good.split(".")[1:]
+    token = ".".join([part({"typ": "JWT", **header}), body, sig])
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _enforce()
+        status, _ = _whoami(client, {"authorization": f"Bearer {token}"})
+        assert status in (401, 403)
+
+
 # ---- enforcement off: a JWT still names its user for the control_mcp switch ------
 
 

@@ -803,6 +803,29 @@ def _match(
 # --------------------------------------------------------------------------- #
 
 
+def _jwt_header(token: str) -> dict[str, Any] | None:
+    """The header of a bearer that could be a provider access token, else None. The
+    break-glass token is ruled out first (constant time), then a login token, then
+    anything that isn't three dot-separated parts with a JSON-object header whose
+    ``alg`` is a string and ``kid``, when sent, too. Only a token that passes this
+    ever costs a discovery or key fetch."""
+    from app.auth.control_plane import is_env_admin_token  # circular-import guard
+
+    if not token or is_env_admin_token(token) or token.startswith("mcpe_"):
+        return None
+    if token.count(".") != 2:
+        return None
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.PyJWTError:
+        return None
+    if not isinstance(header, dict) or not isinstance(header.get("alg"), str):
+        return None
+    if "kid" in header and not isinstance(header["kid"], str):
+        return None
+    return header
+
+
 def _both_configured(values: dict[str, Any]) -> bool:
     return bool(values["oidc_enabled"] and values["oauth_config_url"] and values["oauth_audience"])
 
@@ -814,7 +837,8 @@ async def warm_access_tokens(session: Session, request: Request) -> None:
     token after a restart doesn't meet an empty cache. Async callers run it before a
     sync resolution; a failed fetch is logged, and then no access token resolves."""
     scheme, _, token = request.headers.get("authorization", "").partition(" ")
-    if scheme.lower() != "bearer" or not token.strip() or token.strip().startswith("mcpe_"):
+    token = token.strip()
+    if scheme.lower() != "bearer" or _jwt_header(token) is None:
         return
     values = runtime_settings.read_all(session)
     if not _both_configured(values):
@@ -827,7 +851,7 @@ async def warm_access_tokens(session: Session, request: Request) -> None:
         logger.info("discovery for provider access tokens failed: %s", exc)
         return
     try:
-        await asyncio.to_thread(jwks.signing_key, oauth_doc["jwks_uri"], token.strip())
+        await asyncio.to_thread(jwks.signing_key, oauth_doc["jwks_uri"], token)
     except jwt.PyJWKClientConnectionError as exc:
         logger.info("signing keys for provider access tokens failed: %s", exc)
     except jwt.PyJWTError:
@@ -844,12 +868,13 @@ def access_token_user(session: Session, token: str) -> User | None:
     discovery issuers (an Entra ``{tenantid}`` must be the token's ``tid``, a listed
     tenant). Sync, for the event loop: discovery comes from cache (``warm_access_tokens``)
     and keys from ``app.auth.jwks``. It only reads: no provisioning, linking or groups."""
-    if not token or token.startswith("mcpe_"):
+    header = _jwt_header(token)
+    if header is None:
         return None
     values = runtime_settings.read_all(session)
     if not _both_configured(values):
         return None
-    sso = _DISCOVERY.get(runtime_settings.normalize_config_url(values["oidc_discovery_url"]))
+    sso =_DISCOVERY.get(runtime_settings.normalize_config_url(values["oidc_discovery_url"]))
     cached = oauth_mod._discovery_cache.get(
         runtime_settings.normalize_config_url(values["oauth_config_url"])
     )
@@ -857,7 +882,7 @@ def access_token_user(session: Session, token: str) -> User | None:
         return None
     oauth_doc = cached[1]
     try:
-        alg = jwt.get_unverified_header(token).get("alg")
+        alg = header["alg"]  # a string: _jwt_header checked
         if alg not in _ALLOWED_JWT_ALGORITHMS:
             return None
         claims = jwt.decode(
