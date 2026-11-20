@@ -615,6 +615,20 @@ def delete_user_and_tokens(session: Session, user_id: str) -> bool:
     return True
 
 
+def unlink_user_identity(session: Session, user_id: str) -> bool:
+    """Clear a user's Linked identity and end their Sign-in sessions in one transaction.
+    Returns False when the user doesn't exist."""
+    user = session.get(User, user_id)
+    if user is None:
+        return False
+    user.oidc_issuer = user.oidc_subject = None
+    user.updated_at = utcnow()
+    session.add(user)
+    session.execute(delete(SignInSession).where(SignInSession.user_id == user_id))
+    session.commit()
+    return True
+
+
 def admin_credential_exists(session: Session, *, excluding_user_id: Optional[str] = None) -> bool:
     """Is there at least one usable ADMIN login besides ``excluding_user_id``'s?
     True when a control token exists that resolves to admin: one with no user

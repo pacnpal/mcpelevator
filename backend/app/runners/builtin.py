@@ -100,6 +100,10 @@ Typical flows:
 - Try a tool: call_server_tool on a running server (not counted as usage).
 - Reach a server from a client: mint a token with create_token (scope "all", a
   server id, or "group:<name>"). The plaintext is returned once.
+- Move users to a new SSO identity provider: point the oidc_* settings at the
+  new provider, then unlink_user_identity for each user whose list_users
+  linked_issuer is the old one. Their next sign-in through the new provider
+  links them by name. The same call fixes a wrong match.
 Server ids (not slugs) identify servers in every tool. Lifecycle tools write
 desired state and the supervisor converges, so use wait_for_server after them.
 Read-only views are also resources (mcpelevator://servers, .../servers/{id},

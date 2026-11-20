@@ -34,6 +34,7 @@ from app.auth import oauth_flow, oidc, principal as principal_mod, sign_in
 from app.auth.control_plane import control_auth, enforcement_enabled
 from app.config import get_settings
 from app.db import get_session, repo
+from app.db.models import User
 from app.registry import settings as runtime_settings
 from app.util import host_only
 
@@ -198,9 +199,19 @@ async def oidc_callback(
         )
     except oidc.SignInFailed as exc:
         return _sso_error(exc.reason, str(exc), state, exc.claim)
-    # Checked again as the session row is written: a settings write can land while the
-    # provider answered, and it ends sessions, so one started after it must not survive.
-    raw = sign_in.start(session, user.id, id_token, still_valid=same_provider)
+    pair = (user.oidc_issuer, user.oidc_subject)
+
+    def still_linked(s: Session) -> bool:
+        row = s.get(User, user.id)
+        return (
+            same_provider(s) and row is not None
+            and (row.oidc_issuer, row.oidc_subject) == pair
+        )
+
+    # Checked again as the session row is written: a settings write or an unlink can
+    # land while the provider answered, and both end sessions, so one started after
+    # must not survive.
+    raw = sign_in.start(session, user.id, id_token, still_valid=still_linked)
     if raw is None:
         return _sso_error(oidc.EXPIRED, "the SSO settings changed while this login finished", state)
     resp = RedirectResponse(_safe_next(flow.get("next")), status_code=303)

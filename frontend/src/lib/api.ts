@@ -620,6 +620,12 @@ export function deleteUser(id: string): Promise<void> {
 	return request<void>(`/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+/** Clear a user's Linked identity and end their Sign-in sessions; their next SSO sign-in
+ * matches by name again. */
+export function unlinkUserIdentity(id: string): Promise<void> {
+	return request<void>(`/users/${encodeURIComponent(id)}/identity`, { method: 'DELETE' });
+}
+
 /** Mint a login (control) token for a user — plaintext returned exactly once. */
 export function mintUserCredential(id: string): Promise<UserCredential> {
 	return jsonRequest<UserCredential>(`/users/${encodeURIComponent(id)}/credentials`, 'POST', {});

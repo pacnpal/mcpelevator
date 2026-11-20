@@ -9,7 +9,9 @@ and returns the code the provider would send back.
 Knobs for later tests: ``claims`` (merged into every ID token), ``userinfo`` (claims
 served there, ``None`` = no endpoint), ``token_error`` / ``token_status`` (the token
 endpoint answers with an error), ``down`` (every endpoint 503s), ``id_token_override``
-(hand back this exact ID token), ``sign(..., alg=, key=)`` and ``rotate_key()``.
+(hand back this exact ID token), ``token_barrier`` (a ``threading.Barrier`` every token
+request waits at, so concurrent sign-ins reach the provider together), ``sign(..., alg=,
+key=)`` and ``rotate_key()``.
 
 Provider quirks, one setting each: ``alg`` (``RS256``, ``EdDSA``, or ``HS256`` signed with
 ``client_secret``), ``discovery_issuer`` (the issuer discovery advertises when it differs
@@ -51,6 +53,7 @@ class FakeIdP:
         self.token_status = 400
         self.down = False
         self.id_token_override: str | None = None
+        self.token_barrier: Any = None
         self.iss_param = True  # send RFC 9207 ``iss`` on the callback
         self.alg = "RS256"
         self.discovery_issuer: str | None = None
@@ -147,6 +150,8 @@ class FakeIdP:
         return httpx.Response(404)
 
     def _token(self, request: httpx.Request) -> httpx.Response:
+        if self.token_barrier is not None:
+            self.token_barrier.wait()
         if self.token_error:
             return httpx.Response(self.token_status, json={"error": self.token_error})
         form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}

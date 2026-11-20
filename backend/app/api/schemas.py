@@ -734,6 +734,8 @@ class UserInfo(BaseModel):
     servers_count: int = 0  # servers owned (drives the delete guard in the UI)
     tokens_count: int = 0  # tokens bound to this user (control + data-plane)
     created_at: datetime
+    # The issuer of the user's Linked identity, None when they have none.
+    linked_issuer: Optional[str] = None
 
 
 class UserCreate(BaseModel):

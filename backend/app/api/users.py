@@ -57,6 +57,7 @@ def _info(
         servers_count=servers_count,
         tokens_count=tokens_count,
         created_at=user.created_at,
+        linked_issuer=user.oidc_issuer,
     )
 
 
@@ -260,6 +261,31 @@ async def delete_user(
                 "owner before deleting the user"
             ),
         )
+    return Response(status_code=204)
+
+
+@router.delete("/users/{user_id}/identity", status_code=204)
+async def unlink_identity(
+    user_id: str,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_admin),
+):
+    """Clear a user's Linked identity and end their Sign-in sessions. Their next SSO
+    sign-in matches by name again, which is how users move to a new issuer. Under the
+    config write lock, which the sign-in's link write holds too."""
+
+    def _unlink():
+        with service.config_write_lock():
+            session.expire_all()
+            if not _admin_now(session, principal):
+                return "forbidden"
+            return "ok" if repo.unlink_user_identity(session, user_id) else "not_found"
+
+    result = await run_in_threadpool(_unlink)
+    if result == "forbidden":
+        raise _FORBIDDEN
+    if result == "not_found":
+        raise HTTPException(status_code=404, detail="user not found")
     return Response(status_code=204)
 
 
