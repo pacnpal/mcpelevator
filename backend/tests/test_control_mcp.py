@@ -687,7 +687,7 @@ def cf(monkeypatch):
     import jwt
     from cryptography.hazmat.primitives.asymmetric import rsa
 
-    from app.auth import cf_access
+    from app.auth import cf_access, jwks
     from app.config import get_settings
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -699,12 +699,12 @@ def cf(monkeypatch):
         fetches.append(refresh)
         return [SimpleNamespace(key_id="k1", key=key.public_key())]
 
-    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+    monkeypatch.setattr(jwks, "_keys", lambda team: SimpleNamespace(
         get_signing_keys=get_signing_keys, jwk_set_cache=None))
-    monkeypatch.setattr(cf_access, "_last_refetch", {})
-    monkeypatch.setattr(cf_access, "_last_failure", {})
+    monkeypatch.setattr(jwks, "_last_refetch", {})
+    monkeypatch.setattr(jwks, "_last_failure", {})
     # As the startup load leaves it: requests on the event loop answer from these.
-    monkeypatch.setattr(cf_access, "_good", {"https://team.example": ({"k1": key.public_key()}, time.monotonic())})
+    monkeypatch.setattr(jwks, "_good", {"https://team.example/cdn-cgi/access/certs": ({"k1": key.public_key()}, time.monotonic())})
 
     def assertion(email: str, aud: str = "aud-1", kid: str = "k1", exp: int = 60,
                   iss: str = "https://team.example") -> dict:
@@ -813,7 +813,7 @@ def test_unreachable_signing_keys_back_off_instead_of_blocking_each_request(monk
     import jwt
     from starlette.requests import Request
 
-    from app.auth import cf_access
+    from app.auth import cf_access, jwks
 
     calls = []
 
@@ -821,7 +821,7 @@ def test_unreachable_signing_keys_back_off_instead_of_blocking_each_request(monk
         calls.append(refresh)
         raise jwt.PyJWKClientConnectionError("timed out")
 
-    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+    monkeypatch.setattr(jwks, "_keys", lambda team: SimpleNamespace(
         get_signing_keys=down, jwk_set_cache=None))
     req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
     for _ in range(5):
@@ -832,13 +832,13 @@ def test_unreachable_signing_keys_back_off_instead_of_blocking_each_request(monk
     import json
 
     calls.clear()
-    cf_access._last_failure.clear()
+    jwks._last_failure.clear()
 
     def garbled(refresh: bool = False):
         calls.append(refresh)
         raise json.JSONDecodeError("Expecting value", "<html>", 0)
 
-    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+    monkeypatch.setattr(jwks, "_keys", lambda team: SimpleNamespace(
         get_signing_keys=garbled, jwk_set_cache=None))
     for _ in range(5):
         assert cf_access.verify(req) == (
@@ -852,7 +852,7 @@ def test_a_cached_key_set_with_no_keys_is_refetched(monkeypatch):
     import jwt
     from types import SimpleNamespace
 
-    from app.auth import cf_access
+    from app.auth import jwks
 
     calls = []
 
@@ -863,12 +863,12 @@ def test_a_cached_key_set_with_no_keys_is_refetched(monkeypatch):
         return [SimpleNamespace(key_id="k1", key="pem")]
 
     cache = SimpleNamespace(get=lambda: object())
-    monkeypatch.setattr(cf_access, "_last_failure", {})
-    monkeypatch.setattr(cf_access, "_last_refetch", {})
-    monkeypatch.setattr(cf_access, "_good", {})
-    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+    monkeypatch.setattr(jwks, "_last_failure", {})
+    monkeypatch.setattr(jwks, "_last_refetch", {})
+    monkeypatch.setattr(jwks, "_good", {})
+    monkeypatch.setattr(jwks, "_keys", lambda team: SimpleNamespace(
         get_signing_keys=keys, jwk_set_cache=cache))
-    assert cf_access._fetch("https://team.example", refresh=False) == {"k1": "pem"}
+    assert jwks._fetch("https://team.example", refresh=False) == {"k1": "pem"}
     assert calls == [False, True]
 
 
@@ -900,13 +900,13 @@ def test_backoff_never_blocks_fresh_cached_keys(monkeypatch, cf):
 
     from starlette.requests import Request
 
-    from app.auth import cf_access
+    from app.auth import cf_access, jwks
 
-    real = cf_access._keys("https://team.example")
+    real = jwks._keys("https://team.example")
     cache = SimpleNamespace(get=lambda: object())  # a fresh cached key set
-    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+    monkeypatch.setattr(jwks, "_keys", lambda team: SimpleNamespace(
         get_signing_keys=real.get_signing_keys, jwk_set_cache=cache))
-    cf_access._last_failure["https://team.example"] = time.monotonic()  # a refetch just failed
+    jwks._last_failure["https://team.example/cdn-cgi/access/certs"] = time.monotonic()  # a refetch just failed
     req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
     assert cf_access.email(req) == "ada@example.com"
 
@@ -948,9 +948,9 @@ def test_failed_refetch_doesnt_hold_the_refetch_window(monkeypatch, cf):
     import jwt
     from starlette.requests import Request
 
-    from app.auth import cf_access
+    from app.auth import cf_access, jwks
 
-    real = cf_access._keys("https://team.example")
+    real = jwks._keys("https://team.example")
     state = {"down": True}
 
     def get_signing_keys(refresh: bool = False):
@@ -959,13 +959,13 @@ def test_failed_refetch_doesnt_hold_the_refetch_window(monkeypatch, cf):
         keys = real.get_signing_keys()
         return [*keys, SimpleNamespace(key_id="rotated", key=keys[0].key)] if refresh else keys
 
-    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(
+    monkeypatch.setattr(jwks, "_keys", lambda team: SimpleNamespace(
         get_signing_keys=get_signing_keys, jwk_set_cache=None))
     req = Request({"type": "http", "headers": [
         (k.encode(), v.encode()) for k, v in cf("ada@example.com", kid="rotated").items()]})
     assert cf_access.email(req) is None  # the refetch fails during the outage
     state["down"] = False
-    cf_access._last_failure.clear()  # the 30s failure backoff has passed
+    jwks._last_failure.clear()  # the 30s failure backoff has passed
     assert cf_access.email(req) == "ada@example.com"  # no five-minute wait
 
 
@@ -1036,18 +1036,18 @@ def test_key_refresh_on_the_event_loop_never_waits_on_the_fetch(monkeypatch, cf)
 
     from starlette.requests import Request
 
-    from app.auth import cf_access
+    from app.auth import cf_access, jwks
 
     req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
     assert cf_access.email(req) == "ada@example.com"  # off the loop: fetched in place
-    real, gate, calls = cf_access._keys("https://team.example"), threading.Event(), []
+    real, gate, calls = jwks._keys("https://team.example"), threading.Event(), []
 
     def slow(refresh: bool = False):
         calls.append(refresh)
         gate.wait(5)
         return real.get_signing_keys(refresh)
 
-    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(get_signing_keys=slow, jwk_set_cache=None))
+    monkeypatch.setattr(jwks, "_keys", lambda team: SimpleNamespace(get_signing_keys=slow, jwk_set_cache=None))
 
     async def on_loop():
         return [cf_access.email(req) for _ in range(3)]
@@ -1057,7 +1057,7 @@ def test_key_refresh_on_the_event_loop_never_waits_on_the_fetch(monkeypatch, cf)
     assert time.monotonic() - started < 1  # nobody waited on the stalled fetch
     gate.set()
     for _ in range(200):
-        if not cf_access._refreshing:
+        if not jwks._refreshing:
             break
         time.sleep(0.01)
     assert calls == [False]  # one refresh in a thread, not one per request
@@ -1071,16 +1071,16 @@ def test_a_cold_start_on_the_event_loop_refuses_instead_of_waiting(monkeypatch, 
 
     from starlette.requests import Request
 
-    from app.auth import cf_access
+    from app.auth import cf_access, jwks
 
-    real, gate = cf_access._keys("https://team.example"), threading.Event()
+    real, gate = jwks._keys("https://team.example"), threading.Event()
 
     def slow(refresh: bool = False):
         gate.wait(5)
         return real.get_signing_keys(refresh)
 
-    monkeypatch.setattr(cf_access, "_good", {})  # the startup load hasn't landed
-    monkeypatch.setattr(cf_access, "_keys", lambda team: SimpleNamespace(get_signing_keys=slow, jwk_set_cache=None))
+    monkeypatch.setattr(jwks, "_good", {})  # the startup load hasn't landed
+    monkeypatch.setattr(jwks, "_keys", lambda team: SimpleNamespace(get_signing_keys=slow, jwk_set_cache=None))
     req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
 
     async def on_loop():
@@ -1091,7 +1091,7 @@ def test_a_cold_start_on_the_event_loop_refuses_instead_of_waiting(monkeypatch, 
     assert time.monotonic() - started < 1
     gate.set()
     for _ in range(200):
-        if not cf_access._refreshing:
+        if not jwks._refreshing:
             break
         time.sleep(0.01)
     assert asyncio.run(on_loop()) == ("ada@example.com", None)  # loaded in the background
