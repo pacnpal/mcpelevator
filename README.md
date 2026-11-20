@@ -825,7 +825,7 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_APT_PACKAGES` | _(none)_ | Global, space-separated extra Debian packages installed before mcpelevator starts (Docker image only), not per-server `setup_script`. A failed install warns and boot continues; packages must be reinstalled after container replacement |
 | `MCPE_DATA_DIR` | `./data` | SQLite + caches, including each local server's own `cache/<server id>` (`XDG_CACHE_HOME` / `PLAYWRIGHT_BROWSERS_PATH` for its setup script and child; see **Per-server cache**) |
 | `MCPE_FRONTEND_DIR` | `../frontend/build` | Built SPA to serve |
-| `MCPE_PORT_RANGE_START` / `_END` | `49200` / `49400` | Loopback ports for bridge processes |
+| `MCPE_PORT_RANGE_START` / `_END` | `20000` / `20200` | Loopback ports for bridge processes (end exclusive). The supervisor binds each port and hands the open socket to its bridge, so a port in use is skipped and a chosen one can't be taken before the bridge starts. Keep the range below the OS ephemeral range (Linux 32768-60999, macOS 49152-65535). |
 | `MCPE_MAX_RUNNING` | `50` | Cap on concurrent running servers |
 | `MCPE_START_TIMEOUT_S` | `120` | Separate timeout for setup and for readiness on each startup attempt (covers npx/uvx cold start); a server's own `start_timeout_s` overrides it |
 | `MCPE_REPO_BUILD_TIMEOUT_S` | `900` | Timeout for a repository server's checkout + post-clone build on each startup attempt (a first build can take minutes); a server's own `repo_build_timeout_s` overrides it |

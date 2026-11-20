@@ -12,6 +12,9 @@ module as a subprocess, passing the spec + port via environment variables:
                       serialize_client_requests, attach_stderr_on_error, ...}
     MCPE_BRIDGE_HOST  loopback host (default 127.0.0.1)
     MCPE_BRIDGE_PORT  port to listen on
+    MCPE_BRIDGE_FD    optional: an inherited socket already listening on that port (the
+                      supervisor holds it, so the port can't be taken before the bridge
+                      starts; issue #302). Served instead of binding host:port.
 
 ``transport`` selects the upstream: ``stdio`` (spawn command/args),
 ``streamable-http`` / ``sse`` (front a remote URL; ``command`` is the URL and ``env``
@@ -2441,6 +2444,8 @@ def main() -> None:
         spec["document"] = sys.stdin.buffer.read()
     host = os.environ.get("MCPE_BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ["MCPE_BRIDGE_PORT"])
+    fd = os.environ.get("MCPE_BRIDGE_FD")
+    bind = {"fd": int(fd)} if fd else {}
 
     # MCPE_DEBUG reaches bridges through the inherited environment (see app.debug).
     from app import debug, logconfig
@@ -2489,15 +2494,17 @@ def main() -> None:
         app = build_app(spec, proxy)
         if debug.enabled():
             app = debug.TraceMiddleware(app)
-        uvicorn.run(app, host=host, port=port, log_level=level, **debug.uvicorn_logging())
+        uvicorn.run(app, host=host, port=port, log_level=level, **bind,
+                    **debug.uvicorn_logging())
     elif debug.enabled():
         import uvicorn
 
         uvicorn.run(debug.TraceMiddleware(build_app(spec, proxy)), host=host, port=port,
-                    log_level=level, **debug.uvicorn_logging())
+                    log_level=level, **bind, **debug.uvicorn_logging())
     else:
         # run() handles uvicorn + the Streamable HTTP session-manager lifespan for us.
-        proxy.run(transport="http", host=host, port=port, show_banner=False)
+        proxy.run(transport="http", host=host, port=port, show_banner=False,
+                  uvicorn_config=bind)
 
 
 if __name__ == "__main__":
