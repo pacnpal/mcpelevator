@@ -157,7 +157,7 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   `/s` proxy runs `control_mcp.authorize_edge` so an unusable credential gets a 401/403 with a reason
   instead of a failed `initialize`. Behind Cloudflare Access (`auth/cf_access.py`, opt-in via
   `MCPE_CF_ACCESS_TEAM_DOMAIN` + `MCPE_CF_ACCESS_AUD`) the signed `Cf-Access-Jwt-Assertion` maps
-  its email to the user of that name; `principal.resolve` trusts it only on requests carrying the
+  its email to the user of that name (the team's signing keys come from `auth/jwks.py`, a cache keyed by JWKS URL that never fetches on the event loop); `principal.resolve` trusts it only on requests carrying the
   bridge's internal header (`runners.builtin.is_internal`), never on the rest of `/api` (CSRF). The
   global switch is the row's `enabled` (surfaced as the `control_mcp` setting) and the per-user
   switch is `User.control_mcp`. `/api/mcp` checks both on every request.
