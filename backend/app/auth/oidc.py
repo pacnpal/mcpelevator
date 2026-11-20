@@ -864,8 +864,30 @@ async def warm_access_tokens(session: Session, request: Request) -> None:
 
 
 
+class _Unknown:
+    """``resolve_access_token`` couldn't tell whom the token names."""
+
+    def __repr__(self) -> str:
+        return "UNKNOWN"
+
+
+UNKNOWN = _Unknown()
+
+
 def access_token_user(session: Session, token: str) -> User | None:
-    """The User a provider access token names through their Linked identity, or None.
+    """The User a provider access token names through their Linked identity, or None
+    when it names no one or that couldn't be told. For callers where a User only
+    grants extra access, so not knowing grants nothing."""
+    user = resolve_access_token(session, token)
+    return None if user is UNKNOWN else user
+
+
+def resolve_access_token(session: Session, token: str) -> User | None | _Unknown:
+    """The User a provider access token names through their Linked identity; None when
+    it names no one (not JWT-shaped, cross-plane identity not configured, another
+    issuer or tenant, no active linked User); ``UNKNOWN`` when it couldn't be told
+    (discovery or keys not available, the token not verifiable here, any error).
+    Callers that narrow access on a User must refuse on ``UNKNOWN``.
 
     It counts only when SSO and the ``oauth`` provider trust the same issuer. The token
     is verified with the ``oauth`` settings (its discovery's keys, ``oauth_audience``):
@@ -876,6 +898,16 @@ def access_token_user(session: Session, token: str) -> User | None:
     header = _jwt_header(token)
     if header is None:
         return None
+    try:
+        return _resolve_access_token(session, token, header)
+    except Exception:
+        logger.exception("provider access token resolution failed")
+        return UNKNOWN
+
+
+def _resolve_access_token(
+    session: Session, token: str, header: dict[str, Any]
+) -> User | None | _Unknown:
     values = runtime_settings.read_all(session)
     if not _both_configured(values):
         return None
@@ -884,20 +916,22 @@ def access_token_user(session: Session, token: str) -> User | None:
         runtime_settings.normalize_config_url(values["oauth_config_url"])
     )
     if sso is None or cached is None:
-        return None
+        return UNKNOWN
     oauth_doc = cached[1]
     try:
         alg = header["alg"]  # a string: _jwt_header checked
         if alg not in _ALLOWED_JWT_ALGORITHMS:
-            return None
+            return UNKNOWN
         claims = jwt.decode(
             token, jwks.signing_key(oauth_doc["jwks_uri"], token), algorithms=[alg],
             audience=values["oauth_audience"], leeway=_JWT_LEEWAY_S,
             options={"require": ["iss", "sub", "exp"]},
         )
     except jwt.PyJWTError as exc:
+        # Keys unavailable, or a token this check can't verify: on the oauth provider
+        # its verifier already accepted it, so that's not a verdict on the person.
         logger.debug("provider access token not accepted: %s", exc)
-        return None
+        return UNKNOWN
     iss, sub, tid = claims["iss"], claims["sub"], claims.get("tid")
     tid = tid if isinstance(tid, str) else ""
     if not isinstance(iss, str) or not isinstance(sub, str) or not sub:

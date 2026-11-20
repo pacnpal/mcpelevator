@@ -209,7 +209,13 @@ def build(app: FastAPI) -> "_Gate":
         iss and sub are a linked user's resolves to that user. It opens their own
         "oauth" servers, and every one for an admin, past oauth_allowed_subjects, and
         drives this MCP server as them; it is no login on the rest of /api, and it
-        never creates, links or changes a user."""
+        never creates, links or changes a user. oauth_member_access (default
+        "additive") sets what such a token reaches when its user is a member:
+        "additive" lets them into their own servers plus any oauth_allowed_subjects
+        names them for; "owner_only" refuses them (403) on every "oauth" server they
+        don't own and on every "oauth" group, even when the allowlist lists them.
+        Admins pass in both modes, and a token that resolves to no user follows the
+        allowlist in both."""
         if changes.control_mcp is False and _internal(get_http_request()):
             # Turning control_mcp off disables the built-in server, i.e. the bridge
             # carrying this call (see _refuse_self).

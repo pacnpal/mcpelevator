@@ -281,16 +281,13 @@ def _claims_are_current(claims: dict[str, Any]) -> bool:
     )
 
 
-def _owner_or_admin(request: Request, server: Server) -> bool:
-    """Does the token resolve, through its Linked identity, to this server's owner or
-    an admin? Then the allowlist doesn't apply (one identity across planes). A token
-    that resolves to no one leaves the allowlist's verdict alone."""
-    from app.auth import policy
-    from app.auth.principal import credential_principal  # circular-import guard
+def _caller(token: str):
+    """Whom the token names through its Linked identity: a principal, None for no one,
+    or ``oidc.UNKNOWN`` when that couldn't be told."""
+    from app.auth.principal import provider_jwt_principal  # circular-import guard
 
     with Session(get_engine()) as session:
-        caller = credential_principal(request, session, cloudflare=False, provider_jwt=True)
-    return caller is not None and policy.can_view_server(caller, server)
+        return provider_jwt_principal(session, token)
 
 
 class OAuthProvider:
@@ -302,6 +299,7 @@ class OAuthProvider:
             audience = runtime_settings.oauth_audience(session)
             allowed = runtime_settings.oauth_allowed_subjects(session)
             accept_bearer = runtime_settings.oauth_accept_bearer(session)
+            owner_only = runtime_settings.oauth_member_access(session) == "owner_only"
         # Fail closed, like resolve() does for an unknown provider: a server marked
         # oauth with no AS configured must not fall through to unauthenticated.
         if not config_url or not audience:
@@ -362,11 +360,22 @@ class OAuthProvider:
                 detail="invalid token",
                 headers=_challenge(base, server, error="invalid_token"),
             )
-        if allowed and not _identity_allowed(claims, allowed) and not _owner_or_admin(request, server):
+        from app.auth import policy
+
+        allowlisted = not allowed or _identity_allowed(claims, allowed)
+        # Resolve only when it can change the verdict: an allowlisted token passes
+        # under additive whoever it names.
+        caller = _caller(token) if owner_only or not allowlisted else None
+        refusal = policy.oauth_refusal(
+            caller, server, allowlisted=allowlisted, owner_only=owner_only
+        )
+        if refusal is not None:
+            status, reason = refusal
             raise HTTPException(
-                status_code=403,
-                detail="token subject not authorized for this server",
-                headers=_challenge(base, server, error="insufficient_scope"),
+                status_code=status,
+                detail=reason,
+                headers=_challenge(base, server, error="insufficient_scope")
+                if status == 403 else None,
             )
 
 

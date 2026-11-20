@@ -65,6 +65,11 @@ DEFAULTS: dict[str, Any] = {
     # servers, with normal bearer scope semantics — one endpoint for OAuth humans
     # and token-carrying automation. Off by default: pure-OAuth unless opted in.
     "oauth_accept_bearer": False,
+    # What a provider access token that resolves to a Member reaches on "oauth" servers:
+    # "additive" (their own servers, plus any the allowlist names them for) or
+    # "owner_only" (only their own, whatever the allowlist says). Admins reach every
+    # server and unresolved tokens follow the allowlist in both modes.
+    "oauth_member_access": "additive",
     # Default idle quiescence in SECONDS for servers whose own idle_timeout_s is
     # unset: after this long with no proxy traffic the supervisor stops the bridge
     # (state "idle") and the proxy restarts it on the next request. 0 (the default)
@@ -152,6 +157,7 @@ _MODES = {"local", "expose"}
 _PROVIDERS = {"none", "bearer", "oauth"}
 _CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
 _UPSTREAM_OAUTH_CLIENT_MODES = {"auto", "cimd", "dcr"}
+_OAUTH_MEMBER_ACCESS_MODES = {"additive", "owner_only"}
 _OIDC_IDENTITY_CLAIMS = {"email", "preferred_username", "sub"}
 _OIDC_BOOLS = ("oidc_enabled", "oidc_require_verified_email", "oidc_provisioning")
 GUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -299,6 +305,8 @@ def write(
             value = deduped
         if key == "oauth_accept_bearer" and not isinstance(value, bool):
             raise ValueError(f"invalid oauth_accept_bearer: {value!r}")
+        if key == "oauth_member_access" and value not in _OAUTH_MEMBER_ACCESS_MODES:
+            raise ValueError(f"invalid oauth_member_access: {value!r} (additive or owner_only)")
         if key == "upstream_oauth_client_mode" and value not in _UPSTREAM_OAUTH_CLIENT_MODES:
             raise ValueError(f"invalid upstream_oauth_client_mode: {value!r}")
         if key == "idle_timeout_s":
@@ -453,6 +461,10 @@ def oauth_scopes(session: Session) -> list[str]:
 
 def oauth_accept_bearer(session: Session) -> bool:
     return repo.setting_get(session, "oauth_accept_bearer", DEFAULTS["oauth_accept_bearer"])
+
+
+def oauth_member_access(session: Session) -> str:
+    return repo.setting_get(session, "oauth_member_access", DEFAULTS["oauth_member_access"])
 
 
 def upstream_oauth_client_mode(session: Session) -> str:
