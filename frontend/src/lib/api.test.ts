@@ -261,4 +261,41 @@ describe('Sign-in session CSRF header', () => {
 		expect(go).not.toHaveBeenCalled();
 		expect(goto).toHaveBeenCalledWith('/login');
 	});
+
+	function unauthorized() {
+		return { ok: false, status: 401, json: async () => ({}), text: async () => '' };
+	}
+
+	it('a 401 asks status once (which refreshes the session) and retries once', async () => {
+		const api = await import('./api');
+		vi.mocked(goto).mockClear();
+		let serverCalls = 0;
+		const order: string[] = [];
+		const fetchMock = vi.fn(async (url: string) => {
+			order.push(url);
+			if (url === '/api/auth/status') return respond(session);
+			serverCalls += 1;
+			return serverCalls === 1 ? unauthorized() : respond([]);
+		});
+		vi.stubGlobal('fetch', fetchMock);
+		await expect(api.listServers()).resolves.toEqual([]);
+		expect(order).toEqual(['/api/auth/status', '/api/servers', '/api/auth/status', '/api/servers']);
+		expect(goto).not.toHaveBeenCalled();
+	});
+
+	it('a second 401 after the retry goes to /login without another try', async () => {
+		const api = await import('./api');
+		vi.mocked(goto).mockClear();
+		const order: string[] = [];
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string) => {
+				order.push(url);
+				return url === '/api/auth/status' ? respond(session) : unauthorized();
+			})
+		);
+		await expect(api.listServers()).rejects.toMatchObject({ status: 401 });
+		expect(order).toEqual(['/api/auth/status', '/api/servers', '/api/auth/status', '/api/servers']);
+		expect(goto).toHaveBeenCalledWith('/login');
+	});
 });

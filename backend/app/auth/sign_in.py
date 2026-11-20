@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Callable, Optional
@@ -30,6 +31,7 @@ from app.api.util import oauth_public_base
 from app.config import get_settings
 from app.db import repo
 from app.db.models import SignInSession
+from app.registry import settings as runtime_settings
 from app.util import hash_token, new_id, new_token, secret_file
 
 SECURE_COOKIE = "__Host-mcpe_session"
@@ -38,8 +40,6 @@ CSRF_HEADER = "x-mcpe-csrf"
 LANDED_COOKIE = "mcpe_sso_landed"  # frontend/src/lib/auth.ts reads and clears it
 # The browser-only headers the proxies and the control MCP's inner calls drop.
 BROWSER_HEADERS = frozenset({"cookie", CSRF_HEADER})
-# Hard expiry, fixed for now; #273 adds a soft expiry and refresh.
-MAX_AGE = timedelta(hours=12)
 # The one /api route that reads the cookie without the CSRF header: it is how the SPA
 # learns the header's value. A GET with no side effects, and SameSite=Strict keeps the
 # cookie off cross-site requests while CORS keeps the answer from a cross-site reader.
@@ -84,18 +84,39 @@ def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
+def hard_expiry(row: SignInSession) -> datetime:
+    return _aware(row.expires_at)
+
+
+def _before_hard_expiry(row: Optional[SignInSession]) -> bool:
+    return row is not None and hard_expiry(row) > datetime.now(timezone.utc)
+
+
+def soft_expired(row: SignInSession) -> bool:
+    """Has the provider's access token run out? Then only ``STATUS_PATH`` counts the
+    session, and refreshes it."""
+    soft = row.soft_expires_at
+    return soft is not None and _aware(soft) <= datetime.now(timezone.utc)
+
+
 def live(row: Optional[SignInSession]) -> bool:
-    return row is not None and _aware(row.expires_at) > datetime.now(timezone.utc)
+    """Before both its hard and its soft expiry."""
+    return _before_hard_expiry(row) and not soft_expired(row)
+
+
+def cookie_row(request: Request, session: Session) -> Optional[SignInSession]:
+    """The session the request's cookie names, soft-expired or not, before its hard
+    expiry. For ``STATUS_PATH``, which refreshes a soft-expired one."""
+    raw = cookie_value(request)
+    row = repo.get_sign_in_session_by_hash(session, hash_token(raw)) if raw else None
+    return row if _before_hard_expiry(row) else None
 
 
 def current(request: Request, session: Session) -> Optional[SignInSession]:
     """The request's live Sign-in session, or None. Requires a matching CSRF header
     everywhere except ``STATUS_PATH``."""
-    raw = cookie_value(request)
-    if not raw:
-        return None
-    row = repo.get_sign_in_session_by_hash(session, hash_token(raw))
-    if not live(row):
+    row = cookie_row(request, session)
+    if row is None or soft_expired(row):
         return None
     if request.scope.get("path") != STATUS_PATH:
         presented = request.headers.get(CSRF_HEADER, "")
@@ -104,11 +125,37 @@ def current(request: Request, session: Session) -> Optional[SignInSession]:
     return row
 
 
+def max_age(session: Session) -> timedelta:
+    """The hard cap on a new session (the ``oidc_session_max_age_s`` setting)."""
+    key = "oidc_session_max_age_s"
+    return timedelta(seconds=repo.setting_get(session, key, runtime_settings.DEFAULTS[key]))
+
+
+@dataclass(frozen=True)
+class Grant:
+    """What a session keeps from a token response: the ID token, the refresh token
+    ("" when the provider issued none) and when the access token runs out."""
+
+    id_token: str
+    refresh_token: str
+    access_expires_at: datetime
+
+    def columns(self) -> dict:
+        """The session row's columns for this grant, sealed. Without a refresh token
+        there's nothing to refresh with, so no soft expiry."""
+        return {
+            "id_token": sealed.seal(self.id_token) if self.id_token else "",
+            "refresh_token": sealed.seal(self.refresh_token) if self.refresh_token else "",
+            "soft_expires_at": self.access_expires_at if self.refresh_token else None,
+        }
+
+
 def start(
-    session: Session, user_id: str, id_token: str,
+    session: Session, user_id: str, grant: Grant, settings: str,
     still_valid: Callable[[Session], bool] = lambda _s: True,
 ) -> Optional[str]:
-    """Begin a Sign-in session for ``user_id``; returns the cookie value (shown once).
+    """Begin a Sign-in session for ``user_id`` from the provider's ``grant``, bound to
+    the sign-in settings digest ``settings``; returns the cookie value (shown once).
     ``still_valid`` runs after the row is flushed, so under the database write lock a
     settings write also takes: when it says no, nothing is stored and this returns None."""
     raw = new_token()
@@ -116,7 +163,7 @@ def start(
     session.add(
         SignInSession(
             id=new_id(), token_hash=hash_token(raw), user_id=user_id, created_at=now,
-            expires_at=now + MAX_AGE, id_token=sealed.seal(id_token) if id_token else "",
+            expires_at=now + max_age(session), settings=settings, **grant.columns(),
         )
     )
     session.flush()
@@ -143,10 +190,10 @@ def end(request: Request, session: Session) -> Optional[str]:
     return id_token
 
 
-def set_cookie(response: Response, raw: str, *, https: bool) -> None:
+def set_cookie(response: Response, raw: str, *, https: bool, max_age: timedelta) -> None:
     response.set_cookie(
         SECURE_COOKIE if https else PLAIN_COOKIE, raw,
-        max_age=int(MAX_AGE.total_seconds()), path="/", secure=https, httponly=True,
+        max_age=int(max_age.total_seconds()), path="/", secure=https, httponly=True,
         samesite="strict",
     )
     # A readable marker (no secret in it): the SPA that loads next clears any stored

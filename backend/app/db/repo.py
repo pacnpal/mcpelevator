@@ -666,6 +666,11 @@ def get_sign_in_session_by_hash(session: Session, token_hash: str) -> Optional[S
     return session.exec(select(SignInSession).where(SignInSession.token_hash == token_hash)).first()
 
 
+def delete_sign_in_session(session: Session, session_id: str) -> None:
+    """Stage ending one Sign-in session; the caller commits."""
+    session.execute(delete(SignInSession).where(SignInSession.id == session_id))
+
+
 def delete_sign_in_sessions(session: Session) -> None:
     """Stage ending EVERY Sign-in session; the caller commits."""
     session.execute(delete(SignInSession))

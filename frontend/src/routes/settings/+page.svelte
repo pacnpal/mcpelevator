@@ -402,6 +402,7 @@
 	let oidcAllowedTenants = $state('');
 	let oidcRequireVerifiedEmail = $state(true);
 	let oidcProvisioning = $state(false);
+	let oidcSessionMaxAge = $state<number | null>(43200);
 	let oidcGroupsClaim = $state('groups');
 	let oidcAllowedGroups = $state('');
 	let oidcAdminGroups = $state('');
@@ -420,6 +421,7 @@
 		oidcAllowedTenants = toLines(s.oidc_allowed_tenants);
 		oidcRequireVerifiedEmail = s.oidc_require_verified_email;
 		oidcProvisioning = s.oidc_provisioning;
+		oidcSessionMaxAge = s.oidc_session_max_age_s;
 		oidcGroupsClaim = s.oidc_groups_claim;
 		oidcAllowedGroups = toLines(s.oidc_allowed_groups);
 		oidcAdminGroups = toLines(s.oidc_admin_groups);
@@ -456,6 +458,7 @@
 				oidc_allowed_tenants: fromLines(oidcAllowedTenants),
 				oidc_require_verified_email: oidcRequireVerifiedEmail,
 				oidc_provisioning: oidcProvisioning,
+				oidc_session_max_age_s: oidcSessionMaxAge ?? settings?.oidc_session_max_age_s ?? 43200,
 				oidc_groups_claim: oidcGroupsClaim.trim() || 'groups',
 				oidc_allowed_groups: fromLines(oidcAllowedGroups),
 				oidc_admin_groups: fromLines(oidcAdminGroups),
@@ -2440,6 +2443,20 @@
 						placeholder="Company SSO"
 						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 					/>
+				</label>
+				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+					Longest session (seconds)
+					<input
+						type="number"
+						min="300"
+						step="60"
+						bind:value={oidcSessionMaxAge}
+						disabled={savingField !== null}
+						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
+					/>
+					<span class="font-normal text-[var(--color-ink-dim)]">
+						A sign-in ends after this long even while the provider keeps refreshing it. At least 300; applies to new sessions.
+					</span>
 				</label>
 				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
 					Client id

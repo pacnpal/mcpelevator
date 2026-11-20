@@ -620,6 +620,8 @@ class SettingsInfo(BaseModel):
     oidc_local_runner_groups: list[str] = []
     oidc_allowed_domains: list[str] = []
     oidc_provisioning: bool = False
+    # Hard cap on a Sign-in session, seconds.
+    oidc_session_max_age_s: int = 43200
     # Read-only: the redirect URI to register at the identity provider.
     oidc_redirect_uri: str = ""
 
@@ -673,6 +675,8 @@ class SettingsUpdate(BaseModel):
     oidc_allowed_domains: Optional[list[str]] = None
     # On: a sign-in that matches no user creates one (a Member, local runners off).
     oidc_provisioning: Optional[bool] = None
+    # Hard cap on a Sign-in session in seconds (≥ 300). StrictInt like idle_timeout_s.
+    oidc_session_max_age_s: Optional[StrictInt] = None
 
 
 # ---- Groups (the /g/<name> registry) ----------------------------------------

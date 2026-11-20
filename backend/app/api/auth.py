@@ -45,9 +45,15 @@ router = APIRouter()
 
 @router.get("/auth/status", response_model=AuthStatus)
 async def auth_status(request: Request, session: Session = Depends(get_session)) -> AuthStatus:
+    # The one route that refreshes a soft-expired Sign-in session; every other route
+    # refuses it with 401, and the SPA calls this before retrying.
     # ``user`` reflects the request's PRINCIPAL, which exists even when
     # ``authenticated`` is false with enforcement off (the synthetic local admin) —
     # that's what lets the zero-config SPA render the full admin surface.
+    if sign_in.accepts(request):
+        row = sign_in.cookie_row(request, session)
+        if row is not None and sign_in.soft_expired(row):
+            await oidc.refresh(session, row)  # live again, or ended
     p = principal_mod.resolve(request, session)
     user = None
     if p is not None:
@@ -193,7 +199,7 @@ async def oidc_callback(
         return _sso_error(oidc.EXPIRED, "the SSO settings changed since this login began", state)
     redirect_uri = _redirect_uri(request)
     try:
-        user, id_token = await oidc.finish(
+        user, grant = await oidc.finish(
             session, code=code, verifier=flow["verifier"], nonce=flow["nonce"],
             redirect_uri=redirect_uri, iss=iss, bound=flow.get("settings"),
         )
@@ -211,12 +217,14 @@ async def oidc_callback(
     # Checked again as the session row is written: a settings write or an unlink can
     # land while the provider answered, and both end sessions, so one started after
     # must not survive.
-    raw = sign_in.start(session, user.id, id_token, still_valid=still_linked)
+    raw = sign_in.start(session, user.id, grant, flow.get("settings"), still_valid=still_linked)
     if raw is None:
         return _sso_error(oidc.EXPIRED, "the SSO settings changed while this login finished", state)
     resp = RedirectResponse(_safe_next(flow.get("next")), status_code=303)
     resp.delete_cookie(_flow_cookie(state), path=_FLOW_PATH)
-    sign_in.set_cookie(resp, raw, https=sign_in.https(request))
+    sign_in.set_cookie(
+        resp, raw, https=sign_in.https(request), max_age=sign_in.max_age(session)
+    )
     return resp
 
 

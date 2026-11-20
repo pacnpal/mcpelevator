@@ -132,6 +132,8 @@ class Settings(BaseSettings):
     oidc_allowed_domains: str = ""
     # Seed for just-in-time provisioning of a User on a first sign-in that matches none.
     oidc_provisioning: bool = False
+    # Seed for oidc_session_max_age_s, the hard cap on a Sign-in session (seconds, ≥ 300).
+    oidc_session_max_age_s: int = 0
     # Catalog: keep a local copy of each directory (data_dir/catalog-mirror.db), synced
     # in the background, so browsing doesn't depend on the upstream being up. The MCP
     # Registry promises no uptime and asks consumers to sync about hourly.

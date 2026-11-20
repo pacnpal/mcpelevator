@@ -107,7 +107,12 @@ async function authHeaders(waitForStatus = true, withToken = true): Promise<Reco
 	};
 }
 
-async function request<T>(path: string, init?: RequestInit, withToken = true): Promise<T> {
+async function request<T>(
+	path: string,
+	init?: RequestInit,
+	withToken = true,
+	retried = false
+): Promise<T> {
 	const url = `${BASE}${path}`;
 	const res = await fetch(url, {
 		...init,
@@ -117,6 +122,16 @@ async function request<T>(path: string, init?: RequestInit, withToken = true): P
 			...init?.headers
 		}
 	});
+
+	// A Sign-in session past its provider access token gets 401 everywhere but
+	// /auth/status, which refreshes it: ask status once, then retry once.
+	if (res.status === 401 && !retried && path !== '/auth/status') {
+		const refreshed = await getAuthStatus(withToken).then(
+			() => true,
+			() => false
+		);
+		if (refreshed) return request<T>(path, init, withToken, true);
+	}
 
 	if (!res.ok) {
 		// A 401 means the token is missing or stale: drop it and bounce to /login

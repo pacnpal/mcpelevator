@@ -123,6 +123,9 @@ DEFAULTS: dict[str, Any] = {
     # On: a sign-in that matches no User creates one, named by the identity claim, a
     # Member with local runners off, linked at once. The gates above still run first.
     "oidc_provisioning": False,
+    # Hard cap on a Sign-in session's length in SECONDS, refresh or not (minimum 300).
+    # Applies to sessions started after a change.
+    "oidc_session_max_age_s": 43200,
 }
 
 # The user fields a group list manages, and the setting that manages each.
@@ -314,6 +317,10 @@ def write(
                     f"invalid usage_retention_days: {value!r} "
                     f"(days, 0–{MAX_USAGE_RETENTION_DAYS}; 0 keeps forever)"
                 )
+        if key == "oidc_session_max_age_s" and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 300
+        ):
+            raise ValueError(f"invalid oidc_session_max_age_s: {value!r} (seconds, ≥ 300)")
         if key in _OIDC_BOOLS and not isinstance(value, bool):
             raise ValueError(f"invalid {key}: {value!r}")
         if key == "oidc_discovery_url":

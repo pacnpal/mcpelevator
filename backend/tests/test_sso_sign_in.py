@@ -317,10 +317,14 @@ def test_the_cookie_alone_opens_nothing_on_the_data_plane_or_the_control_mcp(idp
 def test_an_expired_session_is_refused(idp, monkeypatch):
     _user("ada@example.com")
     idp.claims = {"email": "ada@example.com"}
-    monkeypatch.setattr(sign_in, "MAX_AGE", timedelta(seconds=-1))
     with TestClient(app) as client:
         _enforce()
         _sign_in(client, idp)
+        with Session(get_engine()) as s:  # past its hard expiry
+            row = s.exec(select(SignInSession)).one()
+            row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            s.add(row)
+            s.commit()
         status = client.get("/api/auth/status", headers=LOOPBACK).json()
         assert status["authenticated"] is False and status["csrf"] is None
 

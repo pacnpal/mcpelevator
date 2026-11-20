@@ -6,11 +6,14 @@ This module talks to the identity provider. Settings live in ``app.registry.sett
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import logging
 import re
+import weakref
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote_plus, urlencode
 
@@ -18,12 +21,15 @@ import httpx
 import jwt
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, select
+from sqlmodel import Session, select, update
 
+from app import sealed
 from app.api.users import change_user
+from app.auth import sign_in
 from app.auth.oauth import _ALLOWED_JWT_ALGORITHMS, verified_email
+from app.auth.oauth_flow import log_safe
 from app.db import repo
-from app.db.models import User
+from app.db.models import SignInSession, User
 from app.registry import service
 from app.registry import settings as runtime_settings
 from app.util import new_id
@@ -179,6 +185,9 @@ def authorization_url(
     discovery: dict[str, Any], *, client_id: str, redirect_uri: str, scopes: list[str],
     state: str, nonce: str, verifier: str,
 ) -> str:
+    # Google hands out a refresh token for access_type=offline, not the offline_access
+    # scope (requested_scopes leaves that out for Google).
+    offline = {"access_type": "offline"} if discovery["issuer"] == _GOOGLE else {}
     query = urlencode({
         "response_type": "code",
         "client_id": client_id,
@@ -188,6 +197,7 @@ def authorization_url(
         "nonce": nonce,
         "code_challenge": pkce_challenge(verifier),
         "code_challenge_method": "S256",
+        **offline,
     })
     endpoint = discovery["authorization_endpoint"]
     return f"{endpoint}{'&' if '?' in endpoint else '?'}{query}"
@@ -196,14 +206,16 @@ def authorization_url(
 def requested_scopes(values: dict[str, Any], discovery: dict[str, Any]) -> list[str]:
     """The extra scopes a sign-in asks for: ``oidc_scopes``, plus ``groups`` when a group
     list is in use and the provider lists that scope (Authelia, Pocket ID, Gitea and
-    Zitadel send groups only when it's asked for)."""
+    Zitadel send groups only when it's asked for), and ``offline_access`` when the
+    provider lists it (Entra ID, Okta, Authentik, Authelia and Zitadel issue a refresh
+    token only for that scope). Google gets ``access_type=offline`` instead."""
     scopes = list(values["oidc_scopes"])
     supported = discovery.get("scopes_supported")
-    if (
-        any(values[key] for key in _GROUP_LISTS)
-        and isinstance(supported, list) and "groups" in supported
-    ):
+    supported = supported if isinstance(supported, list) else []
+    if any(values[key] for key in _GROUP_LISTS) and "groups" in supported:
         scopes.append("groups")
+    if "offline_access" in supported and discovery["issuer"] != _GOOGLE:
+        scopes.append("offline_access")
     return scopes
 
 
@@ -225,13 +237,13 @@ async def begin(session: Session) -> dict[str, Any]:
 async def finish(
     session: Session, *, code: str, verifier: str, nonce: str, redirect_uri: str,
     iss: str | None, bound: str,
-) -> tuple[User, str]:
+) -> tuple[User, sign_in.Grant]:
     """Exchange ``code``, validate the ID token, and match the person to a User, linking
     the Linked identity and syncing provider groups. Every decision uses one settings
     snapshot: the current one, refused unless its digest is ``bound`` (the one the
     login began with, ``settings.sign_in_digest``), so equal settings; nothing is
     written unless it still holds under the write lock. Returns the
-    user and the raw ID token. Raises ``SignInFailed``."""
+    user and what the session keeps of the provider's tokens. Raises ``SignInFailed``."""
     values = runtime_settings.read_all(session)
     if runtime_settings.sign_in_digest(values) != bound:
         raise SignInFailed(EXPIRED, "the SSO settings changed since this login began")
@@ -245,7 +257,10 @@ async def finish(
     except ValueError as exc:
         raise SignInFailed(PROVIDER_REJECTED, str(exc)) from exc
     async with client() as http:
-        tokens = await _exchange(http, discovery, client_id, secret, code, verifier, redirect_uri)
+        tokens = await _token(http, discovery, client_id, secret, {
+            "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri,
+            "code_verifier": verifier,
+        })
         id_token = tokens.get("id_token")
         if not isinstance(id_token, str) or not id_token:
             raise SignInFailed(PROVIDER_REJECTED, "the token response carried no id_token")
@@ -254,15 +269,130 @@ async def finish(
             allowed_tenants=values["oidc_allowed_tenants"],
         )
         claims = await _with_userinfo(http, discovery, tokens.get("access_token"), claims)
+    groups = _decide(values, claims)
+    # Threadpool: the config write lock is a threading lock, never waited for on the loop.
+    linked = await run_in_threadpool(_link, session, claims, values, groups, bound)
+    return linked, _grant(tokens, id_token, claims, "")
+
+
+def _grant(
+    tokens: dict[str, Any], id_token: str, claims: dict[str, Any], refresh_token: str
+) -> sign_in.Grant:
+    """What the session keeps of a token response. A new refresh token replaces
+    ``refresh_token`` (Authelia and others rotate single-use ones), and the access
+    token runs out after ``expires_in``, else at the ID token's ``exp``."""
+    expires_in = tokens.get("expires_in")
+    if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool):
+        expires = datetime.now(timezone.utc) + timedelta(seconds=max(0, min(expires_in, 10**9)))
+    else:
+        expires = datetime.fromtimestamp(claims["exp"], timezone.utc)
+    new = tokens.get("refresh_token")
+    return sign_in.Grant(
+        id_token=id_token,
+        refresh_token=new if isinstance(new, str) and new else refresh_token,
+        access_expires_at=expires,
+    )
+
+
+def _decide(values: dict[str, Any], claims: dict[str, Any]) -> set[str]:
+    """The verified-email rule, then ``_gate``: the person's groups. Raises
+    ``SignInFailed``."""
     claim = values["oidc_identity_claim"]
     if claim == "email" and values["oidc_require_verified_email"] and not _email_verified(claims):
         raise SignInFailed(
             UNVERIFIED_EMAIL, f"email_verified is {claims.get('email_verified')!r}"
         )
-    groups = _gate(values, claims)
-    # Threadpool: the config write lock is a threading lock, never waited for on the loop.
-    linked = await run_in_threadpool(_link, session, claims, values, groups, bound)
-    return linked, id_token
+    return _gate(values, claims)
+
+
+# --------------------------------------------------------------------------- #
+# Session refresh: the refresh_token grant, then the sign-in checks again
+# --------------------------------------------------------------------------- #
+
+# One refresh at a time per Sign-in session id; an entry lives while a refresh holds it.
+_REFRESH_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+# After a provider outage the session counts this much longer before the next try.
+_RETRY_AFTER = timedelta(minutes=1)
+
+
+async def refresh(session: Session, row: SignInSession) -> None:
+    """Refresh the soft-expired Sign-in session ``row`` against the provider. On success
+    it is live again with the provider's new tokens, its groups mapped again exactly as
+    at sign-in. A refusal (``invalid_grant``, another subject, a Deactivated user, a
+    gate, the last-admin guard, changed sign-in settings) ends it. A provider outage
+    keeps it for ``_RETRY_AFTER`` more, never past its hard expiry."""
+    session_id = row.id
+    lock = _REFRESH_LOCKS.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        session.expire_all()
+        row = session.get(SignInSession, session_id)
+        if row is None or not sign_in.soft_expired(row):
+            return  # ended, or refreshed by the request this one waited for
+        hard = sign_in.hard_expiry(row)
+        try:
+            await _refresh(session, row)
+        except SignInFailed as exc:
+            session.rollback()
+            detail = log_safe(str(exc))
+            if exc.reason == PROVIDER_UNAVAILABLE:
+                logger.info("SSO session refresh failed, trying again later: %s", detail)
+                retry = min(datetime.now(timezone.utc) + _RETRY_AFTER, hard)
+                session.execute(
+                    update(SignInSession).where(SignInSession.id == session_id)
+                    .values(soft_expires_at=retry)
+                )
+            else:
+                logger.warning(
+                    "SSO session refresh refused (%s), session ended: %s", exc.reason, detail
+                )
+                repo.delete_sign_in_session(session, session_id)
+            session.commit()
+
+
+async def _refresh(session: Session, row: SignInSession) -> None:
+    values = runtime_settings.read_all(session)
+    if not values["oidc_enabled"] or runtime_settings.sign_in_digest(values) != row.settings:
+        raise SignInFailed(EXPIRED, "the SSO settings changed since this session began")
+    cached = _DISCOVERY.get(runtime_settings.normalize_config_url(values["oidc_discovery_url"]))
+    discovery = cached or await _discover(values["oidc_discovery_url"])
+    client_id = values["oidc_client_id"]
+    try:
+        secret = runtime_settings.oidc_client_secret(session)
+    except ValueError as exc:
+        raise SignInFailed(PROVIDER_REJECTED, str(exc)) from exc
+    stored, refresh_token = sealed.unseal(row.id_token), sealed.unseal(row.refresh_token)
+    if not stored or not refresh_token:
+        raise SignInFailed(PROVIDER_REJECTED, "the session's tokens can't be read")
+    try:  # validated when it was stored; read here for its issuer, subject and nonce
+        old = jwt.decode(stored, options={"verify_signature": False})
+    except jwt.PyJWTError as exc:
+        raise SignInFailed(PROVIDER_REJECTED, f"stored id_token: {exc}") from exc
+    async with client() as http:
+        tokens = await _token(http, discovery, client_id, secret, {
+            "grant_type": "refresh_token", "refresh_token": refresh_token,
+        })
+        id_token = tokens.get("id_token")
+        if isinstance(id_token, str) and id_token:
+            claims = await _validate(
+                http, discovery, id_token, client_id=client_id,
+                nonce=str(old.get("nonce", "")), allowed_tenants=values["oidc_allowed_tenants"],
+                refreshed=True,
+            )
+        else:  # no new ID token: the identity is the stored one's
+            id_token, claims = stored, dict(old)
+            iss, tid = claims.get("iss"), claims.get("tid")
+            concrete = _concrete_issuer(
+                discovery["issuer"], iss, tid if isinstance(tid, str) else ""
+            ) if isinstance(iss, str) else None
+            if concrete is None:
+                raise SignInFailed(PROVIDER_REJECTED, f"stored id_token iss {iss!r} doesn't fit")
+            claims["iss"] = concrete
+        claims = await _with_userinfo(http, discovery, tokens.get("access_token"), claims)
+    groups = _decide(values, claims)
+    grant = _grant(tokens, id_token, claims, refresh_token)
+    await run_in_threadpool(
+        _link, session, claims, values, groups, row.settings, (row.id, grant)
+    )
 
 
 def _gate(values: dict[str, Any], claims: dict[str, Any]) -> set[str]:
@@ -313,7 +443,7 @@ def _groups(claims: dict[str, Any], name: str) -> set[str]:
 
 def _link(
     session: Session, claims: dict[str, Any], values: dict[str, Any], groups: set[str],
-    bound: str,
+    bound: str, refreshing: tuple[str, sign_in.Grant] | None = None,
 ) -> User:
     """``_match``, the group sync and the provider recheck as ONE transaction under the
     config write lock, so they are one step against other sign-ins, an admin's unlink
@@ -323,19 +453,24 @@ def _link(
     from) does anything commit. A demotion the last-admin guard blocks refuses the
     sign-in and writes nothing: the role stays, so the guard holds. A writer
     outside the config lock (another instance on this database) can still link the
-    pair first: the unique index refuses ours, and the pair is resolved again."""
+    pair first: the unique index refuses ours, and the pair is resolved again.
+
+    ``refreshing`` is (session id, grant) for a session refresh: the pair must still be
+    linked to that session's User (no matching, no linking), and the session takes the
+    grant in the same commit."""
     with service.config_write_lock():
         session.expire_all()  # see what committed while we waited
-        try:
-            user = _match(
-                session, claims, claims["iss"], values["oidc_identity_claim"],
-                provision=values["oidc_provisioning"],
-            )
-        except IntegrityError:
-            session.rollback()
+        if refreshing is not None:
+            row = session.get(SignInSession, refreshing[0])
             user = _holder(session, claims["iss"], str(claims["sub"]))
-            if user is None:  # couldn't tell who this is: fail closed
-                raise SignInFailed(IDENTITY_CONFLICT, "the link write lost a race") from None
+            if row is None:
+                raise SignInFailed(EXPIRED, "the session ended while it refreshed")
+            if user is None or user.id != row.user_id:
+                raise SignInFailed(
+                    IDENTITY_CONFLICT, "the refreshed ID token names another identity"
+                )
+        else:
+            user = _link_user(session, claims, values)
         if not user.active:  # whatever the provider said; only an admin brings them back
             session.rollback()
             raise SignInFailed(DEACTIVATED, f"{user.name!r} is a deactivated user")
@@ -352,8 +487,28 @@ def _link(
                 f"the groups would demote {name!r}, the last admin login: the role stays admin",
             )
         user = synced
+        if refreshing is not None:
+            session.execute(
+                update(SignInSession).where(SignInSession.id == refreshing[0])
+                .values(**refreshing[1].columns())
+            )
         session.commit()
         session.refresh(user)  # the pair as linked, before anything else can change it
+        return user
+
+
+def _link_user(session: Session, claims: dict[str, Any], values: dict[str, Any]) -> User:
+    """``_match`` for a sign-in, resolving a lost link race by its pair."""
+    try:
+        return _match(
+            session, claims, claims["iss"], values["oidc_identity_claim"],
+            provision=values["oidc_provisioning"],
+        )
+    except IntegrityError:
+        session.rollback()
+        user = _holder(session, claims["iss"], str(claims["sub"]))
+        if user is None:  # couldn't tell who this is: fail closed
+            raise SignInFailed(IDENTITY_CONFLICT, "the link write lost a race") from None
         return user
 
 
@@ -406,14 +561,14 @@ def _concrete_issuer(template: str, iss: str, tid: str | None = None) -> str | N
     return iss if iss == template.replace(_TENANT, tid) else None
 
 
-async def _exchange(
+async def _token(
     http: httpx.AsyncClient, discovery: dict[str, Any], client_id: str, secret: str,
-    code: str, verifier: str, redirect_uri: str,
+    form: dict[str, str],
 ) -> dict[str, Any]:
-    form = {
-        "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri,
-        "code_verifier": verifier, "client_id": client_id,
-    }
+    """POST ``form`` (a grant) to the token endpoint with our client authentication.
+    A transport failure or a 5xx is PROVIDER_UNAVAILABLE; any other refusal is
+    PROVIDER_REJECTED."""
+    form = {**form, "client_id": client_id}
     auth = None
     if secret:
         methods = discovery.get("token_endpoint_auth_methods_supported") or ["client_secret_basic"]
@@ -442,8 +597,11 @@ async def _exchange(
 
 async def _validate(
     http: httpx.AsyncClient, discovery: dict[str, Any], id_token: str, *, client_id: str,
-    nonce: str, allowed_tenants: list[str],
+    nonce: str, allowed_tenants: list[str], refreshed: bool = False,
 ) -> dict[str, Any]:
+    """The ID token's claims once every check passes. ``refreshed``: it came from a
+    refresh, where OIDC Core 12.2 lets it leave out the nonce; one it carries must
+    still be the sign-in's."""
     try:
         header = jwt.get_unverified_header(id_token)
     except jwt.PyJWTError as exc:
@@ -497,7 +655,9 @@ async def _validate(
     several = isinstance(aud, list) and len(aud) > 1
     if ("azp" in claims or several) and claims.get("azp") != client_id:
         raise SignInFailed(PROVIDER_REJECTED, f"id_token azp {claims.get('azp')!r} is not ours")
-    if not hmac.compare_digest(str(claims.get("nonce", "")).encode(), nonce.encode()):
+    if (not refreshed or "nonce" in claims) and not hmac.compare_digest(
+        str(claims.get("nonce", "")).encode(), nonce.encode()
+    ):
         raise SignInFailed(PROVIDER_REJECTED, "id_token nonce doesn't match this sign-in")
     return claims
 
