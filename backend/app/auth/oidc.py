@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 TRANSPORT: httpx.AsyncBaseTransport | None = None
 
 _TIMEOUT_S = 5.0
+# The last discovery document fetched per (normalized) discovery URL. Logout reads it and
+# never fetches: after a restart it's empty until the next sign-in or settings save.
+_DISCOVERY: dict[str, dict[str, Any]] = {}
 _REQUIRED = ("issuer", "authorization_endpoint", "token_endpoint", "jwks_uri")
 
 
@@ -78,7 +81,25 @@ async def fetch_discovery(discovery_url: str) -> dict[str, Any]:
         raise ValueError(
             f"the OIDC discovery document at {url} lacks a valid {', '.join(bad)}"
         )
+    _DISCOVERY[url] = doc
     return doc
+
+
+def logout_url(session: Session, *, id_token: str, post_logout_redirect_uri: str) -> str | None:
+    """The provider's RP-initiated logout URL, or None when the cached discovery document
+    (no fetch here) advertises no ``end_session_endpoint``. ``id_token`` may be empty, and
+    then only ``client_id`` identifies us."""
+    values = runtime_settings.read_all(session)
+    doc = _DISCOVERY.get(runtime_settings.normalize_config_url(values["oidc_discovery_url"]))
+    endpoint = (doc or {}).get("end_session_endpoint")
+    if not runtime_settings.is_valid_oauth_endpoint_url(endpoint):
+        return None
+    query = urlencode({
+        **({"id_token_hint": id_token} if id_token else {}),
+        "client_id": values["oidc_client_id"],
+        "post_logout_redirect_uri": post_logout_redirect_uri,
+    })
+    return f"{endpoint}{'&' if '?' in endpoint else '?'}{query}"
 
 
 # --------------------------------------------------------------------------- #

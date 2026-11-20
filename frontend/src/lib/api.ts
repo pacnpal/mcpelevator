@@ -536,11 +536,20 @@ export function getAuthStatus(withToken = true): Promise<AuthStatus> {
 /** End this browser's Sign-in session (if any), then forget its CSRF value. Both calls
  * go without the login token: a request carrying one is judged on the token alone, so
  * status would hand out no CSRF value for the session. A failure throws and keeps the
- * CSRF value, so the caller can retry. */
-export async function logout(): Promise<void> {
+ * CSRF value, so the caller can retry. Then it leaves: to the provider's logout URL
+ * when the backend returns one (ending the provider session too), else to /login. */
+export async function logout(
+	go: (url: string) => void = (url) => window.location.assign(url)
+): Promise<void> {
 	await getAuthStatus(false);
-	await request<unknown>('/auth/logout', { method: 'POST' }, false);
+	const res = await request<{ provider_logout_url?: string | null }>(
+		'/auth/logout',
+		{ method: 'POST' },
+		false
+	);
 	csrf = null;
+	if (res?.provider_logout_url) go(res.provider_logout_url);
+	else await goto('/login');
 }
 
 /** Current security settings: bind mode, allowed hosts, default auth provider. */

@@ -41,6 +41,7 @@ async def _parked(self):  # keep the reconciler from dialing bridges TestClient 
 def idp(monkeypatch):
     fake = FakeIdP()
     monkeypatch.setattr(oidc, "TRANSPORT", fake.transport)
+    monkeypatch.setattr(oidc, "_DISCOVERY", {})
     monkeypatch.setattr(Supervisor, "run_forever", _parked)
     with Session(get_engine()) as s:
         runtime_settings.write(s, {
@@ -895,3 +896,82 @@ def test_an_https_instance_ignores_the_plain_cookie(idp):
         assert client.get("/api/servers", headers=headers).status_code == 200
         https = {**headers, "x-forwarded-proto": "https"}
         assert client.get("/api/servers", headers=https).status_code == 401
+
+
+# ---- provider (RP-initiated) logout (#272) -----------------------------------------
+
+
+def _provider_logout(client: TestClient) -> str | None:
+    r = client.post("/api/auth/logout", headers=LOOPBACK)
+    assert r.status_code == 200
+    assert _sessions() == 0  # the local session ends first, whatever the provider does
+    return r.json()["provider_logout_url"]
+
+
+def _logout_query(url: str) -> dict[str, str]:
+    parts = urlsplit(url)
+    assert f"{parts.scheme}://{parts.netloc}{parts.path}" == f"{ISSUER}/logout"
+    return {k: v[0] for k, v in parse_qs(parts.query).items()}
+
+
+def _login_page(idp: FakeIdP) -> str:
+    return idp.last_authorize["redirect_uri"].replace("/api/auth/oidc/callback", "/login")
+
+
+def test_logout_returns_the_providers_end_session_url(idp):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    idp.end_session = True
+    with TestClient(app) as client:
+        _sign_in(client, idp)
+        q = _logout_query(_provider_logout(client))
+    hint = jwt.decode(q["id_token_hint"], options={"verify_signature": False})
+    assert hint["nonce"] == idp.last_authorize["nonce"]  # the ID token this sign-in got
+    assert q["client_id"] == CLIENT_ID
+    assert q["post_logout_redirect_uri"] == _login_page(idp)
+
+
+def test_a_provider_without_an_end_session_endpoint_ends_locally(idp):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        _sign_in(client, idp)
+        assert _provider_logout(client) is None
+
+
+@pytest.mark.parametrize("down", [True, False], ids=["provider_down", "provider_up"])
+def test_logout_without_cached_discovery_ends_locally_and_calls_no_one(idp, monkeypatch, down):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    idp.end_session = True
+    with TestClient(app) as client:
+        _sign_in(client, idp)
+        monkeypatch.setattr(oidc, "_DISCOVERY", {})  # as after a restart
+        idp.down = down
+        idp.seen.clear()
+        assert _provider_logout(client) is None
+    assert idp.seen == []
+
+
+def test_a_session_without_an_id_token_gets_the_url_with_client_id_only(idp):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    idp.end_session = True
+    with TestClient(app) as client:
+        _sign_in(client, idp)
+        with Session(get_engine()) as s:
+            for row in s.exec(select(SignInSession)).all():
+                row.id_token = ""
+                s.add(row)
+            s.commit()
+        q = _logout_query(_provider_logout(client))
+    assert "id_token_hint" not in q
+    assert q["client_id"] == CLIENT_ID
+    assert q["post_logout_redirect_uri"] == _login_page(idp)
+
+
+def test_logout_without_a_session_returns_no_provider_url(idp):
+    idp.end_session = True
+    with TestClient(app) as client:
+        r = client.post("/api/auth/logout", headers=LOOPBACK)
+        assert r.json()["provider_logout_url"] is None

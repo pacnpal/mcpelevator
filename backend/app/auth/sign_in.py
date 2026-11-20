@@ -128,15 +128,19 @@ def start(
     return raw
 
 
-def end(request: Request, session: Session) -> None:
+def end(request: Request, session: Session) -> Optional[str]:
     """Delete the row the request's cookie names, if any. No CSRF header needed: CSRF
     stops cross-site state changes, and a forced logout harms nobody. Raises if the
-    delete fails, so a caller never reports a logout that didn't happen."""
+    delete fails, so a caller never reports a logout that didn't happen. Returns the
+    ended session's ID token ("" when it holds none), or None when there was no session."""
     raw = cookie_value(request)
     row = repo.get_sign_in_session_by_hash(session, hash_token(raw)) if raw else None
-    if row is not None:
-        session.delete(row)
-        session.commit()
+    if row is None:
+        return None
+    id_token = sealed.unseal(row.id_token) or ""
+    session.delete(row)
+    session.commit()
+    return id_token
 
 
 def set_cookie(response: Response, raw: str, *, https: bool) -> None:

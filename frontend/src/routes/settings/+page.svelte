@@ -50,6 +50,11 @@
 	let loadError = $state<string | null>(null);
 
 	let settings = $state<SettingsInfo | null>(null);
+	// Where the provider sends the browser after logging it out there (the /login page on
+	// the same base as the redirect URI).
+	const postLogoutUri = $derived(
+		settings?.oidc_redirect_uri.replace(/\/api\/auth\/oidc\/callback$/, '/login') ?? ''
+	);
 	let tokens = $state<TokenInfo[]>([]);
 	let servers = $state<ServerSummary[]>([]);
 	let groups = $state<GroupInfo[]>([]);
@@ -2357,6 +2362,24 @@
 					>
 					<CopyButton value={settings.oidc_redirect_uri} label="Copy redirect URI" text="Copy" />
 				</div>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<span class="text-xs font-medium text-[var(--color-ink-muted)]">
+					Post-logout redirect URI <span class="font-normal text-[var(--color-ink-dim)]"
+						>(register this too, where the provider supports logout)</span
+					>
+				</span>
+				<div class="flex items-center gap-2">
+					<code
+						class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
+						title={postLogoutUri}>{postLogoutUri}</code
+					>
+					<CopyButton value={postLogoutUri} label="Copy post-logout redirect URI" text="Copy" />
+				</div>
+				<p class="text-xs text-[var(--color-ink-dim)]">
+					Log out also ends the provider session when its discovery document lists an
+					<code>end_session_endpoint</code>, then the provider sends the browser back here.
+				</p>
 			</div>
 			<div class="grid gap-3 sm:grid-cols-2">
 				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">

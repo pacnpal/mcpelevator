@@ -217,4 +217,33 @@ describe('Sign-in session CSRF header', () => {
 		await api.logout();
 		expect(logoutCalls).toBe(2);
 	});
+
+	it('logout follows the provider logout URL when the backend returns one', async () => {
+		const api = await import('./api');
+		const providerUrl = 'https://idp.example.com/logout?client_id=mcpelevator';
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string) =>
+				respond(url === '/api/auth/status' ? session : { ok: true, provider_logout_url: providerUrl })
+			)
+		);
+		const go = vi.fn();
+		await api.logout(go);
+		expect(go).toHaveBeenCalledWith(providerUrl);
+		expect(goto).not.toHaveBeenCalled();
+	});
+
+	it('logout goes to /login when there is no provider logout URL', async () => {
+		const api = await import('./api');
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string) =>
+				respond(url === '/api/auth/status' ? session : { ok: true, provider_logout_url: null })
+			)
+		);
+		const go = vi.fn();
+		await api.logout(go);
+		expect(go).not.toHaveBeenCalled();
+		expect(goto).toHaveBeenCalledWith('/login');
+	});
 });
