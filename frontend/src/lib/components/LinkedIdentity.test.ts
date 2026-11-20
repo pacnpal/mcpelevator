@@ -56,6 +56,23 @@ describe('LinkedIdentity', () => {
 		expect(api.unlinkUserIdentity).toHaveBeenCalledWith('u-1');
 	});
 
+	it('the checkbox sends block=true', async () => {
+		api.unlinkUserIdentity.mockResolvedValue(undefined);
+		const onunlinked = vi.fn();
+		const target = render({ userId: 'u-1', issuer: 'https://idp.example.com', onunlinked });
+		button(target, 'Unlink').click();
+		flushSync();
+		const box = target.querySelector<HTMLInputElement>('input[type="checkbox"]');
+		if (!box) throw new Error('no checkbox');
+		expect(box.checked).toBe(false);
+		expect(box.closest('label')?.textContent).toContain("Don't let this identity match this user again");
+		box.click();
+		flushSync();
+		button(target, 'Confirm unlink').click();
+		await vi.waitFor(() => expect(onunlinked).toHaveBeenCalledWith(true));
+		expect(api.unlinkUserIdentity).toHaveBeenCalledWith('u-1', true);
+	});
+
 	it('cancel leaves the link alone', () => {
 		const target = render({ userId: 'u-1', issuer: 'https://idp.example.com', onunlinked: vi.fn() });
 		button(target, 'Unlink').click();

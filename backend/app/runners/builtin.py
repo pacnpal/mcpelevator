@@ -106,7 +106,9 @@ Typical flows:
 - Move users to a new SSO identity provider: point the oidc_* settings at the
   new provider, then unlink_user_identity for each user whose list_users
   linked_issuer is the old one. Their next sign-in through the new provider
-  links them by name. The same call fixes a wrong match.
+  links them by name. To fix a wrong match (the wrong person got a user), call
+  unlink_user_identity with block true, so that provider account can't match
+  the user by name again.
 - Let the identity provider decide access: update_settings with
   oidc_allowed_groups (who may sign in), oidc_admin_groups and
   oidc_local_runner_groups (set at each sign-in, then locked against

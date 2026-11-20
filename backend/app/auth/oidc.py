@@ -132,6 +132,7 @@ MISSING_CLAIM = "missing_claim"  # the identity claim isn't among the provider's
 TENANT_NOT_ALLOWED = "tenant_not_allowed"  # a multi-tenant issuer, a tenant not listed
 UNVERIFIED_EMAIL = "unverified_email"  # the identity claim is email and email_verified is false
 IDENTITY_CONFLICT = "identity_conflict"  # the matched User is linked to another identity
+IDENTITY_BLOCKED = "identity_blocked"  # an admin unlinked this identity from the User with block
 NOT_ALLOWED = "not_allowed"  # in none of oidc_allowed_groups
 GROUPS_OVERAGE = "groups_overage"  # Entra left the groups out (too many): can't tell
 DOMAIN_NOT_ALLOWED = "domain_not_allowed"  # no verified email domain or hd in the list
@@ -773,8 +774,9 @@ def _match(
     which is then linked. With ``provision`` and no name match, a new User named by the
     claim: a Member with local runners off, linked at creation. A name match on a User
     linked to anything else is refused: a provider that hands an email or username to a
-    new subject must not hand it our User too. Moving to a new issuer goes through an
-    admin's unlink."""
+    new subject must not hand it our User too, and so is one onto a User whose blocked
+    identities hold this pair (an admin's unlink of a wrong match). Moving to a new issuer
+    goes through an admin's unlink."""
     subject = str(claims["sub"])
     holder = _holder(session, issuer, subject)
     if holder is not None:
@@ -798,6 +800,10 @@ def _match(
         raise SignInFailed(
             IDENTITY_CONFLICT,
             f"{user.name!r} is already linked to {user.oidc_issuer!r}, not subject {subject!r}",
+        )
+    if {"issuer": issuer, "subject": subject} in (user.oidc_blocked_identities or []):
+        raise SignInFailed(
+            IDENTITY_BLOCKED, f"subject {subject!r} of {issuer!r} is blocked from {user.name!r}"
         )
     user.oidc_issuer, user.oidc_subject = issuer, subject
     return repo.save_user(session, user, commit=False)  # _link commits

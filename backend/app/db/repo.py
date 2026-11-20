@@ -644,16 +644,33 @@ def revoke_user_credentials(session: Session, user_id: str) -> None:
     session.execute(delete(SignInSession).where(SignInSession.user_id == user_id))
 
 
-def unlink_user_identity(session: Session, user_id: str) -> bool:
+def unlink_user_identity(session: Session, user_id: str, *, block: bool = False) -> bool:
     """Clear a user's Linked identity and end their Sign-in sessions in one transaction.
-    Returns False when the user doesn't exist."""
+    With ``block``, the unlinked identity joins the user's blocked identities, so it
+    can't match them by name again. Returns False when the user doesn't exist."""
     user = session.get(User, user_id)
     if user is None:
         return False
+    blocked = list(user.oidc_blocked_identities or [])
+    pair = {"issuer": user.oidc_issuer, "subject": user.oidc_subject}
+    if block and user.oidc_subject and pair not in blocked:
+        user.oidc_blocked_identities = [*blocked, pair]  # a new list: JSON isn't tracked
     user.oidc_issuer = user.oidc_subject = None
     user.updated_at = utcnow()
     session.add(user)
     session.execute(delete(SignInSession).where(SignInSession.user_id == user_id))
+    session.commit()
+    return True
+
+
+def clear_blocked_identities(session: Session, user_id: str) -> bool:
+    """Empty a user's blocked identities. Returns False when the user doesn't exist."""
+    user = session.get(User, user_id)
+    if user is None:
+        return False
+    user.oidc_blocked_identities = []
+    user.updated_at = utcnow()
+    session.add(user)
     session.commit()
     return True
 

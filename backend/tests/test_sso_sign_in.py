@@ -1113,6 +1113,66 @@ def test_moving_to_a_new_issuer_goes_through_unlink(idp):
     assert _link("ada@example.com") == (new_issuer, "new-sub")
 
 
+def _blocked_count(client: TestClient, uid: str, headers: dict[str, str]) -> int:
+    users = client.get("/api/users", headers=headers).json()
+    return next(u for u in users if u["id"] == uid)["blocked_identities_count"]
+
+
+def test_unlink_with_block_keeps_a_wrong_match_from_relinking(idp):
+    uid = _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        admin = _enforce()
+        assert _signed_in(_sign_in(client, idp))  # the wrong person matched by name
+        r = client.delete(f"/api/users/{uid}/identity?block=true", headers=admin)
+        assert r.status_code == 204
+        assert _blocked_count(client, uid, admin) == 1
+        assert _reason(_sign_in(client, idp)) == "identity_blocked"
+        assert _listed_issuer(client, uid, admin) is None
+    assert _link("ada@example.com") == (None, None)
+
+
+def test_unlink_without_block_relinks_on_the_next_sign_in(idp):
+    uid = _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        admin = _enforce()
+        assert _signed_in(_sign_in(client, idp))
+        assert client.delete(f"/api/users/{uid}/identity?block=false", headers=admin).status_code == 204
+        assert _blocked_count(client, uid, admin) == 0
+        assert _signed_in(_sign_in(client, idp))
+    assert _link("ada@example.com") == (ISSUER, "sub-1")
+
+
+def test_a_block_leaves_other_identities_free_to_match_the_user(idp):
+    uid = _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        admin = _enforce()
+        assert _signed_in(_sign_in(client, idp))
+        assert client.delete(f"/api/users/{uid}/identity?block=true", headers=admin).status_code == 204
+        idp.claims = {"email": "ada@example.com", "sub": "the-real-ada"}
+        assert _signed_in(_sign_in(client, idp))
+    assert _link("ada@example.com") == (ISSUER, "the-real-ada")
+
+
+def test_clearing_the_blocks_lets_the_identity_match_again(idp):
+    uid = _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        admin = _enforce()
+        assert _signed_in(_sign_in(client, idp))
+        member = _session_headers(client)  # admin only
+        assert client.delete(f"/api/users/{uid}/identity/blocks", headers=member).status_code == 403
+        assert client.delete(f"/api/users/{uid}/identity?block=true", headers=admin).status_code == 204
+        assert _reason(_sign_in(client, idp)) == "identity_blocked"
+        assert client.delete("/api/users/nope/identity/blocks", headers=admin).status_code == 404
+        assert client.delete(f"/api/users/{uid}/identity/blocks", headers=admin).status_code == 204
+        assert _blocked_count(client, uid, admin) == 0
+        assert _signed_in(_sign_in(client, idp))
+    assert _link("ada@example.com") == (ISSUER, "sub-1")
+
+
 def test_entra_tenants_with_the_same_sub_are_different_users(idp):
     second = "00000000-0000-0000-0000-000000000002"
     ada, bob = _user("ada@example.com"), _user("bob@example.com")

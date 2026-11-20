@@ -32,6 +32,7 @@ function user(managed: UserInfo['managed']): UserInfo {
 		tokens_count: 0,
 		created_at: '2026-01-01T00:00:00Z',
 		linked_issuer: null,
+		blocked_identities_count: 0,
 		active: true,
 		managed
 	};
