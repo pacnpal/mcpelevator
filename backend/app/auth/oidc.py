@@ -143,6 +143,8 @@ _JWT_LEEWAY_S = 60
 _ID_TOKEN_ALGORITHMS = _ALLOWED_JWT_ALGORITHMS | {"EdDSA"}
 _DEFAULT_SCOPES = ("openid", "email", "profile")
 _GROUP_LISTS = ("oidc_allowed_groups", "oidc_admin_groups", "oidc_local_runner_groups")
+# Settings that decide access from the provider's claims: a refresh must see fresh ones.
+_ACCESS_POLICY = (*_GROUP_LISTS, "oidc_allowed_domains", "oidc_allowed_tenants")
 # Entra ID's multi-tenant discovery names its issuer with this placeholder; a token's
 # ``iss`` carries the tenant's GUID (its ``tid`` claim) in its place.
 _TENANT = "{tenantid}"
@@ -318,9 +320,11 @@ _RETRY_AFTER = timedelta(minutes=1)
 async def refresh(session: Session, row: SignInSession) -> None:
     """Refresh the soft-expired Sign-in session ``row`` against the provider. On success
     it is live again with the provider's new tokens, its groups mapped again exactly as
-    at sign-in. A refusal (``invalid_grant``, another subject, a Deactivated user, a
-    gate, the last-admin guard, changed sign-in settings) ends it. A provider outage
-    keeps it for ``_RETRY_AFTER`` more, never past its hard expiry."""
+    at sign-in. Access is judged only on fresh claims: the new ID token, else userinfo.
+    A refusal (``invalid_grant``, another subject, a Deactivated user, a gate, the
+    last-admin guard, changed sign-in settings, no fresh claims while an access policy
+    is set) ends it. A provider outage keeps it for ``_RETRY_AFTER`` more, never past
+    its hard expiry, with any refresh token the provider rotated before it."""
     session_id = row.id
     lock = _REFRESH_LOCKS.setdefault(session_id, asyncio.Lock())
     async with lock:
@@ -350,8 +354,9 @@ async def refresh(session: Session, row: SignInSession) -> None:
 
 
 async def _refresh(session: Session, row: SignInSession) -> None:
+    session_id, bound = row.id, row.settings  # read now: the row may go mid-refresh
     values = runtime_settings.read_all(session)
-    if not values["oidc_enabled"] or runtime_settings.sign_in_digest(values) != row.settings:
+    if not values["oidc_enabled"] or runtime_settings.sign_in_digest(values) != bound:
         raise SignInFailed(EXPIRED, "the SSO settings changed since this session began")
     cached = _DISCOVERY.get(runtime_settings.normalize_config_url(values["oidc_discovery_url"]))
     discovery = cached or await _discover(values["oidc_discovery_url"])
@@ -371,27 +376,47 @@ async def _refresh(session: Session, row: SignInSession) -> None:
         tokens = await _token(http, discovery, client_id, secret, {
             "grant_type": "refresh_token", "refresh_token": refresh_token,
         })
+        rotated = tokens.get("refresh_token")
+        if isinstance(rotated, str) and rotated and rotated != refresh_token:
+            # The provider may have spent the old one: keep the new one now, so an outage
+            # in the checks below leaves a token the next try can use. Nothing else
+            # lands until they pass.
+            session.execute(
+                update(SignInSession).where(SignInSession.id == session_id)
+                .values(refresh_token=sealed.seal(rotated))
+            )
+            session.commit()
+            refresh_token = rotated
         id_token = tokens.get("id_token")
+        identity: dict[str, Any] | None = None
         if isinstance(id_token, str) and id_token:
             claims = await _validate(
                 http, discovery, id_token, client_id=client_id,
                 nonce=str(old.get("nonce", "")), allowed_tenants=values["oidc_allowed_tenants"],
                 refreshed=True,
             )
-        else:  # no new ID token: the identity is the stored one's
-            id_token, claims = stored, dict(old)
-            iss, tid = claims.get("iss"), claims.get("tid")
+        else:  # no new ID token: the stored one vouches for who this is, never for access
+            id_token = stored
+            identity = {k: old[k] for k in ("iss", "sub", "tid", "exp") if k in old}
+            iss, tid = identity.get("iss"), identity.get("tid")
             concrete = _concrete_issuer(
                 discovery["issuer"], iss, tid if isinstance(tid, str) else ""
             ) if isinstance(iss, str) else None
-            if concrete is None:
+            if concrete is None or "sub" not in identity:
                 raise SignInFailed(PROVIDER_REJECTED, f"stored id_token iss {iss!r} doesn't fit")
-            claims["iss"] = concrete
+            identity["iss"] = concrete
+            claims = identity
         claims = await _with_userinfo(http, discovery, tokens.get("access_token"), claims)
+    if claims is identity and any(values[k] for k in _ACCESS_POLICY):
+        # Neither a new ID token nor userinfo: the groups, domain and tenant can't be
+        # checked again, so the person signs in again for a fresh ID token.
+        raise SignInFailed(
+            PROVIDER_REJECTED, "the refresh brought no fresh claims to check access with"
+        )
     groups = _decide(values, claims)
     grant = _grant(tokens, id_token, claims, refresh_token)
     await run_in_threadpool(
-        _link, session, claims, values, groups, row.settings, (row.id, grant)
+        _link, session, claims, values, groups, bound, (session_id, grant)
     )
 
 
@@ -671,7 +696,9 @@ async def _with_userinfo(
     ``email_verified`` come as a pair from one response (#291): the ID token's when it
     has an email, userinfo's when it has none. Userinfo's ``email_verified`` counts for
     the ID token's email only when userinfo sends that same email and the ID token
-    states no verification of its own."""
+    states no verification of its own. Returns ``claims`` itself when it took nothing
+    from userinfo (no endpoint, no access token, a failed fetch); a refresh relies on
+    that to tell whether it saw fresh claims."""
     endpoint = discovery.get("userinfo_endpoint")
     if not endpoint or not isinstance(access_token, str):
         return claims

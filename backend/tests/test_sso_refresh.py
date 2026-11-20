@@ -5,9 +5,11 @@ tokens."""
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
@@ -153,6 +155,74 @@ def test_a_provider_outage_keeps_the_session_until_hard_expiry(idp):
         _age(hard=True)
         assert client.get("/api/servers", headers=headers).status_code == 401
         assert _status(client)["authenticated"] is False
+
+
+def test_a_jwks_outage_after_rotation_keeps_the_new_refresh_token(idp):
+    _user("ada@example.com")
+    with TestClient(app) as client:
+        _signed_in_ada(client, idp)
+        idp.jwks_down = True  # the token endpoint spends the refresh token, then the JWKS 503s
+        _age(soft=True)
+        assert _status(client)["authenticated"] is True
+        idp.jwks_down = False
+        _age(soft=True)
+        assert _status(client)["authenticated"] is True
+    first, second = idp.refreshes
+    assert first != second  # the rotated token, not the spent one
+    assert _sessions() == 1
+
+
+def test_a_refreshed_id_token_with_a_bad_signature_ends_the_session(idp):
+    _user("ada@example.com")
+    with TestClient(app) as client:
+        _signed_in_ada(client, idp)
+        now = int(time.time())
+        idp.id_token_override = idp.sign(
+            {"iss": idp.issuer, "aud": idp.client_id, "sub": "sub-1", "iat": now,
+             "exp": now + 300, "email": "ada@example.com"},
+            key=rsa.generate_private_key(public_exponent=65537, key_size=2048),
+        )  # the current kid, another key
+        _age(soft=True)
+        assert _status(client)["authenticated"] is False
+    assert _sessions() == 0
+
+
+def test_without_a_new_id_token_fresh_userinfo_decides_the_groups(idp):
+    _user("ada@example.com")
+    _settings(oidc_admin_groups=["admins"])
+    idp.userinfo = {"sub": "sub-1"}
+    with TestClient(app) as client:
+        _signed_in_ada(client, idp, groups=["admins"])
+        headers = _session_headers(client)
+        assert client.get("/api/users", headers=headers).status_code == 200
+        idp.refresh_id_token = False
+        idp.userinfo = {"sub": "sub-1", "groups": ["staff"]}  # removed from the admin group
+        _age(soft=True)
+        status = _status(client)
+        assert status["authenticated"] is True and status["user"]["role"] == "member"
+        assert client.get("/api/users", headers=headers).status_code == 403
+
+
+def test_without_fresh_claims_a_group_policy_ends_the_session(idp, caplog):
+    _user("ada@example.com")
+    _settings(oidc_admin_groups=["admins"])
+    with TestClient(app) as client:
+        _signed_in_ada(client, idp, groups=["admins"])
+        idp.refresh_id_token = False  # and no userinfo endpoint
+        _age(soft=True)
+        assert _status(client)["authenticated"] is False
+    assert _sessions() == 0
+    assert "session ended" in caplog.text
+
+
+def test_without_fresh_claims_and_no_group_policy_the_session_stays(idp):
+    _user("ada@example.com")
+    with TestClient(app) as client:
+        _signed_in_ada(client, idp)
+        idp.refresh_id_token = False  # and no userinfo endpoint
+        _age(soft=True)
+        assert _status(client)["authenticated"] is True
+    assert _sessions() == 1 and len(idp.refreshes) == 1
 
 
 def test_offline_access_is_requested_only_when_advertised(idp):

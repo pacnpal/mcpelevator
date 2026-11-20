@@ -8,7 +8,8 @@ and returns the code the provider would send back.
 
 Knobs for later tests: ``claims`` (merged into every ID token), ``userinfo`` (claims
 served there, ``None`` = no endpoint), ``token_error`` / ``token_status`` (the token
-endpoint answers with an error), ``down`` (every endpoint 503s), ``id_token_override``
+endpoint answers with an error), ``down`` (every endpoint 503s), ``jwks_down`` (the JWKS
+alone 503s), ``id_token_override``
 (hand back this exact ID token), ``token_barrier`` (a ``threading.Barrier`` every token
 request waits at, so concurrent sign-ins reach the provider together), ``sign(..., alg=,
 key=)`` and ``rotate_key()``.
@@ -58,6 +59,7 @@ class FakeIdP:
         self.token_error: str | None = None
         self.token_status = 400
         self.down = False
+        self.jwks_down = False
         self.id_token_override: str | None = None
         self.token_barrier: Any = None
         self.iss_param = True  # send RFC 9207 ``iss`` on the callback
@@ -146,6 +148,8 @@ class FakeIdP:
                 doc["end_session_endpoint"] = f"{self.issuer}/logout"
             return httpx.Response(200, json=doc)
         if path == "/jwks":
+            if self.jwks_down:
+                return httpx.Response(503)
             keys = []
             for kid, private in self._keys:
                 if isinstance(private, rsa.RSAPrivateKey):
