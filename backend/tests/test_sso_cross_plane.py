@@ -688,6 +688,68 @@ def test_an_oauth_group_under_each_member_access_mode(plane, mode):
                 runtime_settings.write(s, {"default_auth_provider": "none"})
 
 
+# ---- resolution unavailable: narrowing fails closed, granting grants nothing ------
+
+
+@pytest.fixture(params=["discovery", "keys"])
+def sso_down(plane, monkeypatch, request):
+    """SSO's discovery (or the shared signing keys, for the resolver) can't be had, while
+    the ``oauth`` verifier, stubbed by ``plane``, still accepts tokens."""
+    from app.auth import oidc
+
+    if request.param == "discovery":
+        async def discovery(url):
+            raise httpx.ConnectError("down")
+
+        monkeypatch.setattr(oidc, "_DISCOVERY", {})
+        monkeypatch.setattr(oidc, "fetch_discovery", discovery)
+    else:
+        def keys(url, token):
+            raise jwt.PyJWKClientConnectionError("down")
+
+        monkeypatch.setattr(jwks, "signing_key", keys)
+    return plane
+
+
+def _two_members_his_allowlisted(client: TestClient) -> tuple[str, str]:
+    ada = _linked("ada@example.com", "sub-ada")
+    bob = _linked("bob@example.com", "sub-bob")
+    admin = _enforce()
+    hers = _oauth_server(client, admin, "hers", ada)
+    his = _oauth_server(client, admin, "his", bob)
+    _proxying(client)
+    _allowlist("sub-ada")
+    return hers, his
+
+
+def test_owner_only_refuses_with_503_when_resolution_is_unavailable(sso_down):
+    with TestClient(app) as client:
+        _, his = _two_members_his_allowlisted(client)
+        _member_access("owner_only")
+        r = client.get(f"/s/{his}/mcp", headers={**LOOPBACK, **_access(sso_down, "sub-ada")})
+        assert r.status_code == 503 and "couldn't" in r.json()["detail"], r.text
+
+
+def test_additive_keeps_the_allowlist_verdict_when_resolution_is_unavailable(sso_down):
+    with TestClient(app) as client:
+        _, his = _two_members_his_allowlisted(client)
+        assert client.get(f"/s/{his}/mcp", headers={
+            **LOOPBACK, **_access(sso_down, "sub-ada")}).status_code == 200
+        # The pass-through grants nothing it can't confirm: an unlisted owner is refused.
+        _allowlist("someone-else")
+        assert client.get(f"/s/{his}/mcp", headers={
+            **LOOPBACK, **_access(sso_down, "sub-bob")}).status_code == 403
+
+
+def test_owner_only_lets_an_unlinked_token_follow_the_allowlist(plane):
+    with TestClient(app) as client:
+        _, his = _two_members_his_allowlisted(client)
+        _member_access("owner_only")
+        _allowlist("sub-unlinked")
+        assert client.get(f"/s/{his}/mcp", headers={
+            **LOOPBACK, **_access(plane, "sub-unlinked")}).status_code == 200
+
+
 # ---- the built-in server on the oauth provider (#276) ----------------------------
 
 
@@ -796,3 +858,15 @@ def test_the_builtin_servers_auth_takes_oauth_but_not_an_unknown_provider(oauth_
         r = client.patch(f"/api/servers/{builtin}", json={"auth_provider": bad}, headers=admin)
         assert r.status_code in (400, 422), r.text
     assert client.get(f"/api/servers/{builtin}", headers=admin).json()["auth"] == "oauth"
+
+
+def test_the_builtin_server_on_oauth_refuses_with_503_when_resolution_is_unavailable(
+    oauth_builtin, sso_down
+):
+    _linked("ada@example.com", "sub-ada")
+    client = oauth_builtin.client
+    _proxying(client)
+    r = client.get(
+        f"/s/{oauth_builtin.slug}/mcp", headers={**LOOPBACK, **_access(sso_down, "sub-ada")}
+    )
+    assert r.status_code == 503 and "couldn't" in r.json()["detail"], r.text

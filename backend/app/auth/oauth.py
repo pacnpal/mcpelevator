@@ -281,13 +281,13 @@ def _claims_are_current(claims: dict[str, Any]) -> bool:
     )
 
 
-def _caller(request: Request):
-    """The User the token resolves to through its Linked identity, as a principal, or
-    None when it resolves to no one."""
-    from app.auth.principal import credential_principal  # circular-import guard
+def _caller(token: str):
+    """Whom the token names through its Linked identity: a principal, None for no one,
+    or ``oidc.UNKNOWN`` when that couldn't be told."""
+    from app.auth.principal import provider_jwt_principal  # circular-import guard
 
     with Session(get_engine()) as session:
-        return credential_principal(request, session, cloudflare=False, provider_jwt=True)
+        return provider_jwt_principal(session, token)
 
 
 def _authorizes_as_a_user(session: Session, server: Server) -> bool:
@@ -381,15 +381,17 @@ class OAuthProvider:
         allowlisted = not allowed or _identity_allowed(claims, allowed)
         # Resolve only when it can change the verdict: an allowlisted token passes
         # under additive whoever it names. The built-in server always resolves.
-        caller = _caller(request) if builtin or owner_only or not allowlisted else None
-        reason = policy.oauth_refusal(
+        caller = _caller(token) if builtin or owner_only or not allowlisted else None
+        refusal = policy.oauth_refusal(
             caller, server, allowlisted=allowlisted, owner_only=owner_only, builtin=builtin
         )
-        if reason is not None:
+        if refusal is not None:
+            status, reason = refusal
             raise HTTPException(
-                status_code=403,
+                status_code=status,
                 detail=reason,
-                headers=_challenge(base, server, error="insufficient_scope"),
+                headers=_challenge(base, server, error="insufficient_scope")
+                if status == 403 else None,
             )
 
 
