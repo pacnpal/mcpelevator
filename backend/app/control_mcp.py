@@ -165,7 +165,7 @@ def build(app: FastAPI) -> "_Gate":
         provider's discovery URL; a bare issuer works), oidc_client_id,
         oidc_client_secret (write-only: reads "<hidden>", send "<hidden>" to keep it,
         "" to clear it; MCPE_OIDC_CLIENT_SECRET overrides it), oidc_label (the
-        sign-in button's text), oidc_scopes (extra scopes beyond "openid"),
+        sign-in button's text), oidc_scopes (extra scopes beyond "openid email profile"),
         oidc_identity_claim ("email", "preferred_username" or "sub": the ID token
         claim that names the user), and oidc_enabled. While enabled, any oidc_*
         change fetches the discovery document first and is refused with the reason

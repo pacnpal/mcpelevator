@@ -2410,7 +2410,7 @@
 					{/if}
 				</div>
 				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-					Extra scopes <span class="font-normal text-[var(--color-ink-dim)]">(optional, comma-separated, beyond openid)</span>
+					Extra scopes <span class="font-normal text-[var(--color-ink-dim)]">(optional, comma-separated, beyond openid email profile)</span>
 					<input
 						type="text"
 						bind:value={oidcScopes}

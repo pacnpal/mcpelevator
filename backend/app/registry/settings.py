@@ -96,7 +96,7 @@ DEFAULTS: dict[str, Any] = {
     "oidc_client_secret": "",
     # The sign-in button's label.
     "oidc_label": "",
-    # Scopes requested beyond "openid".
+    # Scopes requested beyond "openid email profile", which are always requested.
     "oidc_scopes": [],
     # The ID token claim that names the user: 'email' | 'preferred_username' | 'sub'.
     "oidc_identity_claim": "email",

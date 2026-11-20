@@ -90,11 +90,15 @@ def _safe_next(value: str | None) -> str:
     return value
 
 
-def _sso_error(reason: str, detail: str, state: str | None = None) -> RedirectResponse:
-    """Failure redirect carrying one of oidc's literal reason codes. ``detail`` (which
-    may hold provider text) goes to the log only."""
+def _sso_error(
+    reason: str, detail: str, state: str | None = None, claim: str | None = None
+) -> RedirectResponse:
+    """Failure redirect carrying one of oidc's literal reason codes, plus the configured
+    identity claim's name for ``missing_claim`` (a validated setting, never provider
+    text). ``detail`` (which may hold provider text) goes to the log only."""
     logger.warning("SSO sign-in failed (%s): %s", reason, oauth_flow.log_safe(detail))
-    resp = RedirectResponse(f"/login?sso=error&reason={reason}", status_code=303)
+    query = urlencode({"sso": "error", "reason": reason, **({"claim": claim} if claim else {})})
+    resp = RedirectResponse(f"/login?{query}", status_code=303)
     if state:
         resp.delete_cookie(_flow_cookie(state), path=_FLOW_PATH)
     return resp
@@ -181,7 +185,7 @@ async def oidc_callback(
             redirect_uri=redirect_uri, iss=iss,
         )
     except oidc.SignInFailed as exc:
-        return _sso_error(exc.reason, str(exc), state)
+        return _sso_error(exc.reason, str(exc), state, exc.claim)
     raw = sign_in.start(session, user.id, id_token)
     resp = RedirectResponse(_safe_next(flow.get("next")), status_code=303)
     resp.delete_cookie(_flow_cookie(state), path=_FLOW_PATH)

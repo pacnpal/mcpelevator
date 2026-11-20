@@ -558,6 +558,28 @@ def test_the_s_proxy_sets_the_builtin_markers_itself(client):
     assert r.json() == {"x-mcpe-original-host": "127.0.0.1"}
 
 
+def test_inner_api_calls_drop_the_cookie_and_csrf_header(client, monkeypatch):
+    """A Sign-in session never drives /api through the control MCP: the in-process
+    /api call a tool makes carries the caller's headers minus the browser-only ones."""
+    import httpx
+
+    from app import control_mcp
+
+    seen: list[dict] = []
+
+    class Spy(httpx.ASGITransport):
+        async def handle_async_request(self, request):
+            seen.append(dict(request.headers))
+            return await super().handle_async_request(request)
+
+    monkeypatch.setattr(control_mcp.httpx, "ASGITransport", Spy)
+    browser = {"cookie": "mcpe_session=abc", "x-mcpe-csrf": "def", "x-probe": "1"}
+    is_error, _ = _call(client, "whoami", headers=browser)
+    assert not is_error and seen
+    assert seen[-1].get("x-probe") == "1"
+    assert "cookie" not in seen[-1] and "x-mcpe-csrf" not in seen[-1]
+
+
 def test_urls_name_the_host_the_caller_used(client):
     carried = {"x-mcpe-original-host": "localhost:9999"}
     _, out = _call(client, "list_servers", headers=carried)  # no internal secret: ignored

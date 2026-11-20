@@ -4,13 +4,16 @@ session counts (only /api, never /s, /g or /api/mcp)."""
 
 from __future__ import annotations
 
+import logging
+import time
 from datetime import timedelta
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import jwt
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session, delete
+from sqlmodel import Session, delete, select
 from starlette.responses import JSONResponse
 
 from conftest import LOOPBACK, create_server, mint_token
@@ -452,3 +455,160 @@ def test_the_s_proxy_and_the_group_hub_drop_the_cookie_and_csrf_header(idp):
         hub.app_for = lambda n: _echo_headers if n == "team" else prev(n)
         seen = client.post("/g/team/mcp", headers=browser).json()["headers"]
         assert "cookie" not in seen and "x-mcpe-csrf" not in seen
+
+
+# ---- identity-provider quirks (each one a FakeIdP setting) -----------------------
+
+TENANT = "9188040d-6c67-4c5b-b112-36a304b66dad"
+ENTRA = "https://login.microsoftonline.com/{tenantid}/v2.0"
+GOOGLE = "https://accounts.google.com"
+
+
+def _settings(**values) -> None:
+    with Session(get_engine()) as s:
+        runtime_settings.write(s, values)
+
+
+def _linked_issuer(name: str) -> str | None:
+    with Session(get_engine()) as s:
+        return s.exec(select(User).where(User.name == name)).one().oidc_issuer
+
+
+def _signed_in(r) -> bool:
+    return r.status_code == 303 and r.headers["location"] == "/servers"
+
+
+# ---- signing algorithms ---------------------------------------------------------
+
+
+def test_an_eddsa_id_token_signs_in(idp):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    idp.alg = "EdDSA"
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+
+
+def test_a_shared_secret_id_token_is_refused_and_says_why(idp, caplog):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    idp.client_secret = "a-shared-secret-of-32-bytes!!!!!"
+    _settings(oidc_client_secret=idp.client_secret)
+    idp.alg = "HS256"
+    with TestClient(app) as client, caplog.at_level(logging.WARNING, logger="app"):
+        assert _reason(_sign_in(client, idp)) == "provider_rejected"
+    assert "shared secret" in caplog.text and "signing key" in caplog.text
+
+
+def test_an_unsigned_id_token_is_refused(idp):
+    _user("ada@example.com")
+    with TestClient(app) as client:
+        start = _start(client)
+        query = idp.authorize(start.headers["location"])
+        nonce = parse_qs(urlsplit(start.headers["location"]).query)["nonce"][0]
+        now = int(time.time())
+        idp.id_token_override = jwt.encode(
+            {"iss": idp.issuer, "aud": idp.client_id, "sub": "sub-1", "iat": now,
+             "exp": now + 300, "nonce": nonce, "email": "ada@example.com"},
+            None, algorithm="none",
+        )
+        assert _reason(_callback(client, query)) == "provider_rejected"
+
+
+# ---- issuers --------------------------------------------------------------------
+
+
+def _entra(idp, *, tid: str = TENANT, iss_tenant: str = TENANT, key_issuer: str | None = ENTRA):
+    idp.discovery_issuer = ENTRA
+    idp.jwks_issuer = key_issuer
+    idp.claims = {"email": "ada@example.com", "tid": tid,
+                  "iss": ENTRA.replace("{tenantid}", iss_tenant)}
+
+
+def test_entra_multi_tenant_signs_in_and_links_the_concrete_issuer(idp):
+    _user("ada@example.com")
+    _entra(idp)
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+    assert _linked_issuer("ada@example.com") == ENTRA.replace("{tenantid}", TENANT)
+
+
+@pytest.mark.parametrize(
+    "spoil",
+    [
+        {"tid": "not-a-guid", "iss_tenant": "not-a-guid"},
+        {"iss_tenant": "00000000-0000-0000-0000-000000000001"},
+        {"key_issuer": "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000001/v2.0"},
+    ],
+    ids=["tid_not_a_guid", "iss_names_another_tenant", "key_issuer_differs"],
+)
+def test_entra_refuses_a_token_whose_tenant_does_not_fit(idp, spoil):
+    _user("ada@example.com")
+    _entra(idp, **spoil)
+    idp.iss_param = False
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "provider_rejected"
+
+
+def test_google_scheme_less_issuer_signs_in_and_links_the_https_form(idp):
+    _user("ada@example.com")
+    idp.discovery_issuer = GOOGLE
+    idp.claims = {"email": "ada@example.com", "iss": "accounts.google.com"}
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+    assert _linked_issuer("ada@example.com") == GOOGLE
+
+
+def test_a_scheme_less_issuer_is_google_only(idp):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com", "iss": "idp.example.com"}
+    idp.iss_param = False
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "provider_rejected"
+
+
+# ---- client authentication -------------------------------------------------------
+
+
+def test_a_public_client_sends_its_client_id_and_no_secret(idp):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    idp.auth_methods = ["none"]
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+
+
+@pytest.mark.parametrize("methods", [["client_secret_post"], ["client_secret_basic"]])
+def test_a_confidential_client_uses_the_method_the_provider_lists(idp, methods):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    idp.client_secret = "s3cret"
+    idp.auth_methods = methods
+    _settings(oidc_client_secret="s3cret")
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+
+
+# ---- scopes and claims -----------------------------------------------------------
+
+
+def test_default_scopes_are_requested_with_the_extras_once(idp):
+    _settings(oidc_scopes=["email", "read:things", "openid"])
+    with TestClient(app) as client:
+        idp.authorize(_start(client).headers["location"])
+    assert idp.last_authorize["scope"] == "openid email profile read:things"
+
+
+def test_a_missing_identity_claim_is_its_own_reason(idp):
+    _user("ada@example.com")
+    with TestClient(app) as client:
+        r = _sign_in(client, idp)
+    assert _reason(r) == "missing_claim"
+    assert parse_qs(urlsplit(r.headers["location"]).query)["claim"] == ["email"]
+
+
+def test_an_email_only_in_userinfo_signs_in(idp):
+    _user("ada@example.com")
+    idp.userinfo = {"sub": "sub-1", "email": "ada@example.com"}
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))

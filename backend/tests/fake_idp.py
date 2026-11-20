@@ -10,6 +10,14 @@ Knobs for later tests: ``claims`` (merged into every ID token), ``userinfo`` (cl
 served there, ``None`` = no endpoint), ``token_error`` / ``token_status`` (the token
 endpoint answers with an error), ``down`` (every endpoint 503s), ``id_token_override``
 (hand back this exact ID token), ``sign(..., alg=, key=)`` and ``rotate_key()``.
+
+Provider quirks, one setting each: ``alg`` (``RS256``, ``EdDSA``, or ``HS256`` signed with
+``client_secret``), ``discovery_issuer`` (the issuer discovery advertises when it differs
+from the ID token's ``iss``, e.g. Entra's ``{tenantid}`` template), ``jwks_issuer`` (an
+``issuer`` field on every JWKS key, as Entra serves), ``client_secret`` (None = a public
+client: the token endpoint wants ``client_id`` in the body and no client authentication)
+and ``auth_methods`` (the advertised ``token_endpoint_auth_methods_supported``, enforced).
+``last_authorize`` holds the last authorization request's query.
 """
 
 from __future__ import annotations
@@ -24,8 +32,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import jwt
-from cryptography.hazmat.primitives.asymmetric import rsa
-from jwt.algorithms import RSAAlgorithm
+from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
+from jwt.algorithms import OKPAlgorithm, RSAAlgorithm
 
 ISSUER = "https://idp.example.com"
 CLIENT_ID = "mcpelevator"
@@ -42,8 +50,14 @@ class FakeIdP:
         self.down = False
         self.id_token_override: str | None = None
         self.iss_param = True  # send RFC 9207 ``iss`` on the callback
+        self.alg = "RS256"
+        self.discovery_issuer: str | None = None
+        self.jwks_issuer: str | None = None
+        self.client_secret: str | None = None
+        self.auth_methods: list[str] | None = None
+        self.last_authorize: dict[str, str] = {}
         self._codes: dict[str, dict[str, Any]] = {}
-        self._keys: list[tuple[str, rsa.RSAPrivateKey]] = []
+        self._keys: list[tuple[str, Any]] = []
         self.rotate_key()
         self.transport = httpx.MockTransport(self._handle)
 
@@ -51,11 +65,17 @@ class FakeIdP:
 
     def rotate_key(self) -> None:
         """Publish a fresh signing key; the old one leaves the JWKS."""
-        self._keys = [(secrets.token_hex(4), rsa.generate_private_key(public_exponent=65537, key_size=2048))]
+        self._keys = [
+            (secrets.token_hex(4), rsa.generate_private_key(public_exponent=65537, key_size=2048)),
+            (secrets.token_hex(4), ed25519.Ed25519PrivateKey.generate()),
+        ]
 
-    def sign(self, claims: dict[str, Any], *, alg: str = "RS256", key: Any = None,
+    def sign(self, claims: dict[str, Any], *, alg: str | None = None, key: Any = None,
              kid: str | None = None) -> str:
-        current_kid, private = self._keys[0]
+        alg = alg or self.alg
+        if alg == "HS256" and key is None:
+            return jwt.encode(claims, self.client_secret, algorithm=alg)
+        current_kid, private = self._keys[1 if alg == "EdDSA" else 0]
         return jwt.encode(claims, key if key is not None else private, algorithm=alg,
                           headers={"kid": kid or current_kid})
 
@@ -75,11 +95,12 @@ class FakeIdP:
         q = {k: v[0] for k, v in parse_qs(urlsplit(location).query).items()}
         assert q["response_type"] == "code" and q["client_id"] == self.client_id
         assert q["code_challenge_method"] == "S256"
+        self.last_authorize = q
         code = secrets.token_urlsafe(16)
         self._codes[code] = q
         out = {"code": code, "state": q["state"]}
         if self.iss_param:
-            out["iss"] = self.issuer
+            out["iss"] = self.claims.get("iss", self.issuer)
         return out
 
     # ---- the back channel ---------------------------------------------------
@@ -90,19 +111,27 @@ class FakeIdP:
         path = request.url.path
         if path == "/.well-known/openid-configuration":
             doc = {
-                "issuer": self.issuer,
+                "issuer": self.discovery_issuer or self.issuer,
                 "authorization_endpoint": f"{self.issuer}/authorize",
                 "token_endpoint": f"{self.issuer}/token",
                 "jwks_uri": f"{self.issuer}/jwks",
             }
             if self.userinfo is not None:
                 doc["userinfo_endpoint"] = f"{self.issuer}/userinfo"
+            if self.auth_methods is not None:
+                doc["token_endpoint_auth_methods_supported"] = self.auth_methods
             return httpx.Response(200, json=doc)
         if path == "/jwks":
             keys = []
             for kid, private in self._keys:
-                jwk = json.loads(RSAAlgorithm.to_jwk(private.public_key()))
-                keys.append({**jwk, "kid": kid, "use": "sig", "alg": "RS256"})
+                if isinstance(private, rsa.RSAPrivateKey):
+                    jwk, alg = json.loads(RSAAlgorithm.to_jwk(private.public_key())), "RS256"
+                else:
+                    jwk, alg = json.loads(OKPAlgorithm.to_jwk(private.public_key())), "EdDSA"
+                jwk = {**jwk, "kid": kid, "use": "sig", "alg": alg}
+                if self.jwks_issuer is not None:
+                    jwk["issuer"] = self.jwks_issuer
+                keys.append(jwk)
             return httpx.Response(200, json={"keys": keys})
         if path == "/token":
             return self._token(request)
@@ -114,6 +143,8 @@ class FakeIdP:
         if self.token_error:
             return httpx.Response(self.token_status, json={"error": self.token_error})
         form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+        if not self._client_authenticated(request, form):
+            return httpx.Response(401, json={"error": "invalid_client"})
         grant = self._codes.pop(form.get("code", ""), None)
         if grant is None or form.get("redirect_uri") != grant["redirect_uri"]:
             return httpx.Response(400, json={"error": "invalid_grant"})
@@ -125,3 +156,15 @@ class FakeIdP:
             200, json={"access_token": "at-" + secrets.token_hex(8), "token_type": "Bearer",
                        "id_token": id_token, "expires_in": 300},
         )
+
+    def _client_authenticated(self, request: httpx.Request, form: dict[str, str]) -> bool:
+        header = request.headers.get("authorization", "")
+        if self.client_secret is None:  # a public client: PKCE alone, no client auth
+            return (form.get("client_id") == self.client_id and not header
+                    and "client_secret" not in form)
+        methods = self.auth_methods or ["client_secret_basic"]
+        pair = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+        if header:
+            return "client_secret_basic" in methods and header == f"Basic {pair}"
+        return ("client_secret_post" in methods and form.get("client_id") == self.client_id
+                and form.get("client_secret") == self.client_secret)

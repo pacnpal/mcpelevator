@@ -5,6 +5,12 @@
 	import { clearToken, setToken } from '#lib/auth.js';
 	import type { AuthStatus } from '#lib/types.js';
 
+	// The identity claim a missing_claim failure names: one of the setting's values only.
+	const claimName = () => {
+		const claim = page.url.searchParams.get('claim') ?? '';
+		return ['email', 'preferred_username', 'sub'].includes(claim) ? claim : 'identity';
+	};
+
 	// One plain sentence per reason code the SSO callback sends back (app.auth.oidc).
 	const SSO_ERRORS: Record<string, string> = {
 		provider_denied: 'The identity provider did not let you sign in. Try again, or ask your admin.',
@@ -14,6 +20,7 @@
 		no_match: 'No user here matches your identity provider account. Ask an admin to add you.',
 		ambiguous_match:
 			'More than one user here matches your identity provider account. Ask an admin to sort it out.',
+		missing_claim: `Your identity provider did not send the ${claimName()} claim this instance matches users on. Ask your admin to set the identity claim to preferred_username, or to have the provider send ${claimName()}.`,
 		expired: 'That sign-in took too long or was already used. Start it again.',
 		sso_disabled: 'SSO sign-in is turned off on this instance.'
 	};
