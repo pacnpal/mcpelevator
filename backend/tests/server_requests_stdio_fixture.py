@@ -9,8 +9,9 @@ front-end client, so a request the child sends (``roots/list``,
   the client mid-call and returns what came back — ``{"result": ...}`` or
   ``{"error": ...}``. Before asking it emits a log message and, when the call carried a
   progress token, a progress notification.
-* ``arm`` {method, delay}: answers at once, then sends ``method`` ``delay`` seconds
-  LATER, while no call is in flight (an unsolicited server request).
+* ``arm`` {method, trigger}: answers at once, then sends ``method`` once the file
+  ``trigger`` exists. The test creates it after the call returned, so no call is in
+  flight (an unsolicited server request).
 * ``history``: every server-request outcome so far, in order, tagged with how it was sent.
 * ``max_inflight``: the most tool calls this child ever had in flight at once.
 * ``client_capabilities``: the capabilities the client declared in ``initialize``.
@@ -26,8 +27,10 @@ concurrent calls really are concurrent unless the bridge serializes them.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
+import time
 
 _write_lock = threading.Lock()
 _state_lock = threading.Lock()
@@ -127,6 +130,15 @@ def _later(delay: float, fn, *args) -> None:
     timer.start()
 
 
+def _when_exists(path: str, fn, *args) -> None:
+    def wait() -> None:
+        while not os.path.exists(path):
+            time.sleep(0.01)
+        fn(*args)
+
+    threading.Thread(target=wait, daemon=True).start()
+
+
 def _handle_call(rid, params: dict) -> None:
     name = params.get("name")
     args = params.get("arguments") or {}
@@ -140,7 +152,7 @@ def _handle_call(rid, params: dict) -> None:
             _ask(rid, args, meta)
     elif name == "arm":
         _text(rid, "armed")
-        _later(float(args["delay"]), _ask_client, args["method"], "unsolicited", None)
+        _when_exists(args["trigger"], _ask_client, args["method"], "unsolicited", None)
     elif name == "history":
         with _state_lock:
             snapshot = list(_history)

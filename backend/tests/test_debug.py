@@ -108,12 +108,13 @@ def test_scrub_redacts_opaque_credentials_and_truncated_fields():
 def test_scrub_stays_linear_on_long_keyword_heavy_lines():
     import time
 
-    started = time.perf_counter()
+    # CPU time, not wall time: other processes on a busy machine can't push it over.
+    started = time.process_time()
     for line in ('{"text": "' + "key " * 32000 + '"}', "?" + "key" * 40000, "'key' " * 20000,
                  "?" * 60000, "?key" * 30000, "a." * 50000, "a-" * 50000 + "key:", "key " * 30000 + ":",
                  '{"key": [' * 20000, '"key": {} ' * 20000):
         debug.scrub(line)
-    assert time.perf_counter() - started < 1.0  # over a minute before the scans were linear
+    assert time.process_time() - started < 1.0  # over a minute before the scans were linear
 
 
 def test_bundle_config_hides_url_passwords(monkeypatch):

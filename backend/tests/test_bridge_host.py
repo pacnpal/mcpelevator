@@ -1606,16 +1606,30 @@ async def test_serialized_stdio_forwards_sampling_only_to_a_capable_caller():
 
 
 @pytest.mark.asyncio
-async def test_serialized_stdio_refuses_unsolicited_server_requests():
+async def test_serialized_stdio_refuses_unsolicited_server_requests(tmp_path):
     """Opt-in: a request the child sends while NO call is in flight belongs to nobody —
     roots come back empty and sampling is declined, even with a capable client connected."""
     sampled = AsyncMock(side_effect=_sample_reply)
     proxy, transport = _asker_proxy(serialize=True)
+    # Note each request the routing decides, so the test makes no call (which would fill
+    # the caller slot) until the child's request has been answered.
+    routing, answered = transport.routing, []
+    for name in ("_list_roots", "_sampling"):
+        async def spy(*args, _real=getattr(routing, name), **kwargs):
+            try:
+                return await _real(*args, **kwargs)
+            finally:
+                answered.append(_real.__name__)
+        setattr(routing, name, spy)
     try:
         async with Client(proxy, mode="legacy", roots=["file:///alice"], sampling_handler=sampled) as alice:
-            await alice.call_tool_mcp("arm", {"method": "roots/list", "delay": 0.2})
-            await alice.call_tool_mcp("arm", {"method": "sampling/createMessage", "delay": 0.2})
             with anyio.fail_after(10):
+                for n, method in enumerate(("roots/list", "sampling/createMessage"), 1):
+                    trigger = tmp_path / f"fire-{n}"
+                    await alice.call_tool_mcp("arm", {"method": method, "trigger": str(trigger)})
+                    trigger.touch()  # the arm call has returned, so none is in flight
+                    while len(answered) < n:
+                        await asyncio.sleep(0.02)
                 while len(history := await _history(alice)) < 2:
                     await asyncio.sleep(0.05)
     finally:
