@@ -23,7 +23,7 @@ _Avoid_: Reboot, reload, refresh
 A Server that has remained running without interruption for the configured stability window. Reaching a Stable run restores the retry budget for later recovery.
 
 **Local runner**:
-A runner whose upstream MCP server executes in mcpelevator's host environment. The local runners are `npx`, `uvx`, and `command`; `docker`, `remote`, and `openapi` are not local runners.
+A runner that executes operator-supplied code in mcpelevator's host environment or on its Docker daemon. The local runners are `npx`, `uvx`, `command`, and `docker`; `remote`, `openapi`, and `graphql` are not local runners.
 
 **OpenAPI server**:
 A Server with no MCP upstream: its tools are the operations of a REST API, translated by the bridge from the API's OpenAPI document each time the Server is activated. Calls are plain HTTP requests carrying only the operator's configured headers. A restart re-reads the document, the way it re-discovers an MCP upstream's tools.
@@ -47,7 +47,11 @@ _Avoid_: Removed tool, deleted tool
 
 **Tool override**:
 The operator's replacement name and/or description for one upstream tool, keyed by the tool's upstream name in the Server's `tool_overrides`. Applied by the same bridge transform as a Disabled tool, so it reaches every exposed surface: clients discover only the operator's labels, and a renamed tool answers to its new name only. Fixes a tool whose own wording a model handles badly without rebuilding the upstream server. Part of the launch spec: changing it restarts the bridge.
-_Avoid_: Alias, tool rewrite, tool transformation
+_Avoid_: Tool rewrite, tool transformation
+
+**Tool alias**:
+An extra name, set in a Tool override, that also calls the tool but is never listed to clients. It answers only when no real tool has that name, so an old name keeps working after a rename.
+_Avoid_: Fallback name, secondary name
 
 **Idle quiescence**:
 The supervisor stopping an enabled Server's bridge after its idle window passes with no authenticated proxy traffic. The Server's observed state is `idle`: still desired, deliberately not running, and wakeable.
@@ -68,3 +72,31 @@ _Avoid_: Range, period, timeframe
 **Tool call (counted)**:
 A request that named a tool and reached a running bridge, whichever surface carried it — the MCP endpoint, the REST mirror, or a group, where it counts against the member that owns the tool rather than the group. A request refused before a bridge was picked is not one, and neither is a dashboard playground invocation; a tool that answers with an error still is.
 _Avoid_: Hit, invocation, transaction
+
+**User**:
+A named identity on the control plane. A user holds no password: they prove who they are with a Login token or a Sign-in session, and their role decides what they reach.
+_Avoid_: Account, login
+
+**Admin**:
+A user role that sees and manages every Server, token, user, group, and setting.
+_Avoid_: Superuser, owner
+
+**Member**:
+A user role that sees and manages only the Servers and tokens it owns. Running local runners is a separate permission an admin grants.
+_Avoid_: Regular user, guest
+
+**Login token**:
+A control-scoped token that is a user's credential for the control plane, pasted at sign-in or sent by an agent. Tokens scoped to a Server or group reach the data plane only and are never a login.
+_Avoid_: Password, API key, admin token
+
+**Sign-in session**:
+A person's authenticated browser presence on the control plane, begun by signing in through the configured identity provider and ended by logout, expiry, or deactivation of their user.
+_Avoid_: Session (that means an MCP session), cookie, login
+
+**Linked identity**:
+The one identity-provider account a user is bound to, recognized by its issuer and subject and never by email, so a changed or recycled address can't move the user to someone else.
+_Avoid_: SSO account, external user
+
+**Deactivated user**:
+A user who can no longer sign in or hold any working token, but whose record and owned Servers remain. Owned Servers keep running under admin control. Only provisioning or an admin brings the user back, never a successful sign-in at the identity provider.
+_Avoid_: Disabled user, suspended user, deleted user
