@@ -10,9 +10,13 @@ site at the root keeps working, and nothing outside `/mcpelevator` is touched.
 
 ## Deploy
 
-Needs a Cloudflare login with access to the `pacnp.al` zone. Run it once, and again only
-if `worker.js` or `wrangler.toml` changes. Site content updates don't need a redeploy,
-since the Worker fetches each page from GitHub Pages.
+Deploys are automatic. Cloudflare Workers Builds watches this repository and runs
+`npx wrangler deploy` from `site/cloudflare` on every push to `main` that changes a file
+in this folder (the trigger "Deploy site Worker from main" on the `mcpelevator-site`
+Worker; this README is excluded). Site content updates don't need a deploy at all, since
+the Worker fetches each page from GitHub Pages.
+
+To deploy by hand, you need a Cloudflare login with access to the `pacnp.al` zone:
 
 ```bash
 cd site/cloudflare
@@ -32,10 +36,13 @@ an agent connected to it to:
    `{"main_module": "worker.js", "compatibility_date": "2026-03-01"}` (keep the date in
    step with `wrangler.toml`).
 2. Make sure the `pacnp.al` zone has both routes from `wrangler.toml` pointing at that
-   script (`GET /zones/{zone_id}/workers/routes`, then `POST` any that are missing).
+   script (`GET /zones/{zone_id}/workers/routes`). `POST` any that are missing, and `PUT`
+   any that exist but point at a different script, using the route's id.
 
 If `cloudflare-api` shows as failed with "needs OAuth sign-in", retry it from the
-mcpelevator UI first. Its stored tokens usually still work.
+mcpelevator UI first, since its stored tokens often still work. If it fails again, the
+refresh token has lapsed: open the server page, select **Re-authenticate**, and finish the
+sign-in in the browser before deploying.
 
 Then check:
 
