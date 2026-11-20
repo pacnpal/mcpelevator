@@ -20,6 +20,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from app.api.users import change_user
 from app.auth.oauth import _ALLOWED_JWT_ALGORITHMS
 from app.db import repo
 from app.db.models import User
@@ -101,12 +102,16 @@ MISSING_CLAIM = "missing_claim"  # the identity claim isn't among the provider's
 TENANT_NOT_ALLOWED = "tenant_not_allowed"  # a multi-tenant issuer, a tenant not listed
 UNVERIFIED_EMAIL = "unverified_email"  # the identity claim is email and email_verified is false
 IDENTITY_CONFLICT = "identity_conflict"  # the matched User is linked to another identity
+NOT_ALLOWED = "not_allowed"  # in none of oidc_allowed_groups
+GROUPS_OVERAGE = "groups_overage"  # Entra left the groups out (too many): can't tell
+DOMAIN_NOT_ALLOWED = "domain_not_allowed"  # no verified email domain or hd in the list
 
 _JWT_LEEWAY_S = 60
 # Asymmetric only. EdDSA is Ed25519 (Pocket ID, Zitadel, Forgejo, Keycloak). RFC 9864's
 # newer name "Ed25519" isn't a PyJWT algorithm yet, so a token naming it is refused.
 _ID_TOKEN_ALGORITHMS = _ALLOWED_JWT_ALGORITHMS | {"EdDSA"}
 _DEFAULT_SCOPES = ("openid", "email", "profile")
+_GROUP_LISTS = ("oidc_allowed_groups", "oidc_admin_groups", "oidc_local_runner_groups")
 # Entra ID's multi-tenant discovery names its issuer with this placeholder; a token's
 # ``iss`` carries the tenant's GUID (its ``tid`` claim) in its place.
 _TENANT = "{tenantid}"
@@ -163,6 +168,20 @@ def authorization_url(
     return f"{endpoint}{'&' if '?' in endpoint else '?'}{query}"
 
 
+def requested_scopes(values: dict[str, Any], discovery: dict[str, Any]) -> list[str]:
+    """The extra scopes a sign-in asks for: ``oidc_scopes``, plus ``groups`` when a group
+    list is in use and the provider lists that scope (Authelia, Pocket ID, Gitea and
+    Zitadel send groups only when it's asked for)."""
+    scopes = list(values["oidc_scopes"])
+    supported = discovery.get("scopes_supported")
+    if (
+        any(values[key] for key in _GROUP_LISTS)
+        and isinstance(supported, list) and "groups" in supported
+    ):
+        scopes.append("groups")
+    return scopes
+
+
 async def _discover(discovery_url: str) -> dict[str, Any]:
     try:
         return await fetch_discovery(discovery_url)
@@ -209,25 +228,93 @@ async def finish(
         raise SignInFailed(
             UNVERIFIED_EMAIL, f"email_verified is {claims.get('email_verified')!r}"
         )
+    groups = _gate(values, claims)
     # Threadpool: the config write lock is a threading lock, never waited for on the loop.
-    return await run_in_threadpool(_link, session, claims, claim), id_token
+    return await run_in_threadpool(_link, session, claims, claim, groups), id_token
 
 
-def _link(session: Session, claims: dict[str, Any], claim: str) -> User:
-    """``_match`` under the config write lock, so the check and the link write are one
-    step against other sign-ins and an admin's unlink. A writer outside the lock (another
-    instance on this database) can still link the pair first: the unique index refuses
-    ours, and the pair is resolved again."""
+def _gate(values: dict[str, Any], claims: dict[str, Any]) -> set[str]:
+    """The person's groups, once the allowed-groups and allowed-domains gates pass.
+    Raises ``SignInFailed``."""
+    name = values["oidc_groups_claim"]
+    overage = claims.get("_claim_names")
+    in_use = any(values[key] for key in _GROUP_LISTS)
+    if in_use and isinstance(overage, dict) and (name in overage or "groups" in overage):
+        # Entra moved the groups to a Graph call we don't make: we can't tell who
+        # this person is allowed to be, so fail closed.
+        raise SignInFailed(GROUPS_OVERAGE, f"_claim_names carries {name!r}: groups overage")
+    groups = _groups(claims, name)
+    allowed = values["oidc_allowed_groups"]
+    if allowed and not groups.intersection(allowed):
+        raise SignInFailed(NOT_ALLOWED, f"in none of oidc_allowed_groups ({len(groups)} groups)")
+    domains = values["oidc_allowed_domains"]
+    if domains:
+        hd = claims.get("hd")
+        if isinstance(hd, str) and hd:
+            domain = hd.lower()
+        else:
+            email = claims.get("email")
+            verified = isinstance(email, str) and "@" in email and _email_verified(claims)
+            domain = email.rsplit("@", 1)[1].lower() if verified else None
+        if domain not in domains:
+            raise SignInFailed(DOMAIN_NOT_ALLOWED, f"domain {domain!r} is not in oidc_allowed_domains")
+    return groups
+
+
+def _groups(claims: dict[str, Any], name: str) -> set[str]:
+    """The groups claim ``name``: a literal key first (Auth0's URL-shaped names hold
+    dots), then a dotted path (Keycloak's ``realm_access.roles``). A list keeps its
+    strings, a string is one group, an object counts its keys (Zitadel's roles);
+    anything else, or no claim, is no groups."""
+    value: Any = claims.get(name)
+    if name not in claims:
+        value = claims
+        for part in name.split("."):
+            value = value.get(part) if isinstance(value, dict) else None
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, list):
+        return {v for v in value if isinstance(v, str)}
+    if isinstance(value, dict):
+        return {k for k in value if isinstance(k, str)}
+    return set()
+
+
+def _link(session: Session, claims: dict[str, Any], claim: str, groups: set[str]) -> User:
+    """``_match`` and the group sync under the config write lock, so the check, the link
+    write and the sync are one step against other sign-ins, an admin's unlink and the
+    last-admin guard. A writer outside the lock (another instance on this database)
+    can still link the pair first: the unique index refuses ours, and the pair is
+    resolved again."""
     with service.config_write_lock():
         session.expire_all()  # see what committed while we waited
         try:
-            return _match(session, claims, claims["iss"], claim)
+            user = _match(session, claims, claims["iss"], claim)
         except IntegrityError:
             session.rollback()
-            holder = _holder(session, claims["iss"], str(claims["sub"]))
-            if holder is None:  # couldn't tell who this is: fail closed
+            user = _holder(session, claims["iss"], str(claims["sub"]))
+            if user is None:  # couldn't tell who this is: fail closed
                 raise SignInFailed(IDENTITY_CONFLICT, "the link write lost a race") from None
-            return holder
+        return _sync(session, user, groups)
+
+
+def _sync(session: Session, user: User, groups: set[str]) -> User:
+    """Set the fields provider groups manage, through the same mutation PATCH /users
+    uses (so a demotion sweeps the admin-only tokens). A demotion that would leave no
+    admin login is skipped with a warning; the sign-in still succeeds."""
+    values = runtime_settings.read_all(session)
+    admin_groups, runner_groups = values["oidc_admin_groups"], values["oidc_local_runner_groups"]
+    role = ("admin" if groups.intersection(admin_groups) else "member") if admin_groups else None
+    runners = bool(groups.intersection(runner_groups)) if runner_groups else None
+    if role is None and runners is None:
+        return user
+    result = change_user(session, user, role=role, local_runners=runners)
+    if result == "last_admin":
+        logger.warning(
+            "SSO groups would demote %r, the last admin login: the role stays admin", user.name
+        )
+        result = change_user(session, user, local_runners=runners)
+    return result
 
 
 def _holder(session: Session, issuer: str, subject: str) -> User | None:

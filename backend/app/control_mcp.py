@@ -171,7 +171,21 @@ def build(app: FastAPI) -> "_Gate":
         to sign in; required when the discovery issuer is multi-tenant, i.e. contains
         "{tenantid}", as with /common or /organizations), oidc_require_verified_email
         (default true: with the email identity claim, an ID token whose
-        email_verified is false is refused), and oidc_enabled. While
+        email_verified is false is refused), and oidc_enabled.
+
+        Group mapping, applied at every SSO sign-in: oidc_groups_claim (default
+        "groups"; tried as a literal key first, e.g. Auth0's
+        "https://example.com/groups", then as a dotted path, e.g. Keycloak's
+        "realm_access.roles"; a list, a single string, or an object whose keys are the
+        groups, as Zitadel's roles claim), oidc_allowed_groups (non-empty: anyone in
+        none of them is refused), oidc_admin_groups (non-empty: the role becomes admin
+        when the person is in one, else member), oidc_local_runner_groups (the same for
+        the local-runner permission), and oidc_allowed_domains (non-empty: the verified
+        email's domain, or Google's hd claim when sent, must be listed). An empty list
+        leaves its field manual; a non-empty admin or local-runner list locks that field
+        against update_user. A demotion that would leave no admin login is skipped. While
+        a group list is set, an Entra groups overage refuses the sign-in. The "groups" scope is requested when
+        a group list is set and the provider advertises it. While
         enabled, any oidc_* change fetches the discovery document first and is
         refused with the reason when it's unreachable or lacks issuer,
         authorization_endpoint, token_endpoint or jwks_uri, or when it's
@@ -498,7 +512,11 @@ def build(app: FastAPI) -> "_Gate":
         control_mcp: Optional[bool] = None,
     ) -> Any:
         """Rename a user or change their role, local-runner permission, or access to this
-        MCP server."""
+        MCP server. While SSO is on, a non-empty oidc_admin_groups setting manages every
+        user's role and a non-empty oidc_local_runner_groups manages local_runners: the
+        identity provider's groups set them at each sign-in, so changing a managed field
+        here is refused (409 naming the setting). list_users shows which fields are
+        managed. Empty the setting to edit the field by hand again."""
         changes = {
             "name": name, "role": role, "local_runners": local_runners, "control_mcp": control_mcp
         }

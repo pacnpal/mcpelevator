@@ -39,6 +39,7 @@
 	import CopyButton from '#lib/components/CopyButton.svelte';
 	import CopyMenu from '#lib/components/CopyMenu.svelte';
 	import LinkedIdentity from '#lib/components/LinkedIdentity.svelte';
+	import UserAccessButtons from '#lib/components/UserAccessButtons.svelte';
 	import RestartButton from '#lib/components/RestartButton.svelte';
 	import ServerActionButton from '#lib/components/ServerActionButton.svelte';
 	import StatePill from '#lib/components/StatePill.svelte';
@@ -391,6 +392,11 @@
 	let oidcIdentityClaim = $state<OidcIdentityClaim>('email');
 	let oidcAllowedTenants = $state('');
 	let oidcRequireVerifiedEmail = $state(true);
+	let oidcGroupsClaim = $state('groups');
+	let oidcAllowedGroups = $state('');
+	let oidcAdminGroups = $state('');
+	let oidcLocalRunnerGroups = $state('');
+	let oidcAllowedDomains = $state('');
 	const oidcSecretStored = $derived(settings?.oidc_client_secret === HIDDEN);
 
 	function fillOidc(s: SettingsInfo) {
@@ -403,6 +409,11 @@
 		oidcIdentityClaim = s.oidc_identity_claim;
 		oidcAllowedTenants = s.oidc_allowed_tenants.join(', ');
 		oidcRequireVerifiedEmail = s.oidc_require_verified_email;
+		oidcGroupsClaim = s.oidc_groups_claim;
+		oidcAllowedGroups = s.oidc_allowed_groups.join(', ');
+		oidcAdminGroups = s.oidc_admin_groups.join(', ');
+		oidcLocalRunnerGroups = s.oidc_local_runner_groups.join(', ');
+		oidcAllowedDomains = s.oidc_allowed_domains.join(', ');
 	}
 
 	async function saveOidc(patch: Partial<SettingsInfo>, message: string) {
@@ -432,7 +443,12 @@
 				oidc_scopes: splitCommaList(oidcScopes),
 				oidc_identity_claim: oidcIdentityClaim,
 				oidc_allowed_tenants: splitCommaList(oidcAllowedTenants),
-				oidc_require_verified_email: oidcRequireVerifiedEmail
+				oidc_require_verified_email: oidcRequireVerifiedEmail,
+				oidc_groups_claim: oidcGroupsClaim.trim() || 'groups',
+				oidc_allowed_groups: splitCommaList(oidcAllowedGroups),
+				oidc_admin_groups: splitCommaList(oidcAdminGroups),
+				oidc_local_runner_groups: splitCommaList(oidcLocalRunnerGroups),
+				oidc_allowed_domains: splitCommaList(oidcAllowedDomains)
 			},
 			'SSO settings saved'
 		);
@@ -1291,6 +1307,13 @@
 									{user.servers_count} server{user.servers_count === 1 ? '' : 's'} ·
 									{user.tokens_count} token{user.tokens_count === 1 ? '' : 's'}
 								</span>
+								{#if user.managed.role || user.managed.local_runners}
+									<span class="text-xs text-[var(--color-ink-dim)]">
+										{[user.managed.role && 'Role', user.managed.local_runners && 'Local runners']
+											.filter(Boolean)
+											.join(' and ')} set by SSO groups at sign-in
+									</span>
+								{/if}
 								{#if user.linked_issuer}
 									<LinkedIdentity
 										userId={user.id}
@@ -1332,23 +1355,11 @@
 									>
 										Mint login token
 									</button>
-									<button
-										type="button"
-										onclick={() =>
-											patchUser(user, { role: user.role === 'admin' ? 'member' : 'admin' })}
+									<UserAccessButtons
+										{user}
 										disabled={busyUserId !== null}
-										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
-									>
-										{user.role === 'admin' ? 'Make member' : 'Make admin'}
-									</button>
-									<button
-										type="button"
-										onclick={() => patchUser(user, { local_runners: !user.local_runners })}
-										disabled={busyUserId !== null}
-										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
-									>
-										{user.local_runners ? 'Revoke local runners' : 'Allow local runners'}
-									</button>
+										onpatch={(patch) => patchUser(user, patch)}
+									/>
 									<button
 										type="button"
 										onclick={() => patchUser(user, { control_mcp: !user.control_mcp })}
@@ -2459,6 +2470,34 @@
 						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
 					/>
 				</label>
+			</div>
+			<div class="flex flex-col gap-1">
+				<h3 class="text-xs font-semibold text-[var(--color-ink)]">Group mapping</h3>
+				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
+					Applied at every sign-in. Leave a list empty to keep that field manual. A filled admin
+					or local-runner list sets the field for everyone who signs in and locks it on the Users
+					list.
+				</p>
+			</div>
+			<div class="grid gap-3 sm:grid-cols-2">
+				{#each [
+					{ label: 'Groups claim', hint: 'literal name first, then a dotted path such as realm_access.roles', placeholder: 'groups', get: () => oidcGroupsClaim, set: (v: string) => (oidcGroupsClaim = v) },
+					{ label: 'Allowed groups', hint: 'comma-separated; anyone in none of them is refused', placeholder: 'staff', get: () => oidcAllowedGroups, set: (v: string) => (oidcAllowedGroups = v) },
+					{ label: 'Admin groups', hint: 'comma-separated; Admin when in one, else Member', placeholder: 'mcp-admins', get: () => oidcAdminGroups, set: (v: string) => (oidcAdminGroups = v) },
+					{ label: 'Local runner groups', hint: 'comma-separated; grants the local-runner permission', placeholder: 'mcp-builders', get: () => oidcLocalRunnerGroups, set: (v: string) => (oidcLocalRunnerGroups = v) },
+					{ label: 'Allowed email domains', hint: "comma-separated; a verified email's domain or Google's hd must be listed", placeholder: 'example.com', get: () => oidcAllowedDomains, set: (v: string) => (oidcAllowedDomains = v) }
+				] as field (field.label)}
+					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+						{field.label} <span class="font-normal text-[var(--color-ink-dim)]">({field.hint})</span>
+						<input
+							type="text"
+							bind:value={field.get, field.set}
+							disabled={savingField !== null}
+							placeholder={field.placeholder}
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+						/>
+					</label>
+				{/each}
 			</div>
 			<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
 				<input

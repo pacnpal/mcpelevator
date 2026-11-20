@@ -60,6 +60,11 @@ def test_settings_defaults_and_write(session):
         "oidc_identity_claim": "email",
         "oidc_allowed_tenants": [],
         "oidc_require_verified_email": True,
+        "oidc_groups_claim": "groups",
+        "oidc_allowed_groups": [],
+        "oidc_admin_groups": [],
+        "oidc_local_runner_groups": [],
+        "oidc_allowed_domains": [],
     }
     runtime_settings.write(
         session,

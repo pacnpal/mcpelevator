@@ -133,7 +133,7 @@ async def oidc_login(
     resp = RedirectResponse(
         oidc.authorization_url(
             discovery, client_id=values["oidc_client_id"], redirect_uri=redirect_uri,
-            scopes=values["oidc_scopes"], state=state, nonce=nonce, verifier=verifier,
+            scopes=oidc.requested_scopes(values, discovery), state=state, nonce=nonce, verifier=verifier,
         ),
         status_code=303,
     )

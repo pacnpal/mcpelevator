@@ -105,7 +105,23 @@ DEFAULTS: dict[str, Any] = {
     "oidc_allowed_tenants": [],
     # With the email identity claim, refuse an ID token whose email_verified is false.
     "oidc_require_verified_email": True,
+    # Group mapping. The claim holding the person's groups: tried as a literal key first
+    # (Auth0's URL-shaped names), then as a dotted path (Keycloak's realm_access.roles).
+    "oidc_groups_claim": "groups",
+    # Non-empty: only people in at least one of these groups may sign in.
+    "oidc_allowed_groups": [],
+    # Non-empty: every sign-in sets the role (admin when in one of these groups, else
+    # member) and the role is locked against manual edits. Empty leaves it manual.
+    "oidc_admin_groups": [],
+    # The same for the local-runner permission.
+    "oidc_local_runner_groups": [],
+    # Non-empty: only people whose verified email domain (or Google's hd claim, when
+    # sent) is listed may sign in. Lowercase domains.
+    "oidc_allowed_domains": [],
 }
+
+# The user fields a group list manages, and the setting that manages each.
+MANAGED_USER_FIELDS = {"role": "oidc_admin_groups", "local_runners": "oidc_local_runner_groups"}
 
 
 def read_all(session: Session) -> dict[str, Any]:
@@ -130,6 +146,8 @@ _OIDC_IDENTITY_CLAIMS = {"email", "preferred_username", "sub"}
 _OIDC_BOOLS = ("oidc_enabled", "oidc_require_verified_email")
 GUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 _GUID = re.compile(GUID_PATTERN)
+_OIDC_GROUP_LISTS = ("oidc_allowed_groups", "oidc_admin_groups", "oidc_local_runner_groups")
+_DOMAIN = re.compile(r"(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}")
 # The settings that say which provider signs people in. Changing one ends every Sign-in
 # session, and a login started under other values can't finish.
 SESSION_ENDING_KEYS = ("oidc_enabled", "oidc_discovery_url", "oidc_client_id")
@@ -311,6 +329,20 @@ def write(
             ):
                 raise ValueError(f"invalid oidc_allowed_tenants: {value!r} (tenant GUIDs)")
             value = list(dict.fromkeys(v.strip().lower() for v in value))
+        if key == "oidc_groups_claim":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"invalid oidc_groups_claim: {value!r}")
+            value = value.strip()
+        if key in _OIDC_GROUP_LISTS:
+            if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+                raise ValueError(f"invalid {key}: {value!r} (group names)")
+            value = list(dict.fromkeys(v.strip() for v in value))
+        if key == "oidc_allowed_domains":
+            if not isinstance(value, list) or not all(
+                isinstance(v, str) and _DOMAIN.fullmatch(v.strip().lower()) for v in value
+            ):
+                raise ValueError(f"invalid oidc_allowed_domains: {value!r} (domains, e.g. example.com)")
+            value = list(dict.fromkeys(v.strip().lower() for v in value))
         if key in ("oauth_scopes", "oidc_scopes"):
             if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
                 raise ValueError(f"invalid {key}: {value!r}")
@@ -414,6 +446,16 @@ def usage_retention_days(session: Session) -> int:
 def groups(session: Session) -> dict[str, Any]:
     """The group registry: ``{name: "*" | [server_id, ...]}`` (see DEFAULTS)."""
     return repo.setting_get(session, "groups", DEFAULTS["groups"])
+
+
+def managed_user_fields(session: Session) -> dict[str, bool]:
+    """Which user fields provider groups set at sign-in, and so are locked: those whose
+    group list is non-empty while SSO is on."""
+    on = repo.setting_get(session, "oidc_enabled", False)
+    return {
+        field: bool(on and repo.setting_get(session, key, []))
+        for field, key in MANAGED_USER_FIELDS.items()
+    }
 
 
 def oidc_client_secret(session: Session) -> str:

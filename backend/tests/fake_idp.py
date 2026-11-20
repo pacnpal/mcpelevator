@@ -19,7 +19,8 @@ from the ID token's ``iss``, e.g. Entra's ``{tenantid}`` template), ``jwks_issue
 ``issuer`` field on every JWKS key, as Entra serves), ``client_secret`` (None = a public
 client: the token endpoint wants ``client_id`` in the body and no client authentication)
 and ``auth_methods`` (the advertised ``token_endpoint_auth_methods_supported``, enforced).
-``last_authorize`` holds the last authorization request's query.
+``scopes_supported`` (advertised in discovery when set). ``last_authorize`` holds the
+last authorization request's query.
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ class FakeIdP:
         self.jwks_issuer: str | None = None
         self.client_secret: str | None = None
         self.auth_methods: list[str] | None = None
+        self.scopes_supported: list[str] | None = None
         self.last_authorize: dict[str, str] = {}
         self._codes: dict[str, dict[str, Any]] = {}
         self._keys: list[tuple[str, Any]] = []
@@ -123,6 +125,8 @@ class FakeIdP:
                 doc["userinfo_endpoint"] = f"{self.issuer}/userinfo"
             if self.auth_methods is not None:
                 doc["token_endpoint_auth_methods_supported"] = self.auth_methods
+            if self.scopes_supported is not None:
+                doc["scopes_supported"] = self.scopes_supported
             return httpx.Response(200, json=doc)
         if path == "/jwks":
             keys = []

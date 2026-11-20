@@ -614,6 +614,11 @@ class SettingsInfo(BaseModel):
     oidc_identity_claim: str = "email"
     oidc_allowed_tenants: list[str] = []
     oidc_require_verified_email: bool = True
+    oidc_groups_claim: str = "groups"
+    oidc_allowed_groups: list[str] = []
+    oidc_admin_groups: list[str] = []
+    oidc_local_runner_groups: list[str] = []
+    oidc_allowed_domains: list[str] = []
     # Read-only: the redirect URI to register at the identity provider.
     oidc_redirect_uri: str = ""
 
@@ -655,6 +660,16 @@ class SettingsUpdate(BaseModel):
     # Entra tenant GUIDs allowed to sign in through a multi-tenant issuer.
     oidc_allowed_tenants: Optional[list[str]] = None
     oidc_require_verified_email: Optional[bool] = None
+    # The claim holding the person's groups: a literal key first, then a dotted path.
+    oidc_groups_claim: Optional[str] = None
+    # Non-empty: only members of one of these groups may sign in.
+    oidc_allowed_groups: Optional[list[str]] = None
+    # Non-empty: each sign-in sets the role (admin when in one) and locks it.
+    oidc_admin_groups: Optional[list[str]] = None
+    # Non-empty: each sign-in sets the local-runner permission and locks it.
+    oidc_local_runner_groups: Optional[list[str]] = None
+    # Non-empty: only these verified email domains (or Google hd values) may sign in.
+    oidc_allowed_domains: Optional[list[str]] = None
 
 
 # ---- Groups (the /g/<name> registry) ----------------------------------------
@@ -736,6 +751,8 @@ class UserInfo(BaseModel):
     created_at: datetime
     # The issuer of the user's Linked identity, None when they have none.
     linked_issuer: Optional[str] = None
+    # Fields provider groups set at sign-in, locked against PATCH: {role, local_runners}.
+    managed: dict[str, bool] = {"role": False, "local_runners": False}
 
 
 class UserCreate(BaseModel):
