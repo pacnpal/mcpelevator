@@ -149,10 +149,10 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   (`runner="mcpelevator"`, outside `RUNNERS`) that `service.ensure_builtin` provisions on boot
   (`MCPE_CONTROL_MCP=false` skips that). It runs through an ordinary remote bridge that forwards the
   caller's Authorization (`ProcessSpec.forward_authorization`, on for this runner only) plus a
-  per-process internal header. Only MCP exposure, tool policy, name, slug, auth (`none`/`bearer`) and
+  per-process internal header. Only MCP exposure, tool policy, name, slug, auth (`none`/`bearer`/`oauth`) and
   idle are editable (REST stays off: its in-process proxy call can't forward the caller's token). It can't be deleted, cloned or reassigned (it stays admin-owned, since its `enabled` is a global setting).
   It joins a group only when named (`"*"` skips it); the hub forwards the caller's headers to that
-  member alone, and such a group also opens to an ADMIN's control credential. The bearer provider
+  member alone, and such a group also opens to an ADMIN's control credential, or on `oauth` an admin's resolved provider JWT. The bearer provider
   accepts any control credential for the server itself (`principal.credential_principal`), and the
   `/s` proxy runs `control_mcp.authorize_edge` so an unusable credential gets a 401/403 with a reason
   instead of a failed `initialize`. Behind Cloudflare Access (`auth/cf_access.py`, opt-in via
