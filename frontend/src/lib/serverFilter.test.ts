@@ -8,15 +8,14 @@ import {
 	parseQuery,
 	serializeQuery,
 	sortServers,
-	type FilterableServer,
 	type ServerQuery
 } from './serverFilter';
-import type { Runner, ServerState } from './types';
+import type { Runner, ServerState, ServerSummary } from './types';
 
 function server(
 	name: string,
-	over: Partial<FilterableServer> & { state?: ServerState; runner?: Runner } = {}
-): FilterableServer {
+	over: Partial<ServerSummary> & { state?: ServerState; runner?: Runner } = {}
+): ServerSummary {
 	return {
 		id: name,
 		slug: name.toLowerCase().replace(/\s+/g, '-'),
@@ -32,14 +31,15 @@ function server(
 		pid: null,
 		port: null,
 		tools_count: 0,
+		tool_names: [],
 		owner_id: null,
 		owner_name: null,
 		...over
-	} as FilterableServer;
+	} as ServerSummary;
 }
 
 const q = (over: Partial<ServerQuery>): ServerQuery => ({ ...DEFAULT_QUERY, ...over });
-const names = (list: FilterableServer[]) => list.map((s) => s.name);
+const names = (list: ServerSummary[]) => list.map((s) => s.name);
 
 describe('filterServers', () => {
 	const servers = [
@@ -58,6 +58,13 @@ describe('filterServers', () => {
 		expect(filterServers(servers, q({ q: 'nothing-like-this' }))).toEqual([]);
 	});
 
+	it('finds a server by a tool name the list route sends', () => {
+		// The shape GET /api/servers returns: exposed names, a renamed tool under its new name.
+		const listed = [server('Docs', { tool_names: ['search_docs', 'save_file'] }), server('Other')];
+		expect(names(filterServers(listed, q({ q: 'Save_File' })))).toEqual(['Docs']);
+		expect(names(filterServers(listed, q({ q: 'write_file' })))).toEqual([]);
+	});
+
 	it('ORs several states together', () => {
 		expect(names(filterServers(servers, q({ states: ['failed', 'unhealthy'] })))).toEqual([
 			'GitHub',
@@ -69,7 +76,7 @@ describe('filterServers', () => {
 		const list = [
 			server('Booting', {
 				state: 'failed',
-				startup_status: { phase: 'setup' } as FilterableServer['startup_status']
+				startup_status: { phase: 'setup' } as ServerSummary['startup_status']
 			}),
 			server('Leaving', { state: 'stopping' }),
 			server('Up')

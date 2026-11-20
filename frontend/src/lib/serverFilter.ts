@@ -26,9 +26,6 @@ export interface ServerQuery {
 
 export const DEFAULT_QUERY: ServerQuery = { q: '', states: [], runners: [], owner: '', sort: 'name' };
 
-/** A server summary, plus its discovered tool names when the list carries them. */
-export type FilterableServer = ServerSummary & { tool_names?: string[] };
-
 /** The runner badge's label, which search also matches. */
 export const RUNNER_LABEL: Record<Runner, string> = {
 	npx: 'npx',
@@ -68,7 +65,7 @@ function matchesOwner(server: ServerSummary, owner: string, myId: string | null)
 	return ownerId === owner;
 }
 
-function matchesText(server: FilterableServer, q: string): boolean {
+function matchesText(server: ServerSummary, q: string): boolean {
 	const needle = q.trim().toLowerCase();
 	if (!needle) return true;
 	const haystack = [
@@ -83,7 +80,7 @@ function matchesText(server: FilterableServer, q: string): boolean {
 
 /** The servers matching every filter in `query` (sort is ignored). Several states
  * or runners match any of them. `myId` resolves the "mine" owner filter. */
-export function filterServers<T extends FilterableServer>(
+export function filterServers<T extends ServerSummary>(
 	servers: T[],
 	query: ServerQuery,
 	myId: string | null = null

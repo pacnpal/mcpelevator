@@ -14,7 +14,6 @@
 		parseQuery,
 		serializeQuery,
 		sortServers,
-		type FilterableServer,
 		type ServerQuery,
 		type SortKey,
 		type StateFilter
@@ -26,7 +25,7 @@
 
 	type LoadState = 'loading' | 'ready' | 'error';
 
-	let servers = $state<FilterableServer[]>([]);
+	let servers = $state<ServerSummary[]>([]);
 	let loadState = $state<LoadState>('loading');
 
 	// Search, filter and sort live in the URL query, so a filtered view can be

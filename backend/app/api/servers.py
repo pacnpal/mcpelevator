@@ -259,6 +259,7 @@ def _summary(server: Server, sup, session: Session, base: str, live=None) -> Ser
         pid=pid,
         port=port,
         tools_count=len(tools or []),
+        tool_names=[t["name"] for t in tools or []],
         startup_status=startup_status,
         owner_id=server.owner_id,
         owner_name=_owner_name(session, server.owner_id),
