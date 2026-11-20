@@ -2256,10 +2256,11 @@
 				</p>
 			{/if}
 			<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
-				Stop this server after this long with no traffic; the next request wakes it
-				automatically. Blank inherits the default from
-				<a href="/settings" class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]">Settings</a>;
-				<code class="font-mono text-[var(--color-ink-muted)]">0</code> keeps it always running.
+				Overrides the global idle setting in
+				<a href="/settings" class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]">Settings</a>.
+				Above 0, this server stops after that many seconds with no traffic, and the next request
+				wakes it, at the cost of a cold start and anything it held in memory. Blank inherits the
+				global value; <code class="font-mono text-[var(--color-ink-muted)]">0</code> means never idle.
 			</p>
 		</div>
 
