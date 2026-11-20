@@ -1100,11 +1100,12 @@ footer { border-top: 1px solid var(--line); padding: 40px 0 44px; color: var(--i
               <p class="note">Full walkthrough: <a class="lnk" href="https://github.com/pacnpal/mcpelevator/blob/main/docs/unraid.md">docs/unraid.md</a>.</p>
             </div>
             <div class="panel" id="p-dev" role="tabpanel" aria-labelledby="t-dev" hidden>
-              <div class="code"><pre id="c-dev"><span class="c"># control plane on http://127.0.0.1:8080</span>
-<span class="p">$ </span>cd backend &amp;&amp; uv sync &amp;&amp; uv run uvicorn app.main:app --reload
-
-<span class="c"># UI with hot reload on http://localhost:5173</span>
-<span class="p">$ </span>cd frontend &amp;&amp; npm install &amp;&amp; npm run dev</pre><button class="copy" type="button" data-copy="#c-dev" aria-label="Copy commands"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+              <p style="margin-top:14px">Two terminals, each starting at the repository root.</p>
+              <div class="code"><pre id="c-dev"><span class="c"># terminal 1: control plane on http://127.0.0.1:8080</span>
+<span class="p">$ </span>cd backend &amp;&amp; uv sync &amp;&amp; uv run uvicorn app.main:app --reload --port 8080</pre><button class="copy" type="button" data-copy="#c-dev" aria-label="Copy backend command"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+              <div class="code"><pre id="c-dev2"><span class="c"># terminal 2: UI with hot reload on http://localhost:5173</span>
+<span class="p">$ </span>cd frontend &amp;&amp; npm install &amp;&amp; npm run dev</pre><button class="copy" type="button" data-copy="#c-dev2" aria-label="Copy frontend command"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+              <p class="note">Or <code>make dev-backend</code> and <code>make dev-frontend</code>.</p>
             </div>
           </div>
         </li>
@@ -1473,6 +1474,7 @@ async function type(text) {
     setState(0, 'idle'); await sleep(500); setState(1, 'idle'); await sleep(1600);
     rows[0].classList.add('active');
     cmdEl.textContent = 'POST /s/memory/mcp  tools/call'; runEl.textContent = 'wake';
+    urlEl.innerHTML = 'https://mcp.example.com/s/<span class="slug">memory</span>/mcp';
     setState(0, 'starting'); await sleep(900); setState(0, 'running'); await sleep(2000);
     demo.forEach((_, i) => setState(i, 'stopped'));
     urlEl.classList.add('empty'); urlEl.textContent = 'waiting for a server…';
