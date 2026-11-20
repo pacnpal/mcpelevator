@@ -170,6 +170,7 @@
 	 * a fallback when the scoped server/group no longer exists. */
 	function scopeLabel(scope: string): string {
 		if (scope === 'all') return 'All servers & groups';
+		if (scope === 'scim') return 'SCIM provisioning';
 		if (scope.startsWith('group:')) {
 			const name = scope.slice('group:'.length);
 			return groups.some((g) => g.name === name) ? `Group: ${name}` : 'Unknown group';
@@ -180,6 +181,25 @@
 
 	function dismissReveal() {
 		createdToken = null;
+	}
+
+	// A scim token, revealed once in the SCIM card: it opens /scim/v2 and nothing else.
+	let scimToken = $state<string | null>(null);
+	let mintingScim = $state(false);
+	async function handleCreateScimToken() {
+		if (mintingScim) return;
+		mintingScim = true;
+		try {
+			const created = await createToken('SCIM', 'scim');
+			scimToken = created.token;
+			const { token: _token, ...info } = created;
+			void _token;
+			tokens = [info, ...tokens];
+		} catch (err) {
+			flashToast(errorMessage(err));
+		} finally {
+			mintingScim = false;
+		}
 	}
 
 	// Mint a control-scope admin token, reveal it once, and log in immediately so
@@ -2637,6 +2657,63 @@
 				</button>
 			</div>
 		</form>
+
+		<!-- SCIM provisioning -->
+		<div
+			class="flex flex-col gap-4 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
+		>
+			<div class="flex flex-col gap-1">
+				<h2 class="text-sm font-semibold text-[var(--color-ink)]">SCIM provisioning</h2>
+				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
+					Let the identity provider create, update and deactivate users. Give its SCIM client
+					this URL and a SCIM token as the Bearer secret. The token opens SCIM and nothing else.
+					Deactivating a user ends their sessions and revokes their tokens; their servers keep
+					running.
+				</p>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<span class="text-xs font-medium text-[var(--color-ink-muted)]">SCIM base URL</span>
+				<div class="flex items-center gap-2">
+					<code
+						class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
+						title={settings.scim_base_url}>{settings.scim_base_url}</code
+					>
+					<CopyButton value={settings.scim_base_url} label="Copy SCIM base URL" text="Copy" />
+				</div>
+			</div>
+			{#if scimToken}
+				<div class="flex flex-col gap-1.5">
+					<span class="text-xs font-medium text-[var(--color-ink-muted)]">
+						SCIM token <span class="font-normal text-[var(--color-ink-dim)]">(copy it now, it won't be shown again)</span>
+					</span>
+					<div class="flex items-center gap-2">
+						<code
+							class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
+							>{scimToken}</code
+						>
+						<CopyButton value={scimToken} label="Copy SCIM token" text="Copy" />
+						<button
+							type="button"
+							onclick={() => (scimToken = null)}
+							class="rounded-lg border border-[var(--color-line)] px-3 py-2 text-xs text-[var(--color-ink-muted)] hover:text-[var(--color-ink)]"
+						>
+							Done
+						</button>
+					</div>
+				</div>
+			{/if}
+			<div class="flex justify-end">
+				<button
+					type="button"
+					onclick={handleCreateScimToken}
+					disabled={mintingScim}
+					aria-busy={mintingScim}
+					class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-50"
+				>
+					{mintingScim ? 'Creating…' : 'Create SCIM token'}
+				</button>
+			</div>
+		</div>
 		{/if}
 	{/if}
 </section>

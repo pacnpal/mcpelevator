@@ -49,14 +49,14 @@ async def create_token(
     principal: Principal = Depends(current_principal),
 ):
     # scope is the access boundary: "all" (every bearer-protected server + every group),
-    # a specific server id, "group:<name>" (one /g/<name> bundle), or "control" (a
-    # control-plane admin token). Reject a blank or dangling value rather than silently
+    # a specific server id, "group:<name>" (one /g/<name> bundle), "control" (a
+    # control-plane admin token), or "scim" (opens /scim/v2 and nothing else). Reject a blank or dangling value rather than silently
     # widening or minting a token that authorizes nothing.
     scope = payload.scope.strip()
     if not scope:
         raise HTTPException(
             status_code=400,
-            detail="scope must be 'all', 'control', 'group:<name>', or a server id",
+            detail="scope must be 'all', 'control', 'scim', 'group:<name>', or a server id",
         )
     raw = new_token()
     token = Token(
@@ -90,12 +90,12 @@ async def create_token(
             # Policy FIRST for the named scopes: a member gets a deterministic 403
             # for "all"/"control"/any group, without learning which groups exist.
             scoped_server = None
-            if not scope.startswith("group:") and scope not in ("all", "control"):
+            if not scope.startswith("group:") and scope not in ("all", "control", "scim"):
                 scoped_server = repo.get_server(session, scope)
                 if scoped_server is None:
                     return (400, f"unknown server scope {scope!r}")
             # A member mints tokens only for servers they own (never "all",
-            # "control", or a group). 400 with the same shape as a dangling id for
+            # "control", "scim", or a group). 400 with the same shape as a dangling id for
             # an invisible server, 403 for the named scopes.
             denial = policy.token_scope_error(fresh, scope, scoped_server)
             if denial is not None:

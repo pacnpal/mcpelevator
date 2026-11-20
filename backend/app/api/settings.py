@@ -32,6 +32,7 @@ def _info(values: dict, session: Session, request: Request) -> SettingsInfo:
     info.control_mcp = bool(builtin and builtin.enabled)
     # Anchored on the same base as the upstream-OAuth callback.
     info.oidc_redirect_uri = f"{oauth_public_base(request)}/api/auth/oidc/callback"
+    info.scim_base_url = f"{oauth_public_base(request)}/scim/v2"
     return info
 
 

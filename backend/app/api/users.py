@@ -161,6 +161,37 @@ def change_user(
     return user
 
 
+def remove_user(session: Session, user_id: str) -> str | int:
+    """The one user delete, shared by ``DELETE /users`` and SCIM. The caller holds the
+    config write lock, and EVERY check runs under that same hold: the last-admin guard
+    (two concurrent deletes of the two remaining admins must not both pass by seeing
+    each other's still-present credential: the lock serializes them, so the second
+    re-reads a world where the first admin is gone and is refused) and the owns-servers
+    check (the same lock owner reassignment holds while writing owner_id, so a
+    reassignment can't land between check and delete and leave a server pointing at a
+    deleted user). Returns 'not_found' | 'last_admin' | an owned count | 'ok'."""
+    user = repo.get_user(session, user_id)
+    if user is None:
+        return "not_found"
+    if user.role == "admin" and not _admin_login_would_remain(
+        session, excluding_user_id=user.id
+    ):
+        return "last_admin"
+    owned = repo.count_servers_owned(session, user_id)
+    if owned:
+        return owned
+    repo.delete_user_and_tokens(session, user_id, commit=False)
+    # Counted again inside the delete's write transaction (#291): the check above
+    # only orders the refusals, the database decides.
+    if user.role == "admin" and not _admin_login_would_remain(
+        session, excluding_user_id=user_id
+    ):
+        session.rollback()
+        return "last_admin"
+    session.commit()
+    return "ok"
+
+
 @router.get("/users", response_model=list[UserInfo])
 async def list_users(session: Session = Depends(get_session)):
     servers_by_user = Counter(
@@ -275,39 +306,11 @@ async def delete_user(
     principal: Principal = Depends(require_admin),
 ):
     def _delete():
-        """EVERY check runs under the same hold of the config write lock as the
-        delete itself: the last-admin guard (two concurrent deletes of the two
-        remaining admins must not both pass by seeing each other's still-present
-        credential — the lock serializes them, so the second re-reads a world where
-        the first admin is gone and is refused) and the owns-servers check (the
-        same lock owner reassignment holds while writing owner_id, so a
-        reassignment can't land between check and delete and leave a server
-        pointing at a deleted user). Returns 'not_found' | 'last_admin' | an owned
-        count | 'ok'."""
         with service.config_write_lock():
             session.expire_all()  # re-reads must see state committed while we waited
             if not _admin_now(session, principal):
                 return "forbidden"
-            user = repo.get_user(session, user_id)
-            if user is None:
-                return "not_found"
-            if user.role == "admin" and not _admin_login_would_remain(
-                session, excluding_user_id=user.id
-            ):
-                return "last_admin"
-            owned = repo.count_servers_owned(session, user_id)
-            if owned:
-                return owned
-            repo.delete_user_and_tokens(session, user_id, commit=False)
-            # Counted again inside the delete's write transaction (#291): the check
-            # above only orders the refusals, the database decides.
-            if user.role == "admin" and not _admin_login_would_remain(
-                session, excluding_user_id=user_id
-            ):
-                session.rollback()
-                return "last_admin"
-            session.commit()
-            return "ok"
+            return remove_user(session, user_id)
 
     # Threadpool: the lock is a threading lock shared with imports deriving scrypt
     # hashes — never wait for it on the event loop.

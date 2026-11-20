@@ -100,6 +100,9 @@ Typical flows:
 - Try a tool: call_server_tool on a running server (not counted as usage).
 - Reach a server from a client: mint a token with create_token (scope "all", a
   server id, or "group:<name>"). The plaintext is returned once.
+- Connect an identity provider's SCIM client (admin): create_token with scope
+  "scim" and give the provider <base>/scim/v2 with that token as its Bearer
+  secret. The token opens SCIM and nothing else.
 - Move users to a new SSO identity provider: point the oidc_* settings at the
   new provider, then unlink_user_identity for each user whose list_users
   linked_issuer is the old one. Their next sign-in through the new provider
