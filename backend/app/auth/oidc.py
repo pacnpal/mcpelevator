@@ -543,7 +543,12 @@ def _link(
                 .values(**refreshing[1].columns())
             )
         session.commit()
-        session.refresh(user)  # the pair as linked, before anything else can change it
+        session.refresh(user)
+        # The config lock is process-local: another instance's unlink can land between
+        # the commit and the refresh. Only the validated pair counts, never what the
+        # refreshed row holds (the callback's session check compares against it).
+        if (user.oidc_issuer, user.oidc_subject) != (claims["iss"], str(claims["sub"])):
+            raise SignInFailed(EXPIRED, "the link was cleared as this login finished")
         return user
 
 

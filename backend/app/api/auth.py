@@ -205,7 +205,11 @@ async def oidc_callback(
         )
     except oidc.SignInFailed as exc:
         return _sso_error(exc.reason, str(exc), state, exc.claim)
+    # The validated issuer and subject: ``_link`` refuses the sign-in unless the
+    # committed link is exactly that pair, so an unlink can't leave it empty here.
     pair = (user.oidc_issuer, user.oidc_subject)
+    if None in pair:  # fail closed: no linked identity is never "still linked"
+        return _sso_error(oidc.EXPIRED, "the link was cleared as this login finished", state)
 
     deactivated = False
 
