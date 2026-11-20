@@ -263,6 +263,17 @@ def test_no_user_with_that_name_is_no_match(idp):
         assert _reason(_sign_in(client, idp)) == "no_match"
 
 
+def test_sign_in_matches_names_by_the_rule_cloudflare_access_shares(idp):
+    """repo.match_user_by_name's rule, the one Cloudflare Access uses: trimmed and
+    casefolded, so both paths agree on who a name is."""
+    uid = _user(" Straße@Example.com")
+    idp.claims = {"email": "strasse@example.com"}
+    with TestClient(app) as client:
+        _enforce()
+        assert _sign_in(client, idp).status_code == 303
+        assert client.get("/api/auth/status", headers=LOOPBACK).json()["user"]["id"] == uid
+
+
 def test_two_users_with_the_same_name_is_ambiguous(idp):
     _user("ada@example.com")
     _user("ADA@example.com")
