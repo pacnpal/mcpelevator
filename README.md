@@ -803,6 +803,13 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_CONTROL_MCP` | `true` | Provision the built-in mcpelevator MCP server on boot when it's missing; `false` skips that (an existing one stays, turn it off in Settings) |
 | `MCPE_CF_ACCESS_TEAM_DOMAIN` | _(none)_ | Cloudflare Access team domain (`myteam.cloudflareaccess.com`). With `MCPE_CF_ACCESS_AUD`, the built-in server accepts Cloudflare Access sign-ins; see **Manage mcpelevator from an agent** |
 | `MCPE_CF_ACCESS_AUD` | _(none)_ | The Access application's AUD tag (comma-separated for several applications) |
+| `MCPE_OIDC_ENABLED` | `false` | First-boot seed for single sign-on (Settings → SSO). Like every `MCPE_OIDC_*` seed below, it's written only when that setting was never written, and Settings wins afterwards. Seeding skips the discovery check a Settings save runs |
+| `MCPE_OIDC_DISCOVERY_URL` | _(none)_ | Seed for the provider's OIDC discovery URL; a bare issuer (`https://idp.example.com`) works |
+| `MCPE_OIDC_CLIENT_ID` | _(none)_ | Seed for the OIDC client id |
+| `MCPE_OIDC_CLIENT_SECRET` | _(none)_ | The OIDC client secret. Not a seed: when set it always wins over the one saved in Settings, and bridges and the servers they run never inherit it |
+| `MCPE_OIDC_LABEL` | _(none)_ | Seed for the sign-in button's label |
+| `MCPE_OIDC_SCOPES` | _(none)_ | Seed for extra scopes requested beyond `openid`, comma-separated |
+| `MCPE_OIDC_IDENTITY_CLAIM` | `email` | Seed for the ID token claim that names the user: `email`, `preferred_username` or `sub` |
 | `MCPE_ACCESS_LOG` | `false` | uvicorn's one-line-per-request access log (`"GET /api/servers/… 200 OK"`) in the container log when debug mode is off. Off by default because the UI polls; debug mode always logs requests |
 | `MCPE_LOG_LEVEL` | `INFO` | Level of mcpelevator's own log lines when debug mode is off: server starts, failures with the reason and the server's last output lines, crashes, idle stops. `WARNING` keeps only failures |
 | `MCPE_DEBUG` | `false` | Debug mode: TRACE-level logs everywhere (bridges too), a full trace of every request with secrets scrubbed, crash reporting, and `GET /api/debug`; see **Debug mode** |

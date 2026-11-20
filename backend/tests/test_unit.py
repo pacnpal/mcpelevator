@@ -87,6 +87,17 @@ def test_env_scrub_keeps_control_plane_secrets_from_children(tmp_path, monkeypat
     assert setup_env["PATH"] == "/usr/bin"
 
 
+def test_env_scrub_drops_the_oidc_client_secret(tmp_path, monkeypatch):
+    from app.supervisor import unit as unit_module
+
+    monkeypatch.setattr(unit_module, "get_settings", lambda: _settings(tmp_path))
+    monkeypatch.setenv("MCPE_OIDC_CLIENT_SECRET", "secret")
+    unit = ServerUnit(_server(tmp_path, setup_script="true"))
+    unit.port = 12345
+    assert "MCPE_OIDC_CLIENT_SECRET" not in unit._bridge_env(unit._bridge_payload())
+    assert "MCPE_OIDC_CLIENT_SECRET" not in unit._effective_child_env()
+
+
 async def test_setup_runs_before_bridge_with_child_environment_and_cwd(tmp_path, monkeypatch):
     from app.supervisor import unit as unit_module
 

@@ -157,7 +157,19 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.tool(annotations=_WRITE)
     async def update_settings(changes: SettingsUpdate) -> Any:
         """Change runtime settings (admin only). Only the fields given change. A change
-        that would turn on control-plane auth without an admin credential is refused."""
+        that would turn on control-plane auth without an admin credential is refused.
+
+        Single sign-on (one OpenID Connect provider): oidc_discovery_url (the
+        provider's discovery URL; a bare issuer works), oidc_client_id,
+        oidc_client_secret (write-only: reads "<hidden>", send "<hidden>" to keep it,
+        "" to clear it; MCPE_OIDC_CLIENT_SECRET overrides it), oidc_label (the
+        sign-in button's text), oidc_scopes (extra scopes beyond "openid"),
+        oidc_identity_claim ("email", "preferred_username" or "sub": the ID token
+        claim that names the user), and oidc_enabled. While enabled, any oidc_*
+        change fetches the discovery document first and is refused with the reason
+        when it's unreachable or lacks issuer, authorization_endpoint,
+        token_endpoint or jwks_uri. get_settings returns oidc_redirect_uri, the
+        callback to register at the provider."""
         if changes.control_mcp is False and _internal(get_http_request()):
             # Turning control_mcp off disables the built-in server, i.e. the bridge
             # carrying this call (see _refuse_self).

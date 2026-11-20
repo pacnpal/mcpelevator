@@ -15,6 +15,8 @@ from urllib.parse import urlsplit
 
 from sqlmodel import Session
 
+from app import sealed
+from app.config import get_settings
 from app.db import repo
 from app.util import host_only
 
@@ -82,11 +84,32 @@ DEFAULTS: dict[str, Any] = {
     # 'dcr' never offers the URL client id, 'cimd' always offers it, probe-free.
     # A per-server static client id bypasses all three.
     "upstream_oauth_client_mode": "auto",  # 'auto' | 'cimd' | 'dcr'
+    # --- single sign-on (this instance as an OIDC relying party; see app.auth.oidc) ---
+    # Enabling (or editing an oidc_* key while enabled) through PATCH /api/settings
+    # fetches the discovery document first and refuses the save when that fails.
+    "oidc_enabled": False,
+    # The provider's discovery URL; a bare issuer gets the OIDC well-known path appended.
+    "oidc_discovery_url": "",
+    "oidc_client_id": "",
+    # Stored sealed (app.sealed) and read back as "<hidden>"; MCPE_OIDC_CLIENT_SECRET,
+    # when set, wins over it (see oidc_client_secret()).
+    "oidc_client_secret": "",
+    # The sign-in button's label.
+    "oidc_label": "",
+    # Scopes requested beyond "openid".
+    "oidc_scopes": [],
+    # The ID token claim that names the user: 'email' | 'preferred_username' | 'sub'.
+    "oidc_identity_claim": "email",
 }
 
 
 def read_all(session: Session) -> dict[str, Any]:
-    return {key: repo.setting_get(session, key, default) for key, default in DEFAULTS.items()}
+    """Every setting as the API shows it: the client secret reads ``HIDDEN`` when one
+    is configured (stored or from the env), never its value."""
+    values = {key: repo.setting_get(session, key, default) for key, default in DEFAULTS.items()}
+    if values["oidc_client_secret"] or get_settings().oidc_client_secret:
+        values["oidc_client_secret"] = sealed.HIDDEN
+    return values
 
 
 # Ceiling for `usage_retention_days` (a century). Retention is turned into a
@@ -98,6 +121,7 @@ _MODES = {"local", "expose"}
 _PROVIDERS = {"none", "bearer", "oauth"}
 _CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
 _UPSTREAM_OAUTH_CLIENT_MODES = {"auto", "cimd", "dcr"}
+_OIDC_IDENTITY_CLAIMS = {"email", "preferred_username", "sub"}
 
 
 # Group names are the routing key in /g/<name>/mcp, so they must be URL-safe: lowercase
@@ -127,6 +151,15 @@ def is_valid_oauth_endpoint_url(value: Any) -> bool:
         return ipaddress.ip_address(parsed.hostname).is_loopback
     except ValueError:
         return False
+
+
+def normalize_config_url(config_url: str) -> str:
+    """Accept either a full metadata URL or a bare issuer; issuers get the OIDC
+    well-known path appended (the common case for operators pasting an issuer)."""
+    url = config_url.rstrip("/")
+    if "/.well-known/" in urlsplit(url).path:
+        return url
+    return f"{url}/.well-known/openid-configuration"
 
 
 def _normalize_group_members(name: str, value: Any) -> Any:
@@ -239,9 +272,31 @@ def write(
                     f"invalid usage_retention_days: {value!r} "
                     f"(days, 0–{MAX_USAGE_RETENTION_DAYS}; 0 keeps forever)"
                 )
-        if key == "oauth_scopes":
+        if key == "oidc_enabled" and not isinstance(value, bool):
+            raise ValueError(f"invalid oidc_enabled: {value!r}")
+        if key == "oidc_discovery_url":
+            if not isinstance(value, str):
+                raise ValueError(f"invalid oidc_discovery_url: {value!r}")
+            value = value.strip()
+            if value and not is_valid_oauth_endpoint_url(normalize_config_url(value)):
+                raise ValueError(f"invalid oidc_discovery_url: {value!r}")
+        if key in ("oidc_client_id", "oidc_label"):
+            if not isinstance(value, str):
+                raise ValueError(f"invalid {key}: {value!r}")
+            value = value.strip()
+        if key == "oidc_client_secret":
+            if not isinstance(value, str):
+                raise ValueError("invalid oidc_client_secret")
+            if value == sealed.HIDDEN:
+                continue  # keep what's stored
+            value = sealed.seal(value) if value else ""
+        if key == "oidc_identity_claim" and value not in _OIDC_IDENTITY_CLAIMS:
+            raise ValueError(
+                f"invalid oidc_identity_claim: {value!r} (email, preferred_username or sub)"
+            )
+        if key in ("oauth_scopes", "oidc_scopes"):
             if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
-                raise ValueError(f"invalid oauth_scopes: {value!r}")
+                raise ValueError(f"invalid {key}: {value!r}")
             scopes: list[str] = []
             for v in (x.strip() for x in value):
                 if v not in scopes:
@@ -319,3 +374,16 @@ def usage_retention_days(session: Session) -> int:
 def groups(session: Session) -> dict[str, Any]:
     """The group registry: ``{name: "*" | [server_id, ...]}`` (see DEFAULTS)."""
     return repo.setting_get(session, "groups", DEFAULTS["groups"])
+
+
+def oidc_client_secret(session: Session) -> str:
+    """The OIDC client secret in plaintext: ``MCPE_OIDC_CLIENT_SECRET`` when set, else the
+    stored one ("" when neither). Raises ``ValueError`` when the stored one can't be
+    decrypted (``env.key`` lost)."""
+    from_env = get_settings().oidc_client_secret
+    if from_env:
+        return from_env
+    stored = repo.setting_get(session, "oidc_client_secret", "")
+    if not stored:
+        return ""
+    return sealed.unseal_env({"oidc_client_secret": stored})["oidc_client_secret"]

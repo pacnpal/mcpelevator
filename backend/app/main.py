@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 from contextlib import asynccontextmanager
 
 import httpx
@@ -53,17 +54,19 @@ from app.supervisor.supervisor import Supervisor
 _UNSET = object()
 
 
-def _seed_setting_from_env(enabled: bool, key: str, message: str) -> None:
-    """Seed a runtime setting from its ``MCPE_*`` env flag on first boot, so a headless
-    box (no loopback browser to reach the UI) can enable it declaratively. Seeds only
-    when the setting has never been written, so a later UI toggle stays authoritative
-    across restarts."""
-    if not enabled:
+def _seed_setting_from_env(value: Any, key: str, message: str | None = None) -> None:
+    """Seed a runtime setting from its ``MCPE_*`` env var on first boot, so a headless
+    box (no loopback browser to reach the UI) can configure it declaratively. A falsy
+    ``value`` means the env var is unset. Seeds only when the setting has never been
+    written, so a later UI change stays authoritative across restarts. The value goes
+    through the settings writer, so a bad one fails the boot with the reason."""
+    if not value:
         return
     with Session(get_engine()) as session:
         if repo.setting_get(session, key, _UNSET) is _UNSET:
-            runtime_settings.write(session, {key: True})
-            print(message, flush=True)
+            runtime_settings.write(session, {key: value})
+            if message:
+                print(message, flush=True)
 
 
 def _bootstrap_private_lan() -> None:
@@ -87,6 +90,23 @@ def _bootstrap_docker_runner() -> None:
         "[mcpelevator] MCPE_DOCKER_RUNNER set — docker runner enabled "
         "(root-equivalent; runs images on the mounted Docker daemon).",
     )
+
+
+def _bootstrap_oidc() -> None:
+    """Seed the single sign-on settings from ``MCPE_OIDC_*``. The client secret isn't
+    seeded: ``MCPE_OIDC_CLIENT_SECRET`` is read live and always wins. Enabling from the
+    env skips the discovery check a Settings save runs; sign-in reports a bad provider."""
+    env = get_settings()
+    scopes = [s.strip() for s in env.oidc_scopes.split(",") if s.strip()]
+    for key, value in (
+        ("oidc_discovery_url", env.oidc_discovery_url),
+        ("oidc_client_id", env.oidc_client_id),
+        ("oidc_label", env.oidc_label),
+        ("oidc_scopes", scopes),
+        ("oidc_identity_claim", env.oidc_identity_claim),
+        ("oidc_enabled", env.oidc_enabled),
+    ):
+        _seed_setting_from_env(value, key)
 
 
 def _bootstrap_control_plane_auth() -> None:
@@ -162,6 +182,7 @@ async def lifespan(app: FastAPI):
         group_registry.validate_at_startup(session)
     _bootstrap_private_lan()  # seed LAN access from env before deciding auth enforcement
     _bootstrap_docker_runner()  # seed docker-runner enable from env (headless)
+    _bootstrap_oidc()  # seed single sign-on settings from MCPE_OIDC_* (headless)
     _bootstrap_control_plane_auth()
     # No timeout: long-lived SSE streams. No connection cap either: the /s proxy holds a
     # pooled connection for every open client stream, so httpx's default cap of 100 was

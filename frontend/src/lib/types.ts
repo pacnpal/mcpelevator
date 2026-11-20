@@ -587,7 +587,25 @@ export interface SettingsInfo {
 	upstream_oauth_client_mode: UpstreamOauthClientMode;
 	/** The built-in mcpelevator MCP server's global switch (that server's `enabled`). */
 	control_mcp: boolean;
+	/** Single sign-on through one OpenID Connect provider. */
+	oidc_enabled: boolean;
+	/** The provider's discovery URL; a bare issuer works. */
+	oidc_discovery_url: string;
+	oidc_client_id: string;
+	/** Write-only: `<hidden>` when one is configured, '' when none. Send `<hidden>`
+	 * back to keep it, '' to clear it. */
+	oidc_client_secret: string;
+	/** The sign-in button's label. */
+	oidc_label: string;
+	/** Scopes requested beyond `openid`. */
+	oidc_scopes: string[];
+	/** The ID token claim that names the user. */
+	oidc_identity_claim: OidcIdentityClaim;
+	/** Read-only: the redirect URI to register at the provider. */
+	oidc_redirect_uri: string;
 }
+
+export type OidcIdentityClaim = 'email' | 'preferred_username' | 'sub';
 
 /** A group's members: the wildcard "*" (every registered server, present and
  * future) or an explicit, ordered list of server ids. */
