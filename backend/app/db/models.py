@@ -58,6 +58,9 @@ class User(SQLModel, table=True):
     # server? Admin-set, like local_runners; the global switch is that server's own
     # ``enabled`` flag.
     control_mcp: bool = True
+    # False makes a Deactivated user: no credential resolves to them and SSO refuses
+    # them, while their record and servers stay. Only an admin brings them back.
+    active: bool = True
     # The Linked identity: the identity-provider account this user signs in as, by
     # issuer and subject (never by email). Both NULL until the first SSO sign-in.
     oidc_issuer: Optional[str] = None

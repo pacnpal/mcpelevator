@@ -610,7 +610,7 @@ export function createUser(
  * last-admin guard (no other admin login would remain). */
 export function updateUser(
 	id: string,
-	patch: Partial<Pick<UserInfo, 'name' | 'role' | 'local_runners' | 'control_mcp'>>
+	patch: Partial<Pick<UserInfo, 'name' | 'role' | 'local_runners' | 'control_mcp' | 'active'>>
 ): Promise<UserInfo> {
 	return jsonRequest<UserInfo>(`/users/${encodeURIComponent(id)}`, 'PATCH', patch);
 }

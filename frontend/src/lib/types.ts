@@ -693,6 +693,8 @@ export interface UserInfo {
 	created_at: string;
 	/** Issuer of the user's Linked identity (SSO), null when they have none. */
 	linked_issuer: string | null;
+	/** False for a Deactivated user: no credential works and SSO sign-in is refused. */
+	active: boolean;
 	/** Fields the identity provider's groups set at sign-in; PATCH refuses them. */
 	managed: { role: boolean; local_runners: boolean };
 }

@@ -6,8 +6,9 @@ deterministic and upgrade-safe:
 
 - enforcement OFF            -> the synthetic local admin (zero-config unchanged)
 - ``MCPE_ADMIN_TOKEN`` match -> the synthetic env admin (break-glass, always admin)
-- control token, user_id set -> that user's role/flags (missing user row fails
-                                closed: the credential is treated as invalid)
+- control token, user_id set -> that user's role/flags (a missing user row or a
+                                Deactivated user fails closed: the credential is
+                                treated as invalid)
 - control token, no user_id  -> admin (tokens minted before multi-user, and
                                 boot/recovery mints, keep full power on upgrade)
 - Cloudflare Access identity -> the user named by its email, only on requests the
@@ -126,7 +127,7 @@ def credential_principal(
     """The principal the request's credential names, regardless of enforcement: the
     break-glass token, a control token, (when ``cloudflare``) a Cloudflare Access
     identity that matches a user, or (when ``sign_in``) a live Sign-in session with its
-    CSRF header. None when it names nobody. Callers pass ``sign_in`` only from
+    CSRF header. None when it names nobody, or names a Deactivated user. Callers pass ``sign_in`` only from
     ``app.auth.sign_in.accepts``, so the cookie never counts on ``/s``, ``/g`` or
     ``/api/mcp``."""
     from app.auth import cf_access  # circular-import guard
@@ -147,13 +148,13 @@ def credential_principal(
                     local_runners=True, token_id=row.id,
                 )
             user = repo.get_user(session, row.user_id)
-            if user is not None:
+            if user is not None and user.active:
                 return Principal(
                     user_id=user.id, name=user.name, role=user.role,
                     local_runners=_effective_local_runners(user),
                     token_id=row.id,
                 )
-            # else: dangling credential — fail closed.
+            # else: dangling credential or a Deactivated user — fail closed.
     if cloudflare:
         user = cf_access.user(session, request)
         if user is not None:
@@ -164,7 +165,7 @@ def credential_principal(
     if sign_in and not request.headers.get("authorization"):
         row = sign_in_mod.current(request, session)
         user = repo.get_user(session, row.user_id) if row is not None else None
-        if user is not None:
+        if user is not None and user.active:
             return Principal(
                 user_id=user.id, name=user.name, role=user.role,
                 local_runners=_effective_local_runners(user), session_id=row.id,
@@ -203,8 +204,8 @@ def refresh(session: Session, principal: Principal) -> Optional[Principal]:
     if principal.user_id is None:
         return principal
     user = repo.get_user(session, principal.user_id)
-    if user is None:
-        return None
+    if user is None or not user.active:
+        return None  # deleted or deactivated while we were queued
     return Principal(
         user_id=user.id, name=user.name, role=user.role,
         local_runners=_effective_local_runners(user),

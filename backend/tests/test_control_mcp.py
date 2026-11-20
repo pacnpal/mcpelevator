@@ -819,6 +819,19 @@ def test_cloudflare_identity_refuses_an_ambiguous_name(client, cf):
         assert cf_access.user(s, req) is None
 
 
+def test_cloudflare_identity_refuses_a_deactivated_user(client, cf):
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    admin = {**LOOPBACK, "authorization": f"Bearer {mint_token('control')}"}
+    uid = client.post("/api/users", json={"name": "ada@example.com"}, headers=admin).json()["id"]
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("ada@example.com").items()]})
+    assert client.patch(f"/api/users/{uid}", json={"active": False}, headers=admin).status_code == 200
+    with Session(get_engine()) as s:
+        assert cf_access.user(s, req) is None
+
+
 def test_bridge_forwarding_carries_the_cloudflare_assertion(monkeypatch):
     """The built-in bridge and the group hub rely on FastMCP's forward_incoming_headers
     passing every caller header on, not just Authorization. Pin that."""

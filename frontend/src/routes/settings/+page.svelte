@@ -39,6 +39,7 @@
 	import CopyButton from '#lib/components/CopyButton.svelte';
 	import CopyMenu from '#lib/components/CopyMenu.svelte';
 	import LinkedIdentity from '#lib/components/LinkedIdentity.svelte';
+	import UserActivation from '#lib/components/UserActivation.svelte';
 	import UserAccessButtons, { managedFields } from '#lib/components/UserAccessButtons.svelte';
 	import { fromLines, toLines } from '#lib/lines.js';
 	import RestartButton from '#lib/components/RestartButton.svelte';
@@ -1379,6 +1380,15 @@
 									>
 										{user.control_mcp ? 'Revoke control MCP' : 'Allow control MCP'}
 									</button>
+									<UserActivation
+										userId={user.id}
+										active={user.active}
+										disabled={busyUserId !== null}
+										onchanged={(updated) => {
+											users = users.map((u) => (u.id === user.id ? updated : u));
+											flashToast(updated.active ? 'User reactivated' : 'User deactivated', 'info');
+										}}
+									/>
 									<button
 										type="button"
 										onclick={() => (confirmDeleteUserId = user.id)}

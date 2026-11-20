@@ -490,9 +490,9 @@ def build(app: FastAPI) -> "_Gate":
 
     @mcp.tool(annotations=_READ)
     async def list_users() -> Any:
-        """Every user with role, local-runner permission, owned server/token counts, and
+        """Every user with role, local-runner permission, owned server/token counts,
         ``linked_issuer``: the identity provider their SSO sign-in is linked to (null when
-        none)."""
+        none), and ``active``: false for a Deactivated user."""
         return await api("GET", "/api/users")
 
     @mcp.tool(annotations=_ADD)
@@ -515,15 +515,21 @@ def build(app: FastAPI) -> "_Gate":
         role: Optional[Role] = None,
         local_runners: Optional[bool] = None,
         control_mcp: Optional[bool] = None,
+        active: Optional[bool] = None,
     ) -> Any:
         """Rename a user or change their role, local-runner permission, or access to this
-        MCP server. While SSO is on, a non-empty oidc_admin_groups setting manages every
+        MCP server. ``active`` false deactivates them: their Sign-in sessions end, every
+        token they hold (login and data-plane) is revoked, and SSO refuses them even when
+        the provider lets them in. Their servers keep running and stay theirs. Refused
+        (409) for the last admin login. ``active`` true reactivates; revoked tokens stay
+        revoked, so mint a new login with create_user_credential. While SSO is on, a non-empty oidc_admin_groups setting manages every
         user's role and a non-empty oidc_local_runner_groups manages local_runners: the
         identity provider's groups set them at each sign-in, so changing a managed field
         here is refused (409 naming the setting). list_users shows which fields are
         managed. Empty the setting to edit the field by hand again."""
         changes = {
-            "name": name, "role": role, "local_runners": local_runners, "control_mcp": control_mcp
+            "name": name, "role": role, "local_runners": local_runners,
+            "control_mcp": control_mcp, "active": active,
         }
         return await api(
             "PATCH", f"/api/users/{_seg(user_id)}", json={k: v for k, v in changes.items() if v is not None}

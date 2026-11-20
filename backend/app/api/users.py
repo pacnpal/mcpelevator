@@ -62,6 +62,7 @@ def _info(
         tokens_count=tokens_count,
         created_at=user.created_at,
         linked_issuer=user.oidc_issuer,
+        active=bool(user.active),
         managed=managed,
     )
 
@@ -108,12 +109,21 @@ def change_user(
     role: str | None = None,
     local_runners: bool | None = None,
     control_mcp: bool | None = None,
+    active: bool | None = None,
     commit: bool = True,
 ) -> User | str:
     """The one user mutation, shared by ``PATCH /users`` and the SSO group sync. The
     caller holds the config write lock. Fields left None stay. Returns the saved user,
-    or "last_admin" (nothing written) when a demotion would leave no admin login.
-    ``commit=False`` only flushes, so the caller commits it with its other writes."""
+    or "last_admin" (nothing written) when a demotion or deactivation would leave no
+    admin login. ``commit=False`` only flushes, so the caller commits it with its
+    other writes.
+
+    Deactivating ends the user's Sign-in sessions and revokes every token they hold,
+    in the same transaction as the flag. Their servers stay theirs. Reactivating only
+    sets the flag: revoked tokens stay revoked."""
+    if active is False and user.active and user.role == "admin":
+        if not _admin_login_would_remain(session, excluding_user_id=user.id):
+            return "last_admin"
     if role is not None and role != user.role:
         if user.role == "admin" and not _admin_login_would_remain(
             session, excluding_user_id=user.id
@@ -137,6 +147,10 @@ def change_user(
         user.local_runners = local_runners
     if control_mcp is not None:
         user.control_mcp = control_mcp
+    if active is False and user.active:
+        repo.revoke_user_credentials(session, user.id)
+    if active is not None:
+        user.active = active
     return repo.save_user(session, user, commit=commit)
 
 
@@ -223,6 +237,7 @@ async def update_user(
             return change_user(
                 session, user, name=payload.name, role=payload.role,
                 local_runners=payload.local_runners, control_mcp=payload.control_mcp,
+                active=payload.active,
             )
 
     # Threadpool: the lock is a threading lock shared with imports deriving scrypt
@@ -238,9 +253,10 @@ async def update_user(
             detail=f"managed by the {result[1]} setting: the identity provider's groups set it at sign-in",
         )
     if result == "last_admin":
+        verb = "deactivate" if payload.active is False else "demote"
         raise HTTPException(
             status_code=409,
-            detail="cannot demote the last admin — no other admin login would remain",
+            detail=f"cannot {verb} the last admin — no other admin login would remain",
         )
     return _info(session, result)
 

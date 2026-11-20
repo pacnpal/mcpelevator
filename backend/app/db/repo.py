@@ -613,12 +613,17 @@ def delete_user_and_tokens(session: Session, user_id: str) -> bool:
     user = session.get(User, user_id)
     if user is None:
         return False
-    for token in session.exec(select(Token).where(Token.user_id == user_id)).all():
-        session.delete(token)
-    session.execute(delete(SignInSession).where(SignInSession.user_id == user_id))
+    revoke_user_credentials(session, user_id)
     session.delete(user)
     session.commit()
     return True
+
+
+def revoke_user_credentials(session: Session, user_id: str) -> None:
+    """Delete every token bound to the user (login and data-plane alike) and end their
+    Sign-in sessions. The caller commits."""
+    session.execute(delete(Token).where(Token.user_id == user_id))
+    session.execute(delete(SignInSession).where(SignInSession.user_id == user_id))
 
 
 def unlink_user_identity(session: Session, user_id: str) -> bool:
@@ -638,7 +643,7 @@ def unlink_user_identity(session: Session, user_id: str) -> bool:
 def admin_credential_exists(session: Session, *, excluding_user_id: Optional[str] = None) -> bool:
     """Is there at least one usable ADMIN login besides ``excluding_user_id``'s?
     True when a control token exists that resolves to admin: one with no user
-    (legacy/boot mint) or one belonging to an admin user. The users API consults
+    (legacy/boot mint) or one belonging to an active admin user. The users API consults
     this before demoting or deleting an admin so the last admin credential can't
     be removed (MCPE_ADMIN_TOKEN, checked by the caller, always lifts the guard)."""
     for token in session.exec(select(Token).where(Token.scope == "control")).all():
@@ -647,7 +652,7 @@ def admin_credential_exists(session: Session, *, excluding_user_id: Optional[str
         if excluding_user_id is not None and token.user_id == excluding_user_id:
             continue
         user = session.get(User, token.user_id)
-        if user is not None and user.role == "admin":
+        if user is not None and user.role == "admin" and user.active:
             return True
     return False
 
