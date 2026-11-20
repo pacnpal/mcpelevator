@@ -297,7 +297,10 @@ h3 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; margin: 0 0 8px;
   background: radial-gradient(320px circle at var(--mx, 50%) var(--my, 0%), color-mix(in oklab, var(--accent) 9%, transparent), transparent 60%);
 }
 .feat:hover::after { opacity: 1; }
-.feat .ico { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line-strong); margin-bottom: 18px; color: var(--accent); }
+.feat { display: grid; grid-template-columns: auto 1fr; column-gap: 10px; align-content: start; }
+.feat > :not(.ico, h3) { grid-column: 1 / -1; }
+.feat h3 { margin-bottom: 10px; align-self: center; }
+.feat .ico { color: var(--accent); display: flex; margin-bottom: 10px; align-self: center; }
 .feat .ico svg { width: 18px; height: 18px; }
 .feat p { margin: 0; color: var(--ink-muted); font-size: 14.5px; }
 .feat code { font-size: 12.5px; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); padding: 1px 5px; border-radius: 4px; }
