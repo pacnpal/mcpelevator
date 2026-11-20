@@ -124,7 +124,8 @@ Typical flows:
   and every server for an admin, even when oauth_allowed_subjects doesn't list
   them, and drives /api/mcp as that user. Other tokens follow the allowlist.
   It never creates, links or changes a user, and isn't a login on the rest of
-  /api.
+  /api. Set oauth_member_access "owner_only" to keep a member's token to the
+  servers they own (no group, even when the allowlist names them).
 Server ids (not slugs) identify servers in every tool. Lifecycle tools write
 desired state and the supervisor converges, so use wait_for_server after them.
 Read-only views are also resources (mcpelevator://servers, .../servers/{id},
