@@ -39,6 +39,8 @@
 			'Your email domain is not allowed to sign in here, or your email is not verified. Ask your admin.',
 		last_admin_demoted:
 			'Your identity provider no longer puts you in an admin group, and this is the last admin account. Another admin login or MCPE_ADMIN_TOKEN must exist before this account can sign in through SSO.',
+		deactivated:
+			'Your account here is deactivated, so it cannot sign in even though your identity provider let you in. Ask an admin to reactivate it.',
 		expired: 'That sign-in took too long or was already used. Start it again.',
 		sso_disabled: 'SSO sign-in is turned off on this instance.'
 	});

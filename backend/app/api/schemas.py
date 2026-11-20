@@ -754,6 +754,8 @@ class UserInfo(BaseModel):
     created_at: datetime
     # The issuer of the user's Linked identity, None when they have none.
     linked_issuer: Optional[str] = None
+    # False for a Deactivated user: no credential works and SSO refuses them.
+    active: bool = True
     # Fields provider groups set at sign-in, locked against PATCH: {role, local_runners}.
     managed: dict[str, bool] = {"role": False, "local_runners": False}
 
@@ -772,6 +774,8 @@ class UserUpdate(BaseModel):
     role: Optional[Role] = None
     local_runners: Optional[StrictBool] = None
     control_mcp: Optional[StrictBool] = None
+    # False deactivates (ends Sign-in sessions, revokes every token); True reactivates.
+    active: Optional[StrictBool] = None
 
 
 class UserCredential(BaseModel):

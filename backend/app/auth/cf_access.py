@@ -101,7 +101,7 @@ def email(request: Request) -> Optional[str]:
 def user(session: Session, request: Request) -> Optional[User]:
     """The user whose name is the request's verified Cloudflare Access email. User
     names aren't unique, so two matches is no match: guessing could hand a member an
-    admin's identity."""
+    admin's identity. A Deactivated user is no match either."""
     address = email(request)
     if address is None:
         return None
@@ -109,5 +109,8 @@ def user(session: Session, request: Request) -> Optional[User]:
     if len(matches) != 1:
         logger.info("Cloudflare Access signed in %s, but %d users have that name",
                     address, len(matches))
+        return None
+    if not matches[0].active:
+        logger.info("Cloudflare Access signed in %s, a deactivated user", address)
         return None
     return matches[0]

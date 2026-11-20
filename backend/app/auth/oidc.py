@@ -127,6 +127,7 @@ IDENTITY_CONFLICT = "identity_conflict"  # the matched User is linked to another
 NOT_ALLOWED = "not_allowed"  # in none of oidc_allowed_groups
 GROUPS_OVERAGE = "groups_overage"  # Entra left the groups out (too many): can't tell
 DOMAIN_NOT_ALLOWED = "domain_not_allowed"  # no verified email domain or hd in the list
+DEACTIVATED = "deactivated"  # the matched User is a Deactivated user
 # The groups would demote the last admin login: the role stays, the sign-in is refused
 LAST_ADMIN_DEMOTED = "last_admin_demoted"
 
@@ -335,6 +336,9 @@ def _link(
             user = _holder(session, claims["iss"], str(claims["sub"]))
             if user is None:  # couldn't tell who this is: fail closed
                 raise SignInFailed(IDENTITY_CONFLICT, "the link write lost a race") from None
+        if not user.active:  # whatever the provider said; only an admin brings them back
+            session.rollback()
+            raise SignInFailed(DEACTIVATED, f"{user.name!r} is a deactivated user")
         name = user.name
         synced = _sync(session, user, groups, values)
         session.expire_all()  # the settings as committed, not as this session cached them

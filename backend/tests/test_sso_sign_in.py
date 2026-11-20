@@ -1134,3 +1134,27 @@ def test_an_unlink_while_a_sign_in_finishes_leaves_no_session(idp, monkeypatch):
     with TestClient(app) as client:
         assert _reason(_sign_in(client, idp)) == "expired"
     assert _sessions() == 0
+
+
+def test_a_deactivation_while_a_sign_in_finishes_leaves_no_session(idp, monkeypatch):
+    uid = _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    real_finish = oidc.finish
+
+    async def finish_then_deactivate(*args, **kwargs):
+        result = await real_finish(*args, **kwargs)
+        with Session(get_engine()) as s:  # the deactivation lands after the link
+            user = s.get(User, uid)
+            user.active = False
+            s.add(user)
+            s.commit()
+        return result
+
+    monkeypatch.setattr(oidc, "finish", finish_then_deactivate)
+    with TestClient(app) as client:
+        admin = _enforce()
+        assert _reason(_sign_in(client, idp)) == "deactivated"
+        assert _sessions() == 0
+        r = client.patch(f"/api/users/{uid}", json={"active": True}, headers=admin)
+        assert r.status_code == 200
+        assert _sessions() == 0
