@@ -7,6 +7,7 @@ import threading
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
@@ -163,3 +164,23 @@ def test_provisioning_is_off_by_default_validated_and_seeds_once(idp, monkeypatc
     main._bootstrap_oidc_provisioning()  # restart: already written, so the env is ignored
     with Session(get_engine()) as s:
         assert runtime_settings.read_all(s)["oidc_provisioning"] is False
+
+
+@pytest.mark.parametrize("key", ["oidc_enabled", "oidc_require_verified_email", "oidc_provisioning"])
+def test_sso_switches_take_only_real_booleans(idp, key):
+    with TestClient(app) as client:
+        def patch(body):
+            return client.patch("/api/settings", headers=LOOPBACK, json=body)
+
+        def current():
+            return client.get("/api/settings", headers=LOOPBACK).json()[key]
+
+        before = current()
+        for coercible in ("yes", 1, "true"):  # each would read as True to a lax bool
+            assert patch({key: coercible}).status_code == 422, coercible
+            assert current() == before
+        for value in (not before, before):
+            assert patch({key: value}).status_code == 200
+            assert current() is value
+        assert patch({"oidc_label": "Acme"}).status_code == 200  # omitted: unchanged
+        assert current() is before
