@@ -8,15 +8,19 @@ upgrade path keeps full power).
 
 from __future__ import annotations
 
+import threading
+
 from fastapi.testclient import TestClient
 from sqlmodel import Session, delete
 
 from conftest import LOOPBACK, mint_token as _mint
 
+from app.api.users import change_user
 from app.db import get_engine, repo
 from app.db.models import Server, Token, User
 from app.main import app
 from app.registry import settings as runtime_settings
+from app.util import new_id
 
 
 def _reset() -> None:
@@ -304,3 +308,46 @@ def test_dangling_user_credential_fails_closed():
             assert client.get("/api/servers", headers=_bearer(cred)).status_code == 401
         finally:
             _reset()
+
+
+def test_two_demotions_from_two_sessions_cannot_both_commit(monkeypatch):
+    """Two writers on one database (two instances: the config write lock is
+    process-local, so neither takes it here) each demote a different one of the two
+    admins. Both get past every read before either writes; the guard, counted after
+    the write is flushed, still lets exactly one commit (#291)."""
+    _reset()
+    ids = []
+    with Session(get_engine()) as s:
+        for name in ("A", "B"):
+            user = repo.create_user(s, User(id=new_id(), name=name, role="admin"))
+            repo.create_token(s, Token(id=new_id(), name=name, token_hash=new_id(),
+                                       prefix="x", scope="control", user_id=user.id))
+            ids.append(user.id)
+    both_read = threading.Barrier(2, timeout=30)
+    real_save = repo.save_user
+
+    def save_once_both_have_read(session, user, **kw):
+        both_read.wait()
+        return real_save(session, user, **kw)
+
+    monkeypatch.setattr(repo, "save_user", save_once_both_have_read)
+    results: dict[str, object] = {}
+
+    def demote(user_id: str) -> None:
+        with Session(get_engine()) as s:
+            results[user_id] = change_user(s, s.get(User, user_id), role="member")
+
+    threads = [threading.Thread(target=demote, args=(uid,)) for uid in ids]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        refused = [uid for uid, r in results.items() if r == "last_admin"]
+        assert len(results) == 2 and len(refused) == 1
+        with Session(get_engine()) as s:
+            roles = {uid: s.get(User, uid).role for uid in ids}
+        assert roles[refused[0]] == "admin"
+        assert sorted(roles.values()) == ["admin", "member"]
+    finally:
+        _reset()
