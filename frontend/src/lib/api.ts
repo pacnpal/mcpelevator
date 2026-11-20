@@ -614,9 +614,16 @@ export function deleteUser(id: string): Promise<void> {
 }
 
 /** Clear a user's Linked identity and end their Sign-in sessions; their next SSO sign-in
- * matches by name again. */
-export function unlinkUserIdentity(id: string): Promise<void> {
-	return request<void>(`/users/${encodeURIComponent(id)}/identity`, { method: 'DELETE' });
+ * matches by name again. With `block`, the unlinked identity can't match this user by
+ * name again (the fix for a wrong match). */
+export function unlinkUserIdentity(id: string, block = false): Promise<void> {
+	const query = block ? '?block=true' : '';
+	return request<void>(`/users/${encodeURIComponent(id)}/identity${query}`, { method: 'DELETE' });
+}
+
+/** Let the identities an unlink blocked match this user by name again. */
+export function clearBlockedIdentities(id: string): Promise<void> {
+	return request<void>(`/users/${encodeURIComponent(id)}/identity/blocks`, { method: 'DELETE' });
 }
 
 /** Mint a login (control) token for a user — plaintext returned exactly once. */

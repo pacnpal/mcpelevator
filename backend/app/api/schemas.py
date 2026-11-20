@@ -766,6 +766,8 @@ class UserInfo(BaseModel):
     created_at: datetime
     # The issuer of the user's Linked identity, None when they have none.
     linked_issuer: Optional[str] = None
+    # How many identities an unlink blocked from matching this user by name again.
+    blocked_identities_count: int = 0
     # False for a Deactivated user: no credential works and SSO refuses them.
     active: bool = True
     # Fields provider groups set at sign-in, locked against PATCH: {role, local_runners}.

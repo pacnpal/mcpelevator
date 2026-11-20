@@ -8,7 +8,8 @@ import {
 	getHealth,
 	retryServer,
 	streamLogs,
-	unlinkUserIdentity
+	unlinkUserIdentity,
+	clearBlockedIdentities
 } from './api';
 import { getToken, setToken } from './auth';
 
@@ -79,6 +80,22 @@ describe('api request()', () => {
 		await unlinkUserIdentity('user/id');
 		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
 		expect(url).toBe('/api/users/user%2Fid/identity');
+		expect(init.method).toBe('DELETE');
+	});
+
+	it('unlinkUserIdentity with block sends block=true', async () => {
+		const fetchMock = stubFetch(204, null);
+		await unlinkUserIdentity('user/id', true);
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/users/user%2Fid/identity?block=true');
+		expect(init.method).toBe('DELETE');
+	});
+
+	it('clearBlockedIdentities DELETEs the blocks route', async () => {
+		const fetchMock = stubFetch(204, null);
+		await clearBlockedIdentities('user/id');
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/users/user%2Fid/identity/blocks');
 		expect(init.method).toBe('DELETE');
 	});
 

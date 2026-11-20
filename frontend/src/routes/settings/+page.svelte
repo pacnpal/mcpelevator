@@ -1,5 +1,6 @@
 <script lang="ts">
 	import {
+		clearBlockedIdentities,
 		createToken,
 		createUser,
 		deleteGroup,
@@ -315,6 +316,20 @@
 			users = users.map((u) => (u.id === user.id ? updated : u));
 		} catch (err) {
 			flashToast(errorMessage(err)); // e.g. the last-admin guard (409)
+		} finally {
+			busyUserId = null;
+		}
+	}
+
+	async function handleClearBlocks(user: UserInfo) {
+		if (busyUserId) return;
+		busyUserId = user.id;
+		try {
+			await clearBlockedIdentities(user.id);
+			users = users.map((u) => (u.id === user.id ? { ...u, blocked_identities_count: 0 } : u));
+			flashToast('Blocked identities cleared', 'info');
+		} catch (err) {
+			flashToast(errorMessage(err));
 		} finally {
 			busyUserId = null;
 		}
@@ -1358,11 +1373,30 @@
 										userId={user.id}
 										issuer={user.linked_issuer}
 										disabled={busyUserId !== null}
-										onunlinked={() => {
-											users = users.map((u) => (u.id === user.id ? { ...u, linked_issuer: null } : u));
+										onunlinked={(blocked) => {
+											users = users.map((u) =>
+												u.id === user.id
+													? {
+															...u,
+															linked_issuer: null,
+															blocked_identities_count: u.blocked_identities_count + (blocked ? 1 : 0)
+														}
+													: u
+											);
 											flashToast('Identity unlinked', 'info');
 										}}
 									/>
+								{/if}
+								{#if user.blocked_identities_count > 0}
+									<button
+										type="button"
+										onclick={() => handleClearBlocks(user)}
+										disabled={busyUserId !== null}
+										title="Let the identities an unlink blocked match this user by name again ({user.blocked_identities_count} blocked)"
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+									>
+										Clear blocked identities
+									</button>
 								{/if}
 							</div>
 							<div class="flex shrink-0 flex-wrap items-center gap-1.5">

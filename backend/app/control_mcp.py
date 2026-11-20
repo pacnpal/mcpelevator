@@ -568,11 +568,17 @@ def build(app: FastAPI) -> "_Gate":
         return await api("DELETE", f"/api/users/{_seg(user_id)}")
 
     @mcp.tool(annotations=_DESTRUCTIVE)
-    async def unlink_user_identity(user_id: str) -> Any:
+    async def unlink_user_identity(user_id: str, block: bool = False) -> Any:
         """Clear a user's Linked identity (their SSO link) and end their Sign-in sessions.
-        Their next SSO sign-in matches them by name again: use it to fix a wrong match or
-        to move users to a new identity provider."""
-        return await api("DELETE", f"/api/users/{_seg(user_id)}/identity")
+        Their next SSO sign-in matches them by name again. Moving users to a new identity
+        provider: leave block false. Fixing a wrong match (the wrong person got this
+        user): set block true, so that same provider account can't match this user by
+        name again; it is refused with reason identity_blocked, while a different account
+        can still match. list_users shows blocked_identities_count; an admin clears the
+        list on the Users page (DELETE /api/users/{id}/identity/blocks)."""
+        return await api(
+            "DELETE", f"/api/users/{_seg(user_id)}/identity", params={"block": block}
+        )
 
     @mcp.tool(annotations=_ADD)
     async def create_user_credential(user_id: str) -> Any:

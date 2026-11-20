@@ -1,7 +1,8 @@
 <script lang="ts">
 	// A user's Linked identity on the Users page: a badge naming the issuer's host, and an
 	// Unlink button behind a confirm. Unlinking ends the user's Sign-in sessions; their next
-	// SSO sign-in matches by name again (how users move to a new identity provider).
+	// SSO sign-in matches by name again (how users move to a new identity provider), unless
+	// the confirm's checkbox blocks this identity from matching this user (a wrong match).
 	import { errorMessage, unlinkUserIdentity } from '#lib/api.js';
 	import { flashToast } from '#lib/toast.svelte.js';
 
@@ -14,11 +15,12 @@
 		userId: string;
 		issuer: string;
 		disabled?: boolean;
-		onunlinked: () => void;
+		onunlinked: (blocked: boolean) => void;
 	} = $props();
 
 	let confirming = $state(false);
 	let busy = $state(false);
+	let block = $state(false);
 
 	const host = $derived.by(() => {
 		try {
@@ -32,13 +34,14 @@
 		if (busy) return;
 		busy = true;
 		try {
-			await unlinkUserIdentity(userId);
-			onunlinked();
+			await (block ? unlinkUserIdentity(userId, true) : unlinkUserIdentity(userId));
+			onunlinked(block);
 		} catch (err) {
 			flashToast(errorMessage(err));
 		} finally {
 			busy = false;
 			confirming = false;
+			block = false;
 		}
 	}
 
@@ -54,6 +57,10 @@
 		linked · {host}
 	</span>
 	{#if confirming}
+		<label class="flex items-center gap-1.5 text-xs text-[var(--color-ink-muted)]">
+			<input type="checkbox" bind:checked={block} disabled={busy} />
+			Don't let this identity match this user again
+		</label>
 		<button
 			type="button"
 			onclick={unlink}

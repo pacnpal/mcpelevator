@@ -62,6 +62,7 @@ def _info(
         tokens_count=tokens_count,
         created_at=user.created_at,
         linked_issuer=user.oidc_issuer,
+        blocked_identities_count=len(user.oidc_blocked_identities or []),
         active=bool(user.active),
         managed=managed,
     )
@@ -338,21 +339,43 @@ async def delete_user(
 @router.delete("/users/{user_id}/identity", status_code=204)
 async def unlink_identity(
     user_id: str,
+    block: bool = False,
     session: Session = Depends(get_session),
     principal: Principal = Depends(require_admin),
 ):
     """Clear a user's Linked identity and end their Sign-in sessions. Their next SSO
-    sign-in matches by name again, which is how users move to a new issuer. Under the
-    config write lock, which the sign-in's link write holds too."""
+    sign-in matches by name again, which is how users move to a new issuer. With
+    ``block``, the unlinked identity can't match this user by name again (a wrong match).
+    Under the config write lock, which the sign-in's link write holds too."""
+    return await _admin_user_write(
+        session, principal, lambda: repo.unlink_user_identity(session, user_id, block=block)
+    )
 
-    def _unlink():
+
+@router.delete("/users/{user_id}/identity/blocks", status_code=204)
+async def clear_identity_blocks(
+    user_id: str,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_admin),
+):
+    """Let the identities an unlink blocked match this user by name again."""
+    return await _admin_user_write(
+        session, principal, lambda: repo.clear_blocked_identities(session, user_id)
+    )
+
+
+async def _admin_user_write(session: Session, principal: Principal, write) -> Response:
+    """Run ``write`` (False = no such user) under the config write lock, re-checking the
+    caller is still an admin inside it."""
+
+    def _run():
         with service.config_write_lock():
             session.expire_all()
             if not _admin_now(session, principal):
                 return "forbidden"
-            return "ok" if repo.unlink_user_identity(session, user_id) else "not_found"
+            return "ok" if write() else "not_found"
 
-    result = await run_in_threadpool(_unlink)
+    result = await run_in_threadpool(_run)
     if result == "forbidden":
         raise _FORBIDDEN
     if result == "not_found":

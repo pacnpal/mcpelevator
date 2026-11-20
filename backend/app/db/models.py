@@ -65,6 +65,10 @@ class User(SQLModel, table=True):
     # issuer and subject (never by email). Both NULL until the first SSO sign-in.
     oidc_issuer: Optional[str] = None
     oidc_subject: Optional[str] = None
+    # Identities an admin unlinked from this user as a wrong match, as
+    # [{"issuer": …, "subject": …}]: each is refused a name match onto this user.
+    # Nullable: rows predating the column hold NULL, read as [].
+    oidc_blocked_identities: Optional[list] = Field(default=None, sa_column=Column(JSON))
     # What SCIM provisioning sent as displayName and externalId, kept only to hand back.
     display_name: Optional[str] = None
     scim_external_id: Optional[str] = None

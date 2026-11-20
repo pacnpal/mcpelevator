@@ -122,6 +122,22 @@ def test_list_users_shows_the_linked_issuer_and_unlink_clears_it(client):
     assert "unlink_user_identity" in INSTRUCTIONS
 
 
+def test_unlink_user_identity_passes_block(client):
+    with Session(get_engine()) as s:
+        uid = repo.create_user(
+            s, User(id=new_id(), name="ada", oidc_issuer="https://idp.example.com",
+                    oidc_subject="sub-1")
+        ).id
+    is_error, _ = _call(client, "unlink_user_identity", {"user_id": uid, "block": True})
+    assert not is_error
+    _, users = _call(client, "list_users")
+    assert next(u for u in users["items"] if u["id"] == uid)["blocked_identities_count"] == 1
+    with Session(get_engine()) as s:
+        assert s.get(User, uid).oidc_blocked_identities == [
+            {"issuer": "https://idp.example.com", "subject": "sub-1"}
+        ]
+
+
 def test_get_server_returns_a_stored_openapi_document_on_request(client):
     doc = "openapi: 3.1.0\ninfo: {title: t, version: '1'}\nservers: [{url: 'https://api.example'}]\npaths: {}\n"
     _, created = _call(

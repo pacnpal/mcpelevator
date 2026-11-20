@@ -31,6 +31,8 @@
 			'Your identity provider says your email address is not verified. Verify it at the provider, or ask your admin to match users by preferred_username or to turn off the verified email requirement.',
 		identity_conflict:
 			'The user that matches your account here is already linked to a different identity provider account. Ask an admin to unlink it, then sign in again.',
+		identity_blocked:
+			'An admin blocked your identity provider account from signing in as the user that matches it here. Ask an admin.',
 		not_allowed:
 			'Your identity provider account is not in a group allowed to sign in here. Ask your admin to add you to one.',
 		groups_overage:
