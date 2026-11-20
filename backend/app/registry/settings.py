@@ -123,6 +123,9 @@ DEFAULTS: dict[str, Any] = {
     # On: a sign-in that matches no User creates one, named by the identity claim, a
     # Member with local runners off, linked at once. The gates above still run first.
     "oidc_provisioning": False,
+    # Hard cap on a Sign-in session's length in SECONDS, refresh or not (minimum 300).
+    # Applies to sessions started after a change.
+    "oidc_session_max_age_s": 43200,
 }
 
 # The user fields a group list manages, and the setting that manages each.
@@ -142,6 +145,8 @@ def read_all(session: Session) -> dict[str, Any]:
 # `timedelta` to build the prune cutoff, so the stored value must stay inside what
 # `datetime` arithmetic can represent — see the validation in write().
 MAX_USAGE_RETENTION_DAYS = 36500
+# The longest Sign-in session (30 days); far above it, created_at + the cap overflows.
+MAX_OIDC_SESSION_AGE_S = 2592000
 
 _MODES = {"local", "expose"}
 _PROVIDERS = {"none", "bearer", "oauth"}
@@ -314,6 +319,14 @@ def write(
                     f"invalid usage_retention_days: {value!r} "
                     f"(days, 0–{MAX_USAGE_RETENTION_DAYS}; 0 keeps forever)"
                 )
+        if key == "oidc_session_max_age_s" and (
+            isinstance(value, bool) or not isinstance(value, int)
+            or not 300 <= value <= MAX_OIDC_SESSION_AGE_S
+        ):
+            raise ValueError(
+                f"invalid oidc_session_max_age_s: {value!r} "
+                f"(seconds, 300–{MAX_OIDC_SESSION_AGE_S})"
+            )
         if key in _OIDC_BOOLS and not isinstance(value, bool):
             raise ValueError(f"invalid {key}: {value!r}")
         if key == "oidc_discovery_url":

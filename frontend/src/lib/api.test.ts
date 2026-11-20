@@ -261,4 +261,125 @@ describe('Sign-in session CSRF header', () => {
 		expect(go).not.toHaveBeenCalled();
 		expect(goto).toHaveBeenCalledWith('/login');
 	});
+
+	function unauthorized() {
+		return { ok: false, status: 401, json: async () => ({}), text: async () => '' };
+	}
+
+	it('a 401 asks status once (which refreshes the session) and retries once', async () => {
+		const api = await import('./api');
+		vi.mocked(goto).mockClear();
+		let serverCalls = 0;
+		const order: string[] = [];
+		const fetchMock = vi.fn(async (url: string) => {
+			order.push(url);
+			if (url === '/api/auth/status') return respond(session);
+			serverCalls += 1;
+			return serverCalls === 1 ? unauthorized() : respond([]);
+		});
+		vi.stubGlobal('fetch', fetchMock);
+		await expect(api.listServers()).resolves.toEqual([]);
+		expect(order).toEqual(['/api/auth/status', '/api/servers', '/api/auth/status', '/api/servers']);
+		expect(goto).not.toHaveBeenCalled();
+	});
+
+	it('a second 401 after the retry goes to /login without another try', async () => {
+		const api = await import('./api');
+		vi.mocked(goto).mockClear();
+		const order: string[] = [];
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string) => {
+				order.push(url);
+				return url === '/api/auth/status' ? respond(session) : unauthorized();
+			})
+		);
+		await expect(api.listServers()).rejects.toMatchObject({ status: 401 });
+		expect(order).toEqual(['/api/auth/status', '/api/servers', '/api/auth/status', '/api/servers']);
+		expect(goto).toHaveBeenCalledWith('/login');
+	});
+
+	const statusFailures = {
+		'a network error': () => Promise.reject(new TypeError('network down')),
+		'a 503': () =>
+			Promise.resolve({ ok: false, status: 503, json: async () => ({}), text: async () => '' })
+	};
+	for (const [name, fail] of Object.entries(statusFailures)) {
+		it(`status failing with ${name} during the retry keeps the token and stays put`, async () => {
+			const api = await import('./api');
+			vi.mocked(goto).mockClear();
+			setToken('mcpe_login');
+			let statusCalls = 0;
+			const order: string[] = [];
+			vi.stubGlobal(
+				'fetch',
+				vi.fn(async (url: string) => {
+					order.push(url);
+					if (url !== '/api/auth/status') return unauthorized();
+					statusCalls += 1;
+					return statusCalls === 1 ? respond(session) : fail(); // the retry's status fails
+				})
+			);
+			await expect(api.listServers()).rejects.toMatchObject({ status: 401 });
+			expect(order).toEqual(['/api/auth/status', '/api/servers', '/api/auth/status']);
+			expect(getToken()).toBe('mcpe_login');
+			expect(goto).not.toHaveBeenCalled();
+		});
+	}
+
+	// The raw fetches that don't return JSON take the same refresh path as request().
+	const rawCalls = {
+		downloadMcpb: {
+			url: '/api/servers/srv/mcpb',
+			ok: () => ({ ok: true, status: 200, blob: async () => new Blob(['zip']) }),
+			call: (api: typeof import('./api')) => api.downloadMcpb('srv')
+		},
+		streamLogs: {
+			url: '/api/servers/srv/logs',
+			ok: () => ({
+				ok: true,
+				status: 200,
+				body: new ReadableStream<Uint8Array>({ start: (c) => c.close() })
+			}),
+			call: (api: typeof import('./api')) =>
+				api.streamLogs('srv', { onLine: () => {}, onInfo: () => {} }, new AbortController().signal)
+		}
+	};
+
+	for (const [name, raw] of Object.entries(rawCalls)) {
+		it(`${name}: a 401 asks status once and retries once`, async () => {
+			const api = await import('./api');
+			vi.mocked(goto).mockClear();
+			let calls = 0;
+			const order: string[] = [];
+			vi.stubGlobal(
+				'fetch',
+				vi.fn(async (url: string) => {
+					order.push(url);
+					if (url === '/api/auth/status') return respond(session);
+					calls += 1;
+					return calls === 1 ? unauthorized() : raw.ok();
+				})
+			);
+			await raw.call(api);
+			expect(order).toEqual(['/api/auth/status', raw.url, '/api/auth/status', raw.url]);
+			expect(goto).not.toHaveBeenCalled();
+		});
+
+		it(`${name}: a second 401 after the retry goes to /login`, async () => {
+			const api = await import('./api');
+			vi.mocked(goto).mockClear();
+			const order: string[] = [];
+			vi.stubGlobal(
+				'fetch',
+				vi.fn(async (url: string) => {
+					order.push(url);
+					return url === '/api/auth/status' ? respond(session) : unauthorized();
+				})
+			);
+			await expect(raw.call(api)).rejects.toMatchObject({ status: 401 });
+			expect(order).toEqual(['/api/auth/status', raw.url, '/api/auth/status', raw.url]);
+			expect(goto).toHaveBeenCalledWith('/login');
+		});
+	}
 });

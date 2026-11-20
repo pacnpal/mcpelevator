@@ -110,6 +110,8 @@ Typical flows:
   update_user), and oidc_groups_claim when the groups aren't in "groups".
   oidc_provisioning true creates a member (local runners off) for a sign-in
   that matches no user; oidc_allowed_groups or oidc_allowed_domains limit who.
+  The groups are mapped again each time a Sign-in session refreshes (about one
+  access-token lifetime); oidc_session_max_age_s caps a session's length.
 - Offboard someone: update_user with active false. Their sessions end, every
   token they hold is revoked, and SSO refuses them; their servers keep
   running. active true brings them back (mint a new login, the old ones

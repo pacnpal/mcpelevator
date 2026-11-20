@@ -107,20 +107,38 @@ async function authHeaders(waitForStatus = true, withToken = true): Promise<Reco
 	};
 }
 
-async function request<T>(path: string, init?: RequestInit, withToken = true): Promise<T> {
+/**
+ * Every `/api` fetch goes through here: credential headers, and the Sign-in session
+ * refresh. A session past its provider access token gets 401 everywhere but
+ * /auth/status, which refreshes it, so a 401 asks status once and retries once. A 401
+ * that survives that drops the token and bounces to /login (unless already there). A
+ * status call that fails (offline, a 5xx) throws the original 401 and keeps the token.
+ * Returns the ok response; throws `ApiError` otherwise.
+ */
+async function apiFetch(path: string, init?: RequestInit, withToken = true): Promise<Response> {
 	const url = `${BASE}${path}`;
-	const res = await fetch(url, {
-		...init,
-		headers: {
-			accept: 'application/json',
-			...(await authHeaders(path !== '/auth/status', withToken)),
-			...init?.headers
+	const send = async () =>
+		fetch(url, {
+			...init,
+			headers: {
+				accept: 'application/json',
+				...(await authHeaders(path !== '/auth/status', withToken)),
+				...init?.headers
+			}
+		});
+	let res = await send();
+	if (res.status === 401 && path !== '/auth/status') {
+		try {
+			await getAuthStatus(withToken);
+		} catch {
+			// Status itself failed (offline, a 5xx): that says nothing about the session,
+			// so keep the token and stay put; the original 401 is the error.
+			throw new ApiError(res.status, await res.text().catch(() => ''), url);
 		}
-	});
+		res = await send();
+	}
 
 	if (!res.ok) {
-		// A 401 means the token is missing or stale: drop it and bounce to /login
-		// (unless already there) so the SPA doesn't sit on a dead session.
 		if (res.status === 401) {
 			clearToken();
 			if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
@@ -135,7 +153,11 @@ async function request<T>(path: string, init?: RequestInit, withToken = true): P
 		}
 		throw new ApiError(res.status, body, url);
 	}
+	return res;
+}
 
+async function request<T>(path: string, init?: RequestInit, withToken = true): Promise<T> {
+	const res = await apiFetch(path, init, withToken);
 	// 204 / empty bodies: return undefined cast to T.
 	if (res.status === 204) return undefined as T;
 	return (await res.json()) as T;
@@ -321,29 +343,11 @@ export function updateServer(
 }
 
 /**
- * Download the generated `.mcpb` bundle for a local stdio server. Raw fetch
- * (not `request()`): the body is a zip, not JSON, and it needs the same
- * bearer header an `<a href>` can't carry.
+ * Download the generated `.mcpb` bundle for a local stdio server. The body is a
+ * zip, not JSON, and it needs the same bearer header an `<a href>` can't carry.
  */
 export async function downloadMcpb(id: string): Promise<Blob> {
-	const url = `${BASE}/servers/${encodeURIComponent(id)}/mcpb`;
-	const res = await fetch(url, { headers: await authHeaders() });
-	if (!res.ok) {
-		// Same 401 handling as request(): drop the stale token and bounce to /login.
-		if (res.status === 401) {
-			clearToken();
-			if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
-				void goto('/login');
-			}
-		}
-		let body = '';
-		try {
-			body = await res.text();
-		} catch {
-			// ignore — body may be unreadable on some error responses
-		}
-		throw new ApiError(res.status, body, url);
-	}
+	const res = await apiFetch(`/servers/${encodeURIComponent(id)}/mcpb`);
 	return res.blob();
 }
 
@@ -462,20 +466,9 @@ export async function streamLogs(
 	handlers: LogStreamHandlers,
 	signal: AbortSignal
 ): Promise<void> {
-	const url = `${BASE}/servers/${encodeURIComponent(id)}/logs`;
-	const res = await fetch(url, {
-		headers: {
-			accept: 'text/event-stream',
-			...(await authHeaders())
-		},
-		signal
-	});
-	if (res.status === 401) {
-		clearToken();
-		if (typeof window !== 'undefined' && window.location.pathname !== '/login') void goto('/login');
-		throw new ApiError(401, '', url);
-	}
-	if (!res.ok || !res.body) throw new ApiError(res.status, '', url);
+	const path = `/servers/${encodeURIComponent(id)}/logs`;
+	const res = await apiFetch(path, { headers: { accept: 'text/event-stream' }, signal });
+	if (!res.body) throw new ApiError(res.status, '', `${BASE}${path}`);
 	handlers.onOpen?.();
 
 	const reader = res.body.getReader();

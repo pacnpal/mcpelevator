@@ -175,7 +175,13 @@ def build(app: FastAPI) -> "_Gate":
         sign-in that matches no user creates one named by the identity claim, a member
         with local_runners off and control_mcp on, linked at once; the tenant, verified
         email, allowed-groups and allowed-domains checks still run first, so those
-        lists are how to limit who gets an account), and oidc_enabled.
+        lists are how to limit who gets an account), oidc_session_max_age_s (default
+        43200, 300 to 2592000, i.e. 30 days: the longest a Sign-in session lasts in seconds, refreshed
+        or not, for sessions started after the change), and oidc_enabled. A session
+        is refreshed against the provider when its access token runs out, which maps
+        the groups again; a refused refresh, or any change to a setting a login is
+        bound to, ends it at that refresh. Sign-in requests offline_access when the
+        provider lists it (access_type=offline at Google) to get a refresh token.
 
         Group mapping, applied at every SSO sign-in: oidc_groups_claim (default
         "groups"; tried as a literal key first, e.g. Auth0's

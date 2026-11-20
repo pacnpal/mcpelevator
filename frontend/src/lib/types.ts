@@ -617,6 +617,8 @@ export interface SettingsInfo {
 	oidc_allowed_domains: string[];
 	/** On: a sign-in that matches no user creates one (a Member, local runners off). */
 	oidc_provisioning: boolean;
+	/** Hard cap on a Sign-in session, in seconds (300 to 2592000). */
+	oidc_session_max_age_s: number;
 	/** Read-only: the redirect URI to register at the provider. */
 	oidc_redirect_uri: string;
 }

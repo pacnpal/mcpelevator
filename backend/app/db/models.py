@@ -83,9 +83,23 @@ class SignInSession(SQLModel, table=True):
     token_hash: str = Field(index=True)
     user_id: str = Field(index=True)
     created_at: datetime = Field(default_factory=utcnow)
+    # Hard expiry: created_at + oidc_session_max_age_s as it was at sign-in.
     expires_at: datetime
-    # The provider's ID token, sealed (app.sealed), kept as the logout hint.
+    # Soft expiry: when the provider's access token runs out. Past it only
+    # /api/auth/status counts the session, and refreshes it. None: no refresh token, so
+    # the session runs to its hard expiry.
+    soft_expires_at: Optional[datetime] = None
+    # The provider's latest ID token, sealed (app.sealed): the logout hint, and the
+    # subject a refreshed one must repeat.
     id_token: str = ""
+    # The sign-in's nonce, which a refreshed ID token that carries one must repeat. Kept
+    # apart from id_token, which a refreshed token without a nonce replaces. "" on a
+    # session from before this column: its id_token's nonce counts.
+    nonce: str = ""
+    # The provider's latest refresh token, sealed. Replaced by every refresh response.
+    refresh_token: str = ""
+    # settings.sign_in_digest at sign-in: a refresh under other values ends the session.
+    settings: str = ""
 
 
 class Server(SQLModel, table=True):

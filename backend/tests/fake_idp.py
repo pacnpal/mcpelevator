@@ -8,7 +8,8 @@ and returns the code the provider would send back.
 
 Knobs for later tests: ``claims`` (merged into every ID token), ``userinfo`` (claims
 served there, ``None`` = no endpoint), ``token_error`` / ``token_status`` (the token
-endpoint answers with an error), ``down`` (every endpoint 503s), ``id_token_override``
+endpoint answers with an error), ``down`` (every endpoint 503s), ``jwks_down`` (the JWKS
+alone 503s), ``userinfo_down`` (userinfo alone 503s),``id_token_override``
 (hand back this exact ID token), ``token_barrier`` (a ``threading.Barrier`` every token
 request waits at, so concurrent sign-ins reach the provider together), ``sign(..., alg=,
 key=)`` and ``rotate_key()``.
@@ -20,6 +21,12 @@ from the ID token's ``iss``, e.g. Entra's ``{tenantid}`` template), ``jwks_issue
 client: the token endpoint wants ``client_id`` in the body and no client authentication)
 ``auth_methods`` (the advertised ``token_endpoint_auth_methods_supported``, enforced),
 ``scopes_supported`` (advertised in discovery when set) and ``end_session`` (discovery advertises an ``end_session_endpoint``).
+
+Refresh: every token response carries a single-use ``refresh_token`` (``refresh_tokens``
+False: none) and ``expires_in`` (None: left out). A ``refresh_token`` grant spends the token
+it presents (a reused one gets ``invalid_grant``) and answers with a new one and a new ID
+token from the current ``claims`` (``refresh_id_token`` False: none). ``refreshes`` lists
+the refresh tokens the app presented, in order.
 ``last_authorize`` holds the last authorization request's query; ``seen`` the path of every
 request the app made to the provider.
 """
@@ -52,6 +59,8 @@ class FakeIdP:
         self.token_error: str | None = None
         self.token_status = 400
         self.down = False
+        self.jwks_down = False
+        self.userinfo_down = False
         self.id_token_override: str | None = None
         self.token_barrier: Any = None
         self.iss_param = True  # send RFC 9207 ``iss`` on the callback
@@ -62,6 +71,11 @@ class FakeIdP:
         self.auth_methods: list[str] | None = None
         self.scopes_supported: list[str] | None = None
         self.end_session = False
+        self.refresh_tokens = True
+        self.refresh_id_token = True
+        self.expires_in: int | None = 300
+        self.refreshes: list[str] = []
+        self._refresh: dict[str, dict[str, Any]] = {}
         self.last_authorize: dict[str, str] = {}
         self.seen: list[str] = []
         self._codes: dict[str, dict[str, Any]] = {}
@@ -135,6 +149,8 @@ class FakeIdP:
                 doc["end_session_endpoint"] = f"{self.issuer}/logout"
             return httpx.Response(200, json=doc)
         if path == "/jwks":
+            if self.jwks_down:
+                return httpx.Response(503)
             keys = []
             for kid, private in self._keys:
                 if isinstance(private, rsa.RSAPrivateKey):
@@ -149,6 +165,8 @@ class FakeIdP:
         if path == "/token":
             return self._token(request)
         if path == "/userinfo" and self.userinfo is not None:
+            if self.userinfo_down:
+                return httpx.Response(503)
             return httpx.Response(200, json=self.userinfo)
         return httpx.Response(404)
 
@@ -160,17 +178,31 @@ class FakeIdP:
         form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
         if not self._client_authenticated(request, form):
             return httpx.Response(401, json={"error": "invalid_client"})
+        if form.get("grant_type") == "refresh_token":
+            self.refreshes.append(form.get("refresh_token", ""))
+            grant = self._refresh.pop(form.get("refresh_token", ""), None)
+            if grant is None:
+                return httpx.Response(400, json={"error": "invalid_grant"})
+            return self._tokens(grant, id_token=self.refresh_id_token)
         grant = self._codes.pop(form.get("code", ""), None)
         if grant is None or form.get("redirect_uri") != grant["redirect_uri"]:
             return httpx.Response(400, json={"error": "invalid_grant"})
         digest = hashlib.sha256(form.get("code_verifier", "").encode()).digest()
         if base64.urlsafe_b64encode(digest).rstrip(b"=").decode() != grant["code_challenge"]:
             return httpx.Response(400, json={"error": "invalid_grant"})
-        id_token = self.id_token_override or self.id_token(grant["nonce"])
-        return httpx.Response(
-            200, json={"access_token": "at-" + secrets.token_hex(8), "token_type": "Bearer",
-                       "id_token": id_token, "expires_in": 300},
-        )
+        return self._tokens(grant, id_token=True)
+
+    def _tokens(self, grant: dict[str, Any], *, id_token: bool) -> httpx.Response:
+        body: dict[str, Any] = {"access_token": "at-" + secrets.token_hex(8), "token_type": "Bearer"}
+        if id_token:
+            body["id_token"] = self.id_token_override or self.id_token(grant["nonce"])
+        if self.expires_in is not None:
+            body["expires_in"] = self.expires_in
+        if self.refresh_tokens:
+            refresh = "rt-" + secrets.token_hex(8)
+            self._refresh[refresh] = grant
+            body["refresh_token"] = refresh
+        return httpx.Response(200, json=body)
 
     def _client_authenticated(self, request: httpx.Request, form: dict[str, str]) -> bool:
         header = request.headers.get("authorization", "")
