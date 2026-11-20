@@ -194,7 +194,8 @@
 	.nav-item:active {
 		translate: 0 1px;
 	}
-	.nav-item[aria-current='page'] {
+	.nav-item[aria-current='page'],
+	.nav-item[aria-pressed='true'] {
 		border-color: color-mix(in oklab, var(--color-accent) 40%, transparent);
 		color: var(--color-accent);
 		background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);

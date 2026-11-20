@@ -1,4 +1,4 @@
-// A reactive stand-in for `$app/state`'s `page`, for the login page's test.
+// A reactive stand-in for `$app/state`'s `page`, for route tests.
 let url = $state(new URL('http://localhost/login'));
 
 export const page = {

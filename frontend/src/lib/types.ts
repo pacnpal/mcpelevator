@@ -68,6 +68,9 @@ export interface ServerSummary {
 	pid: number | null;
 	port: number | null;
 	tools_count: number;
+	/** The discovered tools' exposed names (after hiding and renames), for search.
+	 * Optional so synthetic summaries (the group copy-menu shim) need not carry it. */
+	tool_names?: string[];
 	/** Owning user (null = admin-owned). `owner_name` is denormalized for the
 	 * admin dashboard; members only ever see their own servers. Optional so
 	 * synthetic summaries (e.g. the group copy-menu shim) need not carry it. */

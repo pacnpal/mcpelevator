@@ -879,3 +879,47 @@ def test_tool_aliases_round_trip_through_the_api():
             assert bad.status_code in (400, 422), bad.text
         finally:
             client.delete(f"/api/servers/{sid}", headers=LOOPBACK)
+
+
+def test_server_list_carries_exposed_tool_names(monkeypatch):
+    """The dashboard searches tool names, so the list route carries the names a client
+    sees: a hidden tool is absent and a renamed one appears under its new name. The
+    cached list is what the bridge exposed, so a renamed tool keeps its old name only
+    in upstream_name."""
+    async def parked_reconciler(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Supervisor, "run_forever", parked_reconciler)
+    with TestClient(app) as c:
+        created = c.post(
+            "/api/servers",
+            json={
+                "name": "Named tools",
+                "runner": "command",
+                "command": "/bin/true",
+                "disabled_tools": ["delete_file"],
+                "tool_overrides": {"write_file": {"name": "save_file"}},
+            },
+            headers=LOOPBACK,
+        ).json()
+        server_id = created["id"]
+        try:
+            with Session(get_engine()) as session:
+                service.set_enabled(session, server_id, True)
+                repo.upsert_runtime(
+                    session,
+                    server_id,
+                    state="idle",
+                    tools=[
+                        {"name": "read_file"},
+                        {"name": "save_file", "upstream_name": "write_file"},
+                    ],
+                )
+            listed = c.get("/api/servers", headers=LOOPBACK)
+            assert listed.status_code == 200, listed.text
+            row = next(s for s in listed.json() if s["id"] == server_id)
+            assert row["state"] == "idle"
+            assert row["tool_names"] == ["read_file", "save_file"]
+            assert row["tools_count"] == 2
+        finally:
+            c.delete(f"/api/servers/{server_id}", headers=LOOPBACK)

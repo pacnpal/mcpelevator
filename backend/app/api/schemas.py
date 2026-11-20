@@ -108,6 +108,8 @@ class ServerSummary(BaseModel):
     pid: Optional[int] = None
     port: Optional[int] = None
     tools_count: int = 0
+    # The discovered tools' exposed names (after hiding and renames), for dashboard search.
+    tool_names: list[str] = []
     startup_status: Optional[StartupStatus] = None
     # Ownership (multi-user): None = admin-owned. owner_name is denormalized so
     # the admin dashboard can label rows without a second fetch.
