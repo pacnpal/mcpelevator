@@ -324,7 +324,12 @@ def build(app: FastAPI) -> "_Gate":
         (``health_check_tool`` / ``health_check_arguments``, or ``health_check_command``,
         and ``health_check_interval_s``; see create_server) never restart the bridge: a
         change applies from the next start or periodic check, and an explicit null clears
-        one (all null = no check)."""
+        one (all null = no check). The built-in mcpelevator server takes ``auth_provider``
+        "none", "bearer" or "oauth" (never "inherit"). On "oauth" it answers OAuth-only
+        clients such as claude.ai with the standard 401 challenge, and an access token
+        runs calls as the user its Linked identity names; a token linked to no user is
+        refused (the allowlist never applies there). See the instructions' flow.
+        Changing it doesn't restart anything, so it's safe over this connection."""
         if changes.model_fields_set & _RESTARTING_FIELDS:
             _refuse_self(server_id, "change its exposure or tool policy")
         return await api(

@@ -62,11 +62,21 @@ def require_visible_server(principal: Principal, server: Optional[Server]) -> Se
 
 
 def oauth_refusal(
-    caller: Optional[Principal], server: Server, *, allowlisted: bool, owner_only: bool
+    caller: Optional[Principal], server: Server, *, allowlisted: bool, owner_only: bool,
+    builtin: bool = False,
 ) -> Optional[str]:
     """Why a verified provider access token may NOT reach this ``oauth`` server or group
     (None = allowed). ``caller`` is who the token resolves to (None = no one);
-    ``allowlisted`` is whether ``oauth_allowed_subjects`` lets its claims in."""
+    ``allowlisted`` is whether ``oauth_allowed_subjects`` lets its claims in.
+    ``builtin``: the built-in server, or a group bundling it. Every call there runs as
+    a User, so the token must name one, and a group (admin-owned) only an admin."""
+    if builtin:
+        if caller is None:
+            return ("the token is valid, but no mcpelevator user is linked to that "
+                    "identity; sign in to mcpelevator through SSO once to link it")
+        if server.id.startswith("group:") and not caller.is_admin:
+            return "only an admin opens a group that includes the built-in server"
+        return None
     if caller is not None and can_view_server(caller, server):
         return None
     if caller is not None and owner_only:

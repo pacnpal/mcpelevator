@@ -686,3 +686,113 @@ def test_an_oauth_group_under_each_member_access_mode(plane, mode):
             with Session(get_engine()) as s:
                 registry.delete_group(s, "team")
                 runtime_settings.write(s, {"default_auth_provider": "none"})
+
+
+# ---- the built-in server on the oauth provider (#276) ----------------------------
+
+
+@pytest.fixture
+def oauth_builtin(plane):
+    """The built-in server on ``oauth``, set through the API as an operator would."""
+    with TestClient(app) as client:
+        admin = _enforce()
+        builtin = _builtin_id()
+        r = client.patch(f"/api/servers/{builtin}", json={"auth_provider": "oauth"}, headers=admin)
+        assert r.status_code == 200, r.text
+        assert r.json()["auth"] == "oauth"
+        yield SimpleNamespace(client=client, admin=admin, idp=plane, slug=_builtin_slug())
+    with Session(get_engine()) as s:
+        service.update_server(s, _builtin_id(), {"auth_provider": "bearer"})
+        runtime_settings.write(s, {"oauth_accept_bearer": False, "default_auth_provider": "none"})
+
+
+def _builtin_id() -> str:
+    with Session(get_engine()) as s:
+        return service.get_builtin(s).id
+
+
+def test_the_builtin_server_on_oauth_answers_a_bare_request_with_the_challenge(oauth_builtin):
+    r = oauth_builtin.client.get(f"/s/{oauth_builtin.slug}/mcp", headers=LOOPBACK)
+    assert r.status_code == 401, r.text
+    challenge = r.headers["www-authenticate"]
+    assert "resource_metadata=" in challenge
+    assert f"/.well-known/oauth-protected-resource/s/{oauth_builtin.slug}/mcp" in challenge
+
+
+def test_the_metadata_route_advertises_the_builtin_server_on_oauth(oauth_builtin):
+    r = oauth_builtin.client.get(
+        f"/.well-known/oauth-protected-resource/s/{oauth_builtin.slug}/mcp", headers=LOOPBACK
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["authorization_servers"] == [ISSUER]
+    assert r.json()["resource"].endswith(f"/s/{oauth_builtin.slug}/mcp")
+
+
+def test_a_linked_members_jwt_drives_the_builtin_server_on_oauth(oauth_builtin):
+    _linked("ada@example.com", "sub-ada")
+    client = oauth_builtin.client
+    _proxying(client)
+    _allowlist("someone-else")  # never consulted for the built-in server
+    token = _access(oauth_builtin.idp, "sub-ada")
+    r = client.get(f"/s/{oauth_builtin.slug}/mcp", headers={**LOOPBACK, **token})
+    assert r.status_code == 200, r.text
+    status, me = _whoami(client, token)
+    assert status == 200 and me["user"]["name"] == "ada@example.com", me
+
+
+def test_an_unlinked_jwt_is_refused_by_the_builtin_server_on_oauth(oauth_builtin):
+    client = oauth_builtin.client
+    _proxying(client)
+    _allowlist("sub-stranger")  # even an allowlisted subject must be a User here
+    token = _access(oauth_builtin.idp, "sub-stranger")
+    r = client.get(f"/s/{oauth_builtin.slug}/mcp", headers={**LOOPBACK, **token})
+    assert r.status_code == 403, r.text
+    assert "no mcpelevator user is linked" in r.json()["detail"]
+
+
+def test_accept_bearer_keeps_control_tokens_on_the_builtin_server_on_oauth(
+    oauth_builtin, monkeypatch
+):
+    from app.config import get_settings
+
+    client = oauth_builtin.client
+    _proxying(client)
+    with Session(get_engine()) as s:
+        runtime_settings.write(s, {"oauth_accept_bearer": True})
+    monkeypatch.setattr(get_settings(), "admin_token", "breakglass-secret")
+    for header in (oauth_builtin.admin["authorization"], "Bearer breakglass-secret"):
+        r = client.get(
+            f"/s/{oauth_builtin.slug}/mcp", headers={**LOOPBACK, "authorization": header}
+        )
+        assert r.status_code == 200, r.text
+
+
+def test_an_oauth_group_with_the_builtin_server_opens_only_to_an_admin(oauth_builtin):
+    from app.groups import registry
+
+    _linked("ada@example.com", "sub-ada")
+    _linked("root@example.com", "sub-root", role="admin")
+    client = oauth_builtin.client
+    with Session(get_engine()) as s:
+        runtime_settings.write(s, {"default_auth_provider": "oauth"})
+        registry.write_group(s, "ops", [_builtin_id()])
+    try:
+        def get(sub: str):
+            return client.get("/g/ops/mcp", headers={**MCP, **_access(oauth_builtin.idp, sub)})
+
+        assert get("sub-root").status_code != 403
+        r = get("sub-ada")
+        assert r.status_code == 403, r.text
+        assert "admin" in r.json()["detail"]
+    finally:
+        with Session(get_engine()) as s:
+            registry.delete_group(s, "ops")
+
+
+def test_the_builtin_servers_auth_takes_oauth_but_not_an_unknown_provider(oauth_builtin):
+    client, admin = oauth_builtin.client, oauth_builtin.admin
+    builtin = _builtin_id()
+    for bad in ("kerberos", "inherit"):
+        r = client.patch(f"/api/servers/{builtin}", json={"auth_provider": bad}, headers=admin)
+        assert r.status_code in (400, 422), r.text
+    assert client.get(f"/api/servers/{builtin}", headers=admin).json()["auth"] == "oauth"

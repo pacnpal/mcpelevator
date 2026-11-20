@@ -51,7 +51,7 @@ from starlette.requests import Request
 from app.api.util import base_url
 from app.config import get_settings
 from app.db import get_engine, repo
-from app.db.models import Server
+from app.db.models import BUILTIN_RUNNER, Server
 from app.registry import settings as runtime_settings
 
 logger = logging.getLogger(__name__)
@@ -290,6 +290,17 @@ def _caller(request: Request):
         return credential_principal(request, session, cloudflare=False, provider_jwt=True)
 
 
+def _authorizes_as_a_user(session: Session, server: Server) -> bool:
+    """Is ``server`` the built-in one, or a group bundling it? Either authorizes every
+    call as a User, so a token must resolve to one (the allowlist never applies)."""
+    from app.groups import registry  # circular-import guard
+
+    if server.runner == BUILTIN_RUNNER:
+        return True
+    group = server.id.removeprefix("group:") if server.id.startswith("group:") else None
+    return group is not None and registry.includes_builtin(session, group)
+
+
 class OAuthProvider:
     name = "oauth"
 
@@ -300,6 +311,7 @@ class OAuthProvider:
             allowed = runtime_settings.oauth_allowed_subjects(session)
             accept_bearer = runtime_settings.oauth_accept_bearer(session)
             owner_only = runtime_settings.oauth_member_access(session) == "owner_only"
+            builtin = _authorizes_as_a_user(session, server)
         # Fail closed, like resolve() does for an unknown provider: a server marked
         # oauth with no AS configured must not fall through to unauthenticated.
         if not config_url or not audience:
@@ -318,7 +330,11 @@ class OAuthProvider:
         # that way (base64url of any JSON header can't) — so delegation is exact: a
         # local-looking token gets the bearer provider's verdict (including its 403
         # scope semantics) and never falls through to JWT parsing, and vice versa.
-        if accept_bearer and token.startswith("mcpe_"):
+        # The built-in server's break-glass token is the operator's own string, so it
+        # goes the same way there (the bearer provider accepts it for that server).
+        from app.auth.control_plane import is_env_admin_token
+
+        if accept_bearer and (token.startswith("mcpe_") or (builtin and is_env_admin_token(token))):
             from app.auth.bearer import BearerProvider
 
             return await BearerProvider().authenticate(request, server)
@@ -364,10 +380,10 @@ class OAuthProvider:
 
         allowlisted = not allowed or _identity_allowed(claims, allowed)
         # Resolve only when it can change the verdict: an allowlisted token passes
-        # under additive whoever it names.
-        caller = _caller(request) if owner_only or not allowlisted else None
+        # under additive whoever it names. The built-in server always resolves.
+        caller = _caller(request) if builtin or owner_only or not allowlisted else None
         reason = policy.oauth_refusal(
-            caller, server, allowlisted=allowlisted, owner_only=owner_only
+            caller, server, allowlisted=allowlisted, owner_only=owner_only, builtin=builtin
         )
         if reason is not None:
             raise HTTPException(

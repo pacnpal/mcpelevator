@@ -2363,10 +2363,11 @@ def _require_builtin_editable(server: Server, changes: dict[str, Any]) -> None:
         if key in _MUTABLE_FIELDS and key not in _BUILTIN_EDITABLE:
             if (value or None) != (getattr(server, key) or None):
                 raise ValueError(f"{key} can't be changed on the built-in mcpelevator server")
-    if "auth_provider" in changes and changes["auth_provider"] not in ("none", "bearer"):
-        # /api/mcp authorizes each call by the caller's control-plane identity; an OAuth
-        # access token carries none. "inherit" is refused too: the default may be oauth.
-        raise ValueError("the built-in mcpelevator server supports none or bearer auth")
+    if "auth_provider" in changes and changes["auth_provider"] not in ("none", "bearer", "oauth"):
+        # /api/mcp authorizes each call as a User: a control credential, or an OAuth
+        # access token whose Linked identity names one (app.auth.oauth refuses any
+        # other). "inherit" is refused: the gate must not move when the default does.
+        raise ValueError("the built-in mcpelevator server supports none, bearer or oauth auth")
 
 
 # Where a server sends its headers. For an editor who can't run code on this box, moving

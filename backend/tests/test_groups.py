@@ -371,9 +371,9 @@ async def test_hub_excludes_members_with_incompatible_auth(clean_settings):
             repo.delete_server(session, oauth.id)
 
 
-async def test_hub_leaves_the_builtin_out_of_oauth_groups(clean_settings):
-    """The built-in server reads a control credential, which an OAuth group's token
-    never is, so an OAuth group would only list control tools that refuse every call."""
+async def test_hub_mounts_the_builtin_in_oauth_groups(clean_settings):
+    """The built-in server resolves an OAuth group's provider token to its User (#276),
+    so an OAuth group that names it mounts it like any other member."""
     with Session(get_engine()) as session:
         service.ensure_builtin(session)
         row = service.get_builtin(session)
@@ -382,8 +382,8 @@ async def test_hub_leaves_the_builtin_out_of_oauth_groups(clean_settings):
     hub = _hub_for({f"up-{builtin.slug}": _make_upstream("b", "whoami"),
                     "up-open-one": _make_upstream("o", "free")})
     try:
-        for default, tools in (("oauth", ["open-one_free"]),
-                               ("none", [f"{builtin.slug}_whoami", "open-one_free"])):
+        for default in ("oauth", "none"):
+            tools = [f"{builtin.slug}_whoami", "open-one_free"]
             _write_groups({"g": [builtin.id, open_srv.id]}, default_auth_provider=default)
             with Session(get_engine()) as session:
                 service.update_server(session, builtin.id, {"auth_provider": "none"})
