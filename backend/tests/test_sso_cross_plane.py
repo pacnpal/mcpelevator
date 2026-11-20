@@ -11,6 +11,7 @@ import time
 from types import SimpleNamespace
 
 import httpx
+import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from fastapi.testclient import TestClient
@@ -324,6 +325,82 @@ def test_a_jwt_is_not_a_control_credential_on_the_rest_of_api(plane):
         assert client.get("/api/servers", headers={**LOOPBACK, **token}).status_code == 401
         status = client.get("/api/auth/status", headers={**LOOPBACK, **token}).json()
         assert status.get("user") is None
+
+
+def test_a_jwt_without_a_kid_from_a_single_key_provider_resolves(plane):
+    _linked("ada@example.com", "sub-ada")
+    now = int(time.time())
+    token = jwt.encode(
+        {"iss": ISSUER, "aud": AUDIENCE, "sub": "sub-ada", "iat": now, "exp": now + 300},
+        plane._keys[0][1], algorithm="RS256",
+    )
+    assert "kid" not in jwt.get_unverified_header(token)
+    with TestClient(app) as client:
+        _enforce()
+        status, me = _whoami(client, {"authorization": f"Bearer {token}"})
+        assert status == 200 and me["user"]["name"] == "ada@example.com", me
+
+
+# ---- /s and /g: the built-in server opens to a resolved JWT ----------------------
+
+
+def _builtin_slug() -> str:
+    with Session(get_engine()) as s:
+        return service.get_builtin(s).slug
+
+
+def test_a_members_jwt_opens_the_builtin_servers_s_url(plane):
+    _linked("ada@example.com", "sub-ada")
+    with TestClient(app) as client:
+        _enforce()
+        _proxying(client)
+        token = _access(plane, "sub-ada")
+        r = client.get(f"/s/{_builtin_slug()}/mcp", headers={**LOOPBACK, **token})
+        assert r.status_code == 200, r.text
+        status, me = _whoami(client, token)
+        assert status == 200 and me["user"]["name"] == "ada@example.com", me
+
+
+def test_a_members_jwt_cannot_open_a_group_with_the_builtin_server(plane):
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.auth.bearer import BearerProvider
+    from app.groups import registry
+    from app.groups.hub import group_server
+
+    _linked("ada@example.com", "sub-ada")
+    _linked("root@example.com", "sub-root", role="admin")
+    with TestClient(app) as client:
+        _enforce()
+        with Session(get_engine()) as s:
+            registry.write_group(s, "ops", [service.get_builtin(s).id])
+        member, root = _access(plane, "sub-ada"), _access(plane, "sub-root")
+        assert _whoami(client, member)[0] == 200  # warms the discovery caches
+
+        def auth(token: dict[str, str]) -> None:
+            header = token["authorization"].encode()
+            req = Request({"type": "http", "headers": [(b"authorization", header)]})
+            asyncio.run(BearerProvider().authenticate(req, group_server("ops")))
+
+        auth(root)  # an admin's credential opens it, as before
+        with pytest.raises(HTTPException):
+            auth(member)
+
+
+def test_a_jwt_never_opens_an_ordinary_bearer_server(plane):
+    _linked("ada@example.com", "sub-ada", role="admin")
+    with TestClient(app) as client:
+        admin = _enforce()
+        r = client.post(
+            "/api/servers", json={"name": "plain", "command": "echo", "auth_provider": "bearer"},
+            headers=admin,
+        )
+        assert r.status_code == 201, r.text
+        _proxying(client)
+        r = client.get(f"/s/{r.json()['slug']}/mcp", headers={**LOOPBACK, **_access(plane, "sub-ada")})
+        assert r.status_code in (401, 403), r.text
 
 
 # ---- settings: the lock-out guard classifies a JWT like the gate does --------------

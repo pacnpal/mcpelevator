@@ -126,9 +126,16 @@ def _fetch(url: str, *, refresh: bool) -> dict[str, Any]:
 def signing_key(url: str, token: str) -> Any:
     """The key, published at ``url``, that ``token``'s header names.
 
-    Raises ``jwt.PyJWKClientConnectionError`` when the keys can't be had right now
-    and ``jwt.InvalidTokenError`` when they don't include the token's kid."""
+    A token with no kid takes the set's only key, as the ``oauth`` verifier does, and
+    is refused when the set holds several. Raises ``jwt.PyJWKClientConnectionError``
+    when the keys can't be had right now and ``jwt.InvalidTokenError`` when they don't
+    include the token's kid."""
     kid = jwt.get_unverified_header(token).get("kid")
+    if kid is None:
+        keys = _fetch(url, refresh=False)
+        if len(keys) != 1:
+            raise jwt.InvalidTokenError("the token names no key and the issuer publishes several")
+        return next(iter(keys.values()))
     if not isinstance(kid, str):  # a list or object would fail the lookup below
         raise jwt.InvalidTokenError("the token names no key")
     keys = _fetch(url, refresh=False)

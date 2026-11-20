@@ -17,9 +17,10 @@ deterministic and upgrade-safe:
                                 with the CSRF header and no Authorization header
                                 (``app.auth.sign_in``)
 - provider access token      -> the user its Linked identity names, only where the
-                                control MCP accepts credentials: its gate, its edge,
-                                and the /api calls it makes (``control_call``), never
-                                the rest of /api (``app.auth.oidc.access_token_user``)
+                                control MCP accepts credentials: its gate, the built-in
+                                server's /s URL (a group bundling it: admins only), and
+                                the /api calls it makes (``control_call``), never the
+                                rest of /api (``app.auth.oidc.access_token_user``)
 
 WHAT a principal may do lives in ``app.auth.policy`` — keep the two concerns
 separate so authorization rules never re-derive identity.

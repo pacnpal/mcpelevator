@@ -29,14 +29,15 @@ class BearerProvider:
         with Session(get_engine()) as session:
             # The built-in mcpelevator server IS the control plane, which authorizes
             # each call as its caller, so it also opens to the credentials the control
-            # plane accepts: the break-glass token, any control token, or a Cloudflare
-            # Access identity matching a user. A group bundling it opens to an ADMIN's
-            # such credential only: groups are an admin-owned surface, and a member's
-            # login must not reach the other members' tools.
+            # plane accepts: the break-glass token, any control token, a Cloudflare
+            # Access identity matching a user, or a provider access token naming a
+            # linked user. A group bundling it opens to an ADMIN's such credential only:
+            # groups are an admin-owned surface, and a member's login must not reach the
+            # other members' tools.
             if server.runner == BUILTIN_RUNNER or (
                 group is not None and registry.includes_builtin(session, group)
             ):
-                caller = credential_principal(request, session, cloudflare=True)
+                caller = credential_principal(request, session, cloudflare=True, provider_jwt=True)
                 if caller is not None and (group is None or caller.is_admin):
                     return
                 # A Cloudflare sign-in that didn't open the server (no single user, an
