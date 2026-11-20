@@ -79,7 +79,9 @@ async def _run_docker_capture(argv: list[str], *, timeout: float) -> Optional[st
 class Supervisor:
     def __init__(self) -> None:
         settings = get_settings()
-        self.ports = PortAllocator(settings.port_range_start, settings.port_range_end)
+        self.ports = PortAllocator(
+            settings.port_range_start, settings.port_range_end, settings.bridge_host
+        )
         self.max_running = settings.max_running
         self.interval = settings.health_interval_s
         self.units: dict[str, ServerUnit] = {}
@@ -216,15 +218,17 @@ class Supervisor:
             on_state_change=self.nudge,
             release_port=self.ports.release,
         )
-        port = self.ports.allocate()
+        sock = self.ports.allocate()
+        port = sock.getsockname()[1]
         self.units[server.id] = unit
         # A fresh activation starts the idle clock: with no traffic ever, "idle since
         # start" is measured from here, not from a stale pre-restart timestamp.
         self._last_activity[server.id] = utcnow()
         try:
-            await unit.start(port, activation_started_at=activation_started_at)
+            await unit.start(port, sock=sock, activation_started_at=activation_started_at)
         except BaseException:
             self.units.pop(server.id, None)
+            sock.close()
             self.ports.release(port)
             raise
 

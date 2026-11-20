@@ -164,8 +164,10 @@ class Settings(BaseSettings):
 
     # --- bridge / supervisor ---
     bridge_host: str = "127.0.0.1"  # loopback host for per-server bridge processes
-    port_range_start: int = 49200
-    port_range_end: int = 49400
+    # Below the OS ephemeral ranges (macOS 49152-65535, Linux 32768-60999), so an outbound
+    # connection never sits on a port a bridge needs.
+    port_range_start: int = 20000
+    port_range_end: int = 20200
     max_running: int = 50
     start_timeout_s: float = 120.0  # generous: covers npx/uvx cold-start install
     # Deadline for a repository server's checkout + post-clone build (app.runners.repo);
