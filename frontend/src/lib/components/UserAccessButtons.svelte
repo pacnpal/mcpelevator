@@ -1,8 +1,28 @@
+<script lang="ts" module>
+	import type { SettingsInfo, UserInfo } from '#lib/types.js';
+
+	type SsoSettings = Pick<
+		SettingsInfo,
+		'oidc_enabled' | 'oidc_admin_groups' | 'oidc_local_runner_groups'
+	>;
+
+	/** The fields provider groups manage under `settings`: a non-empty group list while
+	 * SSO is on (the backend's `managed_user_fields`). The page derives the lock from the
+	 * settings it holds, so a save shows at once; a user's own `managed` is a snapshot
+	 * from when the list loaded. */
+	export function managedFields(settings: SsoSettings | null): UserInfo['managed'] {
+		const on = settings?.oidc_enabled ?? false;
+		return {
+			role: on && (settings?.oidc_admin_groups.length ?? 0) > 0,
+			local_runners: on && (settings?.oidc_local_runner_groups.length ?? 0) > 0
+		};
+	}
+</script>
+
 <script lang="ts">
 	// A user's role and local-runner toggles on the Users page. A field the identity
 	// provider's groups manage is disabled, with the setting that manages it as the hint:
 	// the backend refuses it (409), and the next sign-in would reset it anyway.
-	import type { UserInfo } from '#lib/types.js';
 
 	let {
 		user,

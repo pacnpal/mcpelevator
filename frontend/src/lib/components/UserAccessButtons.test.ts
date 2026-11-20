@@ -2,7 +2,7 @@ import { flushSync, mount, unmount, type ComponentProps } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { UserInfo } from '#lib/types.js';
-import UserAccessButtons from './UserAccessButtons.svelte';
+import UserAccessButtons, { managedFields } from './UserAccessButtons.svelte';
 
 let dispose: (() => void) | undefined;
 
@@ -64,5 +64,23 @@ describe('UserAccessButtons', () => {
 		expect(runners.disabled).toBe(true);
 		expect(runners.title).toContain('oidc_local_runner_groups');
 		expect(button(target, 'Make admin').disabled).toBe(false);
+	});
+
+	it('follows the SSO settings the page holds, so a save unlocks without a reload', () => {
+		const sso = { oidc_enabled: true, oidc_admin_groups: ['admins'], oidc_local_runner_groups: [] };
+		expect(managedFields(sso)).toEqual({ role: true, local_runners: false });
+		expect(managedFields({ ...sso, oidc_admin_groups: [] })).toEqual({
+			role: false,
+			local_runners: false
+		});
+		expect(managedFields({ ...sso, oidc_local_runner_groups: ['builders'] })).toEqual({
+			role: true,
+			local_runners: true
+		});
+		expect(managedFields({ ...sso, oidc_enabled: false })).toEqual({
+			role: false,
+			local_runners: false
+		});
+		expect(managedFields(null)).toEqual({ role: false, local_runners: false });
 	});
 });

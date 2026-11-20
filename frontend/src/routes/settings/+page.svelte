@@ -39,7 +39,7 @@
 	import CopyButton from '#lib/components/CopyButton.svelte';
 	import CopyMenu from '#lib/components/CopyMenu.svelte';
 	import LinkedIdentity from '#lib/components/LinkedIdentity.svelte';
-	import UserAccessButtons from '#lib/components/UserAccessButtons.svelte';
+	import UserAccessButtons, { managedFields } from '#lib/components/UserAccessButtons.svelte';
 	import RestartButton from '#lib/components/RestartButton.svelte';
 	import ServerActionButton from '#lib/components/ServerActionButton.svelte';
 	import StatePill from '#lib/components/StatePill.svelte';
@@ -52,6 +52,8 @@
 	let loadError = $state<string | null>(null);
 
 	let settings = $state<SettingsInfo | null>(null);
+	// From the settings held here, so any SSO save updates the user rows' locks at once.
+	const managed = $derived(managedFields(settings));
 	// Where the provider sends the browser after logging it out there (the /login page on
 	// the same base as the redirect URI).
 	const postLogoutUri = $derived(
@@ -1312,9 +1314,9 @@
 									{user.servers_count} server{user.servers_count === 1 ? '' : 's'} ·
 									{user.tokens_count} token{user.tokens_count === 1 ? '' : 's'}
 								</span>
-								{#if user.managed.role || user.managed.local_runners}
+								{#if managed.role || managed.local_runners}
 									<span class="text-xs text-[var(--color-ink-dim)]">
-										{[user.managed.role && 'Role', user.managed.local_runners && 'Local runners']
+										{[managed.role && 'Role', managed.local_runners && 'Local runners']
 											.filter(Boolean)
 											.join(' and ')} set by SSO groups at sign-in
 									</span>
@@ -1361,7 +1363,7 @@
 										Mint login token
 									</button>
 									<UserAccessButtons
-										{user}
+										user={{ ...user, managed }}
 										disabled={busyUserId !== null}
 										onpatch={(patch) => patchUser(user, patch)}
 									/>
