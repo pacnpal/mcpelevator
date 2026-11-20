@@ -16,13 +16,14 @@ from cryptography.hazmat.primitives import serialization
 from fastapi.testclient import TestClient
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from sqlmodel import Session, select
+from starlette.requests import Request
 
 from conftest import LOOPBACK
 from fake_idp import ISSUER, FakeIdP
 # idp is the fixture.
-from test_sso_sign_in import _echo_headers, _enforce, idp
+from test_sso_sign_in import _echo_headers, _enforce, _unlink, idp
 
-from app.auth import jwks
+from app.auth import jwks, principal
 from app.auth import oauth as oauth_mod
 from app.db import get_engine, repo
 from app.db.models import Server, Setting, User
@@ -114,14 +115,19 @@ def _proxying(client: TestClient) -> None:
     client.app.state.supervisor.endpoint = lambda slug: ("backend", 9000)
 
 
-def _whoami(client: TestClient, headers: dict) -> tuple[int, dict]:
+def _tool(client: TestClient, headers: dict, name: str, arguments: dict) -> tuple[int, dict]:
     body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "whoami", "arguments": {}}}
+            "params": {"name": name, "arguments": arguments}}
     r = client.post("/api/mcp", json=body, headers={**MCP, **headers})
     if r.status_code != 200:
         return r.status_code, r.json()
     msg = next(json.loads(line[5:]) for line in r.text.splitlines() if line.startswith("data:"))
-    return 200, json.loads(msg["result"]["content"][0]["text"])
+    return 200, msg["result"]
+
+
+def _whoami(client: TestClient, headers: dict) -> tuple[int, dict]:
+    status, result = _tool(client, headers, "whoami", {})
+    return status, json.loads(result["content"][0]["text"]) if status == 200 else result
 
 
 def _allowlist(*subjects: str) -> None:
@@ -318,3 +324,68 @@ def test_a_jwt_is_not_a_control_credential_on_the_rest_of_api(plane):
         assert client.get("/api/servers", headers={**LOOPBACK, **token}).status_code == 401
         status = client.get("/api/auth/status", headers={**LOOPBACK, **token}).json()
         assert status.get("user") is None
+
+
+# ---- settings: the lock-out guard classifies a JWT like the gate does --------------
+
+
+def test_an_admins_jwt_changes_settings_through_the_control_mcp(plane):
+    _linked("ada@example.com", "sub-ada", role="admin")
+    with TestClient(app) as client:
+        _enforce()
+        status, result = _tool(
+            client, _access(plane, "sub-ada"), "update_settings",
+            {"changes": {"idle_timeout_s": 120}},
+        )
+        assert status == 200
+        assert not result.get("isError"), result
+    with Session(get_engine()) as s:
+        assert runtime_settings.read_all(s)["idle_timeout_s"] == 120
+
+
+def test_a_members_jwt_still_cannot_enable_enforcement(plane):
+    _linked("bob@example.com", "sub-bob")
+    with TestClient(app) as client:
+        _enforce()
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"control_plane_auth": "auto"})
+        status, result = _tool(
+            client, _access(plane, "sub-bob"), "update_settings",
+            {"changes": {"control_plane_auth": "always"}},
+        )
+        assert status != 200 or result.get("isError"), result
+    with Session(get_engine()) as s:
+        assert runtime_settings.read_all(s)["control_plane_auth"] == "auto"
+
+
+# ---- refresh: a queued JWT principal fails closed --------------------------------
+
+
+def _jwt_principal(token: dict[str, str]):
+    header = token["authorization"].encode()
+    request = Request({"type": "http", "headers": [(b"authorization", header)]})
+    with Session(get_engine()) as s:
+        return principal.credential_principal(request, s, cloudflare=False, provider_jwt=True)
+
+
+def _refreshed(queued):
+    with Session(get_engine()) as s:
+        return principal.refresh(s, queued)
+
+
+@pytest.mark.parametrize("change", ["deactivate", "unlink"])
+def test_a_queued_jwt_principal_fails_closed_at_refresh(plane, change):
+    ada = _linked("ada@example.com", "sub-ada")
+    with TestClient(app) as client:
+        admin = _enforce()
+        token = _access(plane, "sub-ada")
+        assert _whoami(client, token)[0] == 200  # warms the discovery caches
+        queued = _jwt_principal(token)
+        assert queued is not None and queued.user_id == ada
+        assert _refreshed(queued) is not None
+        if change == "deactivate":
+            r = client.patch(f"/api/users/{ada}", json={"active": False}, headers=admin)
+            assert r.status_code == 200, r.text
+        else:
+            assert _unlink(client, ada, admin).status_code == 204
+        assert _refreshed(queued) is None
