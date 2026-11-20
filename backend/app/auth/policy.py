@@ -21,7 +21,9 @@ The rules (deterministic, documented once here):
   else's server is refused under ``oauth_member_access`` ``owner_only`` even when the
   allowlist names them; under ``additive`` they follow the allowlist. A token that
   resolves to no one follows the allowlist in both modes. A group has no owner, so
-  under ``owner_only`` a member is refused on every ``oauth`` group.
+  under ``owner_only`` a member is refused on every ``oauth`` group. When whom the
+  token names can't be told (the provider's discovery or keys unavailable),
+  ``owner_only`` refuses with a 503 and ``additive`` grants nothing extra.
 """
 
 from __future__ import annotations
@@ -62,18 +64,24 @@ def require_visible_server(principal: Principal, server: Optional[Server]) -> Se
 
 
 def oauth_refusal(
-    caller: Optional[Principal], server: Server, *, allowlisted: bool, owner_only: bool
-) -> Optional[str]:
-    """Why a verified provider access token may NOT reach this ``oauth`` server or group
-    (None = allowed). ``caller`` is who the token resolves to (None = no one);
-    ``allowlisted`` is whether ``oauth_allowed_subjects`` lets its claims in."""
-    if caller is not None and can_view_server(caller, server):
+    caller: object, server: Server, *, allowlisted: bool, owner_only: bool
+) -> Optional[tuple[int, str]]:
+    """Why a verified provider access token may NOT reach this ``oauth`` server or group,
+    as (status, reason); None = allowed. ``caller`` is who the token resolves to: a
+    Principal, None for no one, or anything else for "couldn't tell", which refuses
+    where the answer narrows access (``owner_only``, 503 so clients don't re-authenticate
+    in a loop) and grants nothing where it would only widen it. ``allowlisted`` is
+    whether ``oauth_allowed_subjects`` lets the token's claims in."""
+    resolved = isinstance(caller, Principal)
+    if resolved and can_view_server(caller, server):
         return None
-    if caller is not None and owner_only:
+    if owner_only and resolved:
         if server.id.startswith("group:"):
-            return "oauth_member_access is owner_only: groups are open only to admins"
-        return "this server belongs to another user"
-    return None if allowlisted else "token subject not authorized for this server"
+            return 403, "oauth_member_access is owner_only: groups are open only to admins"
+        return 403, "this server belongs to another user"
+    if owner_only and caller is not None:
+        return 503, "couldn't tell which user this token belongs to; try again shortly"
+    return None if allowlisted else (403, "token subject not authorized for this server")
 
 
 def can_use_runner(principal: Principal, runner: str) -> bool:

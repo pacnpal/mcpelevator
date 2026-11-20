@@ -203,16 +203,26 @@ def credential_principal(
                 local_runners=_effective_local_runners(user), session_id=row.id,
             )
     if provider_jwt and token:
-        from app.auth import oidc  # circular-import guard
-
-        user = oidc.access_token_user(session, token)
-        if user is not None:
-            return Principal(
-                user_id=user.id, name=user.name, role=user.role,
-                local_runners=_effective_local_runners(user),
-                identity=(user.oidc_issuer, user.oidc_subject),
-            )
+        caller = provider_jwt_principal(session, token)
+        if isinstance(caller, Principal):
+            return caller  # UNKNOWN grants nothing here
     return None
+
+
+def provider_jwt_principal(session: Session, token: str):
+    """The principal a provider access token names through its Linked identity: a
+    Principal, None when it names no one, or ``oidc.UNKNOWN`` when that couldn't be told
+    (callers that narrow access on the answer refuse then)."""
+    from app.auth import oidc  # circular-import guard
+
+    user = oidc.resolve_access_token(session, token)
+    if user is None or user is oidc.UNKNOWN:
+        return user
+    return Principal(
+        user_id=user.id, name=user.name, role=user.role,
+        local_runners=_effective_local_runners(user),
+        identity=(user.oidc_issuer, user.oidc_subject),
+    )
 
 
 def refresh(session: Session, principal: Principal) -> Optional[Principal]:
