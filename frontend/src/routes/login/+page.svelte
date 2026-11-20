@@ -37,6 +37,8 @@
 			'Your identity provider left your groups out of the sign-in because there are too many of them, so they could not be checked. Ask your admin to limit the groups sent to this app.',
 		domain_not_allowed:
 			'Your email domain is not allowed to sign in here, or your email is not verified. Ask your admin.',
+		last_admin_demoted:
+			'Your identity provider no longer puts you in an admin group, and this is the last admin account. Another admin login or MCPE_ADMIN_TOKEN must exist before this account can sign in through SSO.',
 		expired: 'That sign-in took too long or was already used. Start it again.',
 		sso_disabled: 'SSO sign-in is turned off on this instance.'
 	});

@@ -40,6 +40,7 @@
 	import CopyMenu from '#lib/components/CopyMenu.svelte';
 	import LinkedIdentity from '#lib/components/LinkedIdentity.svelte';
 	import UserAccessButtons, { managedFields } from '#lib/components/UserAccessButtons.svelte';
+	import { fromLines, toLines } from '#lib/lines.js';
 	import RestartButton from '#lib/components/RestartButton.svelte';
 	import ServerActionButton from '#lib/components/ServerActionButton.svelte';
 	import StatePill from '#lib/components/StatePill.svelte';
@@ -414,13 +415,13 @@
 		oidcLabel = s.oidc_label;
 		oidcScopes = s.oidc_scopes.join(', ');
 		oidcIdentityClaim = s.oidc_identity_claim;
-		oidcAllowedTenants = s.oidc_allowed_tenants.join(', ');
+		oidcAllowedTenants = toLines(s.oidc_allowed_tenants);
 		oidcRequireVerifiedEmail = s.oidc_require_verified_email;
 		oidcGroupsClaim = s.oidc_groups_claim;
-		oidcAllowedGroups = s.oidc_allowed_groups.join(', ');
-		oidcAdminGroups = s.oidc_admin_groups.join(', ');
-		oidcLocalRunnerGroups = s.oidc_local_runner_groups.join(', ');
-		oidcAllowedDomains = s.oidc_allowed_domains.join(', ');
+		oidcAllowedGroups = toLines(s.oidc_allowed_groups);
+		oidcAdminGroups = toLines(s.oidc_admin_groups);
+		oidcLocalRunnerGroups = toLines(s.oidc_local_runner_groups);
+		oidcAllowedDomains = toLines(s.oidc_allowed_domains);
 	}
 
 	async function saveOidc(patch: Partial<SettingsInfo>, message: string) {
@@ -449,13 +450,13 @@
 				oidc_label: oidcLabel.trim(),
 				oidc_scopes: splitCommaList(oidcScopes),
 				oidc_identity_claim: oidcIdentityClaim,
-				oidc_allowed_tenants: splitCommaList(oidcAllowedTenants),
+				oidc_allowed_tenants: fromLines(oidcAllowedTenants),
 				oidc_require_verified_email: oidcRequireVerifiedEmail,
 				oidc_groups_claim: oidcGroupsClaim.trim() || 'groups',
-				oidc_allowed_groups: splitCommaList(oidcAllowedGroups),
-				oidc_admin_groups: splitCommaList(oidcAdminGroups),
-				oidc_local_runner_groups: splitCommaList(oidcLocalRunnerGroups),
-				oidc_allowed_domains: splitCommaList(oidcAllowedDomains)
+				oidc_allowed_groups: fromLines(oidcAllowedGroups),
+				oidc_admin_groups: fromLines(oidcAdminGroups),
+				oidc_local_runner_groups: fromLines(oidcLocalRunnerGroups),
+				oidc_allowed_domains: fromLines(oidcAllowedDomains)
 			},
 			'SSO settings saved'
 		);
@@ -2486,14 +2487,14 @@
 					</select>
 				</label>
 				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-					Allowed tenants <span class="font-normal text-[var(--color-ink-dim)]">(Entra ID tenant GUIDs, comma-separated; required for a multi-tenant issuer such as /common)</span>
-					<input
-						type="text"
+					Allowed tenants <span class="font-normal text-[var(--color-ink-dim)]">(Entra ID tenant GUIDs, one per line; required for a multi-tenant issuer such as /common)</span>
+					<textarea
+						rows="2"
 						bind:value={oidcAllowedTenants}
 						disabled={savingField !== null}
 						placeholder="9188040d-6c67-4c5b-b112-36a304b66dad"
 						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-					/>
+					></textarea>
 				</label>
 			</div>
 			<div class="flex flex-col gap-1">
@@ -2506,21 +2507,31 @@
 			</div>
 			<div class="grid gap-3 sm:grid-cols-2">
 				{#each [
-					{ label: 'Groups claim', hint: 'literal name first, then a dotted path such as realm_access.roles', placeholder: 'groups', get: () => oidcGroupsClaim, set: (v: string) => (oidcGroupsClaim = v) },
-					{ label: 'Allowed groups', hint: 'comma-separated; anyone in none of them is refused', placeholder: 'staff', get: () => oidcAllowedGroups, set: (v: string) => (oidcAllowedGroups = v) },
-					{ label: 'Admin groups', hint: 'comma-separated; Admin when in one, else Member', placeholder: 'mcp-admins', get: () => oidcAdminGroups, set: (v: string) => (oidcAdminGroups = v) },
-					{ label: 'Local runner groups', hint: 'comma-separated; grants the local-runner permission', placeholder: 'mcp-builders', get: () => oidcLocalRunnerGroups, set: (v: string) => (oidcLocalRunnerGroups = v) },
-					{ label: 'Allowed email domains', hint: "comma-separated; a verified email's domain or Google's hd must be listed", placeholder: 'example.com', get: () => oidcAllowedDomains, set: (v: string) => (oidcAllowedDomains = v) }
+					{ label: 'Groups claim', hint: 'literal name first, then a dotted path such as realm_access.roles', placeholder: 'groups', lines: false, get: () => oidcGroupsClaim, set: (v: string) => (oidcGroupsClaim = v) },
+					{ label: 'Allowed groups', hint: 'one per line; anyone in none of them is refused', placeholder: 'staff', lines: true, get: () => oidcAllowedGroups, set: (v: string) => (oidcAllowedGroups = v) },
+					{ label: 'Admin groups', hint: 'one per line; Admin when in one, else Member', placeholder: 'mcp-admins', lines: true, get: () => oidcAdminGroups, set: (v: string) => (oidcAdminGroups = v) },
+					{ label: 'Local runner groups', hint: 'one per line; grants the local-runner permission', placeholder: 'mcp-builders', lines: true, get: () => oidcLocalRunnerGroups, set: (v: string) => (oidcLocalRunnerGroups = v) },
+					{ label: 'Allowed email domains', hint: "one per line; a verified email's domain or Google's hd must be listed", placeholder: 'example.com', lines: true, get: () => oidcAllowedDomains, set: (v: string) => (oidcAllowedDomains = v) }
 				] as field (field.label)}
 					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
 						{field.label} <span class="font-normal text-[var(--color-ink-dim)]">({field.hint})</span>
-						<input
-							type="text"
-							bind:value={field.get, field.set}
-							disabled={savingField !== null}
-							placeholder={field.placeholder}
-							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-						/>
+						{#if field.lines}
+							<textarea
+								rows="3"
+								bind:value={field.get, field.set}
+								disabled={savingField !== null}
+								placeholder={field.placeholder}
+								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							></textarea>
+						{:else}
+							<input
+								type="text"
+								bind:value={field.get, field.set}
+								disabled={savingField !== null}
+								placeholder={field.placeholder}
+								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+							/>
+						{/if}
 					</label>
 				{/each}
 			</div>
