@@ -808,10 +808,11 @@ def _both_configured(values: dict[str, Any]) -> bool:
 
 
 async def warm_access_tokens(session: Session, request: Request) -> None:
-    """Fetch the discovery documents ``access_token_user`` reads from cache, when the
-    request carries a bearer that could be an access token and SSO and the ``oauth``
-    provider are both configured. Async callers run it before a sync resolution; a
-    failed fetch is logged, and then no access token resolves."""
+    """Fetch the discovery documents and signing keys ``access_token_user`` reads from
+    cache, when the request carries a bearer that could be an access token and SSO and
+    the ``oauth`` provider are both configured. The keys load off the loop, so the first
+    token after a restart doesn't meet an empty cache. Async callers run it before a
+    sync resolution; a failed fetch is logged, and then no access token resolves."""
     scheme, _, token = request.headers.get("authorization", "").partition(" ")
     if scheme.lower() != "bearer" or not token.strip() or token.strip().startswith("mcpe_"):
         return
@@ -819,11 +820,19 @@ async def warm_access_tokens(session: Session, request: Request) -> None:
     if not _both_configured(values):
         return
     try:
-        await oauth_mod._discovery(values["oauth_config_url"])
+        oauth_doc = await oauth_mod._discovery(values["oauth_config_url"])
         if runtime_settings.normalize_config_url(values["oidc_discovery_url"]) not in _DISCOVERY:
             await fetch_discovery(values["oidc_discovery_url"])
     except (httpx.HTTPError, ValueError) as exc:
         logger.info("discovery for provider access tokens failed: %s", exc)
+        return
+    try:
+        await asyncio.to_thread(jwks.signing_key, oauth_doc["jwks_uri"], token.strip())
+    except jwt.PyJWKClientConnectionError as exc:
+        logger.info("signing keys for provider access tokens failed: %s", exc)
+    except jwt.PyJWTError:
+        pass  # no key for this token: access_token_user refuses it
+
 
 
 def access_token_user(session: Session, token: str) -> User | None:

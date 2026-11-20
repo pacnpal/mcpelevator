@@ -341,6 +341,47 @@ def test_a_jwt_without_a_kid_from_a_single_key_provider_resolves(plane):
         assert status == 200 and me["user"]["name"] == "ada@example.com", me
 
 
+def test_the_first_jwt_after_a_restart_resolves_with_a_cold_key_cache(plane, monkeypatch):
+    _linked("ada@example.com", "sub-ada")
+    monkeypatch.setattr(jwks, "_good", {})  # no keys loaded yet, as right after a boot
+    # A real fetch takes a network round trip, so the background refresh an on-loop
+    # lookup starts doesn't land before that lookup answers. Model that exactly.
+    monkeypatch.setattr(jwks, "_refresh_soon", lambda url, *, refresh: None)
+    with TestClient(app) as client:
+        _enforce()
+        status, me = _whoami(client, _access(plane, "sub-ada"))
+        assert status == 200 and me["user"]["name"] == "ada@example.com", me
+
+
+# ---- enforcement off: a JWT still names its user for the control_mcp switch ------
+
+
+def _switch(uid: str, on: bool) -> None:
+    with Session(get_engine()) as s:
+        user = s.get(User, uid)
+        user.control_mcp = on
+        s.add(user)
+        s.commit()
+
+
+@pytest.mark.parametrize("on", [True, False])
+def test_with_enforcement_off_a_jwt_applies_its_users_control_mcp_switch(plane, on):
+    ada = _linked("ada@example.com", "sub-ada")
+    _switch(ada, on)
+    with TestClient(app) as client:
+        status, body = _whoami(client, _access(plane, "sub-ada"))
+        if on:
+            assert status == 200, body  # as today: the local admin
+        else:
+            assert status == 403, body
+            assert "disabled for this user" in body["detail"]
+
+
+def test_with_enforcement_off_no_credential_is_still_the_local_admin(plane):
+    with TestClient(app) as client:
+        assert _whoami(client, {})[0] == 200
+
+
 # ---- /s and /g: the built-in server opens to a resolved JWT ----------------------
 
 

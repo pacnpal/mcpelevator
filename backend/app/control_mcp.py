@@ -902,9 +902,14 @@ def _authorize(request: Request, session: Session, *, edge: bool = False) -> Non
         bearer = principal_mod._bearer(request)
         row = repo.get_token_by_hash(session, hash_token(bearer)) if bearer else None
         user_id = row.user_id if row is not None else None
+        if row is None and bearer and not is_env_admin_token(bearer):
+            # A provider access token names its user the way a login token does.
+            jwt_user = oidc.access_token_user(session, bearer)
+            if jwt_user is not None:
+                user_id = jwt_user.id
         # A Cloudflare identity names the caller only when no control credential
         # does: an admin or userless token outranks it, as with enforcement on.
-        if row is None and not is_env_admin_token(bearer) and (edge or internal):
+        if row is None and user_id is None and not is_env_admin_token(bearer) and (edge or internal):
             signed_in = cf_access.user(session, request)
             user_id = signed_in.id if signed_in is not None else None
     if user_id is not None:
