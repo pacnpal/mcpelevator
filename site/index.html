@@ -1,0 +1,965 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mcpelevator · MCP servers on a URL</title>
+<meta name="description" content="Self-hosted control plane that runs stdio MCP servers and gives each one an authenticated Streamable HTTP endpoint. One container, one port.">
+<meta name="theme-color" content="#09090b">
+<meta property="og:type" content="website">
+<meta property="og:title" content="mcpelevator">
+<meta property="og:description" content="Run stdio MCP servers in one self-hosted container and reach each one over authenticated Streamable HTTP.">
+<meta property="og:url" content="https://pacnpal.github.io/mcpelevator/">
+<meta property="og:image" content="https://pacnpal.github.io/mcpelevator/screenshots/servers.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="mcpelevator.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="mcpelevator.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  color-scheme: dark;
+  --accent: #34d399;
+  --accent-deep: #10b981;
+  --accent-ink: #022c22;
+  --canvas: #09090b;
+  --surface: #101012;
+  --surface-2: #161619;
+  --elevated: #1c1c20;
+  --line: #26262b;
+  --line-strong: #34343a;
+  --ink: #f4f4f5;
+  --ink-muted: #a1a1aa;
+  --ink-dim: #87878f;
+  --running: #34d399;
+  --starting: #fbbf24;
+  --unhealthy: #fb923c;
+  --failed: #f87171;
+  --stopped: #87878f;
+  --idle: #60a5fa;
+  --lamp: #f5a524;
+  --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --r-sm: 6px; --r-md: 8px; --r-card: 14px;
+  --wrap: 1160px;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 72px; -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--canvas); color: var(--ink);
+  font: 400 16px/1.6 var(--sans); font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased; overflow-x: hidden;
+}
+::selection { background: color-mix(in oklab, var(--accent) 30%, transparent); }
+a { color: inherit; }
+img { max-width: 100%; display: block; }
+code, pre, .mono { font-family: var(--mono); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.wrap { width: min(var(--wrap), 100% - 32px); margin-inline: auto; }
+@media (min-width: 720px) { .wrap { width: min(var(--wrap), 100% - 48px); } }
+.skip { position: absolute; left: -999px; top: 8px; background: var(--accent); color: var(--accent-ink); padding: 8px 12px; border-radius: var(--r-md); z-index: 100; }
+.skip:focus { left: 8px; }
+
+/* ambient glow + grid, behind everything */
+.ambient { position: absolute; inset: 0 0 auto 0; height: 1100px; pointer-events: none; z-index: 0; overflow: hidden; }
+.ambient::before {
+  content: ""; position: absolute; inset: 0;
+  background: radial-gradient(60% 55% at 50% 0%, color-mix(in oklab, var(--accent) 16%, transparent), transparent 70%);
+}
+.ambient::after {
+  content: ""; position: absolute; inset: 0;
+  background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 56px 56px; opacity: .35;
+  mask-image: radial-gradient(70% 60% at 50% 0%, #000 20%, transparent 75%);
+}
+
+/* nav */
+header.nav {
+  position: sticky; top: 0; z-index: 50;
+  background: color-mix(in oklab, var(--canvas) 78%, transparent);
+  backdrop-filter: blur(12px) saturate(140%); -webkit-backdrop-filter: blur(12px) saturate(140%);
+  border-bottom: 1px solid transparent; transition: border-color .2s;
+}
+header.nav.scrolled { border-bottom-color: var(--line); }
+.nav-in { display: flex; align-items: center; gap: 16px; height: 60px; }
+.brand { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 600; font-size: 16px; letter-spacing: -.01em; }
+.brand-mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--surface-2); }
+.brand-mark svg { width: 17px; height: 17px; }
+.brand b { color: var(--accent); font-weight: 600; }
+.nav-links { display: none; gap: 4px; margin-left: auto; }
+.nav-links a { text-decoration: none; color: var(--ink-muted); font-size: 14px; font-weight: 500; padding: 6px 10px; border-radius: var(--r-md); transition: color .15s, background .15s; }
+.nav-links a:hover { color: var(--ink); background: var(--surface-2); }
+.nav-gh { margin-left: auto; }
+@media (min-width: 860px) { .nav-links { display: flex; } .nav-gh { margin-left: 8px; } }
+
+/* buttons */
+.btn {
+  display: inline-flex; align-items: center; gap: 8px; height: 42px; padding: 0 16px;
+  border-radius: var(--r-md); font: 600 14px/1 var(--sans); text-decoration: none; cursor: pointer;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-muted);
+  transition: background .15s, color .15s, border-color .15s, transform .1s;
+}
+.btn:hover { color: var(--ink); border-color: var(--line-strong); background: var(--surface-2); }
+.btn:active { transform: translateY(1px); }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn-primary:hover { background: var(--accent-deep); border-color: var(--accent-deep); color: var(--accent-ink); }
+.btn-sm { height: 34px; padding: 0 12px; font-size: 13px; }
+.btn svg { width: 16px; height: 16px; flex: none; }
+.gh-stars { font: 500 12px var(--mono); color: var(--ink-dim); border-left: 1px solid var(--line); padding-left: 10px; margin-left: 2px; }
+.gh-stars:empty { display: none; }
+
+/* hero */
+main { position: relative; z-index: 1; }
+.hero { padding: 56px 0 72px; }
+@media (min-width: 960px) { .hero { padding: 88px 0 104px; } }
+.hero-grid { display: grid; gap: 48px; align-items: center; }
+.hero-grid > *, .gallery > *, .qs > *, .band-in > * { min-width: 0; }
+@media (min-width: 1000px) { .hero-grid { grid-template-columns: 1.02fr 1fr; gap: 56px; } }
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px 5px 8px; border-radius: 999px;
+  border: 1px solid color-mix(in oklab, var(--accent) 35%, transparent);
+  background: color-mix(in oklab, var(--accent) 8%, transparent);
+  color: var(--accent); font: 500 12px/1.4 var(--sans); letter-spacing: .02em; text-decoration: none;
+}
+.eyebrow .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 25%, transparent); }
+.eyebrow .ver { font-family: var(--mono); color: var(--ink-muted); }
+.eyebrow .ver:empty { display: none; }
+h1 {
+  font-size: clamp(2.4rem, 1.4rem + 4.2vw, 4.1rem); line-height: 1.04; letter-spacing: -.04em; font-weight: 700;
+  margin: 22px 0 20px; text-wrap: balance;
+}
+h1 .lift { color: var(--accent); }
+.lede { font-size: clamp(1.02rem, .95rem + .35vw, 1.18rem); color: var(--ink-muted); max-width: 36em; margin: 0 0 28px; text-wrap: pretty; }
+.lede strong { color: var(--ink); font-weight: 500; }
+.cta { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 28px; }
+.oneliner {
+  display: flex; align-items: center; gap: 10px; max-width: 100%; width: fit-content;
+  padding: 8px 8px 8px 14px; border: 1px solid var(--line); background: var(--surface); border-radius: var(--r-md);
+  font: 13px/1.4 var(--mono); color: var(--ink-muted);
+}
+.oneliner code { white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
+.oneliner code::-webkit-scrollbar { display: none; }
+.oneliner .p { color: var(--accent); user-select: none; }
+
+/* console (hero visual) */
+.stage { position: relative; }
+.stage::before {
+  content: ""; position: absolute; inset: -40px 0; z-index: -1; border-radius: 40px;
+  background: radial-gradient(50% 50% at 60% 40%, color-mix(in oklab, var(--accent) 14%, transparent), transparent 70%);
+  filter: blur(10px);
+}
+.console {
+  border: 1px solid var(--line-strong); border-radius: 16px; background: var(--surface);
+  box-shadow: 0 1px 0 rgba(255,255,255,.04) inset, 0 30px 80px -20px rgba(0,0,0,.7), 0 0 0 1px rgba(0,0,0,.4);
+  overflow: hidden;
+}
+.c-bar { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.c-dots { display: flex; gap: 6px; }
+.c-dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--line-strong); }
+.c-title { font: 500 12px var(--sans); color: var(--ink-dim); }
+.c-api { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font: 500 12px var(--sans); color: var(--ink-muted); }
+.c-api::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--running); }
+.c-cmd { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); font: 13px/1.5 var(--mono); min-height: 52px; }
+.c-cmd .badge { flex: none; }
+.c-cmd code { color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.caret { width: 7px; height: 16px; background: var(--accent); flex: none; animation: blink 1s steps(2) infinite; margin-left: -6px; }
+@keyframes blink { 50% { opacity: 0; } }
+.rows { list-style: none; margin: 0; padding: 6px; }
+.row {
+  display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center;
+  padding: 10px 10px; border-radius: 10px; border: 1px solid transparent; transition: background .3s, border-color .3s;
+}
+.row.active { background: var(--surface-2); border-color: var(--line); }
+.row-name { font: 600 14px/1.3 var(--sans); display: flex; align-items: center; gap: 8px; min-width: 0; }
+.row-meta { grid-column: 1; display: flex; align-items: center; gap: 8px; font: 12px var(--mono); color: var(--ink-dim); min-width: 0; }
+.row-meta span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .pill { grid-row: 1 / span 2; grid-column: 2; }
+.badge { display: inline-block; font: 500 11px/1 var(--mono); color: var(--ink-muted); background: var(--surface-2); border: 1px solid var(--line); padding: 4px 6px; border-radius: var(--r-sm); }
+.row.active .badge { background: var(--elevated); }
+.pill {
+  --c: var(--stopped);
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; white-space: nowrap;
+  font: 500 12px/1.5 var(--sans); letter-spacing: .02em; color: var(--c);
+  background: color-mix(in oklab, var(--c) 12%, transparent); border: 1px solid color-mix(in oklab, var(--c) 38%, transparent);
+  transition: color .3s, background .3s, border-color .3s;
+}
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill[data-s="starting"] { --c: var(--starting); }
+.pill[data-s="starting"]::before { animation: pulse 1s ease-in-out infinite; }
+.pill[data-s="running"] { --c: var(--running); }
+.pill[data-s="idle"] { --c: var(--idle); }
+.pill[data-s="failed"] { --c: var(--failed); }
+.pill[data-s="unhealthy"] { --c: var(--unhealthy); }
+@keyframes pulse { 50% { opacity: .25; } }
+.c-url { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--line); background: color-mix(in oklab, var(--accent) 5%, var(--surface)); }
+.c-url .lbl { font: 500 11px var(--sans); text-transform: uppercase; letter-spacing: .08em; color: var(--ink-dim); flex: none; }
+.c-url code { font-size: 12.5px; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+.c-url code .slug { color: #d1fae5; }
+.c-url code.empty { color: var(--ink-dim); }
+.float-tag {
+  position: absolute; display: none; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 10px;
+  background: var(--elevated); border: 1px solid var(--line-strong); box-shadow: 0 20px 40px -12px rgba(0,0,0,.6);
+  font: 500 12px var(--sans); color: var(--ink-muted); white-space: nowrap;
+}
+.float-tag b { color: var(--ink); font-weight: 600; }
+.float-tag svg { width: 15px; height: 15px; color: var(--accent); }
+@media (min-width: 1180px) {
+  .float-tag { display: inline-flex; animation: bob 6s ease-in-out infinite; }
+  .ft-1 { left: -36px; bottom: -26px; }
+  .ft-2 { right: -28px; top: -24px; animation-delay: -3s; }
+}
+@keyframes bob { 50% { transform: translateY(-6px); } }
+
+/* mark animation */
+.mark-door { transition: transform .9s cubic-bezier(.2,.8,.2,1); }
+.mark.closed .door-l { transform: translateX(4px); }
+.mark.closed .door-r { transform: translateX(-4px); }
+.mark .lamp { transition: opacity .4s .5s; }
+.mark.closed .lamp { opacity: 0; }
+
+/* sections */
+section { padding: 88px 0; position: relative; }
+@media (min-width: 960px) { section { padding: 112px 0; } }
+.sec-head { max-width: 680px; margin-bottom: 48px; }
+.kicker { font: 500 12px var(--mono); color: var(--accent); letter-spacing: .04em; margin: 0 0 14px; display: flex; align-items: center; gap: 10px; }
+.kicker::before { content: ""; width: 18px; height: 1px; background: var(--accent); }
+h2 { font-size: clamp(1.9rem, 1.3rem + 2.3vw, 2.9rem); line-height: 1.1; letter-spacing: -.035em; font-weight: 700; margin: 0 0 16px; text-wrap: balance; }
+h3 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; margin: 0 0 8px; }
+.sub { color: var(--ink-muted); font-size: 17px; margin: 0; text-wrap: pretty; }
+.divider { height: 1px; background: linear-gradient(90deg, transparent, var(--line-strong), transparent); }
+
+/* problem band */
+.band { padding: 0; }
+.band-in { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--r-card); overflow: hidden; }
+@media (min-width: 820px) { .band-in { grid-template-columns: 1fr 1fr; } }
+.band-cell { background: var(--surface); padding: 28px; }
+.band-cell p { color: var(--ink-muted); margin: 0; }
+.band-cell .tag { font: 500 11px var(--mono); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 12px; display: block; }
+.band-cell.before .tag { color: var(--failed); }
+.band-cell.after .tag { color: var(--accent); }
+.band-cell pre { margin: 16px 0 0; font-size: 12.5px; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); padding: 12px 14px; border-radius: var(--r-md); overflow-x: auto; }
+.band-cell pre .c { color: var(--ink-dim); }
+
+/* flow diagram */
+.flow { display: grid; gap: 14px; align-items: stretch; }
+@media (min-width: 980px) { .flow { grid-template-columns: 1fr 44px 1.25fr 44px 1fr; gap: 0; } }
+.lane { border: 1px solid var(--line); border-radius: var(--r-card); background: var(--surface); padding: 20px; }
+.lane-title { font: 500 11px var(--mono); text-transform: uppercase; letter-spacing: .1em; color: var(--ink-dim); margin-bottom: 14px; display: flex; justify-content: space-between; }
+.lane ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.lane li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line); font-size: 14px; }
+.lane li small { margin-left: auto; font: 11px var(--mono); color: var(--ink-dim); }
+.lane li svg { width: 16px; height: 16px; color: var(--ink-dim); flex: none; }
+.lane.core { border-color: color-mix(in oklab, var(--accent) 35%, var(--line)); background: color-mix(in oklab, var(--accent) 4%, var(--surface)); position: relative; }
+.core .route { font-family: var(--mono); font-size: 13px; }
+.core .route b { color: var(--accent); font-weight: 500; }
+.guard { margin: 12px 0; padding: 10px 12px; border-radius: var(--r-md); border: 1px dashed color-mix(in oklab, var(--accent) 45%, transparent); color: var(--ink-muted); font-size: 13px; display: flex; gap: 10px; align-items: center; }
+.guard svg { width: 16px; height: 16px; color: var(--accent); flex: none; }
+.bridges { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+.bridge { border: 1px solid var(--line); background: var(--surface-2); border-radius: var(--r-md); padding: 10px; text-align: center; font: 11px var(--mono); color: var(--ink-dim); }
+.bridge b { display: block; color: var(--ink); font: 600 12px var(--sans); margin-bottom: 2px; }
+.bridge i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--running); margin-right: 4px; vertical-align: 1px; }
+.bridge.idle i { background: var(--idle); }
+.link { position: relative; display: grid; place-items: center; min-height: 28px; }
+.link::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; transform: translateX(-50%); background: repeating-linear-gradient(180deg, var(--line-strong) 0 6px, transparent 6px 12px); }
+.link::after { content: ""; position: absolute; left: 50%; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); transform: translateX(-50%); animation: travelY 2.4s linear infinite; }
+@media (min-width: 980px) {
+  .link::before { left: 0; right: 0; top: 50%; bottom: auto; width: auto; height: 2px; transform: translateY(-50%); background: repeating-linear-gradient(90deg, var(--line-strong) 0 6px, transparent 6px 12px); }
+  .link::after { top: 50%; left: 0; transform: translateY(-50%); animation-name: travelX; }
+}
+@keyframes travelY { from { top: 0; opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } to { top: calc(100% - 8px); opacity: 0; } }
+@keyframes travelX { from { left: 0; opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } to { left: calc(100% - 8px); opacity: 0; } }
+.flow-notes { display: grid; gap: 24px; margin-top: 48px; }
+@media (min-width: 820px) { .flow-notes { grid-template-columns: repeat(3, 1fr); gap: 32px; } }
+.flow-notes p { color: var(--ink-muted); margin: 0; font-size: 15px; }
+.flow-notes h3 { display: flex; align-items: center; gap: 10px; }
+.num { font: 500 12px var(--mono); color: var(--accent); border: 1px solid color-mix(in oklab, var(--accent) 40%, transparent); border-radius: 6px; padding: 1px 6px; }
+
+/* runners */
+.runners { display: grid; gap: 12px; grid-template-columns: 1fr; }
+@media (min-width: 640px) { .runners { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1000px) { .runners { grid-template-columns: repeat(4, 1fr); } }
+.runner { border: 1px solid var(--line); border-radius: var(--r-card); background: var(--surface); padding: 20px; transition: border-color .2s, transform .2s, background .2s; }
+.runner:hover { border-color: var(--line-strong); background: var(--surface-2); transform: translateY(-2px); }
+.runner .badge { font-size: 12px; padding: 5px 8px; margin-bottom: 14px; color: var(--accent); border-color: color-mix(in oklab, var(--accent) 30%, var(--line)); background: color-mix(in oklab, var(--accent) 7%, var(--surface-2)); }
+.runner p { margin: 0; color: var(--ink-muted); font-size: 14px; }
+.runner code { font-size: 12px; color: var(--ink); }
+.runner.wide { background: color-mix(in oklab, var(--accent) 5%, var(--surface)); border-color: color-mix(in oklab, var(--accent) 25%, var(--line)); }
+.runner.wide h3 { font-size: 15px; }
+
+/* features bento */
+.bento { display: grid; gap: 12px; grid-template-columns: 1fr; }
+@media (min-width: 720px) { .bento { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1040px) { .bento { grid-template-columns: repeat(3, 1fr); } }
+.feat { position: relative; border: 1px solid var(--line); border-radius: var(--r-card); background: var(--surface); padding: 24px; overflow: hidden; }
+.feat::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .3s;
+  background: radial-gradient(320px circle at var(--mx, 50%) var(--my, 0%), color-mix(in oklab, var(--accent) 9%, transparent), transparent 60%);
+}
+.feat:hover::after { opacity: 1; }
+.feat .ico { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line-strong); margin-bottom: 18px; color: var(--accent); }
+.feat .ico svg { width: 18px; height: 18px; }
+.feat p { margin: 0; color: var(--ink-muted); font-size: 14.5px; }
+.feat code { font-size: 12.5px; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); padding: 1px 5px; border-radius: 4px; }
+@media (min-width: 1040px) { .feat.span2 { grid-column: span 2; } }
+.states { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+
+/* screenshots */
+.shot-main { perspective: 1600px; margin-bottom: 40px; }
+.frame { border: 1px solid var(--line-strong); border-radius: 14px; overflow: hidden; background: var(--surface); box-shadow: 0 40px 100px -30px rgba(0,0,0,.8), 0 0 0 1px rgba(0,0,0,.5); }
+.frame-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--surface-2); border-bottom: 1px solid var(--line); }
+.frame-url { flex: 1; max-width: 420px; margin: 0 auto; text-align: center; font: 12px var(--mono); color: var(--ink-dim); background: var(--canvas); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tilt { transform-origin: 50% 100%; }
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .tilt { animation: untilt linear both; animation-timeline: view(); animation-range: entry 5% cover 30%; }
+    @keyframes untilt { from { transform: rotateX(9deg) scale(.96); opacity: .5; } to { transform: none; opacity: 1; } }
+  }
+}
+.gallery { display: grid; gap: 24px; align-items: start; }
+@media (min-width: 980px) { .gallery { grid-template-columns: 1fr 300px; gap: 32px; } }
+.tabs { display: flex; gap: 4px; padding: 4px; border: 1px solid var(--line); background: var(--surface); border-radius: 10px; width: fit-content; max-width: 100%; overflow-x: auto; margin-bottom: 16px; scrollbar-width: none; }
+.tab { flex: none; font: 500 13px var(--sans); color: var(--ink-muted); background: none; border: 0; padding: 7px 12px; border-radius: 7px; cursor: pointer; transition: color .15s, background .15s; }
+.tab:hover { color: var(--ink); }
+.tab[aria-selected="true"] { color: var(--ink); background: var(--elevated); box-shadow: 0 0 0 1px var(--line-strong); }
+.viewer { aspect-ratio: 16 / 10; overflow: hidden; position: relative; }
+.viewer img { width: 100%; height: 100%; object-fit: cover; object-position: top; transition: opacity .25s; }
+.viewer::after { content: ""; position: absolute; inset: auto 0 0 0; height: 30%; background: linear-gradient(transparent, var(--surface)); pointer-events: none; }
+.viewer-cap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; margin-top: 14px; color: var(--ink-muted); font-size: 14px; }
+.viewer-cap a { color: var(--ink-dim); font-size: 13px; text-decoration: none; white-space: nowrap; }
+.viewer-cap a:hover { color: var(--accent); }
+.phone { width: min(280px, 100%); margin-inline: auto; border: 1px solid var(--line-strong); border-radius: 36px; padding: 10px; background: var(--surface-2); box-shadow: 0 40px 80px -30px rgba(0,0,0,.8); }
+.phone-screen { border-radius: 27px; overflow: hidden; aspect-ratio: 9 / 18.5; position: relative; background: var(--canvas); }
+.phone-screen img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.phone-cap { text-align: center; color: var(--ink-dim); font-size: 13px; margin-top: 14px; }
+
+/* quickstart */
+.qs { display: grid; gap: 24px; }
+@media (min-width: 980px) { .qs { grid-template-columns: 1.1fr 1fr; gap: 24px; align-items: start; } }
+.card { border: 1px solid var(--line); border-radius: var(--r-card); background: var(--surface); padding: 24px; min-width: 0; }
+.card > p { color: var(--ink-muted); font-size: 14.5px; }
+.card > p code, .note code { font-size: 12.5px; color: var(--ink); }
+.panel[hidden] { display: none; }
+.code {
+  position: relative; margin: 16px 0; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--canvas);
+  font: 13px/1.7 var(--mono);
+}
+.code pre { margin: 0; padding: 16px 18px; overflow-x: auto; color: var(--ink); }
+.code .c { color: var(--ink-dim); }
+.code .p { color: var(--accent); user-select: none; }
+.code .s { color: #a7f3d0; }
+.code .k { color: #93c5fd; }
+.copy {
+  position: absolute; top: 8px; right: 8px; display: grid; place-items: center; width: 32px; height: 32px;
+  border-radius: 7px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-dim); cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+.copy:hover { color: var(--ink); border-color: var(--line-strong); }
+.copy svg { width: 15px; height: 15px; }
+.copy.ok { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 40%, transparent); }
+.oneliner .copy { position: static; flex: none; width: 28px; height: 28px; }
+.note { font-size: 13.5px; color: var(--ink-dim); margin: 0; }
+.note a, .card a, .sec-link { color: var(--ink-muted); text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+.note a:hover, .card a:hover, .sec-link:hover { color: var(--accent); text-decoration-color: var(--accent); }
+.clients { display: flex; flex-wrap: wrap; gap: 6px; margin: 16px 0 0; padding: 0; list-style: none; }
+.clients li { font: 500 12px var(--sans); color: var(--ink-muted); border: 1px solid var(--line); background: var(--surface-2); border-radius: 999px; padding: 4px 10px; }
+
+/* security */
+.sec-grid { display: grid; gap: 12px; }
+@media (min-width: 820px) { .sec-grid { grid-template-columns: repeat(2, 1fr); } }
+.check { display: flex; gap: 14px; padding: 20px; border: 1px solid var(--line); border-radius: var(--r-card); background: var(--surface); }
+.check svg { width: 20px; height: 20px; color: var(--accent); flex: none; margin-top: 2px; }
+.check p { margin: 0; color: var(--ink-muted); font-size: 14.5px; }
+.check code { font-size: 12.5px; color: var(--ink); }
+.caveat {
+  margin-top: 16px; display: flex; gap: 14px; padding: 20px 22px; border-radius: var(--r-card);
+  border: 1px solid color-mix(in oklab, var(--starting) 35%, transparent); background: color-mix(in oklab, var(--starting) 7%, var(--surface));
+}
+.caveat svg { width: 20px; height: 20px; color: var(--starting); flex: none; margin-top: 2px; }
+.caveat p { margin: 0; color: var(--ink-muted); font-size: 14.5px; }
+.caveat strong { color: var(--ink); font-weight: 600; }
+.sec-links { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-top: 24px; font-size: 14px; }
+
+/* closing */
+.closing { text-align: center; padding: 120px 0; overflow: hidden; }
+.closing::before {
+  content: ""; position: absolute; left: 50%; bottom: -260px; width: 900px; height: 520px; transform: translateX(-50%);
+  background: radial-gradient(closest-side, color-mix(in oklab, var(--accent) 16%, transparent), transparent); pointer-events: none;
+}
+.closing .mark { width: 72px; height: 72px; margin: 0 auto 28px; }
+.closing h2 { margin-inline: auto; max-width: 16em; }
+.closing .sub { margin: 0 auto 32px; max-width: 34em; }
+.closing .cta { justify-content: center; margin: 0; }
+
+footer { border-top: 1px solid var(--line); padding: 32px 0 40px; color: var(--ink-dim); font-size: 13px; position: relative; z-index: 1; }
+.foot { display: flex; flex-wrap: wrap; gap: 16px 24px; align-items: center; justify-content: space-between; }
+.foot nav { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+.foot a { color: var(--ink-dim); text-decoration: none; }
+.foot a:hover { color: var(--ink); }
+
+/* reveal */
+.rv { opacity: 0; transform: translateY(14px); transition: opacity .7s ease, transform .7s cubic-bezier(.2,.8,.2,1); transition-delay: var(--d, 0s); }
+.rv.in { opacity: 1; transform: none; }
+.no-js .rv { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .001s !important; animation-iteration-count: 1 !important; transition-duration: .001s !important; }
+  .rv { opacity: 1; transform: none; }
+  .link::after, .caret { display: none; }
+}
+</style>
+</head>
+<body class="no-js">
+<a class="skip" href="#main">Skip to content</a>
+<div class="ambient" aria-hidden="true"></div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-gh" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.1 0 4.42-2.7 5.4-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></symbol>
+  </defs>
+</svg>
+
+<header class="nav" id="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top" aria-label="mcpelevator home">
+      <span class="brand-mark"><svg viewBox="22 30 84 76" aria-hidden="true"><path fill="var(--accent)" fill-rule="evenodd" d="M34 32 H94 A10 10 0 0 1 104 42 V94 A10 10 0 0 1 94 104 H34 A10 10 0 0 1 24 94 V42 A10 10 0 0 1 34 32 Z M60 32 L68 32 L88 58 L72 58 L72 104 L56 104 L56 58 L40 58 Z"/></svg></span>
+      <span><b>mcp</b>elevator</span>
+    </a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#runners">Runners</a>
+      <a href="#features">Features</a>
+      <a href="#screens">Screens</a>
+      <a href="#security">Security</a>
+      <a href="#quickstart">Quickstart</a>
+    </nav>
+    <a class="btn btn-sm nav-gh" href="https://github.com/pacnpal/mcpelevator">
+      <svg aria-hidden="true"><use href="#i-gh"/></svg>GitHub<span class="gh-stars" data-stars></span>
+    </a>
+  </div>
+</header>
+
+<main id="main">
+  <!-- HERO -->
+  <div class="hero" id="top">
+    <div class="wrap hero-grid">
+      <div>
+        <a class="eyebrow rv" href="https://github.com/pacnpal/mcpelevator/releases/latest">
+          <span class="dot"></span>Self-hosted, MIT licensed <span class="ver" data-version></span>
+        </a>
+        <h1 class="rv" style="--d:.05s">Put your MCP servers <span class="lift">on a URL.</span></h1>
+        <p class="lede rv" style="--d:.1s">
+          Most MCP servers are stdio programs, and stdio only works when the client can spawn the process itself. Your phone can't.
+          mcpelevator runs those servers in <strong>one self-hosted container</strong> and gives each one an
+          <strong>authenticated Streamable HTTP endpoint</strong>. Add a server, press start, copy the URL.
+        </p>
+        <div class="cta rv" style="--d:.15s">
+          <a class="btn btn-primary" href="#quickstart">Get started <svg aria-hidden="true"><use href="#i-arrow"/></svg></a>
+          <a class="btn" href="https://github.com/pacnpal/mcpelevator"><svg aria-hidden="true"><use href="#i-gh"/></svg>View on GitHub</a>
+        </div>
+        <div class="oneliner rv" style="--d:.2s">
+          <span class="p" aria-hidden="true">$</span>
+          <code id="oneliner">docker compose up --build</code>
+          <button class="copy" type="button" data-copy="#oneliner" aria-label="Copy command"><svg aria-hidden="true"><use href="#i-copy"/></svg></button>
+        </div>
+      </div>
+
+      <div class="stage rv" style="--d:.15s">
+        <div class="console" role="img" aria-label="Animated demo: servers launched with npx, uvx, docker, remote, OpenAPI and GraphQL runners go from stopped to starting to running, and each gets its own /s/slug/mcp URL.">
+          <div class="c-bar" aria-hidden="true">
+            <span class="c-dots"><i></i><i></i><i></i></span>
+            <span class="c-title">Servers</span>
+            <span class="c-api">API online</span>
+          </div>
+          <div class="c-cmd" aria-hidden="true">
+            <span class="badge" id="d-runner">npx</span>
+            <code id="d-cmd"></code><span class="caret"></span>
+          </div>
+          <ul class="rows" id="d-rows" aria-hidden="true"></ul>
+          <div class="c-url" aria-hidden="true">
+            <span class="lbl">Endpoint</span>
+            <code id="d-url" class="empty">waiting for a server…</code>
+          </div>
+        </div>
+        <div class="float-tag ft-1" aria-hidden="true"><svg><use href="#i-shield"/></svg><b>Bearer</b> token required</div>
+        <div class="float-tag ft-2" aria-hidden="true"><span class="pill" data-s="idle">Idle</span> wakes on request</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PROBLEM / ANSWER -->
+  <section class="band" aria-label="The problem">
+    <div class="wrap">
+      <div class="band-in rv">
+        <div class="band-cell before">
+          <span class="tag">Without it</span>
+          <p>A stdio server lives inside whatever launched it. That's fine for a desktop client on the same machine. Claude mobile, a browser, or a box across the room has no way to run <code>npx</code> for you, so the server might as well not exist.</p>
+          <pre><span class="c"># only works where the client can spawn it</span>
+npx -y @modelcontextprotocol/server-memory</pre>
+        </div>
+        <div class="band-cell after">
+          <span class="tag">With it</span>
+          <p>mcpelevator keeps the process running on your own hardware and hands back a URL. Anything that speaks Streamable HTTP can use it, and stdio-only clients can still reach it through <code>mcp-remote</code>.</p>
+          <pre>https://mcp.example.com/s/<span style="color:var(--accent)">memory</span>/mcp</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW -->
+  <section id="how">
+    <div class="wrap">
+      <div class="sec-head rv">
+        <p class="kicker">How it works</p>
+        <h2>One container, one port, a bridge per server.</h2>
+        <p class="sub">FastMCP does the protocol bridging. mcpelevator is the control plane around it: it supervises the processes, puts auth in front of them, and gives you a UI to run it all from.</p>
+      </div>
+
+      <div class="flow rv">
+        <div class="lane">
+          <div class="lane-title"><span>Clients</span></div>
+          <ul>
+            <li>Claude mobile and web</li>
+            <li>Claude Code, Codex, VS Code</li>
+            <li>stdio clients <small>mcp-remote</small></li>
+            <li>curl, GPT Actions <small>REST</small></li>
+          </ul>
+        </div>
+        <div class="link" aria-hidden="true"></div>
+        <div class="lane core">
+          <div class="lane-title"><span>mcpelevator</span><span>:8080</span></div>
+          <ul>
+            <li class="route"><b>/s/&lt;slug&gt;/mcp</b><small>one server</small></li>
+            <li class="route"><b>/g/&lt;name&gt;/mcp</b><small>a group</small></li>
+            <li class="route">/api<small>control plane</small></li>
+          </ul>
+          <div class="guard"><svg aria-hidden="true"><use href="#i-shield"/></svg>Host/Origin allowlist, then bearer or OAuth</div>
+          <div class="lane-title" style="margin:16px 0 0"><span>Supervised bridges</span><span>SQLite = desired state</span></div>
+          <div class="bridges">
+            <div class="bridge"><b>memory</b><i></i>:41021</div>
+            <div class="bridge"><b>time</b><i></i>:41022</div>
+            <div class="bridge idle"><b>github</b><i></i>idle</div>
+          </div>
+        </div>
+        <div class="link" aria-hidden="true"></div>
+        <div class="lane">
+          <div class="lane-title"><span>Upstreams</span></div>
+          <ul>
+            <li>stdio child process <small>npx · uvx · cmd</small></li>
+            <li>Docker image <small>docker</small></li>
+            <li>Remote MCP URL <small>remote</small></li>
+            <li>REST or GraphQL API <small>openapi · graphql</small></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="flow-notes">
+        <div class="rv">
+          <h3><span class="num">01</span> Add</h3>
+          <p>Paste a launch command, a Docker image, a remote URL, an OpenAPI document or a GraphQL endpoint. Or paste a whole <code>mcpServers</code> config, or install straight from the public MCP registry.</p>
+        </div>
+        <div class="rv" style="--d:.08s">
+          <h3><span class="num">02</span> Start</h3>
+          <p>Each server gets its own bridge process on a loopback port, with a real PID and its own log. One crashing server doesn't take the others with it. If a start fails, the last error and the log tail tell you why.</p>
+        </div>
+        <div class="rv" style="--d:.16s">
+          <h3><span class="num">03</span> Copy</h3>
+          <p>The copy menu has a ready config for Claude Code, Claude Desktop, Claude web and mobile, Codex, ChatGPT, Gemini CLI, VS Code and plain <code>mcpServers</code>. Paste it and you're connected.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap"><div class="divider"></div></div>
+
+  <!-- RUNNERS -->
+  <section id="runners">
+    <div class="wrap">
+      <div class="sec-head rv">
+        <p class="kicker">Runners</p>
+        <h2>If it can become MCP tools, it can go on a URL.</h2>
+        <p class="sub">Every runner is just a different way to get a server started. They all end up behind the same auth, supervision and copy menu.</p>
+      </div>
+      <div class="runners">
+        <article class="runner rv"><span class="badge">npx</span><h3>npm packages</h3><p>Node and npx ship in the image, so <code>npx -y …</code> servers run with no extra setup.</p></article>
+        <article class="runner rv" style="--d:.04s"><span class="badge">uvx</span><h3>PyPI packages</h3><p>Python servers run through uv. A native build toolchain is in the image for packages that compile on install.</p></article>
+        <article class="runner rv" style="--d:.08s"><span class="badge">command</span><h3>Anything you can type</h3><p>Any command line, including a server cloned from a GitHub repo and built from its own checkout.</p></article>
+        <article class="runner rv" style="--d:.12s"><span class="badge">docker</span><h3>Container images</h3><p>Runs images with a locked-down <code>docker run</code>. Off by default, since access to a Docker daemon is root-equivalent.</p></article>
+        <article class="runner rv"><span class="badge">remote</span><h3>Already-remote MCP</h3><p>Proxies an existing HTTP or SSE MCP URL behind your own auth. Sign in to the upstream with headers or OAuth.</p></article>
+        <article class="runner rv" style="--d:.04s"><span class="badge">openapi</span><h3>REST APIs</h3><p>Point it at an OpenAPI document and every operation becomes a tool. No MCP server needed upstream.</p></article>
+        <article class="runner rv" style="--d:.08s"><span class="badge">graphql</span><h3>GraphQL APIs</h3><p>Each query and mutation field becomes a tool, validated against the schema before it's sent.</p></article>
+        <article class="runner wide rv" style="--d:.12s"><span class="badge">mcpelevator</span><h3>It manages itself, too</h3><p>A built-in control server lets an agent install servers, read logs and mint tokens, with the caller's own permissions.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap"><div class="divider"></div></div>
+
+  <!-- FEATURES -->
+  <section id="features">
+    <div class="wrap">
+      <div class="sec-head rv">
+        <p class="kicker">Features</p>
+        <h2>The parts you'd otherwise end up building yourself.</h2>
+        <p class="sub">Getting a stdio server onto HTTP is the easy part. Keeping a dozen of them up, locked down and debuggable is where the time goes.</p>
+      </div>
+      <div class="bento">
+        <article class="feat span2 rv">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+          <h3>Supervision that explains itself</h3>
+          <p>SQLite holds the state you asked for and a supervisor keeps converging the real processes to it, Kubernetes-style. Restart the container and everything comes back the way it was. When a server fails, its last error and log tail are right there on the card.</p>
+          <div class="states" aria-label="Lifecycle states">
+            <span class="pill" data-s="running">Running</span>
+            <span class="pill" data-s="starting">Starting</span>
+            <span class="pill" data-s="unhealthy">Unhealthy</span>
+            <span class="pill" data-s="failed">Failed</span>
+            <span class="pill" data-s="idle">Idle</span>
+            <span class="pill" data-s="stopped">Stopped</span>
+          </div>
+        </article>
+        <article class="feat rv" style="--d:.05s">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg></div>
+          <h3>Idle shutdown, wake on request</h3>
+          <p>A server nobody has called in a while gets stopped. The next request wakes it and waits until it's ready, so the client just sees a slower first call.</p>
+        </article>
+        <article class="feat rv">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+          <h3>Write-only secrets</h3>
+          <p>Mark an env var or header as secret and it's encrypted at rest and reads <code>&lt;hidden&gt;</code> from then on. It gets decrypted in one place, right before launch.</p>
+        </article>
+        <article class="feat rv" style="--d:.05s">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
+          <h3>Groups</h3>
+          <p>Bundle servers behind one URL at <code>/g/&lt;name&gt;/mcp</code>. Tools get prefixed with the member's slug, and connected clients hear about membership changes right away.</p>
+        </article>
+        <article class="feat rv" style="--d:.1s">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></div>
+          <h3>Tool policy</h3>
+          <p>Hide a tool, rename it, rewrite its description, or add aliases so old names keep working. One transform applies it to MCP, REST and groups at the same time.</p>
+        </article>
+        <article class="feat rv">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg></div>
+          <h3>A REST mirror</h3>
+          <p>Turn on REST for a server and every tool is also a plain call at <code>/s/&lt;slug&gt;/rest/&lt;tool&gt;</code>, with a generated <code>openapi.json</code> for curl, automations and GPT Actions.</p>
+        </article>
+        <article class="feat rv" style="--d:.05s">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></div>
+          <h3>A catalog to install from</h3>
+          <p>Browse the official MCP Registry and Glama from the UI, pick a version, review the launch spec, install. A local mirror keeps browsing working when a directory is down.</p>
+        </article>
+        <article class="feat rv" style="--d:.1s">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15v2M11 11v6M15 7v10M19 12v5"/></svg></div>
+          <h3>Usage per tool</h3>
+          <p>Hourly call counts for every server and tool. Arguments are never recorded. You find out which tools get used and which ones nobody has ever touched.</p>
+        </article>
+        <article class="feat rv">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8Z"/></svg></div>
+          <h3>Health checks</h3>
+          <p>Call a cheap tool or run a shell command at startup and on an interval, so "running" means it answers, not just that the process exists.</p>
+        </article>
+        <article class="feat rv" style="--d:.05s">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M18 10.5c0 4-6 3-11.5 6"/></svg></div>
+          <h3>Launch from a repo</h3>
+          <p>Not on npm or PyPI? Give it a GitHub URL. It clones the repo, runs the build steps it detects, and starts the server from that checkout.</p>
+        </article>
+        <article class="feat rv" style="--d:.1s">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M21.5 20a6.5 6.5 0 0 0-4-6"/></svg></div>
+          <h3>More than one person</h3>
+          <p>Admins and members with login tokens. Members see and manage only their own servers, and a server they can't see returns 404 like it isn't there.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- SCREENS -->
+  <section id="screens">
+    <div class="wrap">
+      <div class="sec-head rv">
+        <p class="kicker">Screens</p>
+        <h2>A quiet panel that only gets loud when something breaks.</h2>
+        <p class="sub">Dark, dense and calm. Green means live. Everything else stays dim until it needs you. These are real screenshots, regenerated by CI every time the UI changes.</p>
+      </div>
+
+      <div class="shot-main">
+        <div class="frame tilt">
+          <div class="frame-bar" aria-hidden="true"><span class="c-dots"><i></i><i></i><i></i></span><span class="frame-url">mcp.example.com</span></div>
+          <img src="screenshots/servers.png" width="2880" height="1440" alt="The servers dashboard: six server cards with Running and Stopped pills, runner badges, an Add to client menu and Start or Stop buttons." loading="lazy" decoding="async">
+        </div>
+      </div>
+
+      <div class="gallery">
+        <div class="rv">
+          <div class="tabs" role="tablist" aria-label="Screenshots">
+            <button class="tab" role="tab" aria-selected="true" data-shot="catalog-browse" data-cap="Browse the public MCP directories, filtered by package type.">Catalog</button>
+            <button class="tab" role="tab" aria-selected="false" data-shot="catalog-search" data-cap="Search, pick a version, and install after one review of the launch spec.">Search</button>
+            <button class="tab" role="tab" aria-selected="false" data-shot="add-server" data-cap="Add a server by hand: npx, uvx, a command, a remote URL, OpenAPI or GraphQL.">Add server</button>
+            <button class="tab" role="tab" aria-selected="false" data-shot="usage" data-cap="Calls over time, an activity grid, and a per-tool breakdown.">Usage</button>
+            <button class="tab" role="tab" aria-selected="false" data-shot="settings" data-cap="Access tokens, bind mode and the LAN gate.">Settings</button>
+          </div>
+          <div class="frame">
+            <div class="frame-bar" aria-hidden="true"><span class="c-dots"><i></i><i></i><i></i></span><span class="frame-url" id="shot-url">mcp.example.com/catalog</span></div>
+            <div class="viewer" role="tabpanel"><img id="shot-img" src="screenshots/catalog-browse.png" alt="Catalog screen" loading="lazy" decoding="async"></div>
+          </div>
+          <div class="viewer-cap"><span id="shot-cap">Browse the public MCP directories, filtered by package type.</span><a id="shot-full" href="screenshots/catalog-browse.png" target="_blank" rel="noopener">Open full size ↗</a></div>
+        </div>
+        <div class="rv" style="--d:.1s">
+          <div class="phone"><div class="phone-screen"><img src="screenshots/servers-mobile.png" width="780" height="2860" alt="The servers dashboard at phone width." loading="lazy" decoding="async"></div></div>
+          <p class="phone-cap">Built for check-ins from your phone.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap"><div class="divider"></div></div>
+
+  <!-- SECURITY -->
+  <section id="security">
+    <div class="wrap">
+      <div class="sec-head rv">
+        <p class="kicker">Security</p>
+        <h2>Locked down by default, upfront about the limits.</h2>
+        <p class="sub">Two independent layers check every request. Both have to pass.</p>
+      </div>
+      <div class="sec-grid">
+        <div class="check rv"><svg aria-hidden="true"><use href="#i-shield"/></svg><div><h3>Host/Origin allowlist, always on</h3><p>Blocks DNS rebinding in every mode. A loopback Host only counts when the connection really comes from loopback, so an exposed box can't be fooled by <code>Host: localhost</code>.</p></div></div>
+        <div class="check rv" style="--d:.05s"><svg aria-hidden="true"><use href="#i-shield"/></svg><div><h3>Per-server auth</h3><p><code>none</code>, <code>bearer</code> or <code>oauth</code>. Tokens can be scoped to one server, one group, or everything. They're stored as SHA-256 hashes and shown exactly once.</p></div></div>
+        <div class="check rv"><svg aria-hidden="true"><use href="#i-shield"/></svg><div><h3>Control plane auth turns itself on</h3><p>In the default <code>auto</code> mode, <code>/api</code> starts requiring an admin token as soon as the config says the box is reachable off-host. A plain local install stays zero-config.</p></div></div>
+        <div class="check rv" style="--d:.05s"><svg aria-hidden="true"><use href="#i-shield"/></svg><div><h3>Docker runner is opt-in</h3><p>When you do turn it on, containers run with <code>--cap-drop ALL</code>, <code>no-new-privileges</code>, a PID limit and a memory cap, and secrets never land on mcpelevator's own command line.</p></div></div>
+      </div>
+      <div class="caveat rv">
+        <svg aria-hidden="true"><use href="#i-warn"/></svg>
+        <p><strong>Authorization, not isolation.</strong> Local runners execute as the mcpelevator process user and can read its data directory, including other servers' settings. Multiple users split up who manages what. They don't sandbox servers from each other. Only give the local-runner permission to people you'd trust with the machine.</p>
+      </div>
+      <div class="sec-links rv">
+        <a class="sec-link" href="https://github.com/pacnpal/mcpelevator/blob/main/docs/security.md">Threat model →</a>
+        <a class="sec-link" href="https://github.com/pacnpal/mcpelevator/blob/main/docs/claude-web-exposure.md">Exposing it to Claude safely →</a>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap"><div class="divider"></div></div>
+
+  <!-- QUICKSTART -->
+  <section id="quickstart">
+    <div class="wrap">
+      <div class="sec-head rv">
+        <p class="kicker">Quickstart</p>
+        <h2>Get it running.</h2>
+        <p class="sub">Everything ships in the one image: Node, npx, Python, uv and a native build toolchain. Nothing else to install on the host.</p>
+      </div>
+      <div class="qs">
+        <div class="card rv">
+          <div class="tabs" role="tablist" aria-label="Install method">
+            <button class="tab" role="tab" aria-selected="true" aria-controls="p-docker" id="t-docker">Docker Compose</button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="p-unraid" id="t-unraid">Unraid</button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="p-dev" id="t-dev">From source</button>
+          </div>
+          <div class="panel" id="p-docker" role="tabpanel" aria-labelledby="t-docker">
+            <div class="code"><pre id="c-docker"><span class="p">$ </span>git clone https://github.com/pacnpal/mcpelevator
+<span class="p">$ </span>cd mcpelevator
+<span class="p">$ </span>docker compose up --build
+<span class="c"># then open http://127.0.0.1:8080</span></pre><button class="copy" type="button" data-copy="#c-docker" aria-label="Copy commands"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+            <p class="note">The port is published to host loopback only, and data lives in the <code>mcpe-data</code> volume. Read <a href="#security">Security</a> before you open it up to your network.</p>
+          </div>
+          <div class="panel" id="p-unraid" role="tabpanel" aria-labelledby="t-unraid" hidden>
+            <p>Install <strong>mcpelevator</strong> from Community Applications. The template lives in <a href="https://github.com/pacnpal/unraid-templates">pacnpal/unraid-templates</a> and comes set up for a headless box: host networking so the LAN gate sees real client IPs, appdata at <code>/mnt/user/appdata/mcpelevator</code>, and LAN access on from the first boot.</p>
+            <div class="code"><pre id="c-unraid"><span class="c"># the first boot prints an admin token, once</span>
+<span class="p">$ </span>docker logs mcpelevator 2>&amp;1 | grep -A2 "control-plane auth is ON"</pre><button class="copy" type="button" data-copy="#c-unraid" aria-label="Copy command"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+            <p class="note">The full walkthrough covers first login, updating and troubleshooting: <a href="https://github.com/pacnpal/mcpelevator/blob/main/docs/unraid.md">docs/unraid.md</a>.</p>
+          </div>
+          <div class="panel" id="p-dev" role="tabpanel" aria-labelledby="t-dev" hidden>
+            <div class="code"><pre id="c-dev"><span class="c"># control plane on http://127.0.0.1:8080</span>
+<span class="p">$ </span>cd backend &amp;&amp; uv sync &amp;&amp; uv run uvicorn app.main:app --reload
+
+<span class="c"># UI with hot reload on http://localhost:5173</span>
+<span class="p">$ </span>cd frontend &amp;&amp; npm install &amp;&amp; npm run dev</pre><button class="copy" type="button" data-copy="#c-dev" aria-label="Copy commands"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+            <p class="note">The <code>Makefile</code> wraps these: <code>make dev-backend</code>, <code>make dev-frontend</code>, <code>make test</code>.</p>
+          </div>
+        </div>
+
+        <div class="card rv" style="--d:.08s">
+          <h3>Connect a client</h3>
+          <p>Clients that speak Streamable HTTP take the URL directly. For one that can only launch a local command, put <a href="https://github.com/geelen/mcp-remote">mcp-remote</a> in between:</p>
+          <div class="code"><pre id="c-client">{
+  <span class="k">"mcpServers"</span>: {
+    <span class="k">"memory"</span>: {
+      <span class="k">"command"</span>: <span class="s">"npx"</span>,
+      <span class="k">"args"</span>: [<span class="s">"-y"</span>, <span class="s">"mcp-remote"</span>,
+        <span class="s">"https://mcp.example.com/s/memory/mcp"</span>]
+    }
+  }
+}</pre><button class="copy" type="button" data-copy="#c-client" aria-label="Copy config"><svg aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+          <p class="note">You rarely need to write this by hand. Every server's copy menu has the right snippet for:</p>
+          <ul class="clients">
+            <li>Claude Code</li><li>Claude Desktop</li><li>Claude web &amp; mobile</li><li>Codex</li><li>ChatGPT</li><li>Gemini CLI</li><li>VS Code</li><li>mcpServers</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CLOSING -->
+  <section class="closing">
+    <div class="wrap">
+      <svg class="mark closed" id="closing-mark" viewBox="0 0 128 128" aria-hidden="true">
+        <rect width="128" height="128" rx="28" fill="var(--surface-2)" stroke="var(--line-strong)"/>
+        <circle class="lamp" cx="64" cy="19" r="5" fill="var(--lamp)"/>
+        <path class="mark-door door-l" fill="var(--accent)" d="M60 32 H34 A10 10 0 0 0 24 42 V94 A10 10 0 0 0 34 104 H56 V58 H40 Z"/>
+        <path class="mark-door door-r" fill="var(--accent)" d="M68 32 H94 A10 10 0 0 1 104 42 V94 A10 10 0 0 1 94 104 H72 V58 H88 Z"/>
+      </svg>
+      <h2 class="rv">Your servers, going up.</h2>
+      <p class="sub rv" style="--d:.05s">Free, open source, and yours to run. One container on hardware you already own.</p>
+      <div class="cta rv" style="--d:.1s">
+        <a class="btn btn-primary" href="#quickstart">Get started <svg aria-hidden="true"><use href="#i-arrow"/></svg></a>
+        <a class="btn" href="https://github.com/pacnpal/mcpelevator"><svg aria-hidden="true"><use href="#i-gh"/></svg>Star on GitHub</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <span><b style="color:var(--accent);font-weight:600">mcp</b><span style="color:var(--ink-muted);font-weight:600">elevator</span> · MIT License · protocol bridging by <a href="https://gofastmcp.com">FastMCP</a></span>
+    <nav aria-label="Footer">
+      <a href="https://github.com/pacnpal/mcpelevator#readme">README</a>
+      <a href="https://github.com/pacnpal/mcpelevator/releases">Releases</a>
+      <a href="https://github.com/pacnpal/mcpelevator/issues">Issues</a>
+      <a href="https://github.com/pacnpal/mcpelevator/blob/main/docs/security.md">Security</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+document.body.classList.remove('no-js');
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+
+// nav border on scroll
+const nav = $('#nav');
+addEventListener('scroll', () => nav.classList.toggle('scrolled', scrollY > 8), { passive: true });
+
+// reveal on scroll
+const io = new IntersectionObserver(es => es.forEach(e => {
+  if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+}), { rootMargin: '0px 0px -8% 0px' });
+$$('.rv').forEach(el => io.observe(el));
+
+// elevator doors open when the closing mark scrolls in
+const mark = $('#closing-mark');
+new IntersectionObserver(([e], o) => {
+  if (e.isIntersecting) { mark.classList.remove('closed'); o.disconnect(); }
+}, { threshold: .6 }).observe(mark);
+
+// pointer glow on feature cards
+$$('.feat').forEach(el => el.addEventListener('pointermove', e => {
+  const r = el.getBoundingClientRect();
+  el.style.setProperty('--mx', (e.clientX - r.left) + 'px');
+  el.style.setProperty('--my', (e.clientY - r.top) + 'px');
+}));
+
+// copy buttons
+$$('[data-copy]').forEach(b => b.addEventListener('click', async () => {
+  const text = $(b.dataset.copy).innerText.replace(/^\$ /gm, '');
+  try {
+    await navigator.clipboard.writeText(text);
+    b.classList.add('ok'); b.querySelector('use').setAttribute('href', '#i-check');
+    setTimeout(() => { b.classList.remove('ok'); b.querySelector('use').setAttribute('href', '#i-copy'); }, 1600);
+  } catch {}
+}));
+
+// tabs (shared by the screenshot viewer and the quickstart card)
+$$('[role=tablist]').forEach(list => {
+  const tabs = $$('[role=tab]', list);
+  const select = t => {
+    tabs.forEach(x => {
+      const on = x === t;
+      x.setAttribute('aria-selected', on); x.tabIndex = on ? 0 : -1;
+      if (x.getAttribute('aria-controls')) document.getElementById(x.getAttribute('aria-controls')).hidden = !on;
+    });
+    if (t.dataset.shot) {
+      const src = 'screenshots/' + t.dataset.shot + '.png', img = $('#shot-img');
+      img.style.opacity = 0;
+      setTimeout(() => { img.src = src; img.alt = t.textContent + ' screen'; }, reduce ? 0 : 150);
+      img.onload = () => img.style.opacity = 1;
+      $('#shot-full').href = src; $('#shot-cap').textContent = t.dataset.cap;
+      $('#shot-url').textContent = 'mcp.example.com/' + t.dataset.shot.split('-')[0].replace('add', 'servers/new');
+    }
+  };
+  tabs.forEach((t, i) => {
+    t.tabIndex = t.getAttribute('aria-selected') === 'true' ? 0 : -1;
+    t.addEventListener('click', () => select(t));
+    t.addEventListener('keydown', e => {
+      const d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+      if (d) { const n = tabs[(i + d + tabs.length) % tabs.length]; n.focus(); select(n); }
+    });
+  });
+});
+
+// latest release + stars (best effort, fine if rate-limited)
+fetch('https://api.github.com/repos/pacnpal/mcpelevator').then(r => r.ok && r.json()).then(j => {
+  if (j && j.stargazers_count) $('[data-stars]').textContent = '★ ' + j.stargazers_count;
+}).catch(() => {});
+fetch('https://api.github.com/repos/pacnpal/mcpelevator/releases/latest').then(r => r.ok && r.json()).then(j => {
+  if (j && j.tag_name) $('[data-version]').textContent = j.tag_name;
+}).catch(() => {});
+
+// hero demo: servers go stopped -> starting -> running and get a URL
+const demo = [
+  { name: 'Memory', slug: 'memory', runner: 'npx', cmd: 'npx -y @modelcontextprotocol/server-memory' },
+  { name: 'Time', slug: 'time', runner: 'uvx', cmd: 'uvx mcp-server-time' },
+  { name: 'GitHub', slug: 'github', runner: 'docker', cmd: 'ghcr.io/github/github-mcp-server' },
+  { name: 'Hugging Face', slug: 'hf-co', runner: 'remote', cmd: 'https://hf.co/mcp' },
+  { name: 'Petstore', slug: 'petstore', runner: 'openapi', cmd: 'https://petstore3.swagger.io/api/v3/openapi.json' },
+  { name: 'Countries', slug: 'countries', runner: 'graphql', cmd: 'https://countries.trevorblades.com/' },
+];
+const label = { stopped: 'Stopped', starting: 'Starting', running: 'Running', idle: 'Idle' };
+const rowsEl = $('#d-rows'), cmdEl = $('#d-cmd'), urlEl = $('#d-url'), runEl = $('#d-runner');
+rowsEl.innerHTML = demo.map(s => `<li class="row"><span class="row-name">${s.name}</span><span class="row-meta"><span>${s.slug}</span><span class="badge">${s.runner}</span></span><span class="pill" data-s="stopped">Stopped</span></li>`).join('');
+const rows = $$('.row', rowsEl);
+const setState = (i, s) => { const p = $('.pill', rows[i]); p.dataset.s = s; p.textContent = label[s]; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function type(text) {
+  cmdEl.textContent = '';
+  if (reduce) { cmdEl.textContent = text; return; }
+  for (const ch of text) { cmdEl.textContent += ch; await sleep(text.length > 30 ? 18 : 34); }
+}
+async function loop() {
+  for (;;) {
+    for (let i = 0; i < demo.length; i++) {
+      const s = demo[i];
+      rows.forEach((r, j) => r.classList.toggle('active', j === i));
+      runEl.textContent = s.runner;
+      await type(s.cmd);
+      await sleep(350);
+      setState(i, 'starting');
+      await sleep(reduce ? 600 : 1100);
+      setState(i, 'running');
+      urlEl.classList.remove('empty');
+      urlEl.innerHTML = `https://mcp.example.com/s/<span class="slug">${s.slug}</span>/mcp`;
+      await sleep(1700);
+    }
+    // nobody called the first two in a while: idle them, then wake one on a request
+    rows.forEach(r => r.classList.remove('active'));
+    setState(0, 'idle'); await sleep(500); setState(1, 'idle');
+    await sleep(1600);
+    rows[0].classList.add('active');
+    cmdEl.textContent = 'POST /s/memory/mcp  tools/call';
+    runEl.textContent = 'wake';
+    setState(0, 'starting'); await sleep(900); setState(0, 'running');
+    await sleep(2000);
+    demo.forEach((_, i) => setState(i, 'stopped'));
+    urlEl.classList.add('empty'); urlEl.textContent = 'waiting for a server…';
+    await sleep(600);
+  }
+}
+loop();
+</script>
+</body>
+</html>
