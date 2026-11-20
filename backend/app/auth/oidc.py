@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.api.users import change_user
-from app.auth.oauth import _ALLOWED_JWT_ALGORITHMS
+from app.auth.oauth import _ALLOWED_JWT_ALGORITHMS, verified_email
 from app.db import repo
 from app.db.models import User
 from app.registry import service
@@ -220,10 +220,12 @@ async def begin(session: Session) -> dict[str, Any]:
 
 async def finish(
     session: Session, *, code: str, verifier: str, nonce: str, redirect_uri: str,
-    iss: str | None,
+    iss: str | None, provider: list[Any],
 ) -> tuple[User, str]:
     """Exchange ``code``, validate the ID token, and match the person to a User, linking
-    the Linked identity. Returns the user and the raw ID token. Raises ``SignInFailed``."""
+    the Linked identity and syncing provider groups, written only while the provider
+    settings are still ``provider`` (``settings.sign_in_provider`` as the login began).
+    Returns the user and the raw ID token. Raises ``SignInFailed``."""
     values = runtime_settings.read_all(session)
     discovery = await begin(session)
     issuer = discovery["issuer"]
@@ -251,7 +253,7 @@ async def finish(
         )
     groups = _gate(values, claims)
     # Threadpool: the config write lock is a threading lock, never waited for on the loop.
-    return await run_in_threadpool(_link, session, claims, claim, groups), id_token
+    return await run_in_threadpool(_link, session, claims, claim, groups, provider), id_token
 
 
 def _gate(values: dict[str, Any], claims: dict[str, Any]) -> set[str]:
@@ -273,10 +275,9 @@ def _gate(values: dict[str, Any], claims: dict[str, Any]) -> set[str]:
         hd = claims.get("hd")
         if isinstance(hd, str) and hd:
             domain = hd.lower()
-        else:
-            email = claims.get("email")
-            verified = isinstance(email, str) and "@" in email and _email_verified(claims)
-            domain = email.rsplit("@", 1)[1].lower() if verified else None
+        else:  # an authorization decision: only an explicitly verified email counts
+            email = verified_email(claims)
+            domain = email.rsplit("@", 1)[1].lower() if email and "@" in email else None
         if domain not in domains:
             raise SignInFailed(DOMAIN_NOT_ALLOWED, f"domain {domain!r} is not in oidc_allowed_domains")
     return groups
@@ -301,12 +302,16 @@ def _groups(claims: dict[str, Any], name: str) -> set[str]:
     return set()
 
 
-def _link(session: Session, claims: dict[str, Any], claim: str, groups: set[str]) -> User:
-    """``_match`` and the group sync under the config write lock, so the check, the link
-    write and the sync are one step against other sign-ins, an admin's unlink and the
-    last-admin guard. A writer outside the lock (another instance on this database)
-    can still link the pair first: the unique index refuses ours, and the pair is
-    resolved again."""
+def _link(
+    session: Session, claims: dict[str, Any], claim: str, groups: set[str], provider: list[Any]
+) -> User:
+    """``_match``, the group sync and the provider recheck as ONE transaction under the
+    config write lock, so they are one step against other sign-ins, an admin's unlink
+    and the last-admin guard. The link and sync are flushed first, which takes the
+    database write lock a settings write also needs; then the provider settings are
+    read again, and only if they are still ``provider`` does anything commit. A writer
+    outside the config lock (another instance on this database) can still link the
+    pair first: the unique index refuses ours, and the pair is resolved again."""
     with service.config_write_lock():
         session.expire_all()  # see what committed while we waited
         try:
@@ -316,25 +321,33 @@ def _link(session: Session, claims: dict[str, Any], claim: str, groups: set[str]
             user = _holder(session, claims["iss"], str(claims["sub"]))
             if user is None:  # couldn't tell who this is: fail closed
                 raise SignInFailed(IDENTITY_CONFLICT, "the link write lost a race") from None
-        return _sync(session, user, groups)
+        user = _sync(session, user, groups)
+        session.expire_all()  # the settings as committed, not as this session cached them
+        if runtime_settings.sign_in_provider(session) != provider:
+            session.rollback()
+            raise SignInFailed(EXPIRED, "the SSO settings changed while this login finished")
+        session.commit()
+        session.refresh(user)  # the pair as linked, before anything else can change it
+        return user
 
 
 def _sync(session: Session, user: User, groups: set[str]) -> User:
     """Set the fields provider groups manage, through the same mutation PATCH /users
-    uses (so a demotion sweeps the admin-only tokens). A demotion that would leave no
-    admin login is skipped with a warning; the sign-in still succeeds."""
+    uses (so a demotion sweeps the admin-only tokens), flushed for ``_link`` to commit.
+    A demotion that would leave no admin login is skipped with a warning; the sign-in
+    still succeeds."""
     values = runtime_settings.read_all(session)
     admin_groups, runner_groups = values["oidc_admin_groups"], values["oidc_local_runner_groups"]
     role = ("admin" if groups.intersection(admin_groups) else "member") if admin_groups else None
     runners = bool(groups.intersection(runner_groups)) if runner_groups else None
     if role is None and runners is None:
         return user
-    result = change_user(session, user, role=role, local_runners=runners)
+    result = change_user(session, user, role=role, local_runners=runners, commit=False)
     if result == "last_admin":
         logger.warning(
             "SSO groups would demote %r, the last admin login: the role stays admin", user.name
         )
-        result = change_user(session, user, local_runners=runners)
+        result = change_user(session, user, local_runners=runners, commit=False)
     return result
 
 
@@ -345,8 +358,10 @@ def _holder(session: Session, issuer: str, subject: str) -> User | None:
 
 
 def _email_verified(claims: dict[str, Any]) -> bool:
-    """``email_verified`` as a boolean. Absent counts as verified; "true"/"false" in any
-    case are read as booleans; any other value counts as unverified (fail closed)."""
+    """``email_verified`` as a boolean, for matching the identity claim only. Absent
+    counts as verified; "true"/"false" in any case are read as booleans; any other value
+    counts as unverified (fail closed). The domain gate grants access, so it uses the
+    strict ``verified_email`` instead."""
     value = claims.get("email_verified", True)
     if isinstance(value, bool):
         return value
@@ -515,4 +530,4 @@ def _match(session: Session, claims: dict[str, Any], issuer: str, claim: str) ->
             f"{user.name!r} is already linked to {user.oidc_issuer!r}, not subject {subject!r}",
         )
     user.oidc_issuer, user.oidc_subject = issuer, subject
-    return repo.save_user(session, user)
+    return repo.save_user(session, user, commit=False)  # _link commits

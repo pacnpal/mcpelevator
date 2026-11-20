@@ -816,7 +816,7 @@ registry — see [`backend/app/catalog/README.md`](backend/app/catalog/README.md
 | `MCPE_OIDC_ALLOWED_GROUPS` | _(none)_ | Seed: only people in one of these groups may sign in, comma-separated |
 | `MCPE_OIDC_ADMIN_GROUPS` | _(none)_ | Seed: people in one of these groups sign in as Admin and everyone else as Member, comma-separated. Set, it locks the role against manual edits |
 | `MCPE_OIDC_LOCAL_RUNNER_GROUPS` | _(none)_ | Seed: people in one of these groups get the local-runner permission at sign-in, everyone else loses it, comma-separated. Set, it locks the permission |
-| `MCPE_OIDC_ALLOWED_DOMAINS` | _(none)_ | Seed: only people whose verified email domain (or Google `hd` claim) is listed may sign in, comma-separated |
+| `MCPE_OIDC_ALLOWED_DOMAINS` | _(none)_ | Seed: only people whose verified email domain (`email_verified` true) or Google `hd` claim is listed may sign in, comma-separated |
 | `MCPE_ACCESS_LOG` | `false` | uvicorn's one-line-per-request access log (`"GET /api/servers/… 200 OK"`) in the container log when debug mode is off. Off by default because the UI polls; debug mode always logs requests |
 | `MCPE_LOG_LEVEL` | `INFO` | Level of mcpelevator's own log lines when debug mode is off: server starts, failures with the reason and the server's last output lines, crashes, idle stops. `WARNING` keeps only failures |
 | `MCPE_DEBUG` | `false` | Debug mode: TRACE-level logs everywhere (bridges too), a full trace of every request with secrets scrubbed, crash reporting, and `GET /api/debug`; see **Debug mode** |
@@ -925,7 +925,7 @@ Sign-in requests the `openid email profile` scopes plus any extras you set. ID t
 
 **Group mapping** — **Settings → SSO** can let the identity provider's groups decide access. The groups come from the claim named by `oidc_groups_claim` (default `groups`) in the ID token and userinfo claims merged. The name is tried as a literal key first, so URL-shaped names with dots work, then as a dotted path such as `realm_access.roles`. A list counts its strings, a single string is one group, an object counts its keys, and anything else or no claim means no groups. Four lists, each empty by default:
 - `oidc_allowed_groups`: a person in none of them is refused (`reason=not_allowed`).
-- `oidc_allowed_domains`: the domain of a verified email, or Google's `hd` claim when sent, must be listed (`reason=domain_not_allowed`). For providers that send no groups, such as Google.
+- `oidc_allowed_domains`: the domain of a verified email, or Google's `hd` claim when sent, must be listed (`reason=domain_not_allowed`). It needs that positive evidence: an email counts only when the provider sends `email_verified` as true, so a provider that omits it (Entra ID) passes only by `hd`. For providers that send no groups, such as Google.
 - `oidc_admin_groups`: every sign-in sets the role, Admin when the person is in one of them and Member otherwise.
 - `oidc_local_runner_groups`: every sign-in sets the local-runner permission the same way.
 

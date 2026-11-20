@@ -108,10 +108,12 @@ def change_user(
     role: str | None = None,
     local_runners: bool | None = None,
     control_mcp: bool | None = None,
+    commit: bool = True,
 ) -> User | str:
     """The one user mutation, shared by ``PATCH /users`` and the SSO group sync. The
     caller holds the config write lock. Fields left None stay. Returns the saved user,
-    or "last_admin" (nothing written) when a demotion would leave no admin login."""
+    or "last_admin" (nothing written) when a demotion would leave no admin login.
+    ``commit=False`` only flushes, so the caller commits it with its other writes."""
     if role is not None and role != user.role:
         if user.role == "admin" and not _admin_login_would_remain(
             session, excluding_user_id=user.id
@@ -125,7 +127,9 @@ def change_user(
             # benign state (an admin with fewer tokens), never a member holding
             # admin-grade credentials. Login (control) tokens stay: they simply
             # resolve to the member role from now on.
-            repo.delete_tokens_by_ids(session, _overprivileged_token_ids(session, user.id))
+            repo.delete_tokens_by_ids(
+                session, _overprivileged_token_ids(session, user.id), commit=commit
+            )
         user.role = role
     if name is not None:
         user.name = name.strip()
@@ -133,7 +137,7 @@ def change_user(
         user.local_runners = local_runners
     if control_mcp is not None:
         user.control_mcp = control_mcp
-    return repo.save_user(session, user)
+    return repo.save_user(session, user, commit=commit)
 
 
 @router.get("/users", response_model=list[UserInfo])

@@ -515,7 +515,7 @@ def delete_tokens_by_scope(session: Session, scope: str) -> int:
     return len(tokens)
 
 
-def delete_tokens_by_ids(session: Session, token_ids: list[str]) -> int:
+def delete_tokens_by_ids(session: Session, token_ids: list[str], *, commit: bool = True) -> int:
     """Hard-delete the given tokens in one transaction; returns the count removed.
     Used for policy-driven revocations (owner reassignment, admin demotion) where
     the caller has already decided WHICH rows lose validity — keeping the decision
@@ -526,8 +526,10 @@ def delete_tokens_by_ids(session: Session, token_ids: list[str]) -> int:
         if token is not None:
             session.delete(token)
             removed += 1
-    if removed:
+    if removed and commit:
         session.commit()
+    elif removed:
+        session.flush()
     return removed
 
 
@@ -586,9 +588,13 @@ def list_users(session: Session) -> list[User]:
     return list(session.exec(select(User).order_by(User.created_at)).all())
 
 
-def save_user(session: Session, user: User) -> User:
+def save_user(session: Session, user: User, *, commit: bool = True) -> User:
+    """``commit=False`` only flushes, for a caller that commits several writes as one."""
     user.updated_at = utcnow()
     session.add(user)
+    if not commit:
+        session.flush()
+        return user
     session.commit()
     session.refresh(user)
     return user

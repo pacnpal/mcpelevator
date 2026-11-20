@@ -180,8 +180,8 @@ def build(app: FastAPI) -> "_Gate":
         groups, as Zitadel's roles claim), oidc_allowed_groups (non-empty: anyone in
         none of them is refused), oidc_admin_groups (non-empty: the role becomes admin
         when the person is in one, else member), oidc_local_runner_groups (the same for
-        the local-runner permission), and oidc_allowed_domains (non-empty: the verified
-        email's domain, or Google's hd claim when sent, must be listed). An empty list
+        the local-runner permission), and oidc_allowed_domains (non-empty: the domain of
+        an email whose email_verified is true, or Google's hd claim, must be listed). An empty list
         leaves its field manual; a non-empty admin or local-runner list locks that field
         against update_user. A demotion that would leave no admin login is skipped. While
         a group list is set, an Entra groups overage refuses the sign-in. The "groups" scope is requested when

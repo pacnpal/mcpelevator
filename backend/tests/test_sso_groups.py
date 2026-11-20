@@ -16,7 +16,9 @@ from conftest import LOOPBACK
 # idp is the fixture; the rest are the sign-in helpers.
 from test_sso_sign_in import (
     _enforce,
+    _linked_issuer,
     _reason,
+    _sessions,
     _settings,
     _sign_in,
     _signed_in,
@@ -124,7 +126,7 @@ def test_no_groups_claim_with_allowed_groups_is_not_allowed(idp):
 
 def test_an_unlisted_email_domain_is_refused(idp):
     _ada()
-    idp.claims = {"email": "ada@example.com"}
+    idp.claims = {"email": "ada@example.com", "email_verified": True}
     _settings(oidc_allowed_domains=["acme.example"])
     with TestClient(app) as client:
         assert _reason(_sign_in(client, idp)) == "domain_not_allowed"
@@ -138,6 +140,27 @@ def test_an_unverified_emails_domain_does_not_count(idp):
     _settings(oidc_identity_claim="preferred_username", oidc_allowed_domains=["example.com"])
     with TestClient(app) as client:
         assert _reason(_sign_in(client, idp)) == "domain_not_allowed"
+
+
+@pytest.mark.parametrize("verified", [None, 1, "yes"], ids=["absent", "number", "word"])
+def test_an_email_domain_without_an_explicit_true_verification_does_not_count(idp, verified):
+    # Entra's email is editable and carries no email_verified: no evidence, no domain.
+    _user("ada")
+    idp.claims = {"preferred_username": "ada", "email": "ada@example.com"}
+    if verified is not None:
+        idp.claims["email_verified"] = verified
+    _settings(oidc_identity_claim="preferred_username", oidc_allowed_domains=["example.com"])
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "domain_not_allowed"
+
+
+@pytest.mark.parametrize("verified", [True, "true", "TRUE"])
+def test_an_explicitly_verified_emails_domain_counts(idp, verified):
+    _user("ada")
+    idp.claims = {"preferred_username": "ada", "email": "ada@example.com", "email_verified": verified}
+    _settings(oidc_identity_claim="preferred_username", oidc_allowed_domains=["example.com"])
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
 
 
 def test_googles_hd_passes_a_listed_domain(idp):
@@ -206,6 +229,24 @@ def test_demoting_the_last_admin_is_skipped_with_a_warning(idp, caplog):
     assert _role(uid) == ("admin", True)
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1 and "last admin" in warnings[0].getMessage()
+
+
+def test_a_provider_change_while_the_provider_answers_writes_no_groups_or_link(idp):
+    uid = _ada()
+    idp.claims = {"email": "ada@example.com", "groups": ["admins"]}
+    _settings(oidc_admin_groups=["admins"])
+    answer = idp._token
+
+    def slow_token(request):  # an admin moves SSO to another client while this is pending
+        _settings(oidc_client_id="another")
+        return answer(request)
+
+    idp._token = slow_token
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "expired"
+    assert _role(uid)[0] == "member"
+    assert _linked_issuer("ada@example.com") is None
+    assert _sessions() == 0
 
 
 # ---- the lock on managed fields -------------------------------------------------------

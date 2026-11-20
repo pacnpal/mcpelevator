@@ -115,8 +115,8 @@ DEFAULTS: dict[str, Any] = {
     "oidc_admin_groups": [],
     # The same for the local-runner permission.
     "oidc_local_runner_groups": [],
-    # Non-empty: only people whose verified email domain (or Google's hd claim, when
-    # sent) is listed may sign in. Lowercase domains.
+    # Non-empty: only people whose verified email domain (email_verified true, never
+    # assumed) or Google's hd claim is listed may sign in. Lowercase domains.
     "oidc_allowed_domains": [],
 }
 

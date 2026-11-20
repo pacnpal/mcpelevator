@@ -238,6 +238,25 @@ async def test_subject_allowlist(session, keypair):
     assert exc.value.status_code == 403
 
 
+async def test_subject_allowlist_counts_an_email_only_when_explicitly_verified(session, keypair):
+    runtime_settings.write(
+        session,
+        {
+            "oauth_config_url": CONFIG_URL,
+            "oauth_audience": AUDIENCE,
+            "oauth_allowed_subjects": ["ada@example.com"],
+        },
+    )
+    for unverified in ({}, {"email_verified": False}, {"email_verified": "yes"}):
+        tok = _token(keypair, subject="s", additional_claims={"email": "Ada@example.com", **unverified})
+        with pytest.raises(HTTPException) as exc:
+            await OAuthProvider().authenticate(_request({"Authorization": f"Bearer {tok}"}), _server())
+        assert exc.value.status_code == 403
+    for verified in (True, "true"):
+        tok = _token(keypair, subject="s", additional_claims={"email": "Ada@example.com", "email_verified": verified})
+        await OAuthProvider().authenticate(_request({"Authorization": f"Bearer {tok}"}), _server())
+
+
 async def test_subject_allowlist_matches_sub_case_sensitively(session, keypair):
     runtime_settings.write(
         session,

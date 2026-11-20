@@ -195,7 +195,7 @@ async def oidc_callback(
     try:
         user, id_token = await oidc.finish(
             session, code=code, verifier=flow["verifier"], nonce=flow["nonce"],
-            redirect_uri=redirect_uri, iss=iss,
+            redirect_uri=redirect_uri, iss=iss, provider=flow.get("provider"),
         )
     except oidc.SignInFailed as exc:
         return _sso_error(exc.reason, str(exc), state, exc.claim)
