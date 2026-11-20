@@ -207,17 +207,23 @@ async def oidc_callback(
         return _sso_error(exc.reason, str(exc), state, exc.claim)
     pair = (user.oidc_issuer, user.oidc_subject)
 
+    deactivated = False
+
     def still_linked(s: Session) -> bool:
+        nonlocal deactivated
         row = s.get(User, user.id)
+        deactivated = row is not None and not row.active
         return (
-            same_provider(s) and row is not None
+            same_provider(s) and row is not None and row.active
             and (row.oidc_issuer, row.oidc_subject) == pair
         )
 
-    # Checked again as the session row is written: a settings write or an unlink can
-    # land while the provider answered, and both end sessions, so one started after
-    # must not survive.
+    # Checked again as the session row is written: a settings write, an unlink or a
+    # deactivation can land while the provider answered, and each ends sessions, so one
+    # started after must not survive (a deactivated user's would revive on reactivation).
     raw = sign_in.start(session, user.id, grant, flow.get("settings"), still_valid=still_linked)
+    if raw is None and deactivated:
+        return _sso_error(oidc.DEACTIVATED, f"{user.name!r} was deactivated during sign-in", state)
     if raw is None:
         return _sso_error(oidc.EXPIRED, "the SSO settings changed while this login finished", state)
     resp = RedirectResponse(_safe_next(flow.get("next")), status_code=303)

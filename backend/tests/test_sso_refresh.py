@@ -27,8 +27,9 @@ from test_sso_sign_in import (
 )
 
 from app import main
+from app.auth import oidc
 from app.db import get_engine
-from app.db.models import Setting, SignInSession
+from app.db.models import Setting, SignInSession, User
 from app.main import app
 from app.registry import settings as runtime_settings
 
@@ -111,6 +112,31 @@ def test_a_refreshed_id_token_for_another_subject_ends_the_session(idp):
         _age(soft=True)
         assert _status(client)["authenticated"] is False
     assert _sessions() == 0
+
+
+def test_a_deactivation_the_refresh_meets_ends_the_session(idp, monkeypatch):
+    uid = _user("ada@example.com")
+    real = oidc._with_userinfo
+
+    async def userinfo_then_deactivate(*args, **kwargs):
+        claims = await real(*args, **kwargs)
+        with Session(get_engine()) as s:  # lands while the provider answered
+            user = s.get(User, uid)
+            user.active = False
+            s.add(user)
+            s.commit()
+        return claims
+
+    with TestClient(app) as client:
+        admin = _signed_in_ada(client, idp)
+        monkeypatch.setattr(oidc, "_with_userinfo", userinfo_then_deactivate)
+        _age(soft=True)
+        assert _status(client)["authenticated"] is False
+        assert _sessions() == 0
+        monkeypatch.setattr(oidc, "_with_userinfo", real)
+        r = client.patch(f"/api/users/{uid}", json={"active": True}, headers=admin)
+        assert r.status_code == 200
+        assert _sessions() == 0
 
 
 def test_a_provider_outage_keeps_the_session_until_hard_expiry(idp):

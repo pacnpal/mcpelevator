@@ -662,7 +662,7 @@ class SettingsUpdate(BaseModel):
     oidc_identity_claim: Optional[str] = None
     # Entra tenant GUIDs allowed to sign in through a multi-tenant issuer.
     oidc_allowed_tenants: Optional[list[str]] = None
-    oidc_require_verified_email: Optional[bool] = None
+    oidc_require_verified_email: Optional[StrictBool] = None
     # The claim holding the person's groups: a literal key first, then a dotted path.
     oidc_groups_claim: Optional[str] = None
     # Non-empty: only members of one of these groups may sign in.
@@ -674,7 +674,7 @@ class SettingsUpdate(BaseModel):
     # Non-empty: only these verified email domains (or Google hd values) may sign in.
     oidc_allowed_domains: Optional[list[str]] = None
     # On: a sign-in that matches no user creates one (a Member, local runners off).
-    oidc_provisioning: Optional[bool] = None
+    oidc_provisioning: Optional[StrictBool] = None
     # Hard cap on a Sign-in session in seconds (≥ 300). StrictInt like idle_timeout_s.
     oidc_session_max_age_s: Optional[StrictInt] = None
 
