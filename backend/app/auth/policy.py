@@ -13,8 +13,8 @@ The rules (deterministic, documented once here):
   and the local runners (npx/uvx/command/docker — code execution on this box)
   only when their ``local_runners`` flag is on.
 - **Token scopes**: an admin may mint any scope. A member may mint tokens only
-  for servers they own — not ``all``, not ``control``, not ``group:*`` (groups
-  are a global, admin-owned surface).
+  for servers they own — not ``all``, not ``control``, not ``scim``, not
+  ``group:*`` (groups are a global, admin-owned surface).
 - **Token visibility**: an admin sees every token; a member sees only their own.
 """
 
@@ -93,7 +93,7 @@ def token_scope_error(principal: Principal, scope: str, server: Optional[Server]
     scopes). The caller has already validated the scope's own well-formedness."""
     if principal.is_admin:
         return None
-    if scope in ("all", "control") or scope.startswith("group:"):
+    if scope in ("all", "control", "scim") or scope.startswith("group:"):
         return f"only admins may mint {scope!r}-scoped tokens"
     if server is None or not can_view_server(principal, server):
         # Same shape as the admin path's dangling-id error: existence is not leaked.

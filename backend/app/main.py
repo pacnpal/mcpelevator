@@ -25,6 +25,7 @@ from app.api import auth as auth_api
 from app.api import catalog as catalog_api
 from app.api import groups as groups_api
 from app.api import health as health_api
+from app.api import scim as scim_api
 from app.api import servers as servers_api
 from app.api import settings as settings_api
 from app.api import tokens as tokens_api
@@ -299,7 +300,8 @@ def create_app() -> FastAPI:
         # otherwise hit loopback and mint tokens / change settings. This is the
         # first of two layers; require_control_plane (on the sensitive routers)
         # adds per-request bearer auth when enforcement is on.
-        if request.url.path == "/api" or request.url.path.startswith("/api/"):
+        path = request.url.path
+        if path == "/api" or path.startswith(("/api/", scim_api.PREFIX + "/")):
             with Session(get_engine()) as session:
                 try:
                     enforce_host(request, session)
@@ -326,6 +328,9 @@ def create_app() -> FastAPI:
     # also declare require_admin themselves — defense in depth at include time).
     app.include_router(groups_api.router, prefix="/api", dependencies=gated)
     app.include_router(users_api.router, prefix="/api", dependencies=gated)
+    # SCIM provisioning: its own scim-scoped token, never the control-plane gate.
+    app.add_exception_handler(scim_api.ScimError, scim_api.error_response)
+    app.include_router(scim_api.router)
     # Admin-only diagnostics bundle; 404 unless MCPE_DEBUG is on (app.debug).
     app.include_router(debug.router, prefix="/api")
     # The control plane as an MCP server; its tools call the routers above in-process

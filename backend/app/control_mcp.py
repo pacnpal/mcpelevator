@@ -492,7 +492,9 @@ def build(app: FastAPI) -> "_Gate":
     @mcp.tool(annotations=_ADD)
     async def create_token(name: str, scope: str = "all") -> Any:
         """Mint a token. ``scope``: "all" (every bearer-protected server), a server id,
-        "group:<name>", or "control" (control plane). The plaintext is returned once."""
+        "group:<name>", "control" (control plane), or "scim" (admin only: SCIM
+        provisioning at <base>/scim/v2 and nothing else, the Bearer secret for an
+        identity provider's SCIM client). The plaintext is returned once."""
         return await api("POST", "/api/tokens", json={"name": name, "scope": scope})
 
     @mcp.tool(annotations=_DESTRUCTIVE)
