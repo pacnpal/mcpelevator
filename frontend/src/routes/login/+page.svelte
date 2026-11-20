@@ -31,6 +31,14 @@
 			'Your identity provider says your email address is not verified. Verify it at the provider, or ask your admin to match users by preferred_username or to turn off the verified email requirement.',
 		identity_conflict:
 			'The user that matches your account here is already linked to a different identity provider account. Ask an admin to unlink it, then sign in again.',
+		not_allowed:
+			'Your identity provider account is not in a group allowed to sign in here. Ask your admin to add you to one.',
+		groups_overage:
+			'Your identity provider left your groups out of the sign-in because there are too many of them, so they could not be checked. Ask your admin to limit the groups sent to this app.',
+		domain_not_allowed:
+			'Your email domain is not allowed to sign in here, or your email is not verified. Ask your admin.',
+		last_admin_demoted:
+			'Your identity provider no longer puts you in an admin group, and this is the last admin account. Another admin login or MCPE_ADMIN_TOKEN must exist before this account can sign in through SSO.',
 		expired: 'That sign-in took too long or was already used. Start it again.',
 		sso_disabled: 'SSO sign-in is turned off on this instance.'
 	});

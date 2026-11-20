@@ -18,7 +18,7 @@ Core configuration is stored in runtime settings (see ``app.registry.settings``)
   issuer URL also works (``/.well-known/openid-configuration`` is appended).
 * ``oauth_audience`` — required ``aud`` to require in tokens.
 * ``oauth_allowed_subjects`` — optional identity allowlist. Friendly username,
-  login, and email claims match case-insensitively; OIDC ``sub`` matches exactly.
+  login, and verified email claims match case-insensitively; OIDC ``sub`` matches exactly.
 
 Signature, issuer, and audience checks are delegated to fastmcp's ``JWTVerifier``
 (already a core dependency — the bridges are fastmcp proxies). This module wraps
@@ -237,18 +237,26 @@ def _challenge(base: str, server: Server, error: Optional[str] = None) -> dict[s
     return {"WWW-Authenticate": " ".join(parts)}
 
 
+def verified_email(claims: dict[str, Any]) -> str | None:
+    """The ``email`` claim when ``email_verified`` is explicitly true (the boolean, or
+    "true" in any case), else None. For decisions that grant access: an absent
+    ``email_verified`` is no evidence the person controls the address (Entra's is
+    editable and carries none)."""
+    email, flag = claims.get("email"), claims.get("email_verified")
+    verified = flag is True or (isinstance(flag, str) and flag.lower() == "true")
+    return email if verified and isinstance(email, str) and email else None
+
+
 def _identity_allowed(claims: dict[str, Any], allowed: list[str]) -> bool:
-    """Match stable subjects exactly and friendly identity claims case-insensitively."""
+    """Match stable subjects exactly and friendly identity claims case-insensitively.
+    An email counts only when verified (``verified_email``)."""
     exact = set(allowed)
     subject = claims.get("sub")
     if subject is not None and str(subject) in exact:
         return True
     lowered = {value.lower() for value in allowed}
-    return any(
-        str(claims[key]).lower() in lowered
-        for key in ("preferred_username", "login", "email")
-        if claims.get(key)
-    )
+    friendly = (claims.get("preferred_username"), claims.get("login"), verified_email(claims))
+    return any(str(value).lower() in lowered for value in friendly if value)
 
 
 def _claims_are_current(claims: dict[str, Any]) -> bool:

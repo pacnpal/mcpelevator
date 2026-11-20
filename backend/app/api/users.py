@@ -29,6 +29,7 @@ from app.config import get_settings
 from app.db import get_session, repo
 from app.db.models import Token, User
 from app.registry import service
+from app.registry import settings as runtime_settings
 from app.util import hash_token, new_id, new_token
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -40,10 +41,13 @@ def _info(
     *,
     servers_count: int | None = None,
     tokens_count: int | None = None,
+    managed: dict[str, bool] | None = None,
 ) -> UserInfo:
     """One user's API shape. The counts default to per-user queries (fine for the
     single-user endpoints); ``list_users`` passes bulk-computed values instead so
     listing N users costs a constant number of queries, not 2N+1."""
+    if managed is None:
+        managed = runtime_settings.managed_user_fields(session)
     if tokens_count is None:
         tokens_count = sum(1 for t in repo.list_tokens(session) if t.user_id == user.id)
     if servers_count is None:
@@ -58,6 +62,7 @@ def _info(
         tokens_count=tokens_count,
         created_at=user.created_at,
         linked_issuer=user.oidc_issuer,
+        managed=managed,
     )
 
 
@@ -95,6 +100,46 @@ def _admin_login_would_remain(session: Session, *, excluding_user_id: str) -> bo
     return repo.admin_credential_exists(session, excluding_user_id=excluding_user_id)
 
 
+def change_user(
+    session: Session,
+    user: User,
+    *,
+    name: str | None = None,
+    role: str | None = None,
+    local_runners: bool | None = None,
+    control_mcp: bool | None = None,
+    commit: bool = True,
+) -> User | str:
+    """The one user mutation, shared by ``PATCH /users`` and the SSO group sync. The
+    caller holds the config write lock. Fields left None stay. Returns the saved user,
+    or "last_admin" (nothing written) when a demotion would leave no admin login.
+    ``commit=False`` only flushes, so the caller commits it with its other writes."""
+    if role is not None and role != user.role:
+        if user.role == "admin" and not _admin_login_would_remain(
+            session, excluding_user_id=user.id
+        ):
+            return "last_admin"
+        if user.role == "admin" and role == "member":
+            # Demotion revokes the data-plane tokens the user could only mint AS an
+            # admin ("all", group scopes, and scopes for servers they don't own),
+            # otherwise those tokens would keep authorizing endpoints the member role
+            # can't reach. Revoke BEFORE the role save so an interruption leaves the
+            # benign state (an admin with fewer tokens), never a member holding
+            # admin-grade credentials. Login (control) tokens stay: they simply
+            # resolve to the member role from now on.
+            repo.delete_tokens_by_ids(
+                session, _overprivileged_token_ids(session, user.id), commit=commit
+            )
+        user.role = role
+    if name is not None:
+        user.name = name.strip()
+    if local_runners is not None:
+        user.local_runners = local_runners
+    if control_mcp is not None:
+        user.control_mcp = control_mcp
+    return repo.save_user(session, user, commit=commit)
+
+
 @router.get("/users", response_model=list[UserInfo])
 async def list_users(session: Session = Depends(get_session)):
     servers_by_user = Counter(
@@ -103,12 +148,14 @@ async def list_users(session: Session = Depends(get_session)):
     tokens_by_user = Counter(
         t.user_id for t in repo.list_tokens(session) if t.user_id is not None
     )
+    managed = runtime_settings.managed_user_fields(session)
     return [
         _info(
             session,
             u,
             servers_count=servers_by_user.get(u.id, 0),
             tokens_count=tokens_by_user.get(u.id, 0),
+            managed=managed,
         )
         for u in repo.list_users(session)
     ]
@@ -167,31 +214,16 @@ async def update_user(
             user = repo.get_user(session, user_id)
             if user is None:
                 return "not_found"
-            if payload.name is not None:
-                user.name = payload.name.strip()
-            if payload.role is not None and payload.role != user.role:
-                if user.role == "admin" and not _admin_login_would_remain(
-                    session, excluding_user_id=user.id
-                ):
-                    return "last_admin"
-                if user.role == "admin" and payload.role == "member":
-                    # Demotion revokes the data-plane tokens the user could only
-                    # mint AS an admin ("all", group scopes, and scopes for servers
-                    # they don't own) — otherwise those tokens would keep
-                    # authorizing endpoints the member role can't reach. Revoke
-                    # BEFORE the role save so an interruption leaves the benign
-                    # state (an admin with fewer tokens), never a member holding
-                    # admin-grade credentials. Login (control) tokens stay: they
-                    # simply resolve to the member role from now on.
-                    repo.delete_tokens_by_ids(
-                        session, _overprivileged_token_ids(session, user.id)
-                    )
-                user.role = payload.role
-            if payload.local_runners is not None:
-                user.local_runners = payload.local_runners
-            if payload.control_mcp is not None:
-                user.control_mcp = payload.control_mcp
-            return repo.save_user(session, user)
+            # A field provider groups manage would be reset at the next sign-in, so a
+            # hand edit is refused rather than silently reverted.
+            managed = runtime_settings.managed_user_fields(session)
+            for field in ("role", "local_runners"):
+                if getattr(payload, field) is not None and managed[field]:
+                    return ("managed", runtime_settings.MANAGED_USER_FIELDS[field])
+            return change_user(
+                session, user, name=payload.name, role=payload.role,
+                local_runners=payload.local_runners, control_mcp=payload.control_mcp,
+            )
 
     # Threadpool: the lock is a threading lock shared with imports deriving scrypt
     # hashes — never wait for it on the event loop.
@@ -200,6 +232,11 @@ async def update_user(
         raise _FORBIDDEN
     if result == "not_found":
         raise HTTPException(status_code=404, detail="user not found")
+    if isinstance(result, tuple):
+        raise HTTPException(
+            status_code=409,
+            detail=f"managed by the {result[1]} setting: the identity provider's groups set it at sign-in",
+        )
     if result == "last_admin":
         raise HTTPException(
             status_code=409,

@@ -97,15 +97,13 @@ def _bootstrap_oidc() -> None:
     seeded: ``MCPE_OIDC_CLIENT_SECRET`` is read live and always wins. Enabling from the
     env skips the discovery check a Settings save runs; sign-in reports a bad provider."""
     env = get_settings()
-    scopes = [s.strip() for s in env.oidc_scopes.split(",") if s.strip()]
-    tenants = [t.strip() for t in env.oidc_allowed_tenants.split(",") if t.strip()]
     for key, value in (
         ("oidc_discovery_url", env.oidc_discovery_url),
         ("oidc_client_id", env.oidc_client_id),
         ("oidc_label", env.oidc_label),
-        ("oidc_scopes", scopes),
+        ("oidc_scopes", _split(env.oidc_scopes)),
         ("oidc_identity_claim", env.oidc_identity_claim),
-        ("oidc_allowed_tenants", tenants),
+        ("oidc_allowed_tenants", _split(env.oidc_allowed_tenants)),
         ("oidc_enabled", env.oidc_enabled),
     ):
         _seed_setting_from_env(value, key)
@@ -117,6 +115,24 @@ def _bootstrap_oidc() -> None:
                 runtime_settings.write(
                     session, {"oidc_require_verified_email": env.oidc_require_verified_email}
                 )
+
+
+def _split(raw: str) -> list[str]:
+    """A comma-separated env value as a list, blanks dropped."""
+    return [v.strip() for v in raw.split(",") if v.strip()]
+
+
+def _bootstrap_oidc_groups() -> None:
+    """Seed the SSO group mapping settings from ``MCPE_OIDC_*`` (lists comma-separated)."""
+    env = get_settings()
+    for key, value in (
+        ("oidc_groups_claim", env.oidc_groups_claim),
+        ("oidc_allowed_groups", _split(env.oidc_allowed_groups)),
+        ("oidc_admin_groups", _split(env.oidc_admin_groups)),
+        ("oidc_local_runner_groups", _split(env.oidc_local_runner_groups)),
+        ("oidc_allowed_domains", _split(env.oidc_allowed_domains)),
+    ):
+        _seed_setting_from_env(value, key)
 
 
 def _bootstrap_control_plane_auth() -> None:
@@ -193,6 +209,7 @@ async def lifespan(app: FastAPI):
     _bootstrap_private_lan()  # seed LAN access from env before deciding auth enforcement
     _bootstrap_docker_runner()  # seed docker-runner enable from env (headless)
     _bootstrap_oidc()  # seed single sign-on settings from MCPE_OIDC_* (headless)
+    _bootstrap_oidc_groups()
     _bootstrap_control_plane_auth()
     # No timeout: long-lived SSE streams. No connection cap either: the /s proxy holds a
     # pooled connection for every open client stream, so httpx's default cap of 100 was

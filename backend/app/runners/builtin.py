@@ -104,6 +104,10 @@ Typical flows:
   new provider, then unlink_user_identity for each user whose list_users
   linked_issuer is the old one. Their next sign-in through the new provider
   links them by name. The same call fixes a wrong match.
+- Let the identity provider decide access: update_settings with
+  oidc_allowed_groups (who may sign in), oidc_admin_groups and
+  oidc_local_runner_groups (set at each sign-in, then locked against
+  update_user), and oidc_groups_claim when the groups aren't in "groups".
 Server ids (not slugs) identify servers in every tool. Lifecycle tools write
 desired state and the supervisor converges, so use wait_for_server after them.
 Read-only views are also resources (mcpelevator://servers, .../servers/{id},

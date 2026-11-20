@@ -124,6 +124,12 @@ class Settings(BaseSettings):
     oidc_allowed_tenants: str = ""
     # Unset (None) leaves the default (on); unlike the other seeds, false is a value.
     oidc_require_verified_email: bool | None = None
+    # Group mapping seeds; the lists are comma-separated.
+    oidc_groups_claim: str = ""
+    oidc_allowed_groups: str = ""
+    oidc_admin_groups: str = ""
+    oidc_local_runner_groups: str = ""
+    oidc_allowed_domains: str = ""
     # Catalog: keep a local copy of each directory (data_dir/catalog-mirror.db), synced
     # in the background, so browsing doesn't depend on the upstream being up. The MCP
     # Registry promises no uptime and asks consumers to sync about hourly.

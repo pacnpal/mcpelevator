@@ -605,6 +605,16 @@ export interface SettingsInfo {
 	oidc_allowed_tenants: string[];
 	/** With the email identity claim, refuse an unverified email. */
 	oidc_require_verified_email: boolean;
+	/** The claim holding the person's groups: a literal key first, then a dotted path. */
+	oidc_groups_claim: string;
+	/** Non-empty: only members of one of these groups may sign in. */
+	oidc_allowed_groups: string[];
+	/** Non-empty: each sign-in sets the role from these groups, and locks it. */
+	oidc_admin_groups: string[];
+	/** Non-empty: each sign-in sets the local-runner permission from these, and locks it. */
+	oidc_local_runner_groups: string[];
+	/** Non-empty: only these verified email domains (or Google `hd`) may sign in. */
+	oidc_allowed_domains: string[];
 	/** Read-only: the redirect URI to register at the provider. */
 	oidc_redirect_uri: string;
 }
@@ -681,6 +691,8 @@ export interface UserInfo {
 	created_at: string;
 	/** Issuer of the user's Linked identity (SSO), null when they have none. */
 	linked_issuer: string | null;
+	/** Fields the identity provider's groups set at sign-in; PATCH refuses them. */
+	managed: { role: boolean; local_runners: boolean };
 }
 
 /** Response of POST /api/users/{id}/credentials — the login token, plaintext exactly once. */

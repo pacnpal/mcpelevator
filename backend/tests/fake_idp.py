@@ -18,8 +18,8 @@ Provider quirks, one setting each: ``alg`` (``RS256``, ``EdDSA``, or ``HS256`` s
 from the ID token's ``iss``, e.g. Entra's ``{tenantid}`` template), ``jwks_issuer`` (an
 ``issuer`` field on every JWKS key, as Entra serves), ``client_secret`` (None = a public
 client: the token endpoint wants ``client_id`` in the body and no client authentication)
-and ``auth_methods`` (the advertised ``token_endpoint_auth_methods_supported``, enforced),
-``end_session`` (discovery advertises an ``end_session_endpoint``).
+``auth_methods`` (the advertised ``token_endpoint_auth_methods_supported``, enforced),
+``scopes_supported`` (advertised in discovery when set) and ``end_session`` (discovery advertises an ``end_session_endpoint``).
 ``last_authorize`` holds the last authorization request's query; ``seen`` the path of every
 request the app made to the provider.
 """
@@ -60,6 +60,7 @@ class FakeIdP:
         self.jwks_issuer: str | None = None
         self.client_secret: str | None = None
         self.auth_methods: list[str] | None = None
+        self.scopes_supported: list[str] | None = None
         self.end_session = False
         self.last_authorize: dict[str, str] = {}
         self.seen: list[str] = []
@@ -128,6 +129,8 @@ class FakeIdP:
                 doc["userinfo_endpoint"] = f"{self.issuer}/userinfo"
             if self.auth_methods is not None:
                 doc["token_endpoint_auth_methods_supported"] = self.auth_methods
+            if self.scopes_supported is not None:
+                doc["scopes_supported"] = self.scopes_supported
             if self.end_session:
                 doc["end_session_endpoint"] = f"{self.issuer}/logout"
             return httpx.Response(200, json=doc)
