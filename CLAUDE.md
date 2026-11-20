@@ -307,4 +307,4 @@ Use the canonical `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-hu
 
 ### Domain docs
 
-This repo uses a single-context layout with `CONTEXT.md` at the root and ADRs under `docs/adr/`. See `docs/agents/domain.md`.
+This repo uses a single-context layout with `GLOSSARY.md` at the root and ADRs under `docs/adr/`. See `docs/agents/domain.md`.
