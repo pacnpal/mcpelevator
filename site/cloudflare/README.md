@@ -20,6 +20,23 @@ npx wrangler login     # one time, opens a browser
 npx wrangler deploy
 ```
 
+### Or through the cloudflare-api MCP server
+
+The mcpelevator instance hosts Cloudflare's own MCP server as `cloudflare-api`
+(`https://mcp.pacnpal.com/s/cloudflare-api/mcp`), signed in to the account that owns
+`pacnp.al`. Its `execute` tool can do the same deploy with no local `wrangler` login. Ask
+an agent connected to it to:
+
+1. Upload `worker.js` as the module Worker `mcpelevator-site`: a multipart `PUT` to
+   `/accounts/{account_id}/workers/scripts/mcpelevator-site`, with metadata
+   `{"main_module": "worker.js", "compatibility_date": "2026-03-01"}` (keep the date in
+   step with `wrangler.toml`).
+2. Make sure the `pacnp.al` zone has both routes from `wrangler.toml` pointing at that
+   script (`GET /zones/{zone_id}/workers/routes`, then `POST` any that are missing).
+
+If `cloudflare-api` shows as failed with "needs OAuth sign-in", retry it from the
+mcpelevator UI first. Its stored tokens usually still work.
+
 Then check:
 
 ```bash
