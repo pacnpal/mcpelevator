@@ -37,7 +37,7 @@ One self-hosted container on one port does all of it. The protocol bridging come
 - Per-server: secret env and headers (write-only, shown as `<hidden>`), disabled tools, tool overrides, health checks, idle timeout, a source repository with a post-clone script, upstream OAuth, and REST/OpenAPI exposure.
 - Control plane: access tokens scoped to `all`, one server, or `group:<name>`; users and roles; runtime settings; usage buckets (hourly per-tool counts, never arguments); catalog mirror; debug mode.
 - Frontend: SvelteKit (Svelte 5 runes), static SPA with no SSR, served by the backend. Tailwind v4, LayerChart for charts.
-- Terminology lives in `CONTEXT.md` (Server, Server activation, Server restart, Idle quiescence, Wake-on-request, Disabled tool, Tool override, Usage bucket…). UI copy should use those terms and avoid the listed alternatives.
+- Terminology lives in `GLOSSARY.md` (Server, Server activation, Server restart, Idle quiescence, Wake-on-request, Disabled tool, Tool override, Usage bucket…). UI copy should use those terms and avoid the listed alternatives.
 - Security posture is authorization, not isolation: local runners execute as the process user. The UI must never suggest stronger isolation than that.
 
 ## Brand Commitments
