@@ -161,7 +161,9 @@ def credential_principal(
     identity names a user. None when it names nobody, or names a Deactivated user.
     Callers pass ``sign_in`` only from ``app.auth.sign_in.accepts``, so the cookie never
     counts on ``/s``, ``/g`` or ``/api/mcp``; ``provider_jwt`` only from the control
-    MCP's gate and calls and the ``oauth`` provider's owner check."""
+    MCP's gate and calls, the built-in server's (and its groups') check in the
+    ``bearer`` provider, and the ``oauth`` provider's owner check (which always
+    resolves for the built-in server and its groups)."""
     from app.auth import cf_access  # circular-import guard
     from app.auth import sign_in as sign_in_mod
     from app.auth.control_plane import is_env_admin_token

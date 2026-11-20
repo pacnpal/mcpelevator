@@ -477,3 +477,17 @@ describe('ServerForm OpenAPI base URL preview', () => {
 		}
 	});
 });
+
+describe('ServerForm built-in server auth', () => {
+	it('offers none, bearer and oauth, never inherit', () => {
+		const target = render({
+			mode: 'edit',
+			initial: { name: 'mcpelevator', runner: 'mcpelevator', command: '', args: [] },
+			onsubmit: vi.fn()
+		});
+		const offered = [
+			...target.querySelectorAll<HTMLInputElement>('input[name="auth-provider"]')
+		].map((input) => input.value);
+		expect(offered).toEqual(['none', 'bearer', 'oauth']);
+	});
+});

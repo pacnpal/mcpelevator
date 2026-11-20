@@ -64,15 +64,28 @@ def require_visible_server(principal: Principal, server: Optional[Server]) -> Se
 
 
 def oauth_refusal(
-    caller: object, server: Server, *, allowlisted: bool, owner_only: bool
+    caller: object, server: Server, *, allowlisted: bool, owner_only: bool,
+    builtin: bool = False,
 ) -> Optional[tuple[int, str]]:
     """Why a verified provider access token may NOT reach this ``oauth`` server or group,
     as (status, reason); None = allowed. ``caller`` is who the token resolves to: a
     Principal, None for no one, or anything else for "couldn't tell", which refuses
     where the answer narrows access (``owner_only``, 503 so clients don't re-authenticate
     in a loop) and grants nothing where it would only widen it. ``allowlisted`` is
-    whether ``oauth_allowed_subjects`` lets the token's claims in."""
+    whether ``oauth_allowed_subjects`` lets the token's claims in. ``builtin``: the
+    built-in server, or a group bundling it. Every call there runs as a User, so the
+    token must name one (a group, admin-owned, only an admin) and "couldn't tell"
+    refuses with 503."""
     resolved = isinstance(caller, Principal)
+    if builtin:
+        if caller is None:
+            return 403, ("the token is valid, but no mcpelevator user is linked to that "
+                         "identity; sign in to mcpelevator through SSO once to link it")
+        if not resolved:
+            return 503, "couldn't tell which user this token belongs to; try again shortly"
+        if server.id.startswith("group:") and not caller.is_admin:
+            return 403, "only an admin opens a group that includes the built-in server"
+        return None
     if resolved and can_view_server(caller, server):
         return None
     if owner_only and resolved:

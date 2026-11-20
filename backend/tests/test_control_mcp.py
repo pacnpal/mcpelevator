@@ -209,7 +209,7 @@ def test_builtin_row_guards(client):
     b = _builtin()
     url = f"/api/servers/{b.id}"
     assert client.patch(url, json={"command": "evil"}, headers=LOOPBACK).status_code == 400
-    assert client.patch(url, json={"auth_provider": "oauth"}, headers=LOOPBACK).status_code == 400
+    assert client.patch(url, json={"auth_provider": "kerberos"}, headers=LOOPBACK).status_code == 422
     assert client.patch(url, json={"auth_provider": "inherit"}, headers=LOOPBACK).status_code == 400
     assert client.patch(url, json={"rest_openapi": True}, headers=LOOPBACK).status_code == 400
     ada = client.post("/api/users", json={"name": "Ada"}, headers=LOOPBACK).json()
