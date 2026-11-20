@@ -161,7 +161,9 @@ def credential_principal(
     identity names a user. None when it names nobody, or names a Deactivated user.
     Callers pass ``sign_in`` only from ``app.auth.sign_in.accepts``, so the cookie never
     counts on ``/s``, ``/g`` or ``/api/mcp``; ``provider_jwt`` only from the control
-    MCP's gate and calls and the ``oauth`` provider's owner check."""
+    MCP's gate and calls, the built-in server's (and its groups') check in the
+    ``bearer`` provider, and the ``oauth`` provider's owner check (which always
+    resolves for the built-in server and its groups)."""
     from app.auth import cf_access  # circular-import guard
     from app.auth import sign_in as sign_in_mod
     from app.auth.control_plane import is_env_admin_token
@@ -203,16 +205,26 @@ def credential_principal(
                 local_runners=_effective_local_runners(user), session_id=row.id,
             )
     if provider_jwt and token:
-        from app.auth import oidc  # circular-import guard
-
-        user = oidc.access_token_user(session, token)
-        if user is not None:
-            return Principal(
-                user_id=user.id, name=user.name, role=user.role,
-                local_runners=_effective_local_runners(user),
-                identity=(user.oidc_issuer, user.oidc_subject),
-            )
+        caller = provider_jwt_principal(session, token)
+        if isinstance(caller, Principal):
+            return caller  # UNKNOWN grants nothing here
     return None
+
+
+def provider_jwt_principal(session: Session, token: str):
+    """The principal a provider access token names through its Linked identity: a
+    Principal, None when it names no one, or ``oidc.UNKNOWN`` when that couldn't be told
+    (callers that narrow access on the answer refuse then)."""
+    from app.auth import oidc  # circular-import guard
+
+    user = oidc.resolve_access_token(session, token)
+    if user is None or user is oidc.UNKNOWN:
+        return user
+    return Principal(
+        user_id=user.id, name=user.name, role=user.role,
+        local_runners=_effective_local_runners(user),
+        identity=(user.oidc_issuer, user.oidc_subject),
+    )
 
 
 def refresh(session: Session, principal: Principal) -> Optional[Principal]:

@@ -47,6 +47,7 @@ def test_settings_defaults_and_write(session):
         "oauth_audience": "",
         "oauth_allowed_subjects": [],
         "oauth_accept_bearer": False,
+        "oauth_member_access": "additive",
         "oauth_scopes": [],
         "idle_timeout_s": 0,
         "usage_retention_days": 30,

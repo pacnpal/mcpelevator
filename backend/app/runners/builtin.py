@@ -127,7 +127,17 @@ Typical flows:
   and every server for an admin, even when oauth_allowed_subjects doesn't list
   them, and drives /api/mcp as that user. Other tokens follow the allowlist.
   It never creates, links or changes a user, and isn't a login on the rest of
-  /api.
+  /api. Set oauth_member_access "owner_only" to keep a member's token to the
+  servers they own (no group, even when the allowlist names them).
+- Connect claude.ai (or another OAuth-only client) to this server without
+  Cloudflare: update_settings with oauth_config_url the same issuer as
+  oidc_discovery_url and oauth_audience the audience its access tokens carry,
+  then update_server on this server with auth_provider "oauth". Each person who
+  connects must be a linked user (one SSO sign-in links them by name): an
+  access token runs calls as that user, and one linked to no user is
+  refused. Turn on oauth_accept_bearer to keep login tokens and
+  MCPE_ADMIN_TOKEN working on the same URL. A group naming this server with the
+  default provider at "oauth" opens only to an admin's access token.
 Server ids (not slugs) identify servers in every tool. Lifecycle tools write
 desired state and the supervisor converges, so use wait_for_server after them.
 Read-only views are also resources (mcpelevator://servers, .../servers/{id},

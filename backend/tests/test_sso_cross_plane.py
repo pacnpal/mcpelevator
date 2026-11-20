@@ -74,7 +74,9 @@ def plane(idp, monkeypatch):
         service.ensure_builtin(s)
     yield idp
     with Session(get_engine()) as s:
-        for key in ("oauth_config_url", "oauth_audience", "oauth_allowed_subjects"):
+        for key in (
+            "oauth_config_url", "oauth_audience", "oauth_allowed_subjects", "oauth_member_access",
+        ):
             row = s.get(Setting, key)
             if row is not None:
                 s.delete(row)
@@ -577,3 +579,294 @@ def test_a_queued_jwt_principal_fails_closed_at_refresh(plane, change):
         else:
             assert _unlink(client, ada, admin).status_code == 204
         assert _refreshed(queued) is None
+
+
+# ---- oauth_member_access: owner_only (#275) --------------------------------------
+
+
+def _member_access(mode: str) -> None:
+    with Session(get_engine()) as s:
+        runtime_settings.write(s, {"oauth_member_access": mode})
+
+
+def test_owner_only_refuses_a_member_on_another_members_server_even_when_allowlisted(plane):
+    ada = _linked("ada@example.com", "sub-ada")
+    bob = _linked("bob@example.com", "sub-bob")
+    with TestClient(app) as client:
+        admin = _enforce()
+        hers = _oauth_server(client, admin, "hers", ada)
+        his = _oauth_server(client, admin, "his", bob)
+        _proxying(client)
+        _member_access("owner_only")
+        _allowlist("sub-ada")
+        token = {**LOOPBACK, **_access(plane, "sub-ada")}
+        assert client.get(f"/s/{hers}/mcp", headers=token).status_code == 200
+        r = client.get(f"/s/{his}/mcp", headers=token)
+        assert r.status_code == 403 and "belongs to another user" in r.json()["detail"]
+
+
+def test_owner_only_refuses_a_member_when_no_allowlist_is_set(plane):
+    _linked("ada@example.com", "sub-ada")
+    bob = _linked("bob@example.com", "sub-bob")
+    with TestClient(app) as client:
+        admin = _enforce()
+        his = _oauth_server(client, admin, "his", bob)
+        _proxying(client)
+        token = {**LOOPBACK, **_access(plane, "sub-ada")}
+        assert client.get(f"/s/{his}/mcp", headers=token).status_code == 200  # additive
+        _member_access("owner_only")
+        assert client.get(f"/s/{his}/mcp", headers=token).status_code == 403
+
+
+def test_owner_only_lets_an_admin_through_everywhere(plane):
+    ada = _linked("ada@example.com", "sub-ada")
+    _linked("root@example.com", "sub-root", role="admin")
+    with TestClient(app) as client:
+        admin = _enforce()
+        hers = _oauth_server(client, admin, "hers", ada)
+        unowned = _oauth_server(client, admin, "unowned", None)
+        _proxying(client)
+        _member_access("owner_only")
+        _allowlist("someone-else")
+        token = {**LOOPBACK, **_access(plane, "sub-root")}
+        assert client.get(f"/s/{hers}/mcp", headers=token).status_code == 200
+        assert client.get(f"/s/{unowned}/mcp", headers=token).status_code == 200
+
+
+@pytest.mark.parametrize("mode", ["additive", "owner_only"])
+def test_an_unresolved_jwt_follows_the_allowlist_in_both_modes(plane, mode):
+    ada = _linked("ada@example.com", "sub-ada")
+    with TestClient(app) as client:
+        admin = _enforce()
+        slug = _oauth_server(client, admin, "hers", ada)
+        _proxying(client)
+        _member_access(mode)
+        _allowlist("sub-listed")
+        assert client.get(f"/s/{slug}/mcp", headers={
+            **LOOPBACK, **_access(plane, "sub-listed")}).status_code == 200
+        assert client.get(f"/s/{slug}/mcp", headers={
+            **LOOPBACK, **_access(plane, "sub-stranger")}).status_code == 403
+
+
+def test_an_invalid_oauth_member_access_is_a_400(plane):
+    with TestClient(app) as client:
+        admin = _enforce()
+        r = client.patch("/api/settings", json={"oauth_member_access": "everyone"}, headers=admin)
+        assert r.status_code == 400 and "oauth_member_access" in r.json()["detail"]
+        assert client.get("/api/settings", headers=admin).json()["oauth_member_access"] == "additive"
+        r = client.patch("/api/settings", json={"oauth_member_access": "owner_only"}, headers=admin)
+        assert r.status_code == 200 and r.json()["oauth_member_access"] == "owner_only"
+
+
+@pytest.mark.parametrize("mode", ["additive", "owner_only"])
+def test_an_oauth_group_under_each_member_access_mode(plane, mode):
+    from app.groups import registry
+
+    _linked("ada@example.com", "sub-ada")
+    _linked("root@example.com", "sub-root", role="admin")
+    with TestClient(app) as client:
+        _enforce()
+        with Session(get_engine()) as s:
+            runtime_settings.write(s, {"default_auth_provider": "oauth"})
+            registry.write_group(s, "team", [])
+        try:
+            _member_access(mode)
+            _allowlist("sub-ada", "sub-listed")
+
+            def status(sub: str) -> int:
+                return client.get("/g/team/mcp", headers={**MCP, **_access(plane, sub)}).status_code
+
+            # Allowlisted, a resolved member passes under additive. Under owner_only a
+            # group is admin-owned, so they're refused even though the list names them.
+            assert (status("sub-ada") == 403) is (mode == "owner_only")
+            assert status("sub-root") != 403
+            assert status("sub-listed") != 403
+            assert status("sub-stranger") == 403
+        finally:
+            with Session(get_engine()) as s:
+                registry.delete_group(s, "team")
+                runtime_settings.write(s, {"default_auth_provider": "none"})
+
+
+# ---- resolution unavailable: narrowing fails closed, granting grants nothing ------
+
+
+@pytest.fixture(params=["discovery", "keys"])
+def sso_down(plane, monkeypatch, request):
+    """SSO's discovery (or the shared signing keys, for the resolver) can't be had, while
+    the ``oauth`` verifier, stubbed by ``plane``, still accepts tokens."""
+    from app.auth import oidc
+
+    if request.param == "discovery":
+        async def discovery(url):
+            raise httpx.ConnectError("down")
+
+        monkeypatch.setattr(oidc, "_DISCOVERY", {})
+        monkeypatch.setattr(oidc, "fetch_discovery", discovery)
+    else:
+        def keys(url, token):
+            raise jwt.PyJWKClientConnectionError("down")
+
+        monkeypatch.setattr(jwks, "signing_key", keys)
+    return plane
+
+
+def _two_members_his_allowlisted(client: TestClient) -> tuple[str, str]:
+    ada = _linked("ada@example.com", "sub-ada")
+    bob = _linked("bob@example.com", "sub-bob")
+    admin = _enforce()
+    hers = _oauth_server(client, admin, "hers", ada)
+    his = _oauth_server(client, admin, "his", bob)
+    _proxying(client)
+    _allowlist("sub-ada")
+    return hers, his
+
+
+def test_owner_only_refuses_with_503_when_resolution_is_unavailable(sso_down):
+    with TestClient(app) as client:
+        _, his = _two_members_his_allowlisted(client)
+        _member_access("owner_only")
+        r = client.get(f"/s/{his}/mcp", headers={**LOOPBACK, **_access(sso_down, "sub-ada")})
+        assert r.status_code == 503 and "couldn't" in r.json()["detail"], r.text
+
+
+def test_additive_keeps_the_allowlist_verdict_when_resolution_is_unavailable(sso_down):
+    with TestClient(app) as client:
+        _, his = _two_members_his_allowlisted(client)
+        assert client.get(f"/s/{his}/mcp", headers={
+            **LOOPBACK, **_access(sso_down, "sub-ada")}).status_code == 200
+        # The pass-through grants nothing it can't confirm: an unlisted owner is refused.
+        _allowlist("someone-else")
+        assert client.get(f"/s/{his}/mcp", headers={
+            **LOOPBACK, **_access(sso_down, "sub-bob")}).status_code == 403
+
+
+def test_owner_only_lets_an_unlinked_token_follow_the_allowlist(plane):
+    with TestClient(app) as client:
+        _, his = _two_members_his_allowlisted(client)
+        _member_access("owner_only")
+        _allowlist("sub-unlinked")
+        assert client.get(f"/s/{his}/mcp", headers={
+            **LOOPBACK, **_access(plane, "sub-unlinked")}).status_code == 200
+
+
+# ---- the built-in server on the oauth provider (#276) ----------------------------
+
+
+@pytest.fixture
+def oauth_builtin(plane):
+    """The built-in server on ``oauth``, set through the API as an operator would."""
+    with TestClient(app) as client:
+        admin = _enforce()
+        builtin = _builtin_id()
+        r = client.patch(f"/api/servers/{builtin}", json={"auth_provider": "oauth"}, headers=admin)
+        assert r.status_code == 200, r.text
+        assert r.json()["auth"] == "oauth"
+        yield SimpleNamespace(client=client, admin=admin, idp=plane, slug=_builtin_slug())
+    with Session(get_engine()) as s:
+        service.update_server(s, _builtin_id(), {"auth_provider": "bearer"})
+        runtime_settings.write(s, {"oauth_accept_bearer": False, "default_auth_provider": "none"})
+
+
+def _builtin_id() -> str:
+    with Session(get_engine()) as s:
+        return service.get_builtin(s).id
+
+
+def test_the_builtin_server_on_oauth_answers_a_bare_request_with_the_challenge(oauth_builtin):
+    r = oauth_builtin.client.get(f"/s/{oauth_builtin.slug}/mcp", headers=LOOPBACK)
+    assert r.status_code == 401, r.text
+    challenge = r.headers["www-authenticate"]
+    assert "resource_metadata=" in challenge
+    assert f"/.well-known/oauth-protected-resource/s/{oauth_builtin.slug}/mcp" in challenge
+
+
+def test_the_metadata_route_advertises_the_builtin_server_on_oauth(oauth_builtin):
+    r = oauth_builtin.client.get(
+        f"/.well-known/oauth-protected-resource/s/{oauth_builtin.slug}/mcp", headers=LOOPBACK
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["authorization_servers"] == [ISSUER]
+    assert r.json()["resource"].endswith(f"/s/{oauth_builtin.slug}/mcp")
+
+
+def test_a_linked_members_jwt_drives_the_builtin_server_on_oauth(oauth_builtin):
+    _linked("ada@example.com", "sub-ada")
+    client = oauth_builtin.client
+    _proxying(client)
+    _allowlist("someone-else")  # never consulted for the built-in server
+    token = _access(oauth_builtin.idp, "sub-ada")
+    r = client.get(f"/s/{oauth_builtin.slug}/mcp", headers={**LOOPBACK, **token})
+    assert r.status_code == 200, r.text
+    status, me = _whoami(client, token)
+    assert status == 200 and me["user"]["name"] == "ada@example.com", me
+
+
+def test_an_unlinked_jwt_is_refused_by_the_builtin_server_on_oauth(oauth_builtin):
+    client = oauth_builtin.client
+    _proxying(client)
+    _allowlist("sub-stranger")  # even an allowlisted subject must be a User here
+    token = _access(oauth_builtin.idp, "sub-stranger")
+    r = client.get(f"/s/{oauth_builtin.slug}/mcp", headers={**LOOPBACK, **token})
+    assert r.status_code == 403, r.text
+    assert "no mcpelevator user is linked" in r.json()["detail"]
+
+
+def test_accept_bearer_keeps_control_tokens_on_the_builtin_server_on_oauth(
+    oauth_builtin, monkeypatch
+):
+    from app.config import get_settings
+
+    client = oauth_builtin.client
+    _proxying(client)
+    with Session(get_engine()) as s:
+        runtime_settings.write(s, {"oauth_accept_bearer": True})
+    monkeypatch.setattr(get_settings(), "admin_token", "breakglass-secret")
+    for header in (oauth_builtin.admin["authorization"], "Bearer breakglass-secret"):
+        r = client.get(
+            f"/s/{oauth_builtin.slug}/mcp", headers={**LOOPBACK, "authorization": header}
+        )
+        assert r.status_code == 200, r.text
+
+
+def test_an_oauth_group_with_the_builtin_server_opens_only_to_an_admin(oauth_builtin):
+    from app.groups import registry
+
+    _linked("ada@example.com", "sub-ada")
+    _linked("root@example.com", "sub-root", role="admin")
+    client = oauth_builtin.client
+    with Session(get_engine()) as s:
+        runtime_settings.write(s, {"default_auth_provider": "oauth"})
+        registry.write_group(s, "ops", [_builtin_id()])
+    try:
+        def get(sub: str):
+            return client.get("/g/ops/mcp", headers={**MCP, **_access(oauth_builtin.idp, sub)})
+
+        assert get("sub-root").status_code != 403
+        r = get("sub-ada")
+        assert r.status_code == 403, r.text
+        assert "admin" in r.json()["detail"]
+    finally:
+        with Session(get_engine()) as s:
+            registry.delete_group(s, "ops")
+
+
+def test_the_builtin_servers_auth_takes_oauth_but_not_an_unknown_provider(oauth_builtin):
+    client, admin = oauth_builtin.client, oauth_builtin.admin
+    builtin = _builtin_id()
+    for bad in ("kerberos", "inherit"):
+        r = client.patch(f"/api/servers/{builtin}", json={"auth_provider": bad}, headers=admin)
+        assert r.status_code in (400, 422), r.text
+    assert client.get(f"/api/servers/{builtin}", headers=admin).json()["auth"] == "oauth"
+
+
+def test_the_builtin_server_on_oauth_refuses_with_503_when_resolution_is_unavailable(
+    oauth_builtin, sso_down
+):
+    _linked("ada@example.com", "sub-ada")
+    client = oauth_builtin.client
+    _proxying(client)
+    r = client.get(
+        f"/s/{oauth_builtin.slug}/mcp", headers={**LOOPBACK, **_access(sso_down, "sub-ada")}
+    )
+    assert r.status_code == 503 and "couldn't" in r.json()["detail"], r.text

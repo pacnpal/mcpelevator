@@ -51,7 +51,7 @@ from starlette.requests import Request
 from app.api.util import base_url
 from app.config import get_settings
 from app.db import get_engine, repo
-from app.db.models import Server
+from app.db.models import BUILTIN_RUNNER, Server
 from app.registry import settings as runtime_settings
 
 logger = logging.getLogger(__name__)
@@ -281,16 +281,24 @@ def _claims_are_current(claims: dict[str, Any]) -> bool:
     )
 
 
-def _owner_or_admin(request: Request, server: Server) -> bool:
-    """Does the token resolve, through its Linked identity, to this server's owner or
-    an admin? Then the allowlist doesn't apply (one identity across planes). A token
-    that resolves to no one leaves the allowlist's verdict alone."""
-    from app.auth import policy
-    from app.auth.principal import credential_principal  # circular-import guard
+def _caller(token: str):
+    """Whom the token names through its Linked identity: a principal, None for no one,
+    or ``oidc.UNKNOWN`` when that couldn't be told."""
+    from app.auth.principal import provider_jwt_principal  # circular-import guard
 
     with Session(get_engine()) as session:
-        caller = credential_principal(request, session, cloudflare=False, provider_jwt=True)
-    return caller is not None and policy.can_view_server(caller, server)
+        return provider_jwt_principal(session, token)
+
+
+def _authorizes_as_a_user(session: Session, server: Server) -> bool:
+    """Is ``server`` the built-in one, or a group bundling it? Either authorizes every
+    call as a User, so a token must resolve to one (the allowlist never applies)."""
+    from app.groups import registry  # circular-import guard
+
+    if server.runner == BUILTIN_RUNNER:
+        return True
+    group = server.id.removeprefix("group:") if server.id.startswith("group:") else None
+    return group is not None and registry.includes_builtin(session, group)
 
 
 class OAuthProvider:
@@ -302,6 +310,8 @@ class OAuthProvider:
             audience = runtime_settings.oauth_audience(session)
             allowed = runtime_settings.oauth_allowed_subjects(session)
             accept_bearer = runtime_settings.oauth_accept_bearer(session)
+            owner_only = runtime_settings.oauth_member_access(session) == "owner_only"
+            builtin = _authorizes_as_a_user(session, server)
         # Fail closed, like resolve() does for an unknown provider: a server marked
         # oauth with no AS configured must not fall through to unauthenticated.
         if not config_url or not audience:
@@ -320,7 +330,11 @@ class OAuthProvider:
         # that way (base64url of any JSON header can't) — so delegation is exact: a
         # local-looking token gets the bearer provider's verdict (including its 403
         # scope semantics) and never falls through to JWT parsing, and vice versa.
-        if accept_bearer and token.startswith("mcpe_"):
+        # The built-in server's break-glass token is the operator's own string, so it
+        # goes the same way there (the bearer provider accepts it for that server).
+        from app.auth.control_plane import is_env_admin_token
+
+        if accept_bearer and (token.startswith("mcpe_") or (builtin and is_env_admin_token(token))):
             from app.auth.bearer import BearerProvider
 
             return await BearerProvider().authenticate(request, server)
@@ -362,11 +376,22 @@ class OAuthProvider:
                 detail="invalid token",
                 headers=_challenge(base, server, error="invalid_token"),
             )
-        if allowed and not _identity_allowed(claims, allowed) and not _owner_or_admin(request, server):
+        from app.auth import policy
+
+        allowlisted = not allowed or _identity_allowed(claims, allowed)
+        # Resolve only when it can change the verdict: an allowlisted token passes
+        # under additive whoever it names. The built-in server always resolves.
+        caller = _caller(token) if builtin or owner_only or not allowlisted else None
+        refusal = policy.oauth_refusal(
+            caller, server, allowlisted=allowlisted, owner_only=owner_only, builtin=builtin
+        )
+        if refusal is not None:
+            status, reason = refusal
             raise HTTPException(
-                status_code=403,
-                detail="token subject not authorized for this server",
-                headers=_challenge(base, server, error="insufficient_scope"),
+                status_code=status,
+                detail=reason,
+                headers=_challenge(base, server, error="insufficient_scope")
+                if status == 403 else None,
             )
 
 
