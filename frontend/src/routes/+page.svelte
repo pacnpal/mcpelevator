@@ -29,10 +29,18 @@
 	let loadState = $state<LoadState>('loading');
 
 	// Search, filter and sort live in the URL query, so a filtered view can be
-	// linked and survives a reload. The search box keeps its own copy so a slow
-	// navigation can't rewrite what's being typed.
+	// linked and survives a reload, and every control reads it from there. The
+	// search box keeps its own copy so the landing of an older keystroke's
+	// navigation can't rewrite what's being typed; it adopts the URL's text
+	// whenever none of its own navigations are in flight (the logo, back/forward,
+	// a link).
 	const query = $derived(parseQuery(page.url.searchParams));
 	let search = $state(parseQuery(page.url.searchParams).q);
+	let ownNavigations = 0;
+	$effect(() => {
+		const q = query.q;
+		if (ownNavigations === 0) search = q;
+	});
 	let me = $state<AuthUser | null>(null);
 	const isAdmin = $derived(me?.role === 'admin');
 	// Offered to admins only, and only when there's more than one owner to pick.
@@ -90,7 +98,11 @@
 	function setQuery(next: Partial<ServerQuery>) {
 		const url = `${page.url.pathname}${serializeQuery({ ...query, q: search, ...next })}`;
 		// SvelteKit 3: `replace` is the old replaceState, `reset: false` keeps focus and scroll.
-		void goto(url, { replace: true, reset: false });
+		ownNavigations += 1;
+		void goto(url, { replace: true, reset: false }).finally(() => {
+			ownNavigations -= 1;
+			if (ownNavigations === 0) search = parseQuery(page.url.searchParams).q;
+		});
 	}
 
 	function toggle<T>(list: T[], items: readonly T[], on: boolean): T[] {
