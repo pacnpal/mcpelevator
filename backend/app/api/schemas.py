@@ -566,7 +566,8 @@ UpstreamOauthClientMode = Literal["auto", "cimd", "dcr"]
 class TokenCreate(BaseModel):
     name: str
     # "all" (default) authorizes every bearer-protected server; a server id restricts
-    # the token to that one server; "control" mints a control-plane admin token.
+    # the token to that one server; "control" mints a control-plane admin token;
+    # "scim" opens /scim/v2 and nothing else.
     # Validated in the endpoint (a dangling server id is a 400).
     scope: str = "all"
 
@@ -627,6 +628,8 @@ class SettingsInfo(BaseModel):
     oidc_session_max_age_s: int = 43200
     # Read-only: the redirect URI to register at the identity provider.
     oidc_redirect_uri: str = ""
+    # Read-only: the SCIM base URL to give the identity provider's provisioning client.
+    scim_base_url: str = ""
 
 
 class SettingsUpdate(BaseModel):

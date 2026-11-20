@@ -59,12 +59,18 @@ class User(SQLModel, table=True):
     # ``enabled`` flag.
     control_mcp: bool = True
     # False makes a Deactivated user: no credential resolves to them and SSO refuses
-    # them, while their record and servers stay. Only an admin brings them back.
+    # them, while their record and servers stay. Only an admin or SCIM brings them back.
     active: bool = True
     # The Linked identity: the identity-provider account this user signs in as, by
     # issuer and subject (never by email). Both NULL until the first SSO sign-in.
     oidc_issuer: Optional[str] = None
     oidc_subject: Optional[str] = None
+    # What SCIM provisioning sent as displayName and externalId, kept only to hand back.
+    display_name: Optional[str] = None
+    scim_external_id: Optional[str] = None
+    # True only for a User SCIM created. SCIM changes nothing but ``active`` on any
+    # other User, so a scim token can't rename someone into an identity it controls.
+    scim_managed: bool = False
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

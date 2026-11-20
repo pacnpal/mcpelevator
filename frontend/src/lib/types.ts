@@ -626,6 +626,8 @@ export interface SettingsInfo {
 	oidc_session_max_age_s: number;
 	/** Read-only: the redirect URI to register at the provider. */
 	oidc_redirect_uri: string;
+	/** Read-only: the SCIM base URL for the provider's provisioning client. */
+	scim_base_url: string;
 }
 
 export type OidcIdentityClaim = 'email' | 'preferred_username' | 'sub';
