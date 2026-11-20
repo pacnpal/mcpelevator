@@ -1,0 +1,10 @@
+# Route-only Worker: puts the project site at pacnp.al/mcpelevator.
+# Deploy once with `npx wrangler deploy` from this folder (see README.md).
+name = "mcpelevator-site"
+main = "worker.js"
+compatibility_date = "2026-03-01"
+workers_dev = false
+routes = [
+  { pattern = "pacnp.al/mcpelevator", zone_name = "pacnp.al" },
+  { pattern = "pacnp.al/mcpelevator/*", zone_name = "pacnp.al" },
+]
