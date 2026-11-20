@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import case, delete, func, update
+from sqlalchemy import and_, case, delete, func, or_, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session, select
 
@@ -619,7 +619,7 @@ def count_servers_owned(session: Session, user_id: str) -> int:
     return len(session.exec(select(Server.id).where(Server.owner_id == user_id)).all())
 
 
-def delete_user_and_tokens(session: Session, user_id: str) -> bool:
+def delete_user_and_tokens(session: Session, user_id: str, *, commit: bool = True) -> bool:
     """Delete a user and revoke EVERY token bound to them (control credentials and
     data-plane tokens alike) in one transaction, so a removed identity can't keep
     authenticating (their Sign-in sessions end too). The caller has already refused the delete while the user owns
@@ -630,7 +630,10 @@ def delete_user_and_tokens(session: Session, user_id: str) -> bool:
         return False
     revoke_user_credentials(session, user_id)
     session.delete(user)
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
     return True
 
 
@@ -660,16 +663,21 @@ def admin_credential_exists(session: Session, *, excluding_user_id: Optional[str
     True when a control token exists that resolves to admin: one with no user
     (legacy/boot mint) or one belonging to an active admin user. The users API consults
     this before demoting or deleting an admin so the last admin credential can't
-    be removed (MCPE_ADMIN_TOKEN, checked by the caller, always lifts the guard)."""
-    for token in session.exec(select(Token).where(Token.scope == "control")).all():
-        if token.user_id is None:
-            return True
-        if excluding_user_id is not None and token.user_id == excluding_user_id:
-            continue
-        user = session.get(User, token.user_id)
-        if user is not None and user.role == "admin" and user.active:
-            return True
-    return False
+    be removed (MCPE_ADMIN_TOKEN, checked by the caller, always lifts the guard).
+
+    One query, read from the database as it stands (this session's flushed writes
+    included), never from rows the session cached: the guard counts inside the write
+    transaction it protects."""
+    admin_user = and_(User.role == "admin", User.active)
+    if excluding_user_id is not None:
+        admin_user = and_(admin_user, Token.user_id != excluding_user_id)
+    query = (
+        select(Token.id)
+        .outerjoin(User, User.id == Token.user_id)
+        .where(Token.scope == "control", or_(Token.user_id.is_(None), admin_user))
+        .limit(1)
+    )
+    return session.exec(query).first() is not None
 
 
 # --------------------------------------------------------------------------- #
