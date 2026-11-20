@@ -16,11 +16,14 @@ from urllib.parse import quote_plus, urlencode
 
 import httpx
 import jwt
+from fastapi.concurrency import run_in_threadpool
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.auth.oauth import _ALLOWED_JWT_ALGORITHMS
 from app.db import repo
 from app.db.models import User
+from app.registry import service
 from app.registry import settings as runtime_settings
 
 logger = logging.getLogger(__name__)
@@ -206,7 +209,31 @@ async def finish(
         raise SignInFailed(
             UNVERIFIED_EMAIL, f"email_verified is {claims.get('email_verified')!r}"
         )
-    return _match(session, claims, claims["iss"], claim), id_token
+    # Threadpool: the config write lock is a threading lock, never waited for on the loop.
+    return await run_in_threadpool(_link, session, claims, claim), id_token
+
+
+def _link(session: Session, claims: dict[str, Any], claim: str) -> User:
+    """``_match`` under the config write lock, so the check and the link write are one
+    step against other sign-ins and an admin's unlink. A writer outside the lock (another
+    instance on this database) can still link the pair first: the unique index refuses
+    ours, and the pair is resolved again."""
+    with service.config_write_lock():
+        session.expire_all()  # see what committed while we waited
+        try:
+            return _match(session, claims, claims["iss"], claim)
+        except IntegrityError:
+            session.rollback()
+            holder = _holder(session, claims["iss"], str(claims["sub"]))
+            if holder is None:  # couldn't tell who this is: fail closed
+                raise SignInFailed(IDENTITY_CONFLICT, "the link write lost a race") from None
+            return holder
+
+
+def _holder(session: Session, issuer: str, subject: str) -> User | None:
+    return session.exec(
+        select(User).where(User.oidc_issuer == issuer, User.oidc_subject == subject)
+    ).first()
 
 
 def _email_verified(claims: dict[str, Any]) -> bool:
@@ -359,11 +386,9 @@ def _match(session: Session, claims: dict[str, Any], issuer: str, claim: str) ->
     equals the identity claim (case-insensitively) and who has no Linked identity yet,
     which is then linked. A name match on a User linked to anything else is refused:
     a provider that hands an email or username to a new subject must not hand it our
-    User too. #269 adds issuer migration (through an admin unlink) and the write lock."""
+    User too. Moving to a new issuer goes through an admin's unlink."""
     subject = str(claims["sub"])
-    holder = session.exec(
-        select(User).where(User.oidc_issuer == issuer, User.oidc_subject == subject)
-    ).first()
+    holder = _holder(session, issuer, subject)
     if holder is not None:
         return holder
     value = claims.get(claim)

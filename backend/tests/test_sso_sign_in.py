@@ -5,8 +5,9 @@ session counts (only /api, never /s, /g or /api/mcp)."""
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -895,3 +896,161 @@ def test_an_https_instance_ignores_the_plain_cookie(idp):
         assert client.get("/api/servers", headers=headers).status_code == 200
         https = {**headers, "x-forwarded-proto": "https"}
         assert client.get("/api/servers", headers=https).status_code == 401
+
+
+# ---- linked identity rules (#269) ------------------------------------------------
+
+
+def _unlink(client: TestClient, uid: str, headers: dict[str, str]) -> httpx.Response:
+    return client.delete(f"/api/users/{uid}/identity", headers=headers)
+
+
+def _listed_issuer(client: TestClient, uid: str, headers: dict[str, str]) -> str | None:
+    users = client.get("/api/users", headers=headers).json()
+    return next(u for u in users if u["id"] == uid)["linked_issuer"]
+
+
+def test_two_first_sign_ins_at_the_same_moment_link_once(idp):
+    uid = _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    idp.token_barrier = threading.Barrier(2, timeout=10)  # both wait at the provider
+    with TestClient(app):  # the app's lifespan; each racer request runs its own loop
+        racers = [TestClient(app), TestClient(app)]
+        queries = [idp.authorize(_start(c).headers["location"]) for c in racers]
+        results: list[httpx.Response] = []
+        threads = [
+            threading.Thread(target=lambda c=c, q=q: results.append(_callback(c, q)))
+            for c, q in zip(racers, queries)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+    assert len(results) == 2
+    assert all(_signed_in(r) for r in results), [r.headers.get("location") for r in results]
+    with Session(get_engine()) as s:
+        holders = s.exec(select(User).where(User.oidc_subject == "sub-1")).all()
+        assert [u.id for u in holders] == [uid]
+        assert [row.user_id for row in s.exec(select(SignInSession)).all()] == [uid, uid]
+
+
+def test_a_link_written_by_another_sign_in_first_resolves_by_its_pair(idp, monkeypatch):
+    """Another writer links this person between our check and our write (a second
+    instance on the same database, or a provisioning sign-in): the unique index
+    refuses ours, and the sign-in resolves to the row that holds the pair."""
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    real_list_users = repo.list_users
+    winner = new_id()
+
+    def list_users_then_race(session):
+        users = real_list_users(session)
+        with Session(get_engine()) as other:
+            other.add(User(id=winner, name="ada (provisioned)", oidc_issuer=ISSUER,
+                           oidc_subject="sub-1"))
+            other.commit()
+        return users
+
+    monkeypatch.setattr(repo, "list_users", list_users_then_race)
+    with TestClient(app) as client:
+        _enforce()
+        assert _signed_in(_sign_in(client, idp))
+        monkeypatch.setattr(repo, "list_users", real_list_users)
+        assert client.get("/api/auth/status", headers=LOOPBACK).json()["user"]["id"] == winner
+    assert _link("ada@example.com") == (None, None)
+
+
+def test_unlink_clears_the_link_and_ends_the_users_sessions(idp):
+    uid = _user("ada@example.com")
+    other = _user("bob@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        admin = _enforce()
+        assert _signed_in(_sign_in(client, idp))
+        session_headers = _session_headers(client)
+        with Session(get_engine()) as s:  # another User's session survives
+            now = datetime.now(timezone.utc)
+            s.add(SignInSession(id=new_id(), token_hash="x" * 64, user_id=other,
+                                created_at=now, expires_at=now + timedelta(hours=1)))
+            s.commit()
+        assert _listed_issuer(client, uid, admin) == ISSUER
+        assert _unlink(client, uid, admin).status_code == 204
+        assert _listed_issuer(client, uid, admin) is None
+        assert client.get("/api/servers", headers=session_headers).status_code == 401
+    assert _link("ada@example.com") == (None, None)
+    with Session(get_engine()) as s:
+        assert [row.user_id for row in s.exec(select(SignInSession)).all()] == [other]
+
+
+def test_unlink_answers_404_for_an_unknown_user_and_204_without_a_link(idp):
+    uid = _user("ada@example.com")
+    with TestClient(app) as client:
+        admin = _enforce()
+        assert _unlink(client, "nope", admin).status_code == 404
+        assert _unlink(client, uid, admin).status_code == 204
+
+
+def test_unlink_is_admin_only(idp):
+    uid = _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        _enforce()
+        assert _signed_in(_sign_in(client, idp))
+        assert _unlink(client, uid, _session_headers(client)).status_code == 403
+    assert _link("ada@example.com") == (ISSUER, "sub-1")
+
+
+def test_moving_to_a_new_issuer_goes_through_unlink(idp):
+    uid = _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    new_issuer = "https://new-idp.example.com"
+    with TestClient(app) as client:
+        admin = _enforce()
+        assert _signed_in(_sign_in(client, idp))
+        # The admin moves SSO to another provider, which names the same person anew.
+        idp.issuer = new_issuer
+        _settings(oidc_discovery_url=new_issuer)
+        idp.claims = {"email": "ada@example.com", "sub": "new-sub"}
+        assert _reason(_sign_in(client, idp)) == "identity_conflict"
+        assert _unlink(client, uid, admin).status_code == 204
+        assert _signed_in(_sign_in(client, idp))
+        assert _listed_issuer(client, uid, admin) == new_issuer
+    assert _link("ada@example.com") == (new_issuer, "new-sub")
+
+
+def test_entra_tenants_with_the_same_sub_are_different_users(idp):
+    second = "00000000-0000-0000-0000-000000000002"
+    ada, bob = _user("ada@example.com"), _user("bob@example.com")
+    _entra(idp)
+    _settings(oidc_allowed_tenants=[TENANT, second])
+    idp.claims["sub"] = "same-sub"
+    with TestClient(app) as client:
+        _enforce()
+        assert _signed_in(_sign_in(client, idp))
+        idp.claims = {"email": "bob@example.com", "tid": second, "sub": "same-sub",
+                      "iss": ENTRA.replace("{tenantid}", second)}
+        assert _signed_in(_sign_in(client, idp))
+        assert client.get("/api/auth/status", headers=LOOPBACK).json()["user"]["id"] == bob
+    with Session(get_engine()) as s:
+        assert s.get(User, ada).oidc_issuer == ENTRA.replace("{tenantid}", TENANT)
+        assert s.get(User, bob).oidc_issuer == ENTRA.replace("{tenantid}", second)
+
+
+def test_an_unlink_while_a_sign_in_finishes_leaves_no_session(idp, monkeypatch):
+    uid = _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    real_finish = oidc.finish
+
+    async def finish_then_unlink(*args, **kwargs):
+        result = await real_finish(*args, **kwargs)
+        with Session(get_engine()) as s:  # the admin's unlink lands as the provider answers
+            user = s.get(User, uid)
+            user.oidc_issuer = user.oidc_subject = None
+            s.add(user)
+            s.commit()
+        return result
+
+    monkeypatch.setattr(oidc, "finish", finish_then_unlink)
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "expired"
+    assert _sessions() == 0

@@ -38,6 +38,7 @@
 	import { pollingInterval, shouldPollFast } from '#lib/startup.js';
 	import CopyButton from '#lib/components/CopyButton.svelte';
 	import CopyMenu from '#lib/components/CopyMenu.svelte';
+	import LinkedIdentity from '#lib/components/LinkedIdentity.svelte';
 	import RestartButton from '#lib/components/RestartButton.svelte';
 	import ServerActionButton from '#lib/components/ServerActionButton.svelte';
 	import StatePill from '#lib/components/StatePill.svelte';
@@ -1290,6 +1291,17 @@
 									{user.servers_count} server{user.servers_count === 1 ? '' : 's'} ·
 									{user.tokens_count} token{user.tokens_count === 1 ? '' : 's'}
 								</span>
+								{#if user.linked_issuer}
+									<LinkedIdentity
+										userId={user.id}
+										issuer={user.linked_issuer}
+										disabled={busyUserId !== null}
+										onunlinked={() => {
+											users = users.map((u) => (u.id === user.id ? { ...u, linked_issuer: null } : u));
+											flashToast('Identity unlinked', 'info');
+										}}
+									/>
+								{/if}
 							</div>
 							<div class="flex shrink-0 flex-wrap items-center gap-1.5">
 								{#if confirmDeleteUserId === user.id}
