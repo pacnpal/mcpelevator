@@ -23,7 +23,13 @@ export default {
 		});
 		const out = new Response(res.body, res);
 		const loc = out.headers.get('Location');
-		if (loc?.startsWith(UPSTREAM)) out.headers.set('Location', url.origin + loc.slice(UPSTREAM.length));
+		if (loc) {
+			// Compare parsed origins: a prefix check would also match pacnpal.github.io.evil.example.
+			const target = new URL(loc, UPSTREAM);
+			if (target.origin === UPSTREAM) {
+				out.headers.set('Location', url.origin + target.pathname + target.search + target.hash);
+			}
+		}
 		return out;
 	},
 };

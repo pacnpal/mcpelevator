@@ -9,6 +9,9 @@ globalThis.fetch = async (input, init) => {
 	if (url.endsWith('/mcpelevator/old')) {
 		return new Response(null, { status: 301, headers: { Location: 'https://pacnpal.github.io/mcpelevator/new/' } });
 	}
+	if (url.endsWith('/mcpelevator/lookalike')) {
+		return new Response(null, { status: 302, headers: { Location: 'https://pacnpal.github.io.evil.example/x' } });
+	}
 	return new Response('ok:' + url, { status: 200, headers: { 'content-type': 'text/html' } });
 };
 const get = (path, method = 'GET') => worker.fetch(new Request('https://pacnp.al' + path, { method }));
@@ -23,6 +26,10 @@ assert.equal(calls.at(-1), 'https://pacnpal.github.io/mcpelevator/screenshots/se
 
 r = await get('/mcpelevator/old');
 assert.equal(r.headers.get('Location'), 'https://pacnp.al/mcpelevator/new/');
+
+// A lookalike host is left alone, never rewritten onto pacnp.al.
+r = await get('/mcpelevator/lookalike');
+assert.equal(r.headers.get('Location'), 'https://pacnpal.github.io.evil.example/x');
 
 r = await get('/mcpelevator/', 'POST');
 assert.equal(r.status, 405);
