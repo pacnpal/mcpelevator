@@ -832,6 +832,46 @@ def test_cloudflare_identity_refuses_a_deactivated_user(client, cf):
         assert cf_access.user(s, req) is None
 
 
+def test_cloudflare_identity_matches_names_by_the_sign_in_rule(client, cf):
+    """Cloudflare Access and SSO share one name rule (repo.match_user_by_name):
+    trimmed and casefolded, so the two paths agree on who a name is."""
+    from starlette.requests import Request
+
+    from app.auth import cf_access
+
+    admin = {**LOOPBACK, "authorization": f"Bearer {mint_token('control')}"}
+    uid = client.post("/api/users", json={"name": " Straße@Example.com"}, headers=admin).json()["id"]
+    req = Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in cf("strasse@example.com").items()]})
+    with Session(get_engine()) as s:
+        assert repo.match_user_by_name(s, "STRASSE@example.com ").id == uid
+        assert cf_access.user(s, req).id == uid
+
+
+def test_a_cloudflare_request_writes_nothing_and_a_linked_user_still_matches(client, cf):
+    """A Linked identity belongs to the OIDC issuer: Cloudflare Access still matches its
+    User by name, and never creates, links or replaces anything on the User table."""
+    admin = {"authorization": f"Bearer {mint_token('control')}"}
+    uid = client.post("/api/users", json={"name": "ada@example.com"}, headers={**LOOPBACK, **admin}).json()["id"]
+    with Session(get_engine()) as s:
+        ada = repo.get_user(s, uid)
+        ada.oidc_issuer, ada.oidc_subject = "https://id.example", "sub-1"
+        repo.save_user(s, ada)
+        runtime_settings.write(s, {"control_plane_auth": "always"})
+
+    def users() -> list[tuple]:
+        with Session(get_engine()) as s:
+            return [(u.id, u.name, u.updated_at, u.oidc_issuer, u.oidc_subject)
+                    for u in repo.list_users(s)]
+
+    before = users()
+    internal = {INTERNAL_HEADER: INTERNAL_SECRET}
+    is_error, me = _call(client, "whoami", headers={**internal, **cf("Ada@Example.com")})
+    assert not is_error and me["user"]["id"] == uid
+    status, _ = _rpc(client, "tools/list", headers={**internal, **cf("nobody@example.com")})
+    assert status == 403  # no match, and no User made for it
+    assert users() == before
+
+
 def test_bridge_forwarding_carries_the_cloudflare_assertion(monkeypatch):
     """The built-in bridge and the group hub rely on FastMCP's forward_incoming_headers
     passing every caller header on, not just Authorization. Pin that."""

@@ -540,8 +540,7 @@ def _match(
     value = claims.get(claim)
     if not isinstance(value, str) or not value.strip():
         raise SignInFailed(MISSING_CLAIM, f"the {claim} claim is missing", claim=claim)
-    wanted = value.strip().casefold()
-    matches = [u for u in repo.list_users(session) if u.name.strip().casefold() == wanted]
+    matches = repo.users_named(session, value)
     if not matches and provision:
         user = User(
             id=new_id(), name=value.strip(), role="member", local_runners=False,
