@@ -156,4 +156,65 @@ describe('Sign-in session CSRF header', () => {
 		await api.getHealth();
 		expect(headersOf(fetchMock, '/api/health')['x-mcpe-csrf']).toBeUndefined();
 	});
+
+	const session = { enforced: true, authenticated: true, user: null, sso: null, csrf: 'c5rf' };
+
+	it('fetches status again when the first status request failed', async () => {
+		const api = await import('./api');
+		let statusCalls = 0;
+		const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+			if (url === '/api/auth/status') {
+				statusCalls += 1;
+				if (statusCalls === 1) throw new TypeError('network down');
+				return respond(session);
+			}
+			return respond({ status: 'ok', version: '1' });
+		});
+		vi.stubGlobal('fetch', fetchMock);
+		await api.getHealth();
+		await api.getHealth();
+		expect(statusCalls).toBe(2);
+		expect((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).headers).toMatchObject({
+			'x-mcpe-csrf': 'c5rf'
+		});
+	});
+
+	it('logout with a stored login token still ends the session', async () => {
+		const api = await import('./api');
+		setToken('mcpe_login');
+		const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+			const auth = (init?.headers as Record<string, string>).authorization;
+			// The backend hands a CSRF value only to a request without a bearer header.
+			if (url === '/api/auth/status') return respond({ ...session, csrf: auth ? null : 'c5rf' });
+			return respond({ ok: true });
+		});
+		vi.stubGlobal('fetch', fetchMock);
+		await api.logout();
+		const headers = headersOf(fetchMock, '/api/auth/logout');
+		expect(headers.authorization).toBeUndefined();
+		expect(headers['x-mcpe-csrf']).toBe('c5rf');
+	});
+
+	it('a failed logout keeps the CSRF value and can be retried', async () => {
+		const api = await import('./api');
+		let logoutCalls = 0;
+		const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+			if (url === '/api/auth/status') return respond(session);
+			if (url === '/api/auth/logout') {
+				logoutCalls += 1;
+				if (logoutCalls === 1) throw new TypeError('network down');
+				return respond({ ok: true });
+			}
+			return respond({ status: 'ok', version: '1' });
+		});
+		vi.stubGlobal('fetch', fetchMock);
+		await api.getHealth();
+		await expect(api.logout()).rejects.toThrow();
+		await api.getHealth();
+		expect((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).headers).toMatchObject({
+			'x-mcpe-csrf': 'c5rf'
+		});
+		await api.logout();
+		expect(logoutCalls).toBe(2);
+	});
 });

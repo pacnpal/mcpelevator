@@ -734,3 +734,164 @@ def test_a_secret_with_reserved_characters_authenticates(idp, methods):
     _settings(oidc_client_secret=idp.client_secret, oidc_client_id=idp.client_id)
     with TestClient(app) as client:
         assert _signed_in(_sign_in(client, idp))
+
+
+# ---- stale logins, logout, the lock-out guard, the cookie name --------------------
+
+_ENDING_CHANGES = [
+    {"oidc_client_id": "another"},
+    {"oidc_enabled": False},
+    {"oidc_discovery_url": "https://other-idp.example.com"},
+]
+_ENDING_IDS = ["client_id", "sso_off", "discovery_url"]
+
+
+def _sessions() -> int:
+    with Session(get_engine()) as s:
+        return len(s.exec(select(SignInSession)).all())
+
+
+@pytest.mark.parametrize("change", _ENDING_CHANGES, ids=_ENDING_IDS)
+def test_a_login_whose_sso_settings_changed_mid_flight_is_expired(idp, monkeypatch, change):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    real_finish = oidc.finish
+
+    async def finish_then_change(*args, **kwargs):
+        result = await real_finish(*args, **kwargs)
+        _settings(**change)  # an admin saves new SSO settings while the provider answers
+        return result
+
+    monkeypatch.setattr(oidc, "finish", finish_then_change)
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "expired"
+    assert _sessions() == 0
+
+
+def test_a_login_started_before_the_client_id_changed_is_expired(idp):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        query = idp.authorize(_start(client).headers["location"])
+        _settings(oidc_client_id="another")
+        assert _reason(_callback(client, query)) == "expired"
+    assert _sessions() == 0
+
+
+def test_a_login_whose_client_id_changed_during_the_token_exchange_is_refused(idp):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    answer = idp._token
+
+    def slow_token(request):  # the settings write lands while the token response is pending
+        _settings(oidc_client_id="another")
+        return answer(request)
+
+    idp._token = slow_token
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "expired"
+    assert _sessions() == 0
+
+
+@pytest.mark.parametrize("extra", [{}, {"authorization": "Bearer x"}], ids=["plain", "bearer"])
+def test_logout_without_the_csrf_header_still_ends_the_session(idp, extra):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        _sign_in(client, idp)
+        r = client.post("/api/auth/logout", headers={**LOOPBACK, **extra})
+        assert r.status_code == 200
+        assert _sessions() == 0
+
+
+def test_a_logout_whose_delete_fails_is_not_success(idp, monkeypatch):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+
+    def broken_delete(self, instance):
+        raise RuntimeError("database is locked")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _sign_in(client, idp)
+        monkeypatch.setattr(Session, "delete", broken_delete)
+        r = client.post("/api/auth/logout", headers=_session_headers(client))
+        monkeypatch.undo()
+        assert r.status_code == 500
+        assert not any("mcpe_session" in h for h in r.headers.get_list("set-cookie"))
+        assert _sessions() == 1
+
+
+def test_login_over_http_on_an_https_public_host_moves_to_https_first(idp, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "public_base_url", "https://mcp.example.com")
+    host = {"host": "mcp.example.com"}
+    with TestClient(app) as client:
+        r = client.get(
+            "/api/auth/oidc/login", params={"next": "/users"}, headers=host,
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert r.headers["location"] == "https://mcp.example.com/api/auth/oidc/login?next=%2Fusers"
+        assert not r.headers.get_list("set-cookie")  # no flow cookie on the http origin
+        r = client.get(
+            "/api/auth/oidc/login", headers={**host, "x-forwarded-proto": "https"},
+            follow_redirects=False,
+        )
+        assert r.headers["location"].startswith(f"{ISSUER}/authorize")
+
+
+def test_logout_with_a_bearer_header_still_ends_the_session(idp):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        _sign_in(client, idp)
+        headers = {**_session_headers(client), "authorization": "Bearer x"}
+        assert client.post("/api/auth/logout", headers=headers).status_code == 200
+        assert _sessions() == 0
+
+
+def test_logout_without_a_session_succeeds_and_clears_the_cookie(idp):
+    with TestClient(app) as client:
+        r = client.post("/api/auth/logout", headers=LOOPBACK)
+        assert r.status_code == 200
+        assert any(h.startswith("mcpe_session=") for h in r.headers.get_list("set-cookie"))
+
+
+@pytest.mark.parametrize("change", _ENDING_CHANGES, ids=_ENDING_IDS)
+def test_the_lock_out_guard_refuses_a_session_the_same_patch_ends(idp, monkeypatch, change):
+    _user("ada@example.com", role="admin")
+    idp.claims = {"email": "ada@example.com"}
+
+    async def no_provider_check(*_args, **_kwargs):  # the provider probe isn't under test
+        return None
+
+    monkeypatch.setattr(oidc, "check_settings", no_provider_check)
+    with TestClient(app) as client:
+        _sign_in(client, idp)  # enforcement is off here
+        r = client.patch(
+            "/api/settings", json={"control_plane_auth": "always", **change},
+            headers=_session_headers(client),
+        )
+        assert r.status_code == 400, r.text
+        with Session(get_engine()) as s:
+            assert runtime_settings.control_plane_auth(s) == "auto"
+        # Sending the stored values back changes nothing, so the session still counts.
+        same = {"oidc_enabled": True, "oidc_client_id": CLIENT_ID, "oidc_discovery_url": ISSUER}
+        r = client.patch(
+            "/api/settings", json={"control_plane_auth": "always", **same},
+            headers=_session_headers(client),
+        )
+        assert r.status_code == 200, r.text
+
+
+def test_an_https_instance_ignores_the_plain_cookie(idp):
+    _user("ada@example.com")
+    idp.claims = {"email": "ada@example.com"}
+    with TestClient(app) as client:
+        _enforce()
+        _sign_in(client, idp)  # over http: the plain mcpe_session cookie
+        headers = _session_headers(client)
+        assert client.get("/api/servers", headers=headers).status_code == 200
+        https = {**headers, "x-forwarded-proto": "https"}
+        assert client.get("/api/servers", headers=https).status_code == 401

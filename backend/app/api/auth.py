@@ -18,7 +18,7 @@ import logging
 import secrets
 import time
 import traceback
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx2
 from fastapi import APIRouter, Depends
@@ -29,7 +29,7 @@ from sqlmodel import Session
 
 from app import sealed
 from app.api.schemas import AuthStatus, AuthUser, SsoInfo
-from app.api.util import oauth_public_base
+from app.api.util import oauth_public_base, request_scheme
 from app.auth import oauth_flow, oidc, principal as principal_mod, sign_in
 from app.auth.control_plane import control_auth, enforcement_enabled
 from app.config import get_settings
@@ -114,9 +114,12 @@ async def oidc_login(
 ):
     target = _safe_next(next)
     config = get_settings()
-    if config.public_host and host_only(request.headers.get("host", "")) != config.public_host:
-        # Start on the canonical host, so the flow cookie and the session cookie land
-        # where the provider sends the browser back to.
+    if config.public_host and (
+        host_only(request.headers.get("host", "")) != config.public_host
+        or request_scheme(request) != urlsplit(config.base_url).scheme
+    ):
+        # Start on the canonical origin (host and scheme), so the flow cookie and the
+        # session cookie land where the provider sends the browser back to.
         query = urlencode({"next": target})
         return RedirectResponse(f"{config.base_url}/api/auth/oidc/login?{query}", status_code=303)
     try:
@@ -133,11 +136,14 @@ async def oidc_login(
         ),
         status_code=303,
     )
+    # Bound to the provider settings it started under: if they change before the
+    # callback, the login is refused as expired.
     flow = {"state": state, "nonce": nonce, "verifier": verifier, "next": target,
-            "exp": time.time() + _FLOW_TTL_S}
+            "exp": time.time() + _FLOW_TTL_S,
+            "provider": runtime_settings.sign_in_provider(session)}
     resp.set_cookie(
         _flow_cookie(state), sealed.seal(json.dumps(flow)), max_age=_FLOW_TTL_S,
-        path=_FLOW_PATH, secure=redirect_uri.startswith("https://"), httponly=True,
+        path=_FLOW_PATH, secure=sign_in.https(request), httponly=True,
         samesite="lax",
     )
     return resp
@@ -178,6 +184,12 @@ async def oidc_callback(
         return _sso_error(oidc.EXPIRED, "unknown or expired state", state)
     if not code:
         return _sso_error(oidc.PROVIDER_REJECTED, "callback carried no code", state)
+
+    def same_provider(s: Session) -> bool:
+        return flow.get("provider") == runtime_settings.sign_in_provider(s)
+
+    if not same_provider(session):
+        return _sso_error(oidc.EXPIRED, "the SSO settings changed since this login began", state)
     redirect_uri = _redirect_uri(request)
     try:
         user, id_token = await oidc.finish(
@@ -186,19 +198,24 @@ async def oidc_callback(
         )
     except oidc.SignInFailed as exc:
         return _sso_error(exc.reason, str(exc), state, exc.claim)
-    raw = sign_in.start(session, user.id, id_token)
+    # Checked again as the session row is written: a settings write can land while the
+    # provider answered, and it ends sessions, so one started after it must not survive.
+    raw = sign_in.start(session, user.id, id_token, still_valid=same_provider)
+    if raw is None:
+        return _sso_error(oidc.EXPIRED, "the SSO settings changed while this login finished", state)
     resp = RedirectResponse(_safe_next(flow.get("next")), status_code=303)
     resp.delete_cookie(_flow_cookie(state), path=_FLOW_PATH)
-    sign_in.set_cookie(resp, raw, https=redirect_uri.startswith("https://"))
+    sign_in.set_cookie(resp, raw, https=sign_in.https(request))
     return resp
 
 
 @router.post("/auth/logout")
 async def logout(request: Request, session: Session = Depends(get_session)) -> JSONResponse:
-    """End this browser's Sign-in session (locally) and clear its cookie. A Login token
-    is the SPA's to forget."""
-    if sign_in.accepts(request) and sign_in.current(request, session) is not None:
-        sign_in.end(request, session)
+    """End the Sign-in session this browser's cookie names (locally) and clear the
+    cookie. An ``Authorization`` header doesn't stop it, and neither does a missing CSRF
+    header (``sign_in.end`` says why). If the delete fails this raises, so success
+    always means the row is gone. A Login token is the SPA's to forget."""
+    sign_in.end(request, session)
     resp = JSONResponse({"ok": True})
     sign_in.clear_cookie(resp)
     return resp

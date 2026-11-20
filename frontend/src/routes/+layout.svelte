@@ -2,14 +2,14 @@
 	import '../app.css';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { getAuthStatus, logout as endSession } from '#lib/api.js';
+	import { errorMessage, getAuthStatus, logout as endSession } from '#lib/api.js';
 	import { adoptSsoLanding, clearToken } from '#lib/auth.js';
 	import { completeOauthPopup } from '#lib/oauthPopup.js';
 	import favicon from '#lib/assets/favicon.svg';
 	import HealthDot from '#lib/components/HealthDot.svelte';
 	import Logo from '#lib/components/Logo.svelte';
 	import Toast from '#lib/components/Toast.svelte';
-	import { toast, dismissToast } from '#lib/toast.svelte.js';
+	import { toast, dismissToast, flashToast } from '#lib/toast.svelte.js';
 
 	let { children } = $props();
 
@@ -63,12 +63,14 @@
 
 	async function logout() {
 		clearToken();
-		loggedIn = false;
 		try {
 			await endSession(); // ends a Sign-in session, if this browser holds one
-		} catch {
-			// best effort: the token is already gone and the cookie expires on its own
+		} catch (err) {
+			// The session may still be live: stay put, with "Log out" there to retry.
+			flashToast(`Log out failed: ${errorMessage(err)}. Try again.`);
+			return;
 		}
+		loggedIn = false;
 		goto('/login');
 	}
 </script>

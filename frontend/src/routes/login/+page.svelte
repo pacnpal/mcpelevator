@@ -5,14 +5,18 @@
 	import { clearToken, setToken, startSsoSignIn } from '#lib/auth.js';
 	import type { AuthStatus } from '#lib/types.js';
 
+	// Everything below is derived from the current URL: SvelteKit reuses this component
+	// when only the query changes.
+	const params = $derived(page.url.searchParams);
+
 	// The identity claim a missing_claim failure names: one of the setting's values only.
-	const claimName = () => {
-		const claim = page.url.searchParams.get('claim') ?? '';
+	const claimName = $derived.by(() => {
+		const claim = params.get('claim') ?? '';
 		return ['email', 'preferred_username', 'sub'].includes(claim) ? claim : 'identity';
-	};
+	});
 
 	// One plain sentence per reason code the SSO callback sends back (app.auth.oidc).
-	const SSO_ERRORS: Record<string, string> = {
+	const SSO_ERRORS: Record<string, string> = $derived({
 		provider_denied: 'The identity provider did not let you sign in. Try again, or ask your admin.',
 		provider_unavailable: 'The identity provider could not be reached. Try again in a moment.',
 		provider_rejected:
@@ -20,7 +24,7 @@
 		no_match: 'No user here matches your identity provider account. Ask an admin to add you.',
 		ambiguous_match:
 			'More than one user here matches your identity provider account. Ask an admin to sort it out.',
-		missing_claim: `Your identity provider did not send the ${claimName()} claim this instance matches users on. Ask your admin to set the identity claim to preferred_username, or to have the provider send ${claimName()}.`,
+		missing_claim: `Your identity provider did not send the ${claimName} claim this instance matches users on. Ask your admin to set the identity claim to preferred_username, or to have the provider send ${claimName}.`,
 		tenant_not_allowed:
 			'Your organization (Microsoft Entra tenant) is not allowed to sign in here. Ask your admin to add it.',
 		unverified_email:
@@ -29,18 +33,18 @@
 			'The user that matches your account here is already linked to a different identity provider account. Ask an admin to unlink it, then sign in again.',
 		expired: 'That sign-in took too long or was already used. Start it again.',
 		sso_disabled: 'SSO sign-in is turned off on this instance.'
-	};
+	});
 
 	// A same-origin path only, as the backend checks it too.
-	const rawNext = page.url.searchParams.get('next') ?? '/';
-	const next =
-		rawNext.startsWith('/') && !rawNext.startsWith('//') && !rawNext.startsWith('/\\')
-			? rawNext
-			: '/';
-	const ssoError =
-		page.url.searchParams.get('sso') === 'error'
-			? (SSO_ERRORS[page.url.searchParams.get('reason') ?? ''] ?? 'SSO sign-in failed.')
-			: null;
+	const next = $derived.by(() => {
+		const raw = params.get('next') ?? '/';
+		return raw.startsWith('/') && !raw.startsWith('//') && !raw.startsWith('/\\') ? raw : '/';
+	});
+	const ssoError = $derived(
+		params.get('sso') === 'error'
+			? (SSO_ERRORS[params.get('reason') ?? ''] ?? 'SSO sign-in failed.')
+			: null
+	);
 
 	let sso = $state<AuthStatus['sso']>(null);
 	$effect(() => {

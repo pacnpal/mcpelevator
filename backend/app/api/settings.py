@@ -63,6 +63,11 @@ async def update_settings(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     toggled: list[str] = []
+    # An admin's Sign-in session can turn enforcement on only when this same write
+    # doesn't end it (a new provider, or SSO turned off). Read before the write stages.
+    session_counts = enforcement_enabled(session) or not runtime_settings.ends_sign_in_sessions(
+        session, changes
+    )
 
     def guard(s: Session) -> None:
         # control_mcp is the built-in row's enabled flag, staged in this same
@@ -83,7 +88,7 @@ async def update_settings(
         #    this enable can't remove the last admin credential between the check
         #    and the commit, and a member login can't flip enforcement on and
         #    strand the box; the UI guards this too.
-        if would_lock_out(request, s, changes):
+        if would_lock_out(request, s, changes, sign_in_counts=session_counts):
             raise HTTPException(
                 status_code=400,
                 detail="authenticate with an admin token before enabling control-plane auth",

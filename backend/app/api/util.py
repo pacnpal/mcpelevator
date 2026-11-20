@@ -74,7 +74,13 @@ def oauth_public_base(request: Request) -> str:
     operator-declared public URL still wins when set."""
     base = base_url(request)
     if not get_settings().public_base_url and base.startswith("http://"):
-        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
-        if forwarded == "https":
+        if request_scheme(request) == "https":
             base = base.replace("http://", "https://", 1)
     return base
+
+
+def request_scheme(request: Request) -> str:
+    """The scheme this request arrived over at the edge: the ASGI scheme, or
+    ``X-Forwarded-Proto: https`` from a TLS-terminating proxy."""
+    forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return "https" if forwarded == "https" or request.url.scheme == "https" else "http"

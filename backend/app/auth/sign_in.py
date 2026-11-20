@@ -19,13 +19,14 @@ import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-from typing import Optional
+from typing import Callable, Optional
 
 from sqlmodel import Session
 from starlette.requests import Request
 from starlette.responses import Response
 
 from app import sealed
+from app.api.util import oauth_public_base
 from app.config import get_settings
 from app.db import repo
 from app.db.models import SignInSession
@@ -57,8 +58,16 @@ def csrf(session_id: str) -> str:
     return hmac.new(_key(), session_id.encode(), hashlib.sha256).hexdigest()
 
 
+def https(request: Request) -> bool:
+    """Is this instance's public base https? The one rule for which cookie it sets."""
+    return oauth_public_base(request).startswith("https://")
+
+
 def cookie_value(request: Request) -> str:
-    return request.cookies.get(SECURE_COOKIE) or request.cookies.get(PLAIN_COOKIE) or ""
+    """The session cookie for this instance's scheme only. On https a plain
+    ``mcpe_session`` is ignored: a sibling host could have planted it with ``Domain=``,
+    which ``__Host-`` rules out."""
+    return request.cookies.get(SECURE_COOKIE if https(request) else PLAIN_COOKIE, "")
 
 
 def accepts(request: Request) -> bool:
@@ -95,8 +104,13 @@ def current(request: Request, session: Session) -> Optional[SignInSession]:
     return row
 
 
-def start(session: Session, user_id: str, id_token: str) -> str:
-    """Begin a Sign-in session for ``user_id``; returns the cookie value (shown once)."""
+def start(
+    session: Session, user_id: str, id_token: str,
+    still_valid: Callable[[Session], bool] = lambda _s: True,
+) -> Optional[str]:
+    """Begin a Sign-in session for ``user_id``; returns the cookie value (shown once).
+    ``still_valid`` runs after the row is flushed, so under the database write lock a
+    settings write also takes: when it says no, nothing is stored and this returns None."""
     raw = new_token()
     now = datetime.now(timezone.utc)
     session.add(
@@ -105,12 +119,19 @@ def start(session: Session, user_id: str, id_token: str) -> str:
             expires_at=now + MAX_AGE, id_token=sealed.seal(id_token) if id_token else "",
         )
     )
+    session.flush()
+    session.expire_all()  # read what's committed now, not what this session cached
+    if not still_valid(session):
+        session.rollback()
+        return None
     session.commit()
     return raw
 
 
 def end(request: Request, session: Session) -> None:
-    """Delete the row the request's cookie names, if any."""
+    """Delete the row the request's cookie names, if any. No CSRF header needed: CSRF
+    stops cross-site state changes, and a forced logout harms nobody. Raises if the
+    delete fails, so a caller never reports a logout that didn't happen."""
     raw = cookie_value(request)
     row = repo.get_sign_in_session_by_hash(session, hash_token(raw)) if raw else None
     if row is not None:

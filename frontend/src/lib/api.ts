@@ -95,25 +95,25 @@ let firstStatus: Promise<unknown> | null = null;
  * and `X-MCPE-CSRF` once status has handed one out. The session cookie itself rides
  * on `fetch`'s default same-origin credentials.
  */
-async function authHeaders(waitForStatus = true): Promise<Record<string, string>> {
+async function authHeaders(waitForStatus = true, withToken = true): Promise<Record<string, string>> {
 	if (waitForStatus) {
-		if (!firstStatus) firstStatus = getAuthStatus().catch(() => undefined);
+		if (!firstStatus) getAuthStatus().catch(() => undefined);
 		await firstStatus;
 	}
-	const token = getToken();
+	const token = withToken ? getToken() : null;
 	return {
 		...(token ? { authorization: `Bearer ${token}` } : {}),
 		...(csrf ? { 'x-mcpe-csrf': csrf } : {})
 	};
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, withToken = true): Promise<T> {
 	const url = `${BASE}${path}`;
 	const res = await fetch(url, {
 		...init,
 		headers: {
 			accept: 'application/json',
-			...(await authHeaders(path !== '/auth/status')),
+			...(await authHeaders(path !== '/auth/status', withToken)),
 			...init?.headers
 		}
 	});
@@ -518,22 +518,29 @@ export async function streamLogs(
 
 /** Whether control-plane auth is enforced, and whether this client is authenticated.
  * Public endpoint — the layout calls it to decide whether to redirect to /login. */
-export function getAuthStatus(): Promise<AuthStatus> {
-	const status = request<AuthStatus>('/auth/status').then((s) => {
+export function getAuthStatus(withToken = true): Promise<AuthStatus> {
+	const status = request<AuthStatus>('/auth/status', undefined, withToken).then((s) => {
 		csrf = s.csrf ?? null;
 		return s;
 	});
-	if (!firstStatus) firstStatus = status.catch(() => undefined);
+	if (!firstStatus) {
+		const first: Promise<unknown> = status.catch(() => {
+			// A failed first status must not stick: the next request asks again.
+			if (firstStatus === first) firstStatus = null;
+		});
+		firstStatus = first;
+	}
 	return status;
 }
 
-/** End this browser's Sign-in session (if any) and forget its CSRF value. */
+/** End this browser's Sign-in session (if any), then forget its CSRF value. Both calls
+ * go without the login token: a request carrying one is judged on the token alone, so
+ * status would hand out no CSRF value for the session. A failure throws and keeps the
+ * CSRF value, so the caller can retry. */
 export async function logout(): Promise<void> {
-	try {
-		await request<unknown>('/auth/logout', { method: 'POST' });
-	} finally {
-		csrf = null;
-	}
+	await getAuthStatus(false);
+	await request<unknown>('/auth/logout', { method: 'POST' }, false);
+	csrf = null;
 }
 
 /** Current security settings: bind mode, allowed hosts, default auth provider. */

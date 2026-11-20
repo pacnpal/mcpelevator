@@ -58,7 +58,9 @@ def enforcement_enabled(session: Session) -> bool:
     )
 
 
-def admin_credential_presented(request: Request, session: Session) -> bool:
+def admin_credential_presented(
+    request: Request, session: Session, *, sign_in_counts: bool = True
+) -> bool:
     """Does the request carry a credential that resolves to ADMIN — the env token,
     a user-less control token, or an admin user's login? Unlike principal
     resolution this ignores enforcement state entirely: it classifies the
@@ -75,19 +77,23 @@ def admin_credential_presented(request: Request, session: Session) -> bool:
     # session: the same resolution principal.resolve uses, so a credential it would
     # call admin counts here too.
     caller = credential_principal(
-        request, session, cloudflare=is_internal(request), sign_in=sign_in.accepts(request)
+        request, session, cloudflare=is_internal(request),
+        sign_in=sign_in_counts and sign_in.accepts(request),
     )
     return caller is not None and caller.is_admin
 
 
-def would_lock_out(request: Request, session: Session, changes: dict[str, Any]) -> bool:
+def would_lock_out(
+    request: Request, session: Session, changes: dict[str, Any], *, sign_in_counts: bool = True
+) -> bool:
     """True if applying ``changes`` would turn enforcement on while THIS request
     can't authenticate as an ADMIN, locking the operator out of the admin surfaces
     the moment it takes effect. Enabling enforcement requires an admin-resolving
     credential on the request (``admin_credential_presented``) — a token row merely
     existing in the DB is not enough (this browser may not hold its plaintext),
-    and a member login is not enough (Settings/Users would become unreachable)."""
-    if admin_credential_presented(request, session):
+    and a member login is not enough (Settings/Users would become unreachable).
+    ``sign_in_counts=False`` leaves a Sign-in session out, for a write that ends it."""
+    if admin_credential_presented(request, session, sign_in_counts=sign_in_counts):
         return False  # the caller already holds a usable admin credential
     mode = changes.get("control_plane_auth", runtime_settings.control_plane_auth(session))
     bind = changes.get("bind_mode", runtime_settings.bind_mode(session))
