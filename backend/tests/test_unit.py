@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import wait_for_unit
 
 from app.bridge.host import UPSTREAM_META_KEY
 from app.db.models import Server
@@ -332,18 +333,19 @@ async def test_exit_after_stable_run_waits_before_fresh_activation(tmp_path, mon
 
     await unit.start(_port())
     try:
-        await _wait_for(lambda: unit.state == "running")
+        await wait_for_unit(unit, lambda: unit.state == "running")
         await asyncio.sleep(0.1)
         assert unit.proc is not None
         os.killpg(unit.proc.pid, 15)
 
-        await _wait_for(
+        await wait_for_unit(
+            unit,
             lambda: unit.startup_status is not None
             and unit.startup_status.phase == "retry_wait"
         )
         assert unit.state == "starting"
         assert unit.last_error is None
-        await _wait_for(lambda: unit.state == "unhealthy", timeout=3)
+        await wait_for_unit(unit, lambda: unit.state == "unhealthy")
         assert "bridge exited" in (unit.last_error or "")
     finally:
         await unit.stop()

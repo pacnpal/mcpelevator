@@ -5,6 +5,7 @@ Pin ``MCPE_DATA_DIR`` to a throwaway directory BEFORE any ``app.*`` import cache
 writes a real data directory. An explicit ``MCPE_DATA_DIR`` still wins (setdefault).
 """
 
+import asyncio
 import os
 import tempfile
 
@@ -33,6 +34,19 @@ def _db_schema():
     init_db()
 
 LOOPBACK = {"host": "127.0.0.1"}  # passes the Host allowlist (TestClient peer is loopback)
+
+
+async def wait_for_unit(unit, predicate) -> None:
+    """Wait until ``predicate()`` holds for a started ServerUnit. The bound is the unit's
+    own deadlines (each attempt's start timeout, the retry backoff), never a clock of the
+    test's, which a busy machine outruns. Fails with the unit's log once its activation
+    has ended without the predicate holding."""
+    while not predicate():
+        task = unit._activation_task
+        if task is None or task.done():
+            assert predicate(), "\n".join(unit.logs.snapshot())
+            return
+        await asyncio.sleep(0.02)
 
 
 def mint_token(scope: str = "all") -> str:

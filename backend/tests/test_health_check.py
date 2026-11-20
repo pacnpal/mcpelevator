@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-from conftest import LOOPBACK
+from conftest import LOOPBACK, wait_for_unit
 
 from app.api import health as health_api
 from app.db import get_engine, repo
@@ -43,12 +43,6 @@ def _port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
-
-
-async def _wait_for(predicate, *, timeout: float = 15) -> None:
-    async with asyncio.timeout(timeout):
-        while not predicate():
-            await asyncio.sleep(0.02)
 
 
 def _settings(tmp_path: Path, **overrides):
@@ -97,7 +91,7 @@ async def test_tool_check_that_errors_fails_the_activation_after_retries(fast_un
     unit = ServerUnit(_server(fast_unit, health_check_tool="check"))
     await unit.start(_port())
     try:
-        await _wait_for(lambda: unit.state == "failed")
+        await wait_for_unit(unit, lambda: unit.state == "failed")
         assert "health check failed" in (unit.last_error or "")
         assert "database unreachable" in (unit.last_error or "")
         logs = unit.logs.snapshot()
@@ -116,7 +110,7 @@ async def test_tool_check_that_passes_reaches_running(fast_unit):
     )
     await unit.start(_port())
     try:
-        await _wait_for(lambda: unit.state in ("running", "failed"))
+        await wait_for_unit(unit, lambda: unit.state in ("running", "failed"))
         assert unit.state == "running", "\n".join(unit.logs.snapshot())
         logs = unit.logs.snapshot()
         assert "[health] hi" in logs
@@ -132,7 +126,7 @@ async def test_failing_shell_check_fails_the_attempt(fast_unit):
     )
     await unit.start(_port())
     try:
-        await _wait_for(lambda: unit.state == "failed")
+        await wait_for_unit(unit, lambda: unit.state == "failed")
         assert "health check failed: exited with code 1" in (unit.last_error or "")
         assert "port 3000 refused" in (unit.last_error or "")
         assert "[health] port 3000 refused" in unit.logs.snapshot()
@@ -150,7 +144,7 @@ async def test_failure_quoting_the_output_hides_secret_env_values(fast_unit):
     unit = ServerUnit(server)
     await unit.start(_port())
     try:
-        await _wait_for(lambda: unit.state == "failed")
+        await wait_for_unit(unit, lambda: unit.state == "failed")
         assert "key=<hidden>" in (unit.last_error or "")
         assert "plain-secret-value-123" not in (unit.last_error or "")
     finally:
@@ -169,7 +163,7 @@ async def test_a_secret_across_the_failure_cut_is_hidden_whole(fast_unit):
     unit = ServerUnit(server)
     await unit.start(_port())
     try:
-        await _wait_for(lambda: unit.state == "failed")
+        await wait_for_unit(unit, lambda: unit.state == "failed")
         assert secret[:6] not in (unit.last_error or "")
         assert "<hidden>" in (unit.last_error or "")
     finally:
@@ -235,7 +229,7 @@ async def test_a_passing_command_with_a_huge_output_line_still_passes(fast_unit)
     )
     await unit.start(_port())
     try:
-        await _wait_for(lambda: unit.state in ("running", "failed"))
+        await wait_for_unit(unit, lambda: unit.state in ("running", "failed"))
         assert unit.state == "running", unit.last_error
         kept = [line for line in unit.logs.snapshot() if line.startswith("[health] x")]
         assert kept and len(kept[0]) <= len("[health] ") + unit_module._HEALTH_LINE_BYTES
@@ -255,7 +249,7 @@ async def test_passing_shell_check_runs_with_the_child_env_and_cwd(fast_unit):
     )
     await unit.start(_port())
     try:
-        await _wait_for(lambda: unit.state in ("running", "failed"))
+        await wait_for_unit(unit, lambda: unit.state in ("running", "failed"))
         assert unit.state == "running", "\n".join(unit.logs.snapshot())
         assert (fast_unit / "health-ran").read_text().strip() == f"from-env|{fast_unit}"
     finally:
@@ -270,7 +264,7 @@ async def test_health_phase_failure_carries_the_playwright_hint(fast_unit, monke
     unit = ServerUnit(_server(fast_unit, health_check_tool="check"))
     await unit.start(_port())
     try:
-        await _wait_for(lambda: unit.state == "failed")
+        await wait_for_unit(unit, lambda: unit.state == "failed")
         assert "health check failed" in (unit.last_error or "")
         assert "npx playwright@<version> install chromium" in (unit.last_error or "")
     finally:
@@ -329,7 +323,7 @@ async def test_periodic_failure_marks_unhealthy_without_restart_then_recovers(
         await sup.reconcile_once()
         unit = sup.unit(sid)
         assert isinstance(unit, ServerUnit)
-        await _wait_for(lambda: unit.state in ("running", "failed"))
+        await wait_for_unit(unit, lambda: unit.state in ("running", "failed"))
         assert unit.state == "running", "\n".join(unit.logs.snapshot())
         pid = unit.pid
         api = TestClient(_health_app(sup))
@@ -379,7 +373,7 @@ async def test_a_replaced_checks_result_never_marks_the_server(fast_unit, monkey
     unit = ServerUnit(_server(fast_unit, health_check_tool="check", health_check_interval_s=10))
     await unit.start(_port())
     try:
-        await _wait_for(lambda: unit.state in ("running", "failed"))
+        await wait_for_unit(unit, lambda: unit.state in ("running", "failed"))
         assert unit.state == "running"
         old = unit.health_check
         release = asyncio.Event()
@@ -404,7 +398,7 @@ async def test_removing_the_check_while_failing_returns_to_running(fast_unit):
     unit = ServerUnit(_server(fast_unit, health_check_tool="check", health_check_interval_s=30))
     await unit.start(_port())
     try:
-        await _wait_for(lambda: unit.state in ("running", "failed"))
+        await wait_for_unit(unit, lambda: unit.state in ("running", "failed"))
         assert unit.state == "running"
         (fast_unit / "health-fail").write_text("nope")
         unit._health_last_at -= 3600
