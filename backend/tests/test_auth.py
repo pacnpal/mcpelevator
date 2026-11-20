@@ -65,6 +65,7 @@ def test_settings_defaults_and_write(session):
         "oidc_admin_groups": [],
         "oidc_local_runner_groups": [],
         "oidc_allowed_domains": [],
+        "oidc_provisioning": False,
     }
     runtime_settings.write(
         session,
