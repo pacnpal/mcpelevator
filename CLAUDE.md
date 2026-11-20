@@ -231,7 +231,10 @@ One FastAPI process serves three surfaces in a single port (`backend/app/main.py
   visibility, the local-runner permission, member token-scope limits) — routers call those
   predicates, never re-derive rules. Users hold no passwords: credentials are `control` tokens
   bound via `Token.user_id`; `Server.owner_id` (NULL = admin-owned, the upgrade default) drives
-  visibility, and non-visible resources 404 like nonexistent ones. Ownership is identity, not
+  visibility, and non-visible resources 404 like nonexistent ones. A provider access token on
+  the SSO issuer resolves read-only through the Linked identity (`oidc.access_token_user`), but
+  only at the control MCP's gate and inside its in-process `/api` calls (`principal.control_call`)
+  and for the `oauth` provider's owner/admin pass-through, never on the rest of `/api`. Ownership is identity, not
   launch config — it stays out of `config_hash`, so reassigning never bounces a bridge. This is
   authorization, not isolation: local runners execute as the process user (README "Security",
   trust caveat).

@@ -22,10 +22,12 @@ import jwt
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, update
+from starlette.requests import Request
 
 from app import sealed
 from app.api.users import change_user
-from app.auth import sign_in
+from app.auth import jwks, sign_in
+from app.auth import oauth as oauth_mod
 from app.auth.oauth import _ALLOWED_JWT_ALGORITHMS, verified_email
 from app.auth.oauth_flow import log_safe
 from app.db import repo
@@ -794,3 +796,111 @@ def _match(
         )
     user.oidc_issuer, user.oidc_subject = issuer, subject
     return repo.save_user(session, user, commit=False)  # _link commits
+
+
+# --------------------------------------------------------------------------- #
+# Provider access tokens: one identity across planes
+# --------------------------------------------------------------------------- #
+
+
+def _jwt_header(token: str) -> dict[str, Any] | None:
+    """The header of a bearer that could be a provider access token, else None. The
+    break-glass token is ruled out first (constant time), then a login token, then
+    anything that isn't three dot-separated parts with a JSON-object header whose
+    ``alg`` is a string and ``kid``, when sent, too. Only a token that passes this
+    ever costs a discovery or key fetch."""
+    from app.auth.control_plane import is_env_admin_token  # circular-import guard
+
+    if not token or is_env_admin_token(token) or token.startswith("mcpe_"):
+        return None
+    if token.count(".") != 2:
+        return None
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.PyJWTError:
+        return None
+    if not isinstance(header, dict) or not isinstance(header.get("alg"), str):
+        return None
+    if "kid" in header and not isinstance(header["kid"], str):
+        return None
+    return header
+
+
+def _both_configured(values: dict[str, Any]) -> bool:
+    return bool(values["oidc_enabled"] and values["oauth_config_url"] and values["oauth_audience"])
+
+
+async def warm_access_tokens(session: Session, request: Request) -> None:
+    """Fetch the discovery documents and signing keys ``access_token_user`` reads from
+    cache, when the request carries a bearer that could be an access token and SSO and
+    the ``oauth`` provider are both configured. The keys load off the loop, so the first
+    token after a restart doesn't meet an empty cache. Async callers run it before a
+    sync resolution; a failed fetch is logged, and then no access token resolves."""
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    token = token.strip()
+    if scheme.lower() != "bearer" or _jwt_header(token) is None:
+        return
+    values = runtime_settings.read_all(session)
+    if not _both_configured(values):
+        return
+    try:
+        oauth_doc = await oauth_mod._discovery(values["oauth_config_url"])
+        if runtime_settings.normalize_config_url(values["oidc_discovery_url"]) not in _DISCOVERY:
+            await fetch_discovery(values["oidc_discovery_url"])
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.info("discovery for provider access tokens failed: %s", exc)
+        return
+    try:
+        await asyncio.to_thread(jwks.signing_key, oauth_doc["jwks_uri"], token)
+    except jwt.PyJWKClientConnectionError as exc:
+        logger.info("signing keys for provider access tokens failed: %s", exc)
+    except jwt.PyJWTError:
+        pass  # no key for this token: access_token_user refuses it
+
+
+
+def access_token_user(session: Session, token: str) -> User | None:
+    """The User a provider access token names through their Linked identity, or None.
+
+    It counts only when SSO and the ``oauth`` provider trust the same issuer. The token
+    is verified with the ``oauth`` settings (its discovery's keys, ``oauth_audience``):
+    asymmetric algorithms only, ``exp`` with 60s leeway, and an ``iss`` that fits both
+    discovery issuers (an Entra ``{tenantid}`` must be the token's ``tid``, a listed
+    tenant). Sync, for the event loop: discovery comes from cache (``warm_access_tokens``)
+    and keys from ``app.auth.jwks``. It only reads: no provisioning, linking or groups."""
+    header = _jwt_header(token)
+    if header is None:
+        return None
+    values = runtime_settings.read_all(session)
+    if not _both_configured(values):
+        return None
+    sso =_DISCOVERY.get(runtime_settings.normalize_config_url(values["oidc_discovery_url"]))
+    cached = oauth_mod._discovery_cache.get(
+        runtime_settings.normalize_config_url(values["oauth_config_url"])
+    )
+    if sso is None or cached is None:
+        return None
+    oauth_doc = cached[1]
+    try:
+        alg = header["alg"]  # a string: _jwt_header checked
+        if alg not in _ALLOWED_JWT_ALGORITHMS:
+            return None
+        claims = jwt.decode(
+            token, jwks.signing_key(oauth_doc["jwks_uri"], token), algorithms=[alg],
+            audience=values["oauth_audience"], leeway=_JWT_LEEWAY_S,
+            options={"require": ["iss", "sub", "exp"]},
+        )
+    except jwt.PyJWTError as exc:
+        logger.debug("provider access token not accepted: %s", exc)
+        return None
+    iss, sub, tid = claims["iss"], claims["sub"], claims.get("tid")
+    tid = tid if isinstance(tid, str) else ""
+    if not isinstance(iss, str) or not isinstance(sub, str) or not sub:
+        return None
+    concrete = _concrete_issuer(sso["issuer"], iss, tid)
+    if concrete is None or _concrete_issuer(oauth_doc["issuer"], iss, tid) is None:
+        return None
+    if _TENANT in sso["issuer"] and tid.lower() not in values["oidc_allowed_tenants"]:
+        return None
+    user = _holder(session, concrete, sub)
+    return user if user is not None and user.active else None

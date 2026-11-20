@@ -69,16 +69,18 @@ def admin_credential_presented(
     enforcement while holding only member logins would strand the box with no way
     to reach Settings or Users."""
     from app.auth import sign_in
-    from app.auth.principal import credential_principal  # circular-import guard
+    from app.auth.principal import credential_principal, in_control_call  # circular-import guard
     from app.runners.builtin import is_internal
 
     # The env token, a user-less control token, an admin's login, (through the
-    # built-in bridge) an admin's Cloudflare Access identity, or an admin's Sign-in
-    # session: the same resolution principal.resolve uses, so a credential it would
-    # call admin counts here too.
+    # built-in bridge) an admin's Cloudflare Access identity, an admin's Sign-in
+    # session, or (on the control MCP's own calls) an admin's provider access token:
+    # the same resolution principal.resolve uses, so a credential it would call
+    # admin counts here too.
     caller = credential_principal(
         request, session, cloudflare=is_internal(request),
         sign_in=sign_in_counts and sign_in.accepts(request),
+        provider_jwt=in_control_call(),
     )
     return caller is not None and caller.is_admin
 
@@ -122,14 +124,16 @@ def control_auth(request: Request, session: Session) -> Literal["ok", "missing",
     a valid non-control token;
     ``missing`` = no token or no match."""
     from app.auth import sign_in
-    from app.auth.principal import credential_principal  # circular-import guard
+    from app.auth.principal import credential_principal, in_control_call  # circular-import guard
     from app.runners.builtin import is_internal
 
     # The same decision principal.resolve makes, so the gate and identity agree:
-    # a user-bound credential whose user row is gone fails closed, and a Cloudflare
-    # Access identity counts only on requests the built-in bridge carried.
+    # a user-bound credential whose user row is gone fails closed, a Cloudflare
+    # Access identity counts only on requests the built-in bridge carried, and a
+    # provider access token only on the control MCP's own calls.
     caller = credential_principal(
-        request, session, cloudflare=is_internal(request), sign_in=sign_in.accepts(request)
+        request, session, cloudflare=is_internal(request), sign_in=sign_in.accepts(request),
+        provider_jwt=in_control_call(),
     )
     if caller is not None:
         return "ok"
