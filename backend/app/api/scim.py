@@ -196,8 +196,23 @@ def _patch(body: dict[str, Any]) -> dict[str, Any]:
 def _write(session: Session, user: User, changes: dict[str, Any]) -> User:
     """Apply ``changes`` to ``user`` (new or existing) through ``change_user``. The caller
     holds the config write lock. A userName another User already has is 409 uniqueness;
-    a deactivation the last-admin guard refuses is 409 with nothing written."""
+    a deactivation the last-admin guard refuses is 409 with nothing written.
+
+    SCIM fully manages only the Users it created. On any other User it changes
+    ``active`` alone, and it never renames an admin: a rename is how a scim token would
+    hand an identity it controls (the next SSO or Cloudflare Access name match) a
+    User's row and role. A refused change is 400 mutability. A rename leaves the Linked
+    identity as it is: that is bound to issuer and subject, never to the name."""
     name = changes.get("name")
+    if name == user.name:
+        name = None  # resending the current name (a PUT does) changes nothing
+    changed = [f for f in ("display_name", "scim_external_id")
+               if f in changes and changes[f] != getattr(user, f)]
+    if (name is not None or changed) and not user.scim_managed:
+        raise ScimError(400, "SCIM didn't create this user, so it may change only active",
+                        "mutability")
+    if name is not None and user.role == "admin":
+        raise ScimError(400, "SCIM never renames an admin", "mutability")
     if name is not None and any(u.id != user.id for u in repo.users_named(session, name)):
         raise ScimError(409, f"a user named {name!r} already exists", "uniqueness")
     for field in ("display_name", "scim_external_id"):
@@ -284,8 +299,10 @@ async def create_user(request: Request, session: Session = Depends(get_session))
     def create():
         session.expire_all()
         # A Member with local runners off, like an SSO-provisioned User. SCIM never
-        # sets the role: that comes from sign-in group mapping only.
-        user = User(id=new_id(), name=changes["name"], role="member", local_runners=False)
+        # sets the role: that comes from sign-in group mapping only. The name starts
+        # blank so _write names it, with the uniqueness check.
+        user = User(id=new_id(), name="", role="member", local_runners=False,
+                    scim_managed=True)
         return _write(session, user, changes)
 
     user = await _locked(request, session, create)

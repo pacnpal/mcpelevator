@@ -68,6 +68,9 @@ class User(SQLModel, table=True):
     # What SCIM provisioning sent as displayName and externalId, kept only to hand back.
     display_name: Optional[str] = None
     scim_external_id: Optional[str] = None
+    # True only for a User SCIM created. SCIM changes nothing but ``active`` on any
+    # other User, so a scim token can't rename someone into an identity it controls.
+    scim_managed: bool = False
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

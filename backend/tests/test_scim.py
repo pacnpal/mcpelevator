@@ -417,3 +417,95 @@ def test_the_filter_value_is_a_json_string(idp):
         for bad in (r'userName eq "ada\x"', 'userName eq "ada'):
             r = client.get("/scim/v2/Users", params={"filter": bad}, headers=headers)
             assert r.status_code == 400 and r.json()["scimType"] == "invalidFilter", bad
+
+
+# ---- who SCIM may manage ---------------------------------------------------------
+
+ATTACKER = "mallory@example.com"
+
+
+def _rename(name: str) -> dict:
+    return {"schemas": [fx.PATCH_OP],
+            "Operations": [{"op": "replace", "path": "userName", "value": name}]}
+
+
+def _assert_mutability(r) -> None:
+    assert r.status_code == 400, r.text
+    assert r.json()["schemas"] == [ERROR] and r.json()["scimType"] == "mutability"
+
+
+def test_scim_can_not_rename_an_admin_it_did_not_create_into_an_sso_takeover(idp):
+    root = _user("root@example.com", role="admin")
+    idp.claims = {"email": ATTACKER}
+    with TestClient(app) as client:
+        _enforce()
+        headers = _scim()
+        _assert_mutability(client.patch(f"/scim/v2/Users/{root}", json=_rename(ATTACKER),
+                                        headers=headers))
+        _assert_mutability(client.put(f"/scim/v2/Users/{root}",
+                                      json=fx.okta_replace(root, ATTACKER, "Mallory"),
+                                      headers=headers))
+        assert _user_row(root).name == "root@example.com"
+        assert not _signed_in(_sign_in(client, idp))
+        assert _user_row(root).oidc_subject is None
+
+
+def test_scim_can_not_rename_an_admin_into_a_cloudflare_access_takeover(idp, monkeypatch):
+    from app.auth import cf_access
+
+    root = _user("root@example.com", role="admin")
+    monkeypatch.setattr(cf_access, "email", lambda request: ATTACKER)
+    with TestClient(app) as client:
+        _assert_mutability(client.patch(f"/scim/v2/Users/{root}", json=_rename(ATTACKER),
+                                        headers=_scim()))
+        with Session(get_engine()) as s:
+            assert cf_access.user(s, None) is None
+
+
+def test_scim_changes_only_active_on_a_user_it_did_not_create(idp):
+    uid = _user("bob@example.com")
+    with TestClient(app) as client:
+        headers = _scim()
+        for body in (fx.entra_replace_attributes(), _rename("robert@example.com")):
+            _assert_mutability(client.patch(f"/scim/v2/Users/{uid}", json=body, headers=headers))
+        r = client.patch(f"/scim/v2/Users/{uid}", json=fx.entra_active("False"), headers=headers)
+        assert r.status_code == 200 and r.json()["active"] is False
+        # A replace that resends the same name only changes active.
+        r = client.put(f"/scim/v2/Users/{uid}", json={"schemas": [fx.USER],
+                       "userName": "bob@example.com", "active": True}, headers=headers)
+        assert r.status_code == 200, r.text
+        row = _user_row(uid)
+        assert (row.name, row.active) == ("bob@example.com", True)
+
+
+def test_scim_renames_its_own_member_and_keeps_the_link(idp):
+    with TestClient(app) as client:
+        headers = _scim()
+        uid = _create(client, headers, fx.okta_create("ada@example.com")).json()["id"]
+        with Session(get_engine()) as s:
+            row = s.get(User, uid)
+            row.oidc_issuer, row.oidc_subject = "https://idp.example", "sub-1"
+            s.add(row)
+            s.commit()
+        r = client.patch(f"/scim/v2/Users/{uid}", json=_rename("ada.king@example.com"),
+                         headers=headers)
+        assert r.status_code == 200, r.text
+        row = _user_row(uid)
+        assert row.name == "ada.king@example.com"
+        assert (row.oidc_issuer, row.oidc_subject) == ("https://idp.example", "sub-1")
+        _user("grace@example.com")
+        r = client.patch(f"/scim/v2/Users/{uid}", json=_rename("Grace@example.com"),
+                         headers=headers)
+        assert r.status_code == 409 and r.json()["scimType"] == "uniqueness"
+
+
+def test_scim_can_not_rename_its_own_user_once_an_admin_promotes_them(idp):
+    with TestClient(app) as client:
+        admin = _enforce()
+        headers = _scim()
+        uid = _create(client, headers, fx.okta_create("ada@example.com")).json()["id"]
+        assert client.patch(f"/api/users/{uid}", json={"role": "admin"},
+                            headers=admin).status_code == 200
+        _assert_mutability(client.patch(f"/scim/v2/Users/{uid}", json=_rename(ATTACKER),
+                                        headers=headers))
+        assert _user_row(uid).name == "ada@example.com"
