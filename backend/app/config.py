@@ -130,6 +130,8 @@ class Settings(BaseSettings):
     oidc_admin_groups: str = ""
     oidc_local_runner_groups: str = ""
     oidc_allowed_domains: str = ""
+    # Seed for just-in-time provisioning of a User on a first sign-in that matches none.
+    oidc_provisioning: bool = False
     # Catalog: keep a local copy of each directory (data_dir/catalog-mirror.db), synced
     # in the background, so browsing doesn't depend on the upstream being up. The MCP
     # Registry promises no uptime and asks consumers to sync about hourly.

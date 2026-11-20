@@ -400,6 +400,7 @@
 	let oidcIdentityClaim = $state<OidcIdentityClaim>('email');
 	let oidcAllowedTenants = $state('');
 	let oidcRequireVerifiedEmail = $state(true);
+	let oidcProvisioning = $state(false);
 	let oidcGroupsClaim = $state('groups');
 	let oidcAllowedGroups = $state('');
 	let oidcAdminGroups = $state('');
@@ -417,6 +418,7 @@
 		oidcIdentityClaim = s.oidc_identity_claim;
 		oidcAllowedTenants = toLines(s.oidc_allowed_tenants);
 		oidcRequireVerifiedEmail = s.oidc_require_verified_email;
+		oidcProvisioning = s.oidc_provisioning;
 		oidcGroupsClaim = s.oidc_groups_claim;
 		oidcAllowedGroups = toLines(s.oidc_allowed_groups);
 		oidcAdminGroups = toLines(s.oidc_admin_groups);
@@ -452,6 +454,7 @@
 				oidc_identity_claim: oidcIdentityClaim,
 				oidc_allowed_tenants: fromLines(oidcAllowedTenants),
 				oidc_require_verified_email: oidcRequireVerifiedEmail,
+				oidc_provisioning: oidcProvisioning,
 				oidc_groups_claim: oidcGroupsClaim.trim() || 'groups',
 				oidc_allowed_groups: fromLines(oidcAllowedGroups),
 				oidc_admin_groups: fromLines(oidcAdminGroups),
@@ -2560,6 +2563,20 @@
 					<span class="text-sm font-medium text-[var(--color-ink)]">Require a verified email</span>
 					<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
 						With the email identity claim, refuses a sign-in whose provider says the email is not verified.
+					</span>
+				</span>
+			</label>
+			<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
+				<input
+					type="checkbox"
+					bind:checked={oidcProvisioning}
+					disabled={savingField !== null}
+					class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+				/>
+				<span class="flex flex-col gap-0.5">
+					<span class="text-sm font-medium text-[var(--color-ink)]">Create users on first sign-in</span>
+					<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+						A person who matches no user gets one, named by the identity claim. New users start as Members with local runners off. Limit who gets an account with allowed groups or domains.
 					</span>
 				</span>
 			</label>

@@ -135,6 +135,11 @@ def _bootstrap_oidc_groups() -> None:
         _seed_setting_from_env(value, key)
 
 
+def _bootstrap_oidc_provisioning() -> None:
+    """Seed just-in-time provisioning from ``MCPE_OIDC_PROVISIONING`` (true seeds it on)."""
+    _seed_setting_from_env(get_settings().oidc_provisioning, "oidc_provisioning")
+
+
 def _bootstrap_control_plane_auth() -> None:
     """On boot, if control-plane auth is enforced, make sure the operator has a usable
     admin credential and is told how to get it — so a headless/compose deployment is
@@ -210,6 +215,7 @@ async def lifespan(app: FastAPI):
     _bootstrap_docker_runner()  # seed docker-runner enable from env (headless)
     _bootstrap_oidc()  # seed single sign-on settings from MCPE_OIDC_* (headless)
     _bootstrap_oidc_groups()
+    _bootstrap_oidc_provisioning()
     _bootstrap_control_plane_auth()
     # No timeout: long-lived SSE streams. No connection cap either: the /s proxy holds a
     # pooled connection for every open client stream, so httpx's default cap of 100 was

@@ -120,6 +120,9 @@ DEFAULTS: dict[str, Any] = {
     # Non-empty: only people whose verified email domain (email_verified true, never
     # assumed) or Google's hd claim is listed may sign in. Lowercase domains.
     "oidc_allowed_domains": [],
+    # On: a sign-in that matches no User creates one, named by the identity claim, a
+    # Member with local runners off, linked at once. The gates above still run first.
+    "oidc_provisioning": False,
 }
 
 # The user fields a group list manages, and the setting that manages each.
@@ -145,7 +148,7 @@ _PROVIDERS = {"none", "bearer", "oauth"}
 _CONTROL_PLANE_AUTH_MODES = {"auto", "always"}
 _UPSTREAM_OAUTH_CLIENT_MODES = {"auto", "cimd", "dcr"}
 _OIDC_IDENTITY_CLAIMS = {"email", "preferred_username", "sub"}
-_OIDC_BOOLS = ("oidc_enabled", "oidc_require_verified_email")
+_OIDC_BOOLS = ("oidc_enabled", "oidc_require_verified_email", "oidc_provisioning")
 GUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 _GUID = re.compile(GUID_PATTERN)
 _OIDC_GROUP_LISTS = ("oidc_allowed_groups", "oidc_admin_groups", "oidc_local_runner_groups")
@@ -159,7 +162,7 @@ SESSION_ENDING_KEYS = ("oidc_enabled", "oidc_discovery_url", "oidc_client_id")
 SIGN_IN_KEYS = SESSION_ENDING_KEYS + (
     "oidc_identity_claim", "oidc_require_verified_email", "oidc_allowed_tenants",
     "oidc_groups_claim", "oidc_allowed_groups", "oidc_admin_groups",
-    "oidc_local_runner_groups", "oidc_allowed_domains",
+    "oidc_local_runner_groups", "oidc_allowed_domains", "oidc_provisioning",
 )
 
 
