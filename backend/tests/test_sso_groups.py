@@ -379,3 +379,55 @@ def test_a_login_with_long_group_and_tenant_lists_fits_its_flow_cookie(idp):
         assert len(flow.split(";", 1)[0].encode()) < 4096
         assert _signed_in(_callback(client, idp.authorize(start.headers["location"])))
     assert _role(uid)[0] == "admin"
+
+
+# ---- email and email_verified come from one response (#291) -------------------------
+
+
+def test_userinfo_cannot_verify_a_different_id_token_email(idp):
+    # The ID token's email carries no email_verified; userinfo verifies another address.
+    _ada()
+    idp.claims = {"email": "ada@example.com"}
+    idp.userinfo = {"sub": "sub-1", "email": "ada@other.example", "email_verified": True}
+    _settings(oidc_allowed_domains=["example.com", "other.example"])
+    with TestClient(app) as client:
+        assert _reason(_sign_in(client, idp)) == "domain_not_allowed"
+
+
+@pytest.mark.parametrize("userinfo_verified", [True, False])
+def test_matching_reads_the_id_token_emails_own_verification(idp, userinfo_verified):
+    # Absent counts as verified for matching, whatever userinfo says of another address.
+    _ada()
+    idp.claims = {"email": "ada@example.com"}
+    idp.userinfo = {
+        "sub": "sub-1", "email": "ada@other.example", "email_verified": userinfo_verified,
+    }
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+    assert _linked_issuer("ada@example.com") is not None
+
+
+def test_an_id_token_email_verified_without_an_email_does_not_judge_userinfos(idp):
+    _ada()
+    idp.claims = {"email_verified": False}
+    idp.userinfo = {"sub": "sub-1", "email": "ada@example.com", "email_verified": True}
+    _settings(oidc_allowed_domains=["example.com"])
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+
+
+def test_an_email_and_verification_only_in_userinfo_count(idp):  # Authelia
+    _ada()
+    idp.userinfo = {"sub": "sub-1", "email": "ada@example.com", "email_verified": True}
+    _settings(oidc_allowed_domains=["example.com"])
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
+
+
+def test_userinfo_verifies_the_same_email_the_id_token_carries(idp):
+    _ada()
+    idp.claims = {"email": "ada@example.com"}
+    idp.userinfo = {"sub": "sub-1", "email": "ada@example.com", "email_verified": True}
+    _settings(oidc_allowed_domains=["example.com"])
+    with TestClient(app) as client:
+        assert _signed_in(_sign_in(client, idp))
