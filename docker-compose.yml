@@ -101,7 +101,7 @@ services:
   # knob to isolate one image. For stronger isolation, front dind with TLS (2376) instead of
   # 2375, or run a separate dind per trust domain.
   dind:
-    image: docker:29-dind@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121
+    image: docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
     profiles: ["docker-dind"]
     privileged: true
     # The dind entrypoint auto-generates TLS certs and forces the daemon onto 2376 whenever
