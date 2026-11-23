@@ -932,7 +932,7 @@
 			The built-in <span class="font-mono">mcpelevator</span> server is the control plane
 			itself, so it has no launch command. Each tool call runs with the caller's own
 			permissions; turn it off for everyone, or per user, in
-			<a href="/settings" class="underline decoration-dotted underline-offset-2">Settings</a>.
+			<a href="/settings?tab=runtime" class="underline decoration-dotted underline-offset-2">Settings</a>.
 		</p>
 	{:else}
 		<!-- Runner -->
@@ -1495,7 +1495,7 @@
 							The Docker runner is disabled (it's root-equivalent). You can still
 							{mode === 'create' ? 'save this server disabled' : 'edit and save it'} for review — but
 							enable the runner on the
-							<a href="/settings" class="font-medium text-[var(--color-ink)] underline decoration-dotted underline-offset-2">Settings</a>
+							<a href="/settings?tab=runtime" class="font-medium text-[var(--color-ink)] underline decoration-dotted underline-offset-2">Settings</a>
 							page before starting it.
 							{#if dockerBlocked}
 								<span class="font-medium text-[var(--color-ink)]">Turn off “Start after creating” below to save it now.</span>
@@ -2257,7 +2257,7 @@
 			{/if}
 			<p class="text-xs leading-relaxed text-[var(--color-ink-dim)]">
 				Overrides the global idle setting in
-				<a href="/settings" class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]">Settings</a>.
+				<a href="/settings?tab=runtime" class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]">Settings</a>.
 				Above 0, this server stops after that many seconds with no traffic, and the next request
 				wakes it, at the cost of a cold start and anything it held in memory. Blank inherits the
 				global value; <code class="font-mono text-[var(--color-ink-muted)]">0</code> means never idle.
@@ -2479,7 +2479,7 @@
 			<code class="font-mono">inherit</code> = use the global default. Configure bearer or
 			OAuth resource-server settings on the
 			<a
-				href="/settings"
+				href="/settings?tab=auth"
 				class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
 			>
 				Settings

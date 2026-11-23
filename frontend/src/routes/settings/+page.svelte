@@ -47,6 +47,10 @@
 	import ServerActionButton from '#lib/components/ServerActionButton.svelte';
 	import StatePill from '#lib/components/StatePill.svelte';
 	import { flashToast } from '#lib/toast.svelte.js';
+	import { page } from '$app/state';
+	import { tick } from 'svelte';
+	import SettingsAbout from '#lib/components/SettingsAbout.svelte';
+	import SettingsHelp from '#lib/components/SettingsHelp.svelte';
 
 	type LoadState = 'loading' | 'ready' | 'error';
 
@@ -70,6 +74,8 @@
 	// a reduced page: their tokens only — no security settings, groups, or users.
 	let authUser = $state<AuthUser | null>(null);
 	const isAdmin = $derived(authUser?.role !== 'member');
+	// The instance's public base (the SCIM URL is `<base>/scim/v2`).
+	const baseUrl = $derived(settings?.scim_base_url.replace(/\/scim\/v2\/?$/, '') ?? '');
 	// Whether THIS browser holds a working control token (not just whether one exists
 	// in the backend). That's what decides if enabling enforcement would lock us out.
 	let hasUsableAdminCredential = $state(false);
@@ -119,6 +125,57 @@
 
 	$effect(() => {
 		load();
+	});
+
+	// ---- Sections -------------------------------------------------------------
+	// The page is split into sections picked by `?tab=`, so a section can be linked to
+	// and survives a reload. A member sees only their tokens, so a tab they can't open
+	// (or an unknown one) falls back to the first.
+	type SettingsTab =
+		| 'tokens'
+		| 'users'
+		| 'groups'
+		| 'network'
+		| 'auth'
+		| 'sso'
+		| 'runtime'
+		| 'help'
+		| 'about';
+	// `divider` starts the nav's second block: reference pages rather than settings.
+	const TABS: { id: SettingsTab; label: string; adminOnly: boolean; divider?: boolean }[] = [
+		{ id: 'tokens', label: 'Access tokens', adminOnly: false },
+		{ id: 'users', label: 'Users', adminOnly: true },
+		{ id: 'groups', label: 'Groups', adminOnly: true },
+		{ id: 'network', label: 'Network', adminOnly: true },
+		{ id: 'auth', label: 'Server auth', adminOnly: true },
+		{ id: 'sso', label: 'Single sign-on', adminOnly: true },
+		{ id: 'runtime', label: 'Runtime', adminOnly: true },
+		{ id: 'help', label: 'Help', adminOnly: false, divider: true },
+		{ id: 'about', label: 'About', adminOnly: false }
+	];
+	const visibleTabs = $derived(TABS.filter((t) => isAdmin || !t.adminOnly));
+	const activeTab = $derived<SettingsTab>(
+		visibleTabs.find((t) => t.id === page.url.searchParams.get('tab'))?.id ?? 'tokens'
+	);
+
+	function tabHref(id: SettingsTab): string {
+		return id === 'tokens' ? '/settings' : `/settings?tab=${id}`;
+	}
+
+	// The size of a list-shaped section, shown beside its name in the nav (not when empty).
+	function tabCount(id: SettingsTab): number | null {
+		const n =
+			id === 'tokens' ? tokens.length : id === 'users' ? users.length : id === 'groups' ? groups.length : 0;
+		return n > 0 ? n : null;
+	}
+
+	// On a phone the nav is a sideways-scrolling strip: keep the open section in view.
+	let sectionNav = $state<HTMLElement | null>(null);
+	$effect(() => {
+		void activeTab;
+		sectionNav
+			?.querySelector('[aria-current="page"]')
+			?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 	});
 
 	// ---- Access tokens --------------------------------------------------------
@@ -872,6 +929,12 @@
 		newGroupSelection = group.members === '*' ? [] : [...group.members];
 		confirmReplaceName = null;
 		confirmDeleteGroup = null;
+		// The form sits under the list, which can be long: bring it into view.
+		void tick().then(() => {
+			const input = document.getElementById('group-name');
+			input?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+			input?.focus({ preventScroll: true });
+		});
 	}
 
 	function handleCreateGroup(e: SubmitEvent) {
@@ -966,12 +1029,14 @@
 	<title>Settings — mcpelevator</title>
 </svelte:head>
 
-<section class="mx-auto flex w-full max-w-2xl flex-col gap-8">
+<section class="mx-auto flex w-full max-w-5xl flex-col gap-6">
 	<!-- Heading -->
 	<div>
 		<h1 class="text-2xl font-semibold tracking-tight text-[var(--color-ink)]">Settings</h1>
 		<p class="mt-1 text-sm text-[var(--color-ink-muted)]">
-			Access tokens and network security.
+			{isAdmin
+				? 'Tokens, users, groups, network access and sign-in for this instance.'
+				: 'Your access tokens.'}
 		</p>
 	</div>
 
@@ -998,1054 +1063,446 @@
 			</button>
 		</div>
 	{:else if settings}
-		<!-- ============================ Access tokens ============================ -->
-		<div
-			class="flex flex-col gap-5 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
-		>
-			<div class="flex flex-col gap-1">
-				<h2 class="text-sm font-semibold text-[var(--color-ink)]">Access tokens</h2>
-				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
-					Bearer tokens for servers set to <code class="font-mono">bearer</code> auth.
-					Sent as <code class="font-mono">Authorization: Bearer &lt;token&gt;</code>.
-				</p>
-			</div>
-
-			<!-- One-time plaintext reveal -->
-			{#if createdToken}
-				<div
-					class="flex flex-col gap-3 rounded-lg border p-4"
-					style="border-color: color-mix(in oklab, var(--color-accent) 45%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);"
-				>
-					<div class="flex items-start gap-2.5">
-						<svg
-							class="mt-0.5 size-4 shrink-0 text-[var(--color-accent)]"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
-						>
-							<path d="M12 9v4M12 17h.01" />
-							<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
-						</svg>
-						<div class="flex flex-col gap-0.5">
-							<p class="text-sm font-semibold text-[var(--color-ink)]">
-								Token created — <span class="font-mono">{createdToken.name}</span>
-							</p>
-							<p class="text-xs text-[var(--color-ink-muted)]">
-								Copy this now — it won't be shown again.
-							</p>
-						</div>
-					</div>
-					<div class="flex items-center gap-2">
-						<code
-							class="min-w-0 flex-1 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5 font-mono text-xs whitespace-nowrap text-[var(--color-accent)]"
-						>
-							{createdToken.token}
-						</code>
-						<CopyButton value={createdToken.token} label="Copy" />
-					</div>
-					<div class="flex justify-end">
-						<button
-							type="button"
-							onclick={dismissReveal}
-							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
-						>
-							I've copied it — dismiss
-						</button>
-					</div>
-				</div>
-			{/if}
-
-			<!-- New token -->
-			<form onsubmit={handleCreateToken} class="flex flex-wrap items-end gap-2">
-				<div class="flex min-w-0 flex-1 basis-48 flex-col gap-1.5">
-					<label for="token-name" class="text-xs font-medium text-[var(--color-ink-muted)]">
-						New token
-					</label>
-					<input
-						id="token-name"
-						type="text"
-						bind:value={newTokenName}
-						autocomplete="off"
-						spellcheck="false"
-						placeholder="e.g. claude-desktop"
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-					/>
-				</div>
-				<div class="flex min-w-0 flex-col gap-1.5">
-					<label for="token-scope" class="text-xs font-medium text-[var(--color-ink-muted)]">
-						Scope
-					</label>
-					<select
-						id="token-scope"
-						bind:value={newTokenScope}
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
+		<div class="flex flex-col gap-6 md:flex-row md:items-start md:gap-8">
+			{#if visibleTabs.length > 1}
+				<!-- Section nav: a scrolling strip on phones, a sticky sidebar from md up. Plain
+				     links (?tab=…), so a section is linkable and survives a reload. -->
+				<nav bind:this={sectionNav} aria-label="Settings sections" class="md:sticky md:top-20 md:w-48 md:shrink-0">
+					<ul
+						class="-mx-4 flex gap-1 overflow-x-auto px-4 pb-1 md:mx-0 md:flex-col md:overflow-visible md:px-0 md:pb-0"
 					>
-						{#if isAdmin}
-							<option value="all">All servers &amp; groups</option>
-						{/if}
-						{#if isAdmin && groups.length > 0}
-							<optgroup label="Groups">
-								{#each groups as group (group.name)}
-									<option value={`group:${group.name}`}>Group: {group.name}</option>
-								{/each}
-							</optgroup>
-						{/if}
-						<optgroup label="Servers">
-							{#each servers as server (server.id)}
-								<option value={server.id}>{serverLabel(server)}</option>
-							{/each}
-						</optgroup>
-					</select>
-				</div>
-				<button
-					type="submit"
-					disabled={!newNameValid || creating}
-					aria-busy={creating}
-					class="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+						{#each visibleTabs as t (t.id)}
+							{@const current = activeTab === t.id}
+							{@const count = tabCount(t.id)}
+							<li
+					class="shrink-0"
+					class:md:mt-3={t.divider}
+					class:md:border-t={t.divider}
+					class:md:pt-3={t.divider}
+					class:md:border-[var(--color-line)]={t.divider}
 				>
-					{#if creating}
-						<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-							<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
-							<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-						</svg>
-					{/if}
-					Create
-				</button>
-			</form>
-
-			<!-- Admin (control-plane) token: the credential the SPA logs in with.
-			     Admin-only — members receive their login token from an admin. -->
-			{#if isAdmin}
-			<div
-				class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed border-[var(--color-line)] px-3 py-2.5"
-			>
-				<p class="min-w-0 text-xs text-[var(--color-ink-muted)]">
-					<span class="font-medium text-[var(--color-ink)]">Admin token.</span> The credential
-					you log in with when the control plane enforces auth.
-				</p>
-				<button
-					type="button"
-					onclick={handleGenerateAdmin}
-					disabled={generatingAdmin}
-					aria-busy={generatingAdmin}
-					class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink)] transition hover:border-[var(--color-line-strong)] disabled:opacity-50"
-				>
-					Generate admin token
-				</button>
-			</div>
+								<a
+									href={tabHref(t.id)}
+									data-sveltekit-noscroll
+									data-sveltekit-replacestate
+									aria-current={current ? 'page' : undefined}
+									class="flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm whitespace-nowrap transition"
+									style={current
+										? 'background-color: var(--color-elevated); color: var(--color-ink); font-weight: 600;'
+										: 'color: var(--color-ink-muted);'}
+								>
+									{t.label}
+									{#if count !== null}
+										<span class="font-mono text-[11px] text-[var(--color-ink-dim)]">{count}</span>
+									{/if}
+								</a>
+							</li>
+						{/each}
+					</ul>
+				</nav>
 			{/if}
-
-			<!-- Token list -->
-			{#if tokens.length === 0}
-				<p
-					class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-6 text-center text-xs text-[var(--color-ink-dim)]"
-				>
-					No tokens yet. Create one above to authenticate bearer-protected servers.
-				</p>
-			{:else}
-				<ul class="flex flex-col divide-y divide-[var(--color-line)]">
-					{#each tokens as token (token.id)}
-						<li class="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
-							<div class="flex min-w-0 flex-col gap-1">
-								<span class="flex min-w-0 items-center gap-2">
-									<span class="truncate text-sm font-medium text-[var(--color-ink)]">
-										{token.name}
-									</span>
-									{#if token.scope === 'control'}
-										<span
-											class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap"
-											title="Control-plane admin token, authenticates /api"
-											style="border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);"
-										>
-											control
-										</span>
-									{:else}
-										<span
-											class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap"
-											title={token.scope === 'all'
-												? 'Authorizes every bearer-protected server and group'
-												: token.scope.startsWith('group:')
-													? 'Authorizes only this group'
-													: 'Authorizes only this server'}
-											style={token.scope === 'all'
-												? 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'
-												: 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'}
-										>
-											{scopeLabel(token.scope)}
-										</span>
-									{/if}
-								</span>
-								<span class="font-mono text-xs text-[var(--color-ink-dim)]">
-									{token.prefix}…
-									<span class="text-[var(--color-ink-dim)]">· {formatDate(token.created_at)}</span>
-									{#if isAdmin && token.user_name}
-										<span class="text-[var(--color-ink-dim)]">· {token.user_name}</span>
-									{/if}
-								</span>
-							</div>
-							{#if confirmRevokeId === token.id}
-								<div class="flex shrink-0 items-center gap-1.5">
+			<div class="flex min-w-0 max-w-3xl flex-1 flex-col gap-5">
+				{#if activeTab === 'tokens'}
+					<div class="flex flex-col gap-1">
+						<h2 class="text-lg font-semibold tracking-tight text-[var(--color-ink)]">Access tokens</h2>
+						<p class="max-w-prose text-sm text-[var(--color-ink-muted)]">
+							Bearer tokens for servers and groups set to <code class="font-mono">bearer</code> auth,
+							sent as <code class="font-mono">Authorization: Bearer &lt;token&gt;</code>.
+						</p>
+					</div>
+					<div class="flex flex-col gap-5 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5">
+						<!-- One-time plaintext reveal -->
+						{#if createdToken}
+							<div
+								class="flex flex-col gap-3 rounded-lg border p-4"
+								style="border-color: color-mix(in oklab, var(--color-accent) 45%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);"
+							>
+								<div class="flex items-start gap-2.5">
+									<svg
+										class="mt-0.5 size-4 shrink-0 text-[var(--color-accent)]"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="2"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										aria-hidden="true"
+									>
+										<path d="M12 9v4M12 17h.01" />
+										<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+									</svg>
+									<div class="flex flex-col gap-0.5">
+										<p class="text-sm font-semibold text-[var(--color-ink)]">
+											Token created — <span class="font-mono">{createdToken.name}</span>
+										</p>
+										<p class="text-xs text-[var(--color-ink-muted)]">
+											Copy this now — it won't be shown again.
+										</p>
+									</div>
+								</div>
+								<div class="flex items-center gap-2">
+									<code
+										class="min-w-0 flex-1 overflow-x-auto rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2.5 font-mono text-xs whitespace-nowrap text-[var(--color-accent)]"
+									>
+										{createdToken.token}
+									</code>
+									<CopyButton value={createdToken.token} label="Copy" />
+								</div>
+								<div class="flex justify-end">
 									<button
 										type="button"
-										onclick={() => handleRevoke(token.id)}
-										disabled={revokingId === token.id}
-										aria-busy={revokingId === token.id}
-										class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
-										style="background-color: var(--color-state-failed);"
+										onclick={dismissReveal}
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
 									>
-										{#if revokingId === token.id}
-											<svg class="size-3.5 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-												<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
-												<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-											</svg>
-										{/if}
-										Revoke
-									</button>
-									<button
-										type="button"
-										onclick={() => (confirmRevokeId = null)}
-										disabled={revokingId === token.id}
-										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
-									>
-										Cancel
+										I've copied it — dismiss
 									</button>
 								</div>
-							{:else}
-								<button
-									type="button"
-									onclick={() => (confirmRevokeId = token.id)}
-									class="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium transition active:translate-y-px"
-									style="border-color: color-mix(in oklab, var(--color-state-failed) 35%, transparent); color: var(--color-state-failed);"
-								>
-									Revoke
-								</button>
-							{/if}
-						</li>
-					{/each}
-				</ul>
-			{/if}
-		</div>
-
-		<!-- =============================== Users ================================ -->
-		{#if isAdmin}
-		<div
-			class="flex flex-col gap-5 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
-		>
-			<div class="flex flex-col gap-1">
-				<h2 class="text-sm font-semibold text-[var(--color-ink)]">Users</h2>
-				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
-					Members see and manage only the servers and tokens they own. Users log in with
-					a login token you mint here — shown once, like every token.
-					<span class="font-medium text-[var(--color-ink-muted)]">Local runners execute
-					code on this box as the mcpelevator process user; grant that permission only to
-					people you trust with the machine.</span>
-				</p>
-			</div>
-
-			<!-- One-time login-token reveal -->
-			{#if mintedFor}
-				<div
-					class="flex flex-col gap-2 rounded-lg border p-4"
-					style="border-color: color-mix(in oklab, var(--color-accent) 45%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);"
-				>
-					<p class="text-xs text-[var(--color-ink-muted)]">
-						Login token for
-						<span class="font-medium text-[var(--color-ink)]">{mintedFor.userName}</span>
-						— copy it now; it won't be shown again.
-					</p>
-					<div class="flex items-center gap-2">
-						<code
-							class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
-						>
-							{mintedFor.token}
-						</code>
-						<CopyButton value={mintedFor.token} label="Copy login token" />
-						<button
-							type="button"
-							onclick={() => (mintedFor = null)}
-							class="shrink-0 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
-						>
-							Done
-						</button>
-					</div>
-				</div>
-			{/if}
-
-			<!-- Create user -->
-			<form class="flex flex-wrap items-end gap-3" onsubmit={handleCreateUser}>
-				<div class="flex min-w-0 grow flex-col gap-1.5">
-					<label for="user-name" class="text-xs font-medium text-[var(--color-ink-muted)]">Name</label>
-					<input
-						id="user-name"
-						type="text"
-						bind:value={newUserName}
-						autocomplete="off"
-						spellcheck="false"
-						placeholder="e.g. ada"
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-					/>
-				</div>
-				<div class="flex min-w-0 flex-col gap-1.5">
-					<label for="user-role" class="text-xs font-medium text-[var(--color-ink-muted)]">Role</label>
-					<select
-						id="user-role"
-						bind:value={newUserRole}
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
-					>
-						<option value="member">member</option>
-						<option value="admin">admin</option>
-					</select>
-				</div>
-				<label
-					class="flex items-center gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs font-medium text-[var(--color-ink-muted)]"
-					title="Allow npx / uvx / command / docker servers (code execution on this box)"
-				>
-					<input type="checkbox" bind:checked={newUserLocal} class="accent-[var(--color-accent)]" />
-					local runners
-				</label>
-				<button
-					type="submit"
-					disabled={!newUserName.trim() || creatingUser}
-					aria-busy={creatingUser}
-					class="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
-				>
-					Add user
-				</button>
-			</form>
-
-			<!-- User list -->
-			{#if users.length === 0}
-				<p
-					class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-6 text-center text-xs text-[var(--color-ink-dim)]"
-				>
-					No users yet. You're operating as the built-in admin; add users to give
-					teammates their own scoped access.
-				</p>
-			{:else}
-				<ul class="flex flex-col divide-y divide-[var(--color-line)]">
-					{#each users as user (user.id)}
-						<li class="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
-							<div class="flex min-w-0 flex-col gap-1">
-								<span class="flex min-w-0 items-center gap-2">
-									<span class="truncate text-sm font-medium text-[var(--color-ink)]">{user.name}</span>
-									<span
-										class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap"
-										style={user.role === 'admin'
-											? 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'
-											: 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'}
-									>
-										{user.role}
-									</span>
-									{#if user.local_runners}
-										<span
-											class="shrink-0 rounded-full border border-[var(--color-line)] px-2 py-0.5 text-[11px] font-medium whitespace-nowrap text-[var(--color-ink-muted)]"
-											title="May configure npx / uvx / command / docker servers (code execution on this box)"
-										>
-											local runners
-										</span>
-									{/if}
-									{#if !user.control_mcp}
-										<span
-											class="shrink-0 rounded-full border border-[var(--color-line)] px-2 py-0.5 text-[11px] font-medium whitespace-nowrap text-[var(--color-ink-muted)]"
-											title="Can't use the built-in mcpelevator MCP server"
-										>
-											no control MCP
-										</span>
-									{/if}
-								</span>
-								<span class="text-xs text-[var(--color-ink-dim)]">
-									{user.servers_count} server{user.servers_count === 1 ? '' : 's'} ·
-									{user.tokens_count} token{user.tokens_count === 1 ? '' : 's'}
-								</span>
-								{#if managed.role || managed.local_runners}
-									<span class="text-xs text-[var(--color-ink-dim)]">
-										{[managed.role && 'Role', managed.local_runners && 'Local runners']
-											.filter(Boolean)
-											.join(' and ')} set by SSO groups at sign-in
-									</span>
-								{/if}
-								{#if user.linked_issuer}
-									<LinkedIdentity
-										userId={user.id}
-										issuer={user.linked_issuer}
-										disabled={busyUserId !== null}
-										onunlinked={(blocked) => {
-											users = users.map((u) =>
-												u.id === user.id
-													? {
-															...u,
-															linked_issuer: null,
-															blocked_identities_count: u.blocked_identities_count + (blocked ? 1 : 0)
-														}
-													: u
-											);
-											flashToast('Identity unlinked', 'info');
-										}}
-									/>
-								{/if}
-								{#if user.blocked_identities_count > 0}
-									<button
-										type="button"
-										onclick={() => handleClearBlocks(user)}
-										disabled={busyUserId !== null}
-										title="Let the identities an unlink blocked match this user by name again ({user.blocked_identities_count} blocked)"
-										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
-									>
-										Clear blocked identities
-									</button>
-								{/if}
 							</div>
-							<div class="flex shrink-0 flex-wrap items-center gap-1.5">
-								{#if confirmDeleteUserId === user.id}
-									<button
-										type="button"
-										onclick={() => handleDeleteUser(user.id)}
-										disabled={busyUserId === user.id}
-										aria-busy={busyUserId === user.id}
-										class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
-										style="background-color: var(--color-state-failed);"
-									>
-										Delete
-									</button>
-									<button
-										type="button"
-										onclick={() => (confirmDeleteUserId = null)}
-										disabled={busyUserId === user.id}
-										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
-									>
-										Cancel
-									</button>
-								{:else}
-									<button
-										type="button"
-										onclick={() => handleMintCredential(user)}
-										disabled={busyUserId !== null}
-										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink)] transition hover:border-[var(--color-line-strong)] disabled:opacity-50"
-									>
-										Mint login token
-									</button>
-									<UserAccessButtons
-										user={{ ...user, managed }}
-										disabled={busyUserId !== null}
-										onpatch={(patch) => patchUser(user, patch)}
-									/>
-									<button
-										type="button"
-										onclick={() => patchUser(user, { control_mcp: !user.control_mcp })}
-										disabled={busyUserId !== null}
-										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
-									>
-										{user.control_mcp ? 'Revoke control MCP' : 'Allow control MCP'}
-									</button>
-									<UserActivation
-										userId={user.id}
-										active={user.active}
-										disabled={busyUserId !== null}
-										onchanged={(updated) => {
-											users = users.map((u) => (u.id === user.id ? updated : u));
-											flashToast(updated.active ? 'User reactivated' : 'User deactivated', 'info');
-										}}
-									/>
-									<button
-										type="button"
-										onclick={() => (confirmDeleteUserId = user.id)}
-										disabled={busyUserId !== null}
-										class="rounded-lg border px-3 py-1.5 text-xs font-medium transition active:translate-y-px disabled:opacity-50"
-										style="border-color: color-mix(in oklab, var(--color-state-failed) 35%, transparent); color: var(--color-state-failed);"
-									>
-										Delete
-									</button>
-								{/if}
+						{/if}
+
+						<!-- New token -->
+						<form onsubmit={handleCreateToken} class="flex flex-wrap items-end gap-2">
+							<div class="flex min-w-0 flex-1 basis-48 flex-col gap-1.5">
+								<label for="token-name" class="text-xs font-medium text-[var(--color-ink-muted)]">
+									New token
+								</label>
+								<input
+									id="token-name"
+									type="text"
+									bind:value={newTokenName}
+									autocomplete="off"
+									spellcheck="false"
+									placeholder="e.g. claude-desktop"
+									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								/>
 							</div>
-						</li>
-					{/each}
-				</ul>
-			{/if}
-		</div>
-		{/if}
-
-		<!-- ============================== Security =============================== -->
-		{#if isAdmin}
-		<div
-			class="flex flex-col gap-6 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
-		>
-			<h2 class="text-sm font-semibold text-[var(--color-ink)]">Security</h2>
-
-			<!-- Default auth -->
-			<fieldset class="flex flex-col gap-2 border-0 p-0">
-				<legend class="text-sm font-medium text-[var(--color-ink)]">Default auth</legend>
-				<div
-					class="grid grid-cols-3 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1"
-				>
-					{#each AUTH_CHOICES as choice (choice.value)}
-						<label
-							class="flex cursor-pointer items-center justify-center rounded-md px-3 py-1.5 font-mono text-xs font-semibold transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
-							style={settings.default_auth_provider === choice.value
-								? 'background-color: color-mix(in oklab, var(--color-accent) 14%, transparent); color: var(--color-accent);'
-								: 'color: var(--color-ink-muted);'}
-						>
-							<input
-								type="radio"
-								name="default-auth"
-								value={choice.value}
-								checked={settings.default_auth_provider === choice.value}
-								onchange={() => setDefaultAuth(choice.value)}
-								disabled={savingField !== null}
-								class="sr-only"
-							/>
-							{choice.label}
-						</label>
-					{/each}
-				</div>
-				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
-					Servers set to <code class="font-mono">inherit</code> use this.
-					<code class="font-mono">bearer</code> requires a token in
-					<code class="font-mono">Authorization: Bearer …</code>.
-					<code class="font-mono">oauth</code> validates JWTs from the authorization server below.
-				</p>
-			</fieldset>
-
-			<!-- Inbound OAuth resource server -->
-			<form class="flex flex-col gap-3" onsubmit={saveOauthSettings}>
-				<div class="flex flex-col gap-1">
-					<h3 class="text-sm font-medium text-[var(--color-ink)]">OAuth resource server</h3>
-					<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
-						Validates access tokens clients send to servers and groups using
-						<code class="font-mono">oauth</code>. This is separate from OAuth used to reach a remote upstream.
-					</p>
-				</div>
-				<div class="grid gap-3 sm:grid-cols-2">
-					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-						Discovery URL or issuer
-						<input
-							type="url"
-							bind:value={oauthConfigUrl}
-							disabled={savingField !== null}
-							placeholder="https://auth.example.com/application/o/mcp/"
-							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-						/>
-					</label>
-					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-						Audience
-						<input
-							type="text"
-							bind:value={oauthAudience}
-							disabled={savingField !== null}
-							placeholder="mcp-production-api"
-							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-						/>
-					</label>
-				</div>
-				<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
-					Both fields are required before OAuth endpoints serve metadata or accept tokens. Audience validation prevents a token minted for another app from being reused here.
-				</p>
-				<div class="grid gap-3 sm:grid-cols-2">
-					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-						Allowed identities <span class="font-normal text-[var(--color-ink-dim)]">(optional, comma-separated)</span>
-						<input
-							type="text"
-							bind:value={oauthAllowedSubjects}
-							disabled={savingField !== null}
-							placeholder="alice, bob@example.com"
-							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-						/>
-					</label>
-					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-						Advertised scopes <span class="font-normal text-[var(--color-ink-dim)]">(optional, comma-separated)</span>
-						<input
-							type="text"
-							bind:value={oauthScopes}
-							disabled={savingField !== null}
-							placeholder="openid, profile, email"
-							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-						/>
-					</label>
-				</div>
-				<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
-					<input
-						type="checkbox"
-						bind:checked={oauthAcceptBearer}
-						disabled={savingField !== null}
-						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
-					/>
-					<span class="flex flex-col gap-0.5">
-						<span class="text-sm font-medium text-[var(--color-ink)]">Also accept local bearer tokens</span>
-						<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
-							Lets <code class="font-mono">mcpe_…</code> automation tokens use OAuth-protected endpoints with their normal server or group scope checks.
-						</span>
-					</span>
-				</label>
-				<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
-					<input
-						type="checkbox"
-						bind:checked={oauthOwnerOnly}
-						disabled={savingField !== null}
-						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
-					/>
-					<span class="flex flex-col gap-0.5">
-						<span class="text-sm font-medium text-[var(--color-ink)]">Members reach only their own servers</span>
-						<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
-							A token from a linked Member opens only the servers they own, even when the allowlist names them, and no group. Admins and unlinked tokens are unaffected.
-						</span>
-					</span>
-				</label>
-				<div class="flex justify-end">
-					<button
-						type="submit"
-						disabled={savingOauth || savingField !== null}
-						aria-busy={savingOauth}
-						class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-50"
-					>
-						{savingOauth ? 'Saving…' : 'Save OAuth settings'}
-					</button>
-				</div>
-			</form>
-
-			<!-- Bind mode -->
-			<fieldset class="flex flex-col gap-2 border-0 p-0">
-				<legend class="text-sm font-medium text-[var(--color-ink)]">Bind mode</legend>
-				<div class="grid grid-cols-2 gap-2">
-					{#each BIND_CHOICES as choice (choice.value)}
-						{@const locked = choice.value === 'expose' && !hasUsableAdminCredential}
-						<label
-							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
-							class:cursor-not-allowed={locked}
-							class:opacity-60={locked}
-							style={settings.bind_mode === choice.value
-								? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
-								: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
-						>
-							<span class="flex items-center gap-2">
-								<input
-									type="radio"
-									name="bind-mode"
-									value={choice.value}
-									checked={settings.bind_mode === choice.value}
-									onchange={() => setBindMode(choice.value)}
-									disabled={savingField !== null}
-									class="sr-only"
-								/>
-								<span
-									class="font-mono text-sm font-semibold"
-									style={settings.bind_mode === choice.value
-										? 'color: var(--color-accent);'
-										: 'color: var(--color-ink);'}
+							<div class="flex min-w-0 flex-col gap-1.5">
+								<label for="token-scope" class="text-xs font-medium text-[var(--color-ink-muted)]">
+									Scope
+								</label>
+								<select
+									id="token-scope"
+									bind:value={newTokenScope}
+									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
 								>
-									{choice.label}
-								</span>
-							</span>
-							<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
-								{choice.hint}
-							</span>
-						</label>
-					{/each}
-				</div>
-				{#if confirmBindLocal}
-					<div
-						role="alert"
-						class="flex flex-col gap-2.5 rounded-lg border p-3"
-						style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
-					>
-						<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
-							This will lock this browser
-							(<code class="font-mono text-[var(--color-ink)]">{browserHost}</code>)
-							out of the control plane — <code class="font-mono">local</code> allows loopback
-							only. Open
-							<a
-								class="font-mono text-[var(--color-accent)] underline"
-								href={loopbackUrl}
-								target="_blank"
-								rel="noopener noreferrer">{loopbackUrl}</a
-							>
-							first, then switch.
-						</p>
-						<div class="flex items-center gap-1.5">
+									{#if isAdmin}
+										<option value="all">All servers &amp; groups</option>
+									{/if}
+									{#if isAdmin && groups.length > 0}
+										<optgroup label="Groups">
+											{#each groups as group (group.name)}
+												<option value={`group:${group.name}`}>Group: {group.name}</option>
+											{/each}
+										</optgroup>
+									{/if}
+									<optgroup label="Servers">
+										{#each servers as server (server.id)}
+											<option value={server.id}>{serverLabel(server)}</option>
+										{/each}
+									</optgroup>
+								</select>
+							</div>
 							<button
-								type="button"
-								onclick={confirmSwitchToLocal}
-								disabled={savingField !== null}
-								class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
-								style="background-color: var(--color-state-failed);"
+								type="submit"
+								disabled={!newNameValid || creating}
+								aria-busy={creating}
+								class="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
 							>
-								Switch to local anyway
+								{#if creating}
+									<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+										<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
+										<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+									</svg>
+								{/if}
+								Create
 							</button>
-							<button
-								type="button"
-								onclick={cancelSwitchToLocal}
-								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
-							>
-								Cancel
-							</button>
-						</div>
-					</div>
-				{/if}
-				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
-					Host/Origin is always checked (DNS-rebinding defense): loopback is always
-					allowed; <code class="font-mono">expose</code> also allows the hosts below.
-				</p>
-			</fieldset>
+						</form>
 
-			<!-- Local network (LAN) access -->
-			<fieldset class="flex flex-col gap-2 border-0 p-0">
-				<legend class="text-sm font-medium text-[var(--color-ink)]">Local network access</legend>
-				<label
-					class="flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
-					class:cursor-not-allowed={!settings.allow_private_lan && !hasUsableAdminCredential}
-					class:opacity-60={!settings.allow_private_lan && !hasUsableAdminCredential}
-					style={settings.allow_private_lan
-						? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
-						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
-				>
-					<input
-						type="checkbox"
-						checked={settings.allow_private_lan}
-						onchange={(e) => setAllowPrivateLan(e.currentTarget.checked, e.currentTarget)}
-						disabled={savingField !== null}
-						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
-					/>
-					<span class="flex flex-col gap-0.5">
-						<span class="text-sm font-medium text-[var(--color-ink)]">
-							Allow access from devices on your local network
-						</span>
-						<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
-							Reach this box at its private IP (e.g.
-							<code class="font-mono">http://192.168.1.50:8080</code>) from other LAN devices —
-							no per-host allowlisting. Private-IP literals only, from a private-network peer,
-							so it stays DNS-rebinding-safe. Counts as exposed, so an admin token is required
-							for <code class="font-mono">/api</code>.
-						</span>
-					</span>
-				</label>
-				{#if confirmDisableLan}
-					<div
-						role="alert"
-						class="flex flex-col gap-2.5 rounded-lg border p-3"
-						style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
-					>
-						<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
-							This will lock this browser
-							(<code class="font-mono text-[var(--color-ink)]">{browserHost}</code>)
-							out of the control plane — you're connected through a private IP. Open
-							<a
-								class="font-mono text-[var(--color-accent)] underline"
-								href={loopbackUrl}
-								target="_blank"
-								rel="noopener noreferrer">{loopbackUrl}</a
-							>
-							first, then turn it off.
-						</p>
-						<div class="flex items-center gap-1.5">
-							<button
-								type="button"
-								onclick={confirmDisablePrivateLan}
-								disabled={savingField !== null}
-								class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
-								style="background-color: var(--color-state-failed);"
-							>
-								Turn off anyway
-							</button>
-							<button
-								type="button"
-								onclick={() => (confirmDisableLan = false)}
-								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
-							>
-								Cancel
-							</button>
-						</div>
-					</div>
-				{/if}
-			</fieldset>
-
-			<!-- Docker runner (root-equivalent, opt-in) -->
-			<fieldset class="flex flex-col gap-2 border-0 p-0">
-				<legend class="text-sm font-medium text-[var(--color-ink)]">Docker runner</legend>
-				<label
-					class="flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
-					style={settings.docker_runner
-						? 'border-color: color-mix(in oklab, var(--color-state-failed) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 7%, transparent);'
-						: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
-				>
-					<input
-						type="checkbox"
-						checked={settings.docker_runner}
-						onchange={(e) => setDockerRunner(e.currentTarget.checked, e.currentTarget)}
-						disabled={savingField !== null}
-						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
-					/>
-					<span class="flex flex-col gap-0.5">
-						<span class="text-sm font-medium text-[var(--color-ink)]">
-							Enable running MCP servers packaged as Docker images
-						</span>
-						<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
-							<span class="font-semibold text-[var(--color-state-failed)]">Root-equivalent.</span>
-							Launches arbitrary images on the mounted Docker daemon (a sibling container on
-							the host, or an isolated dind sidecar). Only enable it if you trust every image
-							you run and understand it can affect the host. Requires the Docker socket to be
-							mounted into this container.
-						</span>
-					</span>
-				</label>
-				{#if confirmEnableDocker}
-					<div
-						role="alert"
-						class="flex flex-col gap-2.5 rounded-lg border p-3"
-						style="border-color: color-mix(in oklab, var(--color-state-failed) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 8%, transparent);"
-					>
-						<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
-							The docker runner is <span class="font-semibold text-[var(--color-ink)]">root-equivalent</span>:
-							a server you run can execute any image on the host's Docker daemon. Enable it only
-							if you trust the images you'll run.
-						</p>
-						<div class="flex items-center gap-1.5">
-							<button
-								type="button"
-								onclick={confirmEnableDockerRunner}
-								disabled={savingField !== null}
-								class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
-								style="background-color: var(--color-state-failed);"
-							>
-								Enable anyway
-							</button>
-							<button
-								type="button"
-								onclick={() => (confirmEnableDocker = false)}
-								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
-							>
-								Cancel
-							</button>
-						</div>
-					</div>
-				{/if}
-			</fieldset>
-
-			<!-- Built-in mcpelevator MCP server (the control plane as MCP) -->
-			<fieldset class="flex flex-col gap-2 border-0 p-0">
-				<legend class="text-sm font-medium text-[var(--color-ink)]">mcpelevator MCP server</legend>
-				<label
-					class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
-				>
-					<input
-						type="checkbox"
-						checked={settings.control_mcp}
-						onchange={(e) =>
-							patchSettings({ control_mcp: e.currentTarget.checked }, 'control_mcp')}
-						disabled={savingField !== null}
-						class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
-					/>
-					<span class="flex flex-col gap-0.5">
-						<span class="text-sm font-medium text-[var(--color-ink)]">
-							Serve the control plane as an MCP server
-						</span>
-						<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
-							Lets an agent manage servers, groups, tokens, users and settings through the
-							built-in <code class="font-mono">mcpelevator</code> server on the dashboard, where it
-							is edited like any other server (hide or rename tools, auth, idle). Every tool call
-							runs with the caller's own permissions; with control-plane auth on, connect with a
-							login (control) token. Individual users can be excluded under Users.
-						</span>
-					</span>
-				</label>
-			</fieldset>
-
-			<!-- Idle shutdown (wake-on-request) -->
-			<fieldset class="flex flex-col gap-2 border-0 p-0">
-				<legend class="text-sm font-medium text-[var(--color-ink)]">Idle shutdown</legend>
-				<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
-					<code class="font-mono text-[var(--color-ink-muted)]">0</code> (the default) keeps
-					every server running. Above 0, a server with no traffic for that many seconds stops,
-					and the next request wakes it, at the cost of a cold start and anything it held in
-					memory. Each server can override this in its own settings, where
-					<code class="font-mono text-[var(--color-ink-muted)]">0</code> means never idle.
-				</p>
-				<form class="flex items-center gap-2" onsubmit={saveIdleTimeout}>
-					<input
-						type="text"
-						inputmode="numeric"
-						bind:value={idleTimeoutText}
-						autocomplete="off"
-						spellcheck="false"
-						aria-label="Default idle shutdown in seconds"
-						aria-invalid={!idleTimeoutValid}
-						class="w-32 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
-						style={idleTimeoutValid
-							? 'border-color: var(--color-line);'
-							: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
-					/>
-					<span class="text-xs text-[var(--color-ink-dim)]">seconds</span>
-					<button
-						type="submit"
-						disabled={!idleTimeoutValid || !idleTimeoutDirty || savingField !== null}
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
-					>
-						Save
-					</button>
-				</form>
-				{#if !idleTimeoutValid}
-					<p class="text-xs text-[var(--color-state-failed)]" role="alert">
-						Enter a whole number of seconds (0 turns idling off).
-					</p>
-				{/if}
-			</fieldset>
-
-			<!-- Usage retention -->
-			<fieldset class="flex flex-col gap-2 border-0 p-0">
-				<legend class="text-sm font-medium text-[var(--color-ink)]">Usage retention</legend>
-				<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
-					How long to keep per-server and per-tool call counts, shown on each server's
-					Usage panel — counts and when each was last seen, never arguments or results.
-					<code class="font-mono text-[var(--color-ink-muted)]">0</code> keeps them forever;
-					a usage window never reaches further back than this, so lowering it shortens what
-					the charts can show.
-				</p>
-				<form class="flex items-center gap-2" onsubmit={saveUsageRetention}>
-					<input
-						type="text"
-						inputmode="numeric"
-						bind:value={usageRetentionText}
-						autocomplete="off"
-						spellcheck="false"
-						aria-label="Usage retention in days"
-						aria-invalid={!usageRetentionValid}
-						class="w-32 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
-						style={usageRetentionValid
-							? 'border-color: var(--color-line);'
-							: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
-					/>
-					<span class="text-xs text-[var(--color-ink-dim)]">days</span>
-					<button
-						type="submit"
-						disabled={!usageRetentionValid || !usageRetentionDirty || savingField !== null}
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
-					>
-						Save
-					</button>
-				</form>
-				{#if !usageRetentionValid}
-					<p class="text-xs text-[var(--color-state-failed)]" role="alert">
-						Enter a whole number of days (0 keeps counters forever).
-					</p>
-				{/if}
-			</fieldset>
-
-			<!-- Upstream OAuth client identity -->
-			<fieldset class="flex flex-col gap-2 border-0 p-0">
-				<legend class="text-sm font-medium text-[var(--color-ink)]">
-					Upstream OAuth client identity
-				</legend>
-				<div class="grid grid-cols-3 gap-2">
-					{#each UPSTREAM_OAUTH_CLIENT_CHOICES as choice (choice.value)}
-						<label
-							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
-							style={settings.upstream_oauth_client_mode === choice.value
-								? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
-								: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+						<!-- Admin (control-plane) token: the credential the SPA logs in with.
+						     Admin-only — members receive their login token from an admin. -->
+						{#if isAdmin}
+						<div
+							class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed border-[var(--color-line)] px-3 py-2.5"
 						>
-							<span class="flex items-center gap-2">
-								<input
-									type="radio"
-									name="upstream-oauth-client-mode"
-									value={choice.value}
-									checked={settings.upstream_oauth_client_mode === choice.value}
-									onchange={() => setUpstreamOauthClientMode(choice.value)}
-									disabled={savingField !== null}
-									class="sr-only"
-								/>
-								<span
-									class="font-mono text-sm font-semibold"
-									style={settings.upstream_oauth_client_mode === choice.value
-										? 'color: var(--color-accent);'
-										: 'color: var(--color-ink);'}
-								>
-									{choice.label}
-								</span>
-							</span>
-							<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
-								{choice.hint}
-							</span>
-						</label>
-					{/each}
-				</div>
-				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
-					How OAuth sign-ins to a remote server identify this instance when no static client
-					id is set. <code class="font-mono">auto</code> offers the URL-based client id (CIMD)
-					only after confirming
-					<code class="font-mono">/api/oauth/client-metadata.json</code> is publicly fetchable,
-					falling back to Dynamic Client Registration — e.g. when an auth-gating proxy such as
-					Cloudflare Access blocks the provider's fetch. Pick
-					<code class="font-mono">CIMD</code> or <code class="font-mono">DCR</code> to skip the
-					probe and decide explicitly. A server with a static client id ignores this.
-				</p>
-			</fieldset>
-
-			<!-- Groups -->
-			<fieldset class="flex flex-col gap-3 border-0 p-0">
-				<legend class="text-sm font-medium text-[var(--color-ink)]">Groups</legend>
-				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
-					A group is served at <code class="font-mono">/g/&lt;name&gt;/mcp</code> — one URL
-					bundling its running members' tools, each prefixed by the member's slug (e.g.
-					<code class="font-mono">github_create_issue</code>). Members are
-					<code class="font-mono">all servers</code> (every registered server, including
-					future ones, except the built-in <code class="font-mono">mcpelevator</code> server,
-					which joins a group only when picked) or a picked list. A group uses the default auth provider above. A
-					protected member is included only when it uses that same provider; bearer and OAuth
-					credentials cannot stand in for one another. Name a group
-					<code class="font-mono">all</code> with <code class="font-mono">all servers</code>
-					for a bundle of every server.
-				</p>
-
-				<!-- Existing groups -->
-				{#if groups.length === 0}
-					<p
-						class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-4 text-center text-xs text-[var(--color-ink-dim)]"
-					>
-						No groups yet. Create one below to serve a bundle at
-						<code class="font-mono">/g/&lt;name&gt;/mcp</code>.
-					</p>
-				{:else}
-					<ul class="flex flex-col gap-2">
-						{#each groups as group (group.name)}
-							<li
-								class="flex flex-col gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5"
+							<p class="min-w-0 text-xs text-[var(--color-ink-muted)]">
+								<span class="font-medium text-[var(--color-ink)]">Admin token.</span> The credential
+								you log in with when the control plane enforces auth.
+							</p>
+							<button
+								type="button"
+								onclick={handleGenerateAdmin}
+								disabled={generatingAdmin}
+								aria-busy={generatingAdmin}
+								class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink)] transition hover:border-[var(--color-line-strong)] disabled:opacity-50"
 							>
-								<div class="flex items-center justify-between gap-2">
-									<div class="flex min-w-0 flex-col gap-0.5">
-										<span class="truncate font-mono text-sm font-semibold text-[var(--color-ink)]">
-											{group.name}
-										</span>
-										<span class="text-[11px] text-[var(--color-ink-dim)]">
-											{membersLabel(group.members)}
-										</span>
-									</div>
-									<div class="flex shrink-0 items-center gap-1.5">
-										<CopyMenu server={groupSummary(group)} />
-										{#if confirmDeleteGroup !== group.name}
-											<!-- A group owns no process: restarting it bounces each enabled
-											     member through the same per-server restart, so the bundle
-											     re-reads their tools. Same component as the server pages. -->
-											<RestartButton
-												target={{ kind: 'group', name: group.name }}
-												size="sm"
-												onrestarted={() => void refreshServers()}
-											/>
+								Generate admin token
+							</button>
+						</div>
+						{/if}
+
+						<!-- Token list -->
+						{#if tokens.length === 0}
+							<p
+								class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-6 text-center text-xs text-[var(--color-ink-dim)]"
+							>
+								No tokens yet. Create one above to authenticate bearer-protected servers.
+							</p>
+						{:else}
+							<ul class="flex flex-col divide-y divide-[var(--color-line)]">
+								{#each tokens as token (token.id)}
+									<li class="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
+										<div class="flex min-w-0 flex-col gap-1">
+											<span class="flex min-w-0 items-center gap-2">
+												<span class="truncate text-sm font-medium text-[var(--color-ink)]">
+													{token.name}
+												</span>
+												{#if token.scope === 'control'}
+													<span
+														class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap"
+														title="Control-plane admin token, authenticates /api"
+														style="border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);"
+													>
+														control
+													</span>
+												{:else}
+													<span
+														class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap"
+														title={token.scope === 'all'
+															? 'Authorizes every bearer-protected server and group'
+															: token.scope.startsWith('group:')
+																? 'Authorizes only this group'
+																: 'Authorizes only this server'}
+														style={token.scope === 'all'
+															? 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'
+															: 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'}
+													>
+														{scopeLabel(token.scope)}
+													</span>
+												{/if}
+											</span>
+											<span class="font-mono text-xs text-[var(--color-ink-dim)]">
+												{token.prefix}…
+												<span class="text-[var(--color-ink-dim)]">· {formatDate(token.created_at)}</span>
+												{#if isAdmin && token.user_name}
+													<span class="text-[var(--color-ink-dim)]">· {token.user_name}</span>
+												{/if}
+											</span>
+										</div>
+										{#if confirmRevokeId === token.id}
+											<div class="flex shrink-0 items-center gap-1.5">
+												<button
+													type="button"
+													onclick={() => handleRevoke(token.id)}
+													disabled={revokingId === token.id}
+													aria-busy={revokingId === token.id}
+													class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+													style="background-color: var(--color-state-failed);"
+												>
+													{#if revokingId === token.id}
+														<svg class="size-3.5 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+															<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25" />
+															<path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+														</svg>
+													{/if}
+													Revoke
+												</button>
+												<button
+													type="button"
+													onclick={() => (confirmRevokeId = null)}
+													disabled={revokingId === token.id}
+													class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+												>
+													Cancel
+												</button>
+											</div>
+										{:else}
 											<button
 												type="button"
-												onclick={() => editGroup(group)}
-												aria-label={`Edit group ${group.name}`}
-												class="shrink-0 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+												onclick={() => (confirmRevokeId = token.id)}
+												class="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium transition active:translate-y-px"
+												style="border-color: color-mix(in oklab, var(--color-state-failed) 35%, transparent); color: var(--color-state-failed);"
 											>
-												Edit
+												Revoke
 											</button>
 										{/if}
-										{#if confirmDeleteGroup === group.name}
+									</li>
+								{/each}
+							</ul>
+						{/if}
+					</div>
+				{:else if activeTab === 'users'}
+					<div class="flex flex-col gap-1">
+						<h2 class="text-lg font-semibold tracking-tight text-[var(--color-ink)]">Users</h2>
+						<p class="max-w-prose text-sm text-[var(--color-ink-muted)]">
+							Members see and manage only the servers and tokens they own. Users log in with
+							a login token you mint here — shown once, like every token.
+							<span class="font-medium text-[var(--color-ink)]">Local runners execute
+							code on this box as the mcpelevator process user; grant that permission only to
+							people you trust with the machine.</span>
+						</p>
+					</div>
+					<div class="flex flex-col gap-5 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5">
+						<!-- One-time login-token reveal -->
+						{#if mintedFor}
+							<div
+								class="flex flex-col gap-2 rounded-lg border p-4"
+								style="border-color: color-mix(in oklab, var(--color-accent) 45%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);"
+							>
+								<p class="text-xs text-[var(--color-ink-muted)]">
+									Login token for
+									<span class="font-medium text-[var(--color-ink)]">{mintedFor.userName}</span>
+									— copy it now; it won't be shown again.
+								</p>
+								<div class="flex items-center gap-2">
+									<code
+										class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
+									>
+										{mintedFor.token}
+									</code>
+									<CopyButton value={mintedFor.token} label="Copy login token" />
+									<button
+										type="button"
+										onclick={() => (mintedFor = null)}
+										class="shrink-0 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+									>
+										Done
+									</button>
+								</div>
+							</div>
+						{/if}
+
+						<!-- Create user -->
+						<form class="flex flex-wrap items-end gap-3" onsubmit={handleCreateUser}>
+							<div class="flex min-w-0 grow flex-col gap-1.5">
+								<label for="user-name" class="text-xs font-medium text-[var(--color-ink-muted)]">Name</label>
+								<input
+									id="user-name"
+									type="text"
+									bind:value={newUserName}
+									autocomplete="off"
+									spellcheck="false"
+									placeholder="e.g. ada"
+									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+								/>
+							</div>
+							<div class="flex min-w-0 flex-col gap-1.5">
+								<label for="user-role" class="text-xs font-medium text-[var(--color-ink-muted)]">Role</label>
+								<select
+									id="user-role"
+									bind:value={newUserRole}
+									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
+								>
+									<option value="member">member</option>
+									<option value="admin">admin</option>
+								</select>
+							</div>
+							<label
+								class="flex items-center gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs font-medium text-[var(--color-ink-muted)]"
+								title="Allow npx / uvx / command / docker servers (code execution on this box)"
+							>
+								<input type="checkbox" bind:checked={newUserLocal} class="accent-[var(--color-accent)]" />
+								local runners
+							</label>
+							<button
+								type="submit"
+								disabled={!newUserName.trim() || creatingUser}
+								aria-busy={creatingUser}
+								class="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+							>
+								Add user
+							</button>
+						</form>
+
+						<!-- User list -->
+						{#if users.length === 0}
+							<p
+								class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-6 text-center text-xs text-[var(--color-ink-dim)]"
+							>
+								No users yet. You're operating as the built-in admin; add users to give
+								teammates their own scoped access.
+							</p>
+						{:else}
+							<ul class="flex flex-col divide-y divide-[var(--color-line)]">
+								{#each users as user (user.id)}
+						<li class="flex flex-col gap-3 py-4 first:pt-0 last:pb-0">
+							<div class="flex flex-wrap items-start justify-between gap-3">
+									<div class="flex min-w-0 flex-col gap-1">
+										<span class="flex min-w-0 items-center gap-2">
+											<span class="truncate text-sm font-medium text-[var(--color-ink)]">{user.name}</span>
+											<span
+												class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap"
+												style={user.role === 'admin'
+													? 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'
+													: 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'}
+											>
+												{user.role}
+											</span>
+											{#if user.local_runners}
+												<span
+													class="shrink-0 rounded-full border border-[var(--color-line)] px-2 py-0.5 text-[11px] font-medium whitespace-nowrap text-[var(--color-ink-muted)]"
+													title="May configure npx / uvx / command / docker servers (code execution on this box)"
+												>
+													local runners
+												</span>
+											{/if}
+											{#if !user.control_mcp}
+												<span
+													class="shrink-0 rounded-full border border-[var(--color-line)] px-2 py-0.5 text-[11px] font-medium whitespace-nowrap text-[var(--color-ink-muted)]"
+													title="Can't use the built-in mcpelevator MCP server"
+												>
+													no control MCP
+												</span>
+											{/if}
+										</span>
+										<span class="text-xs text-[var(--color-ink-dim)]">
+											{user.servers_count} server{user.servers_count === 1 ? '' : 's'} ·
+											{user.tokens_count} token{user.tokens_count === 1 ? '' : 's'}
+										</span>
+										{#if managed.role || managed.local_runners}
+											<span class="text-xs text-[var(--color-ink-dim)]">
+												{[managed.role && 'Role', managed.local_runners && 'Local runners']
+													.filter(Boolean)
+													.join(' and ')} set by SSO groups at sign-in
+											</span>
+										{/if}
+										{#if user.linked_issuer}
+											<LinkedIdentity
+												userId={user.id}
+												issuer={user.linked_issuer}
+												disabled={busyUserId !== null}
+												onunlinked={(blocked) => {
+													users = users.map((u) =>
+														u.id === user.id
+															? {
+																	...u,
+																	linked_issuer: null,
+																	blocked_identities_count: u.blocked_identities_count + (blocked ? 1 : 0)
+																}
+															: u
+													);
+													flashToast('Identity unlinked', 'info');
+												}}
+											/>
+										{/if}
+										{#if user.blocked_identities_count > 0}
 											<button
 												type="button"
-												onclick={() => handleDeleteGroup(group.name)}
-												disabled={deletingGroup === group.name}
-												aria-busy={deletingGroup === group.name}
+												onclick={() => handleClearBlocks(user)}
+												disabled={busyUserId !== null}
+												title="Let the identities an unlink blocked match this user by name again ({user.blocked_identities_count} blocked)"
+												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+											>
+												Clear blocked identities
+											</button>
+										{/if}
+									</div>
+								<div class="flex shrink-0 items-center gap-1.5">
+									{#if confirmDeleteUserId === user.id}
+											<button
+												type="button"
+												onclick={() => handleDeleteUser(user.id)}
+												disabled={busyUserId === user.id}
+												aria-busy={busyUserId === user.id}
 												class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
 												style="background-color: var(--color-state-failed);"
 											>
@@ -2053,702 +1510,1424 @@
 											</button>
 											<button
 												type="button"
-												onclick={() => (confirmDeleteGroup = null)}
-												disabled={deletingGroup === group.name}
-												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+												onclick={() => (confirmDeleteUserId = null)}
+												disabled={busyUserId === user.id}
+												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
 											>
 												Cancel
 											</button>
-										{:else}
+									{:else}
 											<button
 												type="button"
-												onclick={() => (confirmDeleteGroup = group.name)}
-												aria-label={`Delete group ${group.name}`}
-												class="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium transition active:translate-y-px"
+												onclick={() => handleMintCredential(user)}
+												disabled={busyUserId !== null}
+												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink)] transition hover:border-[var(--color-line-strong)] disabled:opacity-50"
+											>
+												Mint login token
+											</button>
+											<button
+												type="button"
+												onclick={() => (confirmDeleteUserId = user.id)}
+												disabled={busyUserId !== null}
+												class="rounded-lg border px-3 py-1.5 text-xs font-medium transition active:translate-y-px disabled:opacity-50"
 												style="border-color: color-mix(in oklab, var(--color-state-failed) 35%, transparent); color: var(--color-state-failed);"
 											>
 												Delete
 											</button>
-										{/if}
-									</div>
+									{/if}
 								</div>
-								{#if confirmDeleteGroup === group.name}
-									<p class="text-xs leading-normal text-[var(--color-state-failed)]">
-										This takes <code class="font-mono">{group.url}</code> offline and revokes tokens
-										scoped to this group.
-									</p>
-								{/if}
-								<code class="min-w-0 truncate font-mono text-[11px] text-[var(--color-ink-dim)]">
-									{group.url}
-								</code>
-
-								<!-- Members, each with its own controls. A group is only a view over its
-								     servers: what it serves is exactly what its RUNNING members expose, so
-								     starting, stopping, or restarting one from here is the same action as
-								     on its own page — same components, same endpoints. -->
-								{#if groupMembers(group).length === 0}
-									<p class="text-[11px] text-[var(--color-ink-dim)]">
-										No members yet — this group serves an empty bundle.
-									</p>
-								{:else}
-									<details class="mt-0.5">
-										<summary
-											class="cursor-pointer text-[11px] font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
+							</div>
+							{#if confirmDeleteUserId !== user.id}
+								<!-- What this user may do, apart from the row's identity actions above. -->
+								<div
+									class="flex flex-wrap items-center gap-1.5 border-t border-dashed border-[var(--color-line)] pt-3"
+								>
+									<span class="mr-1 text-[11px] font-medium tracking-wide text-[var(--color-ink-dim)] uppercase"
+										>Access</span
+									>
+										<UserAccessButtons
+											user={{ ...user, managed }}
+											disabled={busyUserId !== null}
+											onpatch={(patch) => patchUser(user, patch)}
+										/>
+										<button
+											type="button"
+											onclick={() => patchUser(user, { control_mcp: !user.control_mcp })}
+											disabled={busyUserId !== null}
+											class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
 										>
-											Members ({groupMembers(group).length})
-										</summary>
-										<ul class="mt-1.5 flex flex-col divide-y divide-[var(--color-line)]">
-											{#each groupMembers(group) as member (member.id)}
-												<li class="flex flex-wrap items-center justify-between gap-2 py-1.5">
-													<a
-														href={`/server/${member.id}`}
-														class="flex min-w-0 flex-1 basis-40 items-center gap-2 rounded-md outline-offset-4 transition-opacity hover:opacity-80"
-													>
-														<StatePill
-															state={member.state}
-															startupStatus={member.startup_status}
-														/>
-														<span class="min-w-0 truncate text-xs text-[var(--color-ink)]">
-															{member.name}
-														</span>
-														<span
-															class="min-w-0 truncate font-mono text-[11px] text-[var(--color-ink-dim)]"
-														>
-															{member.slug}
-														</span>
-													</a>
-													<div class="flex shrink-0 items-center gap-1.5">
-														<ServerActionButton
-															server={member}
-															size="sm"
-															onchange={applyServerUpdate}
-															onerror={flashToast}
-														/>
-														{#if member.enabled}
-															<RestartButton
-																target={{ kind: 'server', id: member.id }}
-																size="sm"
-																onrestarted={(next) => next && applyServerUpdate(next)}
-															/>
-														{/if}
-													</div>
-												</li>
-											{/each}
-										</ul>
-									</details>
-								{/if}
-							</li>
-						{/each}
-					</ul>
-				{/if}
-
-				<!-- New group -->
-				<form
-					onsubmit={handleCreateGroup}
-					class="flex flex-col gap-2 rounded-lg border border-dashed border-[var(--color-line)] p-3"
-				>
-					<div class="flex flex-wrap items-end gap-2">
-						<div class="flex min-w-0 flex-1 basis-40 flex-col gap-1.5">
-							<label for="group-name" class="text-xs font-medium text-[var(--color-ink-muted)]">
-								New group
-							</label>
-							<input
-								id="group-name"
-								type="text"
-								bind:value={newGroupName}
-								autocomplete="off"
-								spellcheck="false"
-								placeholder="e.g. all, dev-tools"
-								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-							/>
-						</div>
-						<button
-							type="submit"
-							disabled={!groupNameValid || savingGroup}
-							aria-busy={savingGroup}
-							class="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
-						>
-							{groups.some((g) => g.name === newGroupName.trim()) ? 'Update group' : 'Create group'}
-						</button>
+											{user.control_mcp ? 'Revoke control MCP' : 'Allow control MCP'}
+										</button>
+										<UserActivation
+											userId={user.id}
+											active={user.active}
+											disabled={busyUserId !== null}
+											onchanged={(updated) => {
+												users = users.map((u) => (u.id === user.id ? updated : u));
+												flashToast(updated.active ? 'User reactivated' : 'User deactivated', 'info');
+											}}
+										/>
+								</div>
+							{/if}
+						</li>
+								{/each}
+							</ul>
+						{/if}
 					</div>
-					{#if newGroupName.trim().length > 0 && !groupNameValid}
-						<p class="text-[11px] text-[var(--color-state-failed)]">
-							Use lowercase letters, digits, and single hyphens (the URL routing key).
+				{:else if activeTab === 'groups'}
+					<div class="flex flex-col gap-1">
+						<h2 class="text-lg font-semibold tracking-tight text-[var(--color-ink)]">Groups</h2>
+						<p class="max-w-prose text-sm text-[var(--color-ink-muted)]">
+							A group is served at <code class="font-mono">/g/&lt;name&gt;/mcp</code> — one URL
+							bundling its running members' tools, each prefixed by the member's slug (e.g.
+							<code class="font-mono">github_create_issue</code>). Members are
+							<code class="font-mono">all servers</code> (every registered server, including
+							future ones, except the built-in <code class="font-mono">mcpelevator</code> server,
+							which joins a group only when picked) or a picked list. A group uses the default auth
+							provider set under <a href="/settings?tab=auth" data-sveltekit-noscroll class="underline decoration-dotted underline-offset-2">Server auth</a>.
+							A protected member is included only when it uses that same provider; bearer and OAuth
+							credentials cannot stand in for one another. Name a group
+							<code class="font-mono">all</code> with <code class="font-mono">all servers</code>
+							for a bundle of every server.
 						</p>
-					{/if}
-					{#if confirmReplaceName !== null && confirmReplaceName === newGroupName.trim()}
-						<div
-							role="alert"
-							class="flex flex-col gap-2.5 rounded-lg border p-3"
-							style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
-						>
-							<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
-								A group named <code class="font-mono text-[var(--color-ink)]">{confirmReplaceName}</code>
-								already exists{#if replaceTarget} (currently <strong>{membersLabel(replaceTarget.members)}</strong>){/if}.
-								Replace its members with your selection above? Its
-								<code class="font-mono">/g/{confirmReplaceName}/mcp</code> endpoint stays up and its
-								tokens keep working — only the membership changes. Use <strong>Edit</strong> on the
-								group above to start from its current members.
+					</div>
+					<div class="flex flex-col gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5">
+						<!-- Existing groups -->
+						{#if groups.length === 0}
+							<p
+								class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-4 text-center text-xs text-[var(--color-ink-dim)]"
+							>
+								No groups yet. Create one below to serve a bundle at
+								<code class="font-mono">/g/&lt;name&gt;/mcp</code>.
 							</p>
-							<div class="flex items-center gap-1.5">
+						{:else}
+							<ul class="flex flex-col gap-2">
+								{#each groups as group (group.name)}
+									<li
+										class="flex flex-col gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5"
+									>
+										<div class="flex items-center justify-between gap-2">
+											<div class="flex min-w-0 flex-col gap-0.5">
+												<span class="truncate font-mono text-sm font-semibold text-[var(--color-ink)]">
+													{group.name}
+												</span>
+												<span class="text-[11px] text-[var(--color-ink-dim)]">
+													{membersLabel(group.members)}
+												</span>
+											</div>
+											<div class="flex shrink-0 items-center gap-1.5">
+												<CopyMenu server={groupSummary(group)} />
+												{#if confirmDeleteGroup !== group.name}
+													<!-- A group owns no process: restarting it bounces each enabled
+													     member through the same per-server restart, so the bundle
+													     re-reads their tools. Same component as the server pages. -->
+													<RestartButton
+														target={{ kind: 'group', name: group.name }}
+														size="sm"
+														onrestarted={() => void refreshServers()}
+													/>
+													<button
+														type="button"
+														onclick={() => editGroup(group)}
+														aria-label={`Edit group ${group.name}`}
+														class="shrink-0 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+													>
+														Edit
+													</button>
+												{/if}
+												{#if confirmDeleteGroup === group.name}
+													<button
+														type="button"
+														onclick={() => handleDeleteGroup(group.name)}
+														disabled={deletingGroup === group.name}
+														aria-busy={deletingGroup === group.name}
+														class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+														style="background-color: var(--color-state-failed);"
+													>
+														Delete
+													</button>
+													<button
+														type="button"
+														onclick={() => (confirmDeleteGroup = null)}
+														disabled={deletingGroup === group.name}
+														class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+													>
+														Cancel
+													</button>
+												{:else}
+													<button
+														type="button"
+														onclick={() => (confirmDeleteGroup = group.name)}
+														aria-label={`Delete group ${group.name}`}
+														class="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium transition active:translate-y-px"
+														style="border-color: color-mix(in oklab, var(--color-state-failed) 35%, transparent); color: var(--color-state-failed);"
+													>
+														Delete
+													</button>
+												{/if}
+											</div>
+										</div>
+										{#if confirmDeleteGroup === group.name}
+											<p class="text-xs leading-normal text-[var(--color-state-failed)]">
+												This takes <code class="font-mono">{group.url}</code> offline and revokes tokens
+												scoped to this group.
+											</p>
+										{/if}
+										<code class="min-w-0 truncate font-mono text-[11px] text-[var(--color-ink-dim)]">
+											{group.url}
+										</code>
+
+										<!-- Members, each with its own controls. A group is only a view over its
+										     servers: what it serves is exactly what its RUNNING members expose, so
+										     starting, stopping, or restarting one from here is the same action as
+										     on its own page — same components, same endpoints. -->
+										{#if groupMembers(group).length === 0}
+											<p class="text-[11px] text-[var(--color-ink-dim)]">
+												No members yet — this group serves an empty bundle.
+											</p>
+										{:else}
+											<details class="mt-0.5">
+												<summary
+													class="cursor-pointer text-[11px] font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-ink)]"
+												>
+													Members ({groupMembers(group).length})
+												</summary>
+												<ul class="mt-1.5 flex flex-col divide-y divide-[var(--color-line)]">
+													{#each groupMembers(group) as member (member.id)}
+														<li class="flex flex-wrap items-center justify-between gap-2 py-1.5">
+															<a
+																href={`/server/${member.id}`}
+																class="flex min-w-0 flex-1 basis-40 items-center gap-2 rounded-md outline-offset-4 transition-opacity hover:opacity-80"
+															>
+																<StatePill
+																	state={member.state}
+																	startupStatus={member.startup_status}
+																/>
+																<span class="min-w-0 truncate text-xs text-[var(--color-ink)]">
+																	{member.name}
+																</span>
+																<span
+																	class="min-w-0 truncate font-mono text-[11px] text-[var(--color-ink-dim)]"
+																>
+																	{member.slug}
+																</span>
+															</a>
+															<div class="flex shrink-0 items-center gap-1.5">
+																<ServerActionButton
+																	server={member}
+																	size="sm"
+																	onchange={applyServerUpdate}
+																	onerror={flashToast}
+																/>
+																{#if member.enabled}
+																	<RestartButton
+																		target={{ kind: 'server', id: member.id }}
+																		size="sm"
+																		onrestarted={(next) => next && applyServerUpdate(next)}
+																	/>
+																{/if}
+															</div>
+														</li>
+													{/each}
+												</ul>
+											</details>
+										{/if}
+									</li>
+								{/each}
+							</ul>
+						{/if}
+
+						<!-- New group -->
+						<form
+							onsubmit={handleCreateGroup}
+							class="flex flex-col gap-2 rounded-lg border border-dashed border-[var(--color-line)] p-3"
+						>
+							<div class="flex flex-wrap items-end gap-2">
+								<div class="flex min-w-0 flex-1 basis-40 flex-col gap-1.5">
+									<label for="group-name" class="text-xs font-medium text-[var(--color-ink-muted)]">
+										New group
+									</label>
+									<input
+										id="group-name"
+										type="text"
+										bind:value={newGroupName}
+										autocomplete="off"
+										spellcheck="false"
+										placeholder="e.g. all, dev-tools"
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+									/>
+								</div>
 								<button
-									type="button"
-									onclick={() => submitGroup()}
-									disabled={savingGroup}
+									type="submit"
+									disabled={!groupNameValid || savingGroup}
 									aria-busy={savingGroup}
-									class="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-70"
+									class="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
 								>
-									Replace members
-								</button>
-								<button
-									type="button"
-									onclick={() => (confirmReplaceName = null)}
-									disabled={savingGroup}
-									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
-								>
-									Cancel
+									{groups.some((g) => g.name === newGroupName.trim()) ? 'Update group' : 'Create group'}
 								</button>
 							</div>
-						</div>
-					{/if}
+							{#if newGroupName.trim().length > 0 && !groupNameValid}
+								<p class="text-[11px] text-[var(--color-state-failed)]">
+									Use lowercase letters, digits, and single hyphens (the URL routing key).
+								</p>
+							{/if}
+							{#if confirmReplaceName !== null && confirmReplaceName === newGroupName.trim()}
+								<div
+									role="alert"
+									class="flex flex-col gap-2.5 rounded-lg border p-3"
+									style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+								>
+									<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
+										A group named <code class="font-mono text-[var(--color-ink)]">{confirmReplaceName}</code>
+										already exists{#if replaceTarget} (currently <strong>{membersLabel(replaceTarget.members)}</strong>){/if}.
+										Replace its members with your selection above? Its
+										<code class="font-mono">/g/{confirmReplaceName}/mcp</code> endpoint stays up and its
+										tokens keep working — only the membership changes. Use <strong>Edit</strong> on the
+										group above to start from its current members.
+									</p>
+									<div class="flex items-center gap-1.5">
+										<button
+											type="button"
+											onclick={() => submitGroup()}
+											disabled={savingGroup}
+											aria-busy={savingGroup}
+											class="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-70"
+										>
+											Replace members
+										</button>
+										<button
+											type="button"
+											onclick={() => (confirmReplaceName = null)}
+											disabled={savingGroup}
+											class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:opacity-50"
+										>
+											Cancel
+										</button>
+									</div>
+								</div>
+							{/if}
 
-					<div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Group members">
-						{#each [
-							{ value: 'all', label: 'All servers', hint: 'every registered server, including future ones, except the built-in mcpelevator server' },
-							{ value: 'selected', label: 'Selected servers', hint: 'only the servers you pick below' }
-						] as const as choice (choice.value)}
-							<label
-								class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
-								style={newGroupMode === choice.value
-									? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
-									: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
-							>
-								<span class="flex items-center gap-2">
-									<input
-										type="radio"
-										name="new-group-mode"
-										value={choice.value}
-										checked={newGroupMode === choice.value}
-										onchange={() => (newGroupMode = choice.value)}
-										class="sr-only"
-									/>
-									<span
-										class="text-sm font-semibold"
-										style={newGroupMode === choice.value
-											? 'color: var(--color-accent);'
-											: 'color: var(--color-ink);'}
-									>
-										{choice.label}
-									</span>
-								</span>
-								<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
-									{choice.hint}
-								</span>
-							</label>
-						{/each}
-					</div>
-					{#if newGroupMode === 'selected'}
-						{#if servers.length === 0}
-							<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">No servers yet — add one first.</p>
-						{:else}
-							<div
-								class="flex flex-col gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-2"
-							>
-								{#each servers as server (server.id)}
+							<div class="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Group members">
+								{#each [
+									{ value: 'all', label: 'All servers', hint: 'every registered server, including future ones, except the built-in mcpelevator server' },
+									{ value: 'selected', label: 'Selected servers', hint: 'only the servers you pick below' }
+								] as const as choice (choice.value)}
 									<label
-										class="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition hover:bg-[var(--color-surface)]"
-										class:opacity-60={!server.enabled}
+										class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+										style={newGroupMode === choice.value
+											? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+											: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
 									>
-										<input
-											type="checkbox"
-											checked={newGroupSelection.includes(server.id)}
-											onchange={(e) => toggleNewGroupServer(server.id, e.currentTarget.checked)}
-											class="size-4 shrink-0 accent-[var(--color-accent)]"
-										/>
-										<span class="min-w-0 flex-1 truncate text-sm text-[var(--color-ink)]">
-											{serverLabel(server)}
+										<span class="flex items-center gap-2">
+											<input
+												type="radio"
+												name="new-group-mode"
+												value={choice.value}
+												checked={newGroupMode === choice.value}
+												onchange={() => (newGroupMode = choice.value)}
+												class="sr-only"
+											/>
+											<span
+												class="text-sm font-semibold"
+												style={newGroupMode === choice.value
+													? 'color: var(--color-accent);'
+													: 'color: var(--color-ink);'}
+											>
+												{choice.label}
+											</span>
 										</span>
-										{#if !server.enabled}
-											<span class="text-[11px] text-[var(--color-ink-dim)]">disabled</span>
-										{/if}
+										<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+											{choice.hint}
+										</span>
 									</label>
 								{/each}
 							</div>
-							<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
-								Only running members appear in the bundle; a disabled pick joins when it starts.
-							</p>
-						{/if}
-					{/if}
-				</form>
-			</fieldset>
-
-			<!-- Control-plane auth -->
-			<fieldset class="flex flex-col gap-2 border-0 p-0">
-				<legend class="text-sm font-medium text-[var(--color-ink)]">Control-plane auth</legend>
-				<div class="grid grid-cols-2 gap-2">
-					{#each CONTROL_AUTH_CHOICES as choice (choice.value)}
-						{@const locked = choice.value === 'always' && !hasUsableAdminCredential}
-						<label
-							class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
-							class:cursor-not-allowed={locked}
-							class:opacity-60={locked}
-							style={settings.control_plane_auth === choice.value
-								? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
-								: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
-						>
-							<span class="flex items-center gap-2">
-								<input
-									type="radio"
-									name="control-plane-auth"
-									value={choice.value}
-									checked={settings.control_plane_auth === choice.value}
-									onchange={() => setControlPlaneAuth(choice.value)}
-									disabled={savingField !== null}
-									class="sr-only"
-								/>
-								<span
-									class="font-mono text-sm font-semibold"
-									style={settings.control_plane_auth === choice.value
-										? 'color: var(--color-accent);'
-										: 'color: var(--color-ink);'}
-								>
-									{choice.label}
-								</span>
-							</span>
-							<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
-								{choice.hint}
-							</span>
-						</label>
-					{/each}
-				</div>
-				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
-					When required, <code class="font-mono">/api</code> needs an admin (control-scope)
-					token; the SPA logs in with it.
-					{#if !hasUsableAdminCredential}
-						<span class="text-[var(--color-accent)]">
-							Generate an admin token above to enable
-							<code class="font-mono">expose</code> / <code class="font-mono">always</code>.
-						</span>
-					{/if}
-				</p>
-			</fieldset>
-
-			<!-- Allowed hosts -->
-			<fieldset class="flex flex-col gap-2 border-0 p-0">
-				<legend class="text-sm font-medium text-[var(--color-ink)]">
-					Allowed hosts
-					<span class="font-normal text-[var(--color-ink-dim)]">
-						({settings.bind_mode === 'expose' ? 'enforced' : 'inactive while local'})
-					</span>
-				</legend>
-
-				<form onsubmit={addHost} class="flex items-center gap-2">
-					<input
-						type="text"
-						bind:value={newHost}
-						disabled={savingField !== null}
-						autocomplete="off"
-						spellcheck="false"
-						placeholder="mcp.example.com"
-						aria-label="Add allowed host"
-						class="min-w-0 flex-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-					/>
-					<button
-						type="submit"
-						disabled={newHost.trim().length === 0 || savingField !== null}
-						class="inline-flex shrink-0 items-center gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
-					>
-						<svg
-							class="size-3.5"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.5"
-							stroke-linecap="round"
-							aria-hidden="true"
-						>
-							<path d="M12 5v14M5 12h14" />
-						</svg>
-						Add
-					</button>
-				</form>
-
-				{#if settings.allowed_hosts.length === 0}
-					<p
-						class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-3 text-xs text-[var(--color-ink-dim)]"
-					>
-						No hosts added. Only loopback is allowed when exposed.
-					</p>
-				{:else}
-					<ul class="flex flex-wrap gap-2">
-						{#each settings.allowed_hosts as host (host)}
-							<li
-								class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] py-1 pr-1 pl-2.5"
-							>
-								<span class="font-mono text-xs text-[var(--color-ink)]">{host}</span>
-								<button
-									type="button"
-									onclick={() => removeHost(host)}
-									disabled={savingField !== null}
-									aria-label={`Remove ${host}`}
-									class="rounded-md p-1 text-[var(--color-ink-dim)] transition hover:text-[var(--color-state-failed)] disabled:opacity-50"
-								>
-									<svg
-										class="size-3.5"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="2"
-										stroke-linecap="round"
-										aria-hidden="true"
+							{#if newGroupMode === 'selected'}
+								{#if servers.length === 0}
+									<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">No servers yet — add one first.</p>
+								{:else}
+									<div
+										class="flex flex-col gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-2"
 									>
-										<path d="M18 6 6 18M6 6l12 12" />
-									</svg>
-								</button>
-							</li>
-						{/each}
-					</ul>
-				{/if}
-
-				{#if confirmRemoveHost !== null}
-					<div
-						role="alert"
-						class="flex flex-col gap-2.5 rounded-lg border p-3"
-						style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
-					>
-						<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
-							Removing
-							<code class="font-mono text-[var(--color-ink)]">{confirmRemoveHost}</code>
-							will lock this browser out of the control plane — it's the host you're
-							connected through. Open
-							<a
-								class="font-mono text-[var(--color-accent)] underline"
-								href={loopbackUrl}
-								target="_blank"
-								rel="noopener noreferrer">{loopbackUrl}</a
-							>
-							first.
+										{#each servers as server (server.id)}
+											<label
+												class="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition hover:bg-[var(--color-surface)]"
+												class:opacity-60={!server.enabled}
+											>
+												<input
+													type="checkbox"
+													checked={newGroupSelection.includes(server.id)}
+													onchange={(e) => toggleNewGroupServer(server.id, e.currentTarget.checked)}
+													class="size-4 shrink-0 accent-[var(--color-accent)]"
+												/>
+												<span class="min-w-0 flex-1 truncate text-sm text-[var(--color-ink)]">
+													{serverLabel(server)}
+												</span>
+												{#if !server.enabled}
+													<span class="text-[11px] text-[var(--color-ink-dim)]">disabled</span>
+												{/if}
+											</label>
+										{/each}
+									</div>
+									<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
+										Only running members appear in the bundle; a disabled pick joins when it starts.
+									</p>
+								{/if}
+							{/if}
+						</form>
+					</div>
+				{:else if activeTab === 'network'}
+					<div class="flex flex-col gap-1">
+						<h2 class="text-lg font-semibold tracking-tight text-[var(--color-ink)]">Network</h2>
+						<p class="max-w-prose text-sm text-[var(--color-ink-muted)]">
+							Where this instance can be reached from, and what it takes to use the control plane.
 						</p>
-						<div class="flex items-center gap-1.5">
+					</div>
+					<div class="flex flex-col divide-y divide-[var(--color-line)] rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)]">
+						<div class="p-5">
+							<fieldset class="flex flex-col gap-2 border-0 p-0">
+								<legend class="text-sm font-medium text-[var(--color-ink)]">Bind mode</legend>
+								<div class="grid gap-2 sm:grid-cols-2">
+									{#each BIND_CHOICES as choice (choice.value)}
+										{@const locked = choice.value === 'expose' && !hasUsableAdminCredential}
+										<label
+											class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+											class:cursor-not-allowed={locked}
+											class:opacity-60={locked}
+											style={settings.bind_mode === choice.value
+												? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+												: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+										>
+											<span class="flex items-center gap-2">
+												<input
+													type="radio"
+													name="bind-mode"
+													value={choice.value}
+													checked={settings.bind_mode === choice.value}
+													onchange={() => setBindMode(choice.value)}
+													disabled={savingField !== null}
+													class="sr-only"
+												/>
+												<span
+													class="font-mono text-sm font-semibold"
+													style={settings.bind_mode === choice.value
+														? 'color: var(--color-accent);'
+														: 'color: var(--color-ink);'}
+												>
+													{choice.label}
+												</span>
+											</span>
+											<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+												{choice.hint}
+											</span>
+										</label>
+									{/each}
+								</div>
+								{#if confirmBindLocal}
+									<div
+										role="alert"
+										class="flex flex-col gap-2.5 rounded-lg border p-3"
+										style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+									>
+										<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
+											This will lock this browser
+											(<code class="font-mono text-[var(--color-ink)]">{browserHost}</code>)
+											out of the control plane — <code class="font-mono">local</code> allows loopback
+											only. Open
+											<a
+												class="font-mono text-[var(--color-accent)] underline"
+												href={loopbackUrl}
+												target="_blank"
+												rel="noopener noreferrer">{loopbackUrl}</a
+											>
+											first, then switch.
+										</p>
+										<div class="flex items-center gap-1.5">
+											<button
+												type="button"
+												onclick={confirmSwitchToLocal}
+												disabled={savingField !== null}
+												class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+												style="background-color: var(--color-state-failed);"
+											>
+												Switch to local anyway
+											</button>
+											<button
+												type="button"
+												onclick={cancelSwitchToLocal}
+												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+											>
+												Cancel
+											</button>
+										</div>
+									</div>
+								{/if}
+								<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
+									Host/Origin is always checked (DNS-rebinding defense): loopback is always
+									allowed; <code class="font-mono">expose</code> also allows the hosts below.
+								</p>
+							</fieldset>
+						</div>
+						<div class="p-5">
+							<fieldset class="flex flex-col gap-2 border-0 p-0">
+								<legend class="text-sm font-medium text-[var(--color-ink)]">Local network access</legend>
+								<label
+									class="flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+									class:cursor-not-allowed={!settings.allow_private_lan && !hasUsableAdminCredential}
+									class:opacity-60={!settings.allow_private_lan && !hasUsableAdminCredential}
+									style={settings.allow_private_lan
+										? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+										: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+								>
+									<input
+										type="checkbox"
+										checked={settings.allow_private_lan}
+										onchange={(e) => setAllowPrivateLan(e.currentTarget.checked, e.currentTarget)}
+										disabled={savingField !== null}
+										class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+									/>
+									<span class="flex flex-col gap-0.5">
+										<span class="text-sm font-medium text-[var(--color-ink)]">
+											Allow access from devices on your local network
+										</span>
+										<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+											Reach this box at its private IP (e.g.
+											<code class="font-mono">http://192.168.1.50:8080</code>) from other LAN devices —
+											no per-host allowlisting. Private-IP literals only, from a private-network peer,
+											so it stays DNS-rebinding-safe. Counts as exposed, so an admin token is required
+											for <code class="font-mono">/api</code>.
+										</span>
+									</span>
+								</label>
+								{#if confirmDisableLan}
+									<div
+										role="alert"
+										class="flex flex-col gap-2.5 rounded-lg border p-3"
+										style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+									>
+										<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
+											This will lock this browser
+											(<code class="font-mono text-[var(--color-ink)]">{browserHost}</code>)
+											out of the control plane — you're connected through a private IP. Open
+											<a
+												class="font-mono text-[var(--color-accent)] underline"
+												href={loopbackUrl}
+												target="_blank"
+												rel="noopener noreferrer">{loopbackUrl}</a
+											>
+											first, then turn it off.
+										</p>
+										<div class="flex items-center gap-1.5">
+											<button
+												type="button"
+												onclick={confirmDisablePrivateLan}
+												disabled={savingField !== null}
+												class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+												style="background-color: var(--color-state-failed);"
+											>
+												Turn off anyway
+											</button>
+											<button
+												type="button"
+												onclick={() => (confirmDisableLan = false)}
+												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+											>
+												Cancel
+											</button>
+										</div>
+									</div>
+								{/if}
+							</fieldset>
+						</div>
+						<div class="p-5">
+							<fieldset class="flex flex-col gap-2 border-0 p-0">
+								<legend class="text-sm font-medium text-[var(--color-ink)]">Control-plane auth</legend>
+								<div class="grid gap-2 sm:grid-cols-2">
+									{#each CONTROL_AUTH_CHOICES as choice (choice.value)}
+										{@const locked = choice.value === 'always' && !hasUsableAdminCredential}
+										<label
+											class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+											class:cursor-not-allowed={locked}
+											class:opacity-60={locked}
+											style={settings.control_plane_auth === choice.value
+												? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+												: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+										>
+											<span class="flex items-center gap-2">
+												<input
+													type="radio"
+													name="control-plane-auth"
+													value={choice.value}
+													checked={settings.control_plane_auth === choice.value}
+													onchange={() => setControlPlaneAuth(choice.value)}
+													disabled={savingField !== null}
+													class="sr-only"
+												/>
+												<span
+													class="font-mono text-sm font-semibold"
+													style={settings.control_plane_auth === choice.value
+														? 'color: var(--color-accent);'
+														: 'color: var(--color-ink);'}
+												>
+													{choice.label}
+												</span>
+											</span>
+											<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+												{choice.hint}
+											</span>
+										</label>
+									{/each}
+								</div>
+								<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
+									When required, <code class="font-mono">/api</code> needs an admin (control-scope)
+									token; the SPA logs in with it.
+									{#if !hasUsableAdminCredential}
+										<span class="text-[var(--color-accent)]">
+											<a href="/settings" data-sveltekit-noscroll class="underline decoration-dotted underline-offset-2">Generate an admin token</a> under Access tokens to enable
+											<code class="font-mono">expose</code> / <code class="font-mono">always</code>.
+										</span>
+									{/if}
+								</p>
+							</fieldset>
+						</div>
+						<div class="p-5">
+							<fieldset class="flex flex-col gap-2 border-0 p-0">
+								<legend class="text-sm font-medium text-[var(--color-ink)]">
+									Allowed hosts
+									<span class="font-normal text-[var(--color-ink-dim)]">
+										({settings.bind_mode === 'expose' ? 'enforced' : 'inactive while local'})
+									</span>
+								</legend>
+
+								<form onsubmit={addHost} class="flex items-center gap-2">
+									<input
+										type="text"
+										bind:value={newHost}
+										disabled={savingField !== null}
+										autocomplete="off"
+										spellcheck="false"
+										placeholder="mcp.example.com"
+										aria-label="Add allowed host"
+										class="min-w-0 flex-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+									/>
+									<button
+										type="submit"
+										disabled={newHost.trim().length === 0 || savingField !== null}
+										class="inline-flex shrink-0 items-center gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
+									>
+										<svg
+											class="size-3.5"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2.5"
+											stroke-linecap="round"
+											aria-hidden="true"
+										>
+											<path d="M12 5v14M5 12h14" />
+										</svg>
+										Add
+									</button>
+								</form>
+
+								{#if settings.allowed_hosts.length === 0}
+									<p
+										class="rounded-lg border border-dashed border-[var(--color-line)] px-3 py-3 text-xs text-[var(--color-ink-dim)]"
+									>
+										No hosts added. Only loopback is allowed when exposed.
+									</p>
+								{:else}
+									<ul class="flex flex-wrap gap-2">
+										{#each settings.allowed_hosts as host (host)}
+											<li
+												class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] py-1 pr-1 pl-2.5"
+											>
+												<span class="font-mono text-xs text-[var(--color-ink)]">{host}</span>
+												<button
+													type="button"
+													onclick={() => removeHost(host)}
+													disabled={savingField !== null}
+													aria-label={`Remove ${host}`}
+													class="rounded-md p-1 text-[var(--color-ink-dim)] transition hover:text-[var(--color-state-failed)] disabled:opacity-50"
+												>
+													<svg
+														class="size-3.5"
+														viewBox="0 0 24 24"
+														fill="none"
+														stroke="currentColor"
+														stroke-width="2"
+														stroke-linecap="round"
+														aria-hidden="true"
+													>
+														<path d="M18 6 6 18M6 6l12 12" />
+													</svg>
+												</button>
+											</li>
+										{/each}
+									</ul>
+								{/if}
+
+								{#if confirmRemoveHost !== null}
+									<div
+										role="alert"
+										class="flex flex-col gap-2.5 rounded-lg border p-3"
+										style="border-color: color-mix(in oklab, var(--color-state-starting) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-starting) 8%, transparent);"
+									>
+										<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
+											Removing
+											<code class="font-mono text-[var(--color-ink)]">{confirmRemoveHost}</code>
+											will lock this browser out of the control plane — it's the host you're
+											connected through. Open
+											<a
+												class="font-mono text-[var(--color-accent)] underline"
+												href={loopbackUrl}
+												target="_blank"
+												rel="noopener noreferrer">{loopbackUrl}</a
+											>
+											first.
+										</p>
+										<div class="flex items-center gap-1.5">
+											<button
+												type="button"
+												onclick={confirmRemoveCurrentHost}
+												disabled={savingField !== null}
+												class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+												style="background-color: var(--color-state-failed);"
+											>
+												Remove anyway
+											</button>
+											<button
+												type="button"
+												onclick={() => (confirmRemoveHost = null)}
+												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+											>
+												Cancel
+											</button>
+										</div>
+									</div>
+								{/if}
+							</fieldset>
+						</div>
+					</div>
+				{:else if activeTab === 'auth'}
+					<div class="flex flex-col gap-1">
+						<h2 class="text-lg font-semibold tracking-tight text-[var(--color-ink)]">Server auth</h2>
+						<p class="max-w-prose text-sm text-[var(--color-ink-muted)]">
+							How clients authenticate to servers and groups, and how this instance identifies itself to an OAuth upstream.
+						</p>
+					</div>
+					<div class="flex flex-col divide-y divide-[var(--color-line)] rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)]">
+						<div class="p-5">
+							<fieldset class="flex flex-col gap-2 border-0 p-0">
+								<legend class="text-sm font-medium text-[var(--color-ink)]">Default auth</legend>
+								<div
+									class="grid grid-cols-3 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1"
+								>
+									{#each AUTH_CHOICES as choice (choice.value)}
+										<label
+											class="flex cursor-pointer items-center justify-center rounded-md px-3 py-1.5 font-mono text-xs font-semibold transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+											style={settings.default_auth_provider === choice.value
+												? 'background-color: color-mix(in oklab, var(--color-accent) 14%, transparent); color: var(--color-accent);'
+												: 'color: var(--color-ink-muted);'}
+										>
+											<input
+												type="radio"
+												name="default-auth"
+												value={choice.value}
+												checked={settings.default_auth_provider === choice.value}
+												onchange={() => setDefaultAuth(choice.value)}
+												disabled={savingField !== null}
+												class="sr-only"
+											/>
+											{choice.label}
+										</label>
+									{/each}
+								</div>
+								<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
+									Servers set to <code class="font-mono">inherit</code> use this.
+									<code class="font-mono">bearer</code> requires a token in
+									<code class="font-mono">Authorization: Bearer …</code>.
+									<code class="font-mono">oauth</code> validates JWTs from the authorization server below.
+								</p>
+							</fieldset>
+						</div>
+						<div class="p-5">
+							<form class="flex flex-col gap-3" onsubmit={saveOauthSettings}>
+								<div class="flex flex-col gap-1">
+									<h3 class="text-sm font-medium text-[var(--color-ink)]">OAuth resource server</h3>
+									<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
+										Validates access tokens clients send to servers and groups using
+										<code class="font-mono">oauth</code>. This is separate from OAuth used to reach a remote upstream.
+									</p>
+								</div>
+								<div class="grid gap-3 sm:grid-cols-2">
+									<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+										Discovery URL or issuer
+										<input
+											type="url"
+											bind:value={oauthConfigUrl}
+											disabled={savingField !== null}
+											placeholder="https://auth.example.com/application/o/mcp/"
+											class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+										/>
+									</label>
+									<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+										Audience
+										<input
+											type="text"
+											bind:value={oauthAudience}
+											disabled={savingField !== null}
+											placeholder="mcp-production-api"
+											class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+										/>
+									</label>
+								</div>
+								<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
+									Both fields are required before OAuth endpoints serve metadata or accept tokens. Audience validation prevents a token minted for another app from being reused here.
+								</p>
+								<div class="grid gap-3 sm:grid-cols-2">
+									<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+										Allowed identities <span class="font-normal text-[var(--color-ink-dim)]">(optional, comma-separated)</span>
+										<input
+											type="text"
+											bind:value={oauthAllowedSubjects}
+											disabled={savingField !== null}
+											placeholder="alice, bob@example.com"
+											class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+										/>
+									</label>
+									<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+										Advertised scopes <span class="font-normal text-[var(--color-ink-dim)]">(optional, comma-separated)</span>
+										<input
+											type="text"
+											bind:value={oauthScopes}
+											disabled={savingField !== null}
+											placeholder="openid, profile, email"
+											class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+										/>
+									</label>
+								</div>
+								<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
+									<input
+										type="checkbox"
+										bind:checked={oauthAcceptBearer}
+										disabled={savingField !== null}
+										class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+									/>
+									<span class="flex flex-col gap-0.5">
+										<span class="text-sm font-medium text-[var(--color-ink)]">Also accept local bearer tokens</span>
+										<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+											Lets <code class="font-mono">mcpe_…</code> automation tokens use OAuth-protected endpoints with their normal server or group scope checks.
+										</span>
+									</span>
+								</label>
+								<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
+									<input
+										type="checkbox"
+										bind:checked={oauthOwnerOnly}
+										disabled={savingField !== null}
+										class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+									/>
+									<span class="flex flex-col gap-0.5">
+										<span class="text-sm font-medium text-[var(--color-ink)]">Members reach only their own servers</span>
+										<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+											A token from a linked Member opens only the servers they own, even when the allowlist names them, and no group. Admins and unlinked tokens are unaffected.
+										</span>
+									</span>
+								</label>
+								<div class="flex justify-end">
+									<button
+										type="submit"
+										disabled={savingOauth || savingField !== null}
+										aria-busy={savingOauth}
+										class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-50"
+									>
+										{savingOauth ? 'Saving…' : 'Save OAuth settings'}
+									</button>
+								</div>
+							</form>
+						</div>
+						<div class="p-5">
+							<fieldset class="flex flex-col gap-2 border-0 p-0">
+								<legend class="text-sm font-medium text-[var(--color-ink)]">
+									Upstream OAuth client identity
+								</legend>
+								<div class="grid gap-2 sm:grid-cols-3">
+									{#each UPSTREAM_OAUTH_CLIENT_CHOICES as choice (choice.value)}
+										<label
+											class="flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+											style={settings.upstream_oauth_client_mode === choice.value
+												? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+												: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+										>
+											<span class="flex items-center gap-2">
+												<input
+													type="radio"
+													name="upstream-oauth-client-mode"
+													value={choice.value}
+													checked={settings.upstream_oauth_client_mode === choice.value}
+													onchange={() => setUpstreamOauthClientMode(choice.value)}
+													disabled={savingField !== null}
+													class="sr-only"
+												/>
+												<span
+													class="font-mono text-sm font-semibold"
+													style={settings.upstream_oauth_client_mode === choice.value
+														? 'color: var(--color-accent);'
+														: 'color: var(--color-ink);'}
+												>
+													{choice.label}
+												</span>
+											</span>
+											<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+												{choice.hint}
+											</span>
+										</label>
+									{/each}
+								</div>
+								<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
+									How OAuth sign-ins to a remote server identify this instance when no static client
+									id is set. <code class="font-mono">auto</code> offers the URL-based client id (CIMD)
+									only after confirming
+									<code class="font-mono">/api/oauth/client-metadata.json</code> is publicly fetchable,
+									falling back to Dynamic Client Registration — e.g. when an auth-gating proxy such as
+									Cloudflare Access blocks the provider's fetch. Pick
+									<code class="font-mono">CIMD</code> or <code class="font-mono">DCR</code> to skip the
+									probe and decide explicitly. A server with a static client id ignores this.
+								</p>
+							</fieldset>
+						</div>
+					</div>
+				{:else if activeTab === 'sso'}
+					<div class="flex flex-col gap-1">
+						<h2 class="text-lg font-semibold tracking-tight text-[var(--color-ink)]">Single sign-on</h2>
+						<p class="max-w-prose text-sm text-[var(--color-ink-muted)]">
+							Let people sign in to this control plane through one OpenID Connect provider, and let it provision users over SCIM.
+						</p>
+					</div>
+					<form
+						class="flex flex-col divide-y divide-[var(--color-line)] rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)]"
+						onsubmit={saveOidcSettings}
+					>
+						<!-- On/off first: it decides whether anything below is live. -->
+						<div class="p-5">
+							<label
+								class="flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+								style={oidcEnabled
+									? 'border-color: color-mix(in oklab, var(--color-accent) 50%, transparent); background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);'
+									: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+							>
+								<input
+									type="checkbox"
+									bind:checked={oidcEnabled}
+									disabled={savingField !== null}
+									class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+								/>
+								<span class="flex flex-col gap-0.5">
+									<span class="text-sm font-medium text-[var(--color-ink)]">Enable single sign-on</span>
+									<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+										Shows a sign-in button for this provider on the login screen. Saving while enabled
+										fetches the provider's discovery document and refuses the save with the reason if
+										it can't.
+									</span>
+								</span>
+							</label>
+						</div>
+
+						<!-- What to register at the provider -->
+						<div class="flex flex-col gap-3 p-5">
+							<div class="flex flex-col gap-1">
+								<h3 class="text-sm font-semibold text-[var(--color-ink)]">Register at the provider</h3>
+								<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
+									Add both to the provider's application. Log out also ends the provider session
+									when its discovery document lists an <code class="font-mono">end_session_endpoint</code>,
+									then the provider sends the browser back to the post-logout URI.
+								</p>
+							</div>
+							<div class="flex flex-col gap-1.5">
+								<span class="text-xs font-medium text-[var(--color-ink-muted)]">Redirect URI</span>
+								<div class="flex items-center gap-2">
+									<code
+										class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
+										title={settings.oidc_redirect_uri}>{settings.oidc_redirect_uri}</code
+									>
+									<CopyButton value={settings.oidc_redirect_uri} label="Copy redirect URI" text="Copy" />
+								</div>
+							</div>
+							<div class="flex flex-col gap-1.5">
+								<span class="text-xs font-medium text-[var(--color-ink-muted)]">
+									Post-logout redirect URI <span class="font-normal leading-normal text-[var(--color-ink-dim)]">(where the provider supports logout)</span>
+								</span>
+								<div class="flex items-center gap-2">
+									<code
+										class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
+										title={postLogoutUri}>{postLogoutUri}</code
+									>
+									<CopyButton value={postLogoutUri} label="Copy post-logout redirect URI" text="Copy" />
+								</div>
+							</div>
+						</div>
+
+						<!-- Provider connection -->
+						<div class="flex flex-col gap-3 p-5">
+							<h3 class="text-sm font-semibold text-[var(--color-ink)]">Provider</h3>
+							<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+								Discovery URL or issuer
+								<input
+									type="url"
+									bind:value={oidcDiscoveryUrl}
+									disabled={savingField !== null}
+									placeholder="https://idp.example.com"
+									class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)] font-mono "
+								/>
+							</label>
+							<div class="grid items-start gap-3 sm:grid-cols-2">
+								<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+									Client id
+									<input
+										type="text"
+										bind:value={oidcClientId}
+										disabled={savingField !== null}
+										autocomplete="off"
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)] font-mono "
+									/>
+								</label>
+								<div class="flex flex-col gap-1.5">
+									<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+										Client secret
+										<input
+											type="password"
+											bind:value={oidcClientSecret}
+											disabled={savingField !== null}
+											autocomplete="new-password"
+											placeholder={oidcSecretStored ? `${HIDDEN} (type to replace)` : 'Not set'}
+											class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)] font-mono "
+										/>
+									</label>
+									{#if oidcSecretStored}
+										<p class="flex items-center gap-2 text-xs text-[var(--color-ink-dim)]">
+											A secret is saved and stays hidden.
+											<button
+												type="button"
+												disabled={savingField !== null}
+												onclick={() => saveOidc({ oidc_client_secret: '' }, 'Client secret removed')}
+												class="font-medium text-[var(--color-ink-muted)] underline transition hover:text-[var(--color-ink)] disabled:opacity-50"
+											>
+												Remove
+											</button>
+										</p>
+									{/if}
+								</div>
+								<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+									Extra scopes
+									<input
+										type="text"
+										bind:value={oidcScopes}
+										disabled={savingField !== null}
+										placeholder="groups"
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+									/>
+									<span class="font-normal leading-normal text-[var(--color-ink-dim)]">Optional, comma-separated, beyond <code class="font-mono">openid email profile</code>.</span>
+								</label>
+								<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+									Allowed tenants
+									<textarea
+										rows="2"
+										bind:value={oidcAllowedTenants}
+										disabled={savingField !== null}
+										placeholder="9188040d-6c67-4c5b-b112-36a304b66dad"
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)] font-mono "
+									></textarea>
+									<span class="font-normal leading-normal text-[var(--color-ink-dim)]">Entra ID tenant GUIDs, one per line; required for a multi-tenant issuer such as <code class="font-mono">/common</code>.</span>
+								</label>
+							</div>
+						</div>
+
+						<!-- Who a sign-in becomes, and for how long -->
+						<div class="flex flex-col gap-3 p-5">
+							<h3 class="text-sm font-semibold text-[var(--color-ink)]">Sign-in</h3>
+							<div class="grid items-start gap-3 sm:grid-cols-2">
+								<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+									Identity claim
+									<select
+										bind:value={oidcIdentityClaim}
+										disabled={savingField !== null}
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
+									>
+										{#each OIDC_CLAIMS as claim (claim.value)}
+											<option value={claim.value}>{claim.value}: {claim.hint}</option>
+										{/each}
+									</select>
+									<span class="font-normal leading-normal text-[var(--color-ink-dim)]">Matched against user names, case-insensitively.</span>
+								</label>
+								<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+									Button label
+									<input
+										type="text"
+										bind:value={oidcLabel}
+										disabled={savingField !== null}
+										placeholder="Company SSO"
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
+									/>
+								</label>
+								<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+									Longest session
+									<span class="flex items-center gap-2">
+										<input
+											type="number"
+											min="300"
+											max="2592000"
+											step="1"
+											bind:value={oidcSessionMaxAge}
+											disabled={savingField !== null}
+											class="w-32 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
+										/>
+										<span class="font-normal leading-normal text-[var(--color-ink-dim)]">seconds</span>
+									</span>
+									<span class="font-normal leading-normal text-[var(--color-ink-dim)]">
+										A sign-in ends after this long even while the provider keeps refreshing it. At
+										least 300; applies to new sessions.
+									</span>
+								</label>
+							</div>
+							<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
+								<input
+									type="checkbox"
+									bind:checked={oidcRequireVerifiedEmail}
+									disabled={savingField !== null}
+									class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+								/>
+								<span class="flex flex-col gap-0.5">
+									<span class="text-sm font-medium text-[var(--color-ink)]">Require a verified email</span>
+									<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+										With the email identity claim, refuses a sign-in whose provider says the email is not verified.
+									</span>
+								</span>
+							</label>
+							<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
+								<input
+									type="checkbox"
+									bind:checked={oidcProvisioning}
+									disabled={savingField !== null}
+									class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+								/>
+								<span class="flex flex-col gap-0.5">
+									<span class="text-sm font-medium text-[var(--color-ink)]">Create users on first sign-in</span>
+									<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+										A person who matches no user gets one, named by the identity claim. New users start as Members with local runners off. Limit who gets an account with allowed groups or domains.
+									</span>
+								</span>
+							</label>
+						</div>
+
+						<!-- Group mapping -->
+						<div class="flex flex-col gap-3 p-5">
+							<div class="flex flex-col gap-1">
+								<h3 class="text-sm font-semibold text-[var(--color-ink)]">Access rules</h3>
+								<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
+									Applied at every sign-in. Leave a list empty to keep that field manual. A filled admin
+									or local-runner list sets the field for everyone who signs in and locks it on the
+									Users list.
+								</p>
+							</div>
+							<div class="grid items-start gap-3 sm:grid-cols-2">
+								{#each [
+									{ label: 'Groups claim', hint: 'Literal name first, then a dotted path such as realm_access.roles.', placeholder: 'groups', lines: false, get: () => oidcGroupsClaim, set: (v: string) => (oidcGroupsClaim = v) },
+									{ label: 'Allowed groups', hint: 'One per line; anyone in none of them is refused.', placeholder: 'staff', lines: true, get: () => oidcAllowedGroups, set: (v: string) => (oidcAllowedGroups = v) },
+									{ label: 'Admin groups', hint: 'One per line; Admin when in one, else Member.', placeholder: 'mcp-admins', lines: true, get: () => oidcAdminGroups, set: (v: string) => (oidcAdminGroups = v) },
+									{ label: 'Local runner groups', hint: 'One per line; grants the local-runner permission.', placeholder: 'mcp-builders', lines: true, get: () => oidcLocalRunnerGroups, set: (v: string) => (oidcLocalRunnerGroups = v) },
+									{ label: 'Allowed email domains', hint: "One per line; a verified email's domain or Google's hd must be listed.", placeholder: 'example.com', lines: true, get: () => oidcAllowedDomains, set: (v: string) => (oidcAllowedDomains = v) }
+								] as field (field.label)}
+									<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
+										{field.label}
+										{#if field.lines}
+											<textarea
+												rows="3"
+												bind:value={field.get, field.set}
+												disabled={savingField !== null}
+												placeholder={field.placeholder}
+												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)] font-mono "
+											></textarea>
+										{:else}
+											<input
+												type="text"
+												bind:value={field.get, field.set}
+												disabled={savingField !== null}
+												placeholder={field.placeholder}
+												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)] font-mono "
+											/>
+										{/if}
+										<span class="font-normal leading-normal text-[var(--color-ink-dim)]">{field.hint}</span>
+									</label>
+								{/each}
+							</div>
+						</div>
+
+						<!-- Save: pinned to the bottom of the viewport while the form is on screen. -->
+						<div
+							class="sticky bottom-0 flex items-center justify-end gap-3 rounded-b-[var(--radius-card)] bg-[color-mix(in_oklab,var(--color-surface)_92%,transparent)] px-5 py-3 backdrop-blur-md"
+						>
 							<button
-								type="button"
-								onclick={confirmRemoveCurrentHost}
+								type="submit"
 								disabled={savingField !== null}
-								class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
-								style="background-color: var(--color-state-failed);"
+								aria-busy={savingOidc}
+								class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-50"
 							>
-								Remove anyway
+								{savingOidc ? 'Saving…' : 'Save SSO settings'}
 							</button>
+						</div>
+					</form>
+					<div class="flex flex-col gap-4 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5">
+						<div class="flex flex-col gap-1">
+							<h3 class="text-sm font-semibold text-[var(--color-ink)]">SCIM provisioning</h3>
+							<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
+								Let the identity provider create, update and deactivate users. Give its SCIM client
+								this URL and a SCIM token as the Bearer secret. The token opens SCIM and nothing else.
+								Deactivating a user ends their sessions and revokes their tokens; their servers keep
+								running.
+							</p>
+						</div>
+						<div class="flex flex-col gap-1.5">
+							<span class="text-xs font-medium text-[var(--color-ink-muted)]">SCIM base URL</span>
+							<div class="flex items-center gap-2">
+								<code
+									class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
+									title={settings.scim_base_url}>{settings.scim_base_url}</code
+								>
+								<CopyButton value={settings.scim_base_url} label="Copy SCIM base URL" text="Copy" />
+							</div>
+						</div>
+						{#if scimToken}
+							<div class="flex flex-col gap-1.5">
+								<span class="text-xs font-medium text-[var(--color-ink-muted)]">
+									SCIM token <span class="font-normal text-[var(--color-ink-dim)]">(copy it now, it won't be shown again)</span>
+								</span>
+								<div class="flex items-center gap-2">
+									<code
+										class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
+										>{scimToken}</code
+									>
+									<CopyButton value={scimToken} label="Copy SCIM token" text="Copy" />
+									<button
+										type="button"
+										onclick={() => (scimToken = null)}
+										class="rounded-lg border border-[var(--color-line)] px-3 py-2 text-xs text-[var(--color-ink-muted)] hover:text-[var(--color-ink)]"
+									>
+										Done
+									</button>
+								</div>
+							</div>
+						{/if}
+						<div class="flex justify-end">
 							<button
 								type="button"
-								onclick={() => (confirmRemoveHost = null)}
-								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+								onclick={handleCreateScimToken}
+								disabled={mintingScim}
+								aria-busy={mintingScim}
+								class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-50"
 							>
-								Cancel
+								{mintingScim ? 'Creating…' : 'Create SCIM token'}
 							</button>
 						</div>
 					</div>
-				{/if}
-			</fieldset>
-		</div>
-
-		<!-- Single sign-on -->
-		<form
-			class="flex flex-col gap-4 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
-			onsubmit={saveOidcSettings}
-		>
-			<div class="flex flex-col gap-1">
-				<h2 class="text-sm font-semibold text-[var(--color-ink)]">Single sign-on</h2>
-				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
-					Let users sign in to this control plane through one OpenID Connect provider. Saving
-					while enabled fetches the provider's discovery document and refuses the save with
-					the reason if it can't.
-				</p>
-			</div>
-			<div class="flex flex-col gap-1.5">
-				<span class="text-xs font-medium text-[var(--color-ink-muted)]">
-					Redirect URI <span class="font-normal text-[var(--color-ink-dim)]">(register this at the provider)</span>
-				</span>
-				<div class="flex items-center gap-2">
-					<code
-						class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
-						title={settings.oidc_redirect_uri}>{settings.oidc_redirect_uri}</code
-					>
-					<CopyButton value={settings.oidc_redirect_uri} label="Copy redirect URI" text="Copy" />
-				</div>
-			</div>
-			<div class="flex flex-col gap-1.5">
-				<span class="text-xs font-medium text-[var(--color-ink-muted)]">
-					Post-logout redirect URI <span class="font-normal text-[var(--color-ink-dim)]"
-						>(register this too, where the provider supports logout)</span
-					>
-				</span>
-				<div class="flex items-center gap-2">
-					<code
-						class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
-						title={postLogoutUri}>{postLogoutUri}</code
-					>
-					<CopyButton value={postLogoutUri} label="Copy post-logout redirect URI" text="Copy" />
-				</div>
-				<p class="text-xs text-[var(--color-ink-dim)]">
-					Log out also ends the provider session when its discovery document lists an
-					<code>end_session_endpoint</code>, then the provider sends the browser back here.
-				</p>
-			</div>
-			<div class="grid gap-3 sm:grid-cols-2">
-				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-					Discovery URL or issuer
-					<input
-						type="url"
-						bind:value={oidcDiscoveryUrl}
-						disabled={savingField !== null}
-						placeholder="https://idp.example.com"
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-					/>
-				</label>
-				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-					Button label
-					<input
-						type="text"
-						bind:value={oidcLabel}
-						disabled={savingField !== null}
-						placeholder="Company SSO"
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-					/>
-				</label>
-				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-					Longest session (seconds)
-					<input
-						type="number"
-						min="300"
-						max="2592000"
-						step="1"
-						bind:value={oidcSessionMaxAge}
-						disabled={savingField !== null}
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
-					/>
-					<span class="font-normal text-[var(--color-ink-dim)]">
-						A sign-in ends after this long even while the provider keeps refreshing it. At least 300; applies to new sessions.
-					</span>
-				</label>
-				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-					Client id
-					<input
-						type="text"
-						bind:value={oidcClientId}
-						disabled={savingField !== null}
-						autocomplete="off"
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-					/>
-				</label>
-				<div class="flex flex-col gap-1.5">
-					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-						Client secret
-						<input
-							type="password"
-							bind:value={oidcClientSecret}
-							disabled={savingField !== null}
-							autocomplete="new-password"
-							placeholder={oidcSecretStored ? `${HIDDEN} (type to replace)` : 'Not set'}
-							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-						/>
-					</label>
-					{#if oidcSecretStored}
-						<p class="flex items-center gap-2 text-xs text-[var(--color-ink-dim)]">
-							A secret is saved and stays hidden.
-							<button
-								type="button"
-								disabled={savingField !== null}
-								onclick={() => saveOidc({ oidc_client_secret: '' }, 'Client secret removed')}
-								class="font-medium text-[var(--color-ink-muted)] underline transition hover:text-[var(--color-ink)] disabled:opacity-50"
-							>
-								Remove
-							</button>
+				{:else if activeTab === 'runtime'}
+					<div class="flex flex-col gap-1">
+						<h2 class="text-lg font-semibold tracking-tight text-[var(--color-ink)]">Runtime</h2>
+						<p class="max-w-prose text-sm text-[var(--color-ink-muted)]">
+							What servers may run, when idle ones stop, and how long usage counts are kept.
 						</p>
-					{/if}
-				</div>
-				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-					Extra scopes <span class="font-normal text-[var(--color-ink-dim)]">(optional, comma-separated, beyond openid email profile)</span>
-					<input
-						type="text"
-						bind:value={oidcScopes}
-						disabled={savingField !== null}
-						placeholder="email, profile, groups"
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-					/>
-				</label>
-				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-					Identity claim
-					<select
-						bind:value={oidcIdentityClaim}
-						disabled={savingField !== null}
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
-					>
-						{#each OIDC_CLAIMS as claim (claim.value)}
-							<option value={claim.value}>{claim.value}: {claim.hint}</option>
-						{/each}
-					</select>
-				</label>
-				<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-					Allowed tenants <span class="font-normal text-[var(--color-ink-dim)]">(Entra ID tenant GUIDs, one per line; required for a multi-tenant issuer such as /common)</span>
-					<textarea
-						rows="2"
-						bind:value={oidcAllowedTenants}
-						disabled={savingField !== null}
-						placeholder="9188040d-6c67-4c5b-b112-36a304b66dad"
-						class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-					></textarea>
-				</label>
-			</div>
-			<div class="flex flex-col gap-1">
-				<h3 class="text-xs font-semibold text-[var(--color-ink)]">Group mapping</h3>
-				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
-					Applied at every sign-in. Leave a list empty to keep that field manual. A filled admin
-					or local-runner list sets the field for everyone who signs in and locks it on the Users
-					list.
-				</p>
-			</div>
-			<div class="grid gap-3 sm:grid-cols-2">
-				{#each [
-					{ label: 'Groups claim', hint: 'literal name first, then a dotted path such as realm_access.roles', placeholder: 'groups', lines: false, get: () => oidcGroupsClaim, set: (v: string) => (oidcGroupsClaim = v) },
-					{ label: 'Allowed groups', hint: 'one per line; anyone in none of them is refused', placeholder: 'staff', lines: true, get: () => oidcAllowedGroups, set: (v: string) => (oidcAllowedGroups = v) },
-					{ label: 'Admin groups', hint: 'one per line; Admin when in one, else Member', placeholder: 'mcp-admins', lines: true, get: () => oidcAdminGroups, set: (v: string) => (oidcAdminGroups = v) },
-					{ label: 'Local runner groups', hint: 'one per line; grants the local-runner permission', placeholder: 'mcp-builders', lines: true, get: () => oidcLocalRunnerGroups, set: (v: string) => (oidcLocalRunnerGroups = v) },
-					{ label: 'Allowed email domains', hint: "one per line; a verified email's domain or Google's hd must be listed", placeholder: 'example.com', lines: true, get: () => oidcAllowedDomains, set: (v: string) => (oidcAllowedDomains = v) }
-				] as field (field.label)}
-					<label class="flex flex-col gap-1.5 text-xs font-medium text-[var(--color-ink-muted)]">
-						{field.label} <span class="font-normal text-[var(--color-ink-dim)]">({field.hint})</span>
-						{#if field.lines}
-							<textarea
-								rows="3"
-								bind:value={field.get, field.set}
-								disabled={savingField !== null}
-								placeholder={field.placeholder}
-								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-							></textarea>
-						{:else}
-							<input
-								type="text"
-								bind:value={field.get, field.set}
-								disabled={savingField !== null}
-								placeholder={field.placeholder}
-								class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] outline-hidden transition placeholder:text-[var(--color-ink-dim)] focus:border-[var(--color-line-strong)]"
-							/>
-						{/if}
-					</label>
-				{/each}
-			</div>
-			<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
-				<input
-					type="checkbox"
-					bind:checked={oidcEnabled}
-					disabled={savingField !== null}
-					class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
-				/>
-				<span class="flex flex-col gap-0.5">
-					<span class="text-sm font-medium text-[var(--color-ink)]">Enable single sign-on</span>
-					<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
-						Turns on sign-in through this provider.
-					</span>
-				</span>
-			</label>
-			<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
-				<input
-					type="checkbox"
-					bind:checked={oidcRequireVerifiedEmail}
-					disabled={savingField !== null}
-					class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
-				/>
-				<span class="flex flex-col gap-0.5">
-					<span class="text-sm font-medium text-[var(--color-ink)]">Require a verified email</span>
-					<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
-						With the email identity claim, refuses a sign-in whose provider says the email is not verified.
-					</span>
-				</span>
-			</label>
-			<label class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5">
-				<input
-					type="checkbox"
-					bind:checked={oidcProvisioning}
-					disabled={savingField !== null}
-					class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
-				/>
-				<span class="flex flex-col gap-0.5">
-					<span class="text-sm font-medium text-[var(--color-ink)]">Create users on first sign-in</span>
-					<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
-						A person who matches no user gets one, named by the identity claim. New users start as Members with local runners off. Limit who gets an account with allowed groups or domains.
-					</span>
-				</span>
-			</label>
-			<div class="flex justify-end">
-				<button
-					type="submit"
-					disabled={savingField !== null}
-					aria-busy={savingOidc}
-					class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-50"
-				>
-					{savingOidc ? 'Saving…' : 'Save SSO settings'}
-				</button>
-			</div>
-		</form>
-
-		<!-- SCIM provisioning -->
-		<div
-			class="flex flex-col gap-4 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-5"
-		>
-			<div class="flex flex-col gap-1">
-				<h2 class="text-sm font-semibold text-[var(--color-ink)]">SCIM provisioning</h2>
-				<p class="max-w-prose text-xs text-[var(--color-ink-dim)]">
-					Let the identity provider create, update and deactivate users. Give its SCIM client
-					this URL and a SCIM token as the Bearer secret. The token opens SCIM and nothing else.
-					Deactivating a user ends their sessions and revokes their tokens; their servers keep
-					running.
-				</p>
-			</div>
-			<div class="flex flex-col gap-1.5">
-				<span class="text-xs font-medium text-[var(--color-ink-muted)]">SCIM base URL</span>
-				<div class="flex items-center gap-2">
-					<code
-						class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
-						title={settings.scim_base_url}>{settings.scim_base_url}</code
-					>
-					<CopyButton value={settings.scim_base_url} label="Copy SCIM base URL" text="Copy" />
-				</div>
-			</div>
-			{#if scimToken}
-				<div class="flex flex-col gap-1.5">
-					<span class="text-xs font-medium text-[var(--color-ink-muted)]">
-						SCIM token <span class="font-normal text-[var(--color-ink-dim)]">(copy it now, it won't be shown again)</span>
-					</span>
-					<div class="flex items-center gap-2">
-						<code
-							class="min-w-0 flex-1 truncate rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
-							>{scimToken}</code
-						>
-						<CopyButton value={scimToken} label="Copy SCIM token" text="Copy" />
-						<button
-							type="button"
-							onclick={() => (scimToken = null)}
-							class="rounded-lg border border-[var(--color-line)] px-3 py-2 text-xs text-[var(--color-ink-muted)] hover:text-[var(--color-ink)]"
-						>
-							Done
-						</button>
 					</div>
-				</div>
-			{/if}
-			<div class="flex justify-end">
-				<button
-					type="button"
-					onclick={handleCreateScimToken}
-					disabled={mintingScim}
-					aria-busy={mintingScim}
-					class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-accent-ink)] transition active:translate-y-px hover:bg-[var(--color-accent-strong)] disabled:cursor-wait disabled:opacity-50"
-				>
-					{mintingScim ? 'Creating…' : 'Create SCIM token'}
-				</button>
+					<div class="flex flex-col divide-y divide-[var(--color-line)] rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)]">
+						<div class="p-5">
+							<fieldset class="flex flex-col gap-2 border-0 p-0">
+								<legend class="text-sm font-medium text-[var(--color-ink)]">Docker runner</legend>
+								<label
+									class="flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+									style={settings.docker_runner
+										? 'border-color: color-mix(in oklab, var(--color-state-failed) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 7%, transparent);'
+										: 'border-color: var(--color-line); background-color: var(--color-surface-2);'}
+								>
+									<input
+										type="checkbox"
+										checked={settings.docker_runner}
+										onchange={(e) => setDockerRunner(e.currentTarget.checked, e.currentTarget)}
+										disabled={savingField !== null}
+										class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+									/>
+									<span class="flex flex-col gap-0.5">
+										<span class="text-sm font-medium text-[var(--color-ink)]">
+											Enable running MCP servers packaged as Docker images
+										</span>
+										<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+											<span class="font-semibold text-[var(--color-state-failed)]">Root-equivalent.</span>
+											Launches arbitrary images on the mounted Docker daemon (a sibling container on
+											the host, or an isolated dind sidecar). Only enable it if you trust every image
+											you run and understand it can affect the host. Requires the Docker socket to be
+											mounted into this container.
+										</span>
+									</span>
+								</label>
+								{#if confirmEnableDocker}
+									<div
+										role="alert"
+										class="flex flex-col gap-2.5 rounded-lg border p-3"
+										style="border-color: color-mix(in oklab, var(--color-state-failed) 45%, transparent); background-color: color-mix(in oklab, var(--color-state-failed) 8%, transparent);"
+									>
+										<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-muted)]">
+											The docker runner is <span class="font-semibold text-[var(--color-ink)]">root-equivalent</span>:
+											a server you run can execute any image on the host's Docker daemon. Enable it only
+											if you trust the images you'll run.
+										</p>
+										<div class="flex items-center gap-1.5">
+											<button
+												type="button"
+												onclick={confirmEnableDockerRunner}
+												disabled={savingField !== null}
+												class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition active:translate-y-px disabled:cursor-wait disabled:opacity-70"
+												style="background-color: var(--color-state-failed);"
+											>
+												Enable anyway
+											</button>
+											<button
+												type="button"
+												onclick={() => (confirmEnableDocker = false)}
+												class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)]"
+											>
+												Cancel
+											</button>
+										</div>
+									</div>
+								{/if}
+							</fieldset>
+						</div>
+						<div class="p-5">
+							<fieldset class="flex flex-col gap-2 border-0 p-0">
+								<legend class="text-sm font-medium text-[var(--color-ink)]">mcpelevator MCP server</legend>
+								<label
+									class="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-[var(--color-accent)]"
+								>
+									<input
+										type="checkbox"
+										checked={settings.control_mcp}
+										onchange={(e) =>
+											patchSettings({ control_mcp: e.currentTarget.checked }, 'control_mcp')}
+										disabled={savingField !== null}
+										class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent)]"
+									/>
+									<span class="flex flex-col gap-0.5">
+										<span class="text-sm font-medium text-[var(--color-ink)]">
+											Serve the control plane as an MCP server
+										</span>
+										<span class="text-xs leading-normal text-[var(--color-ink-dim)]">
+											Lets an agent manage servers, groups, tokens, users and settings through the
+											built-in <code class="font-mono">mcpelevator</code> server on the dashboard, where it
+											is edited like any other server (hide or rename tools, auth, idle). Every tool call
+											runs with the caller's own permissions; with control-plane auth on, connect with a
+											login (control) token. Individual users can be excluded under Users.
+										</span>
+									</span>
+								</label>
+							</fieldset>
+						</div>
+						<div class="p-5">
+							<fieldset class="flex flex-col gap-2 border-0 p-0">
+								<legend class="text-sm font-medium text-[var(--color-ink)]">Idle shutdown</legend>
+								<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
+									<code class="font-mono text-[var(--color-ink-muted)]">0</code> (the default) keeps
+									every server running. Above 0, a server with no traffic for that many seconds stops,
+									and the next request wakes it, at the cost of a cold start and anything it held in
+									memory. Each server can override this in its own settings, where
+									<code class="font-mono text-[var(--color-ink-muted)]">0</code> means never idle.
+								</p>
+								<form class="flex items-center gap-2" onsubmit={saveIdleTimeout}>
+									<input
+										type="text"
+										inputmode="numeric"
+										bind:value={idleTimeoutText}
+										autocomplete="off"
+										spellcheck="false"
+										aria-label="Default idle shutdown in seconds"
+										aria-invalid={!idleTimeoutValid}
+										class="w-32 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+										style={idleTimeoutValid
+											? 'border-color: var(--color-line);'
+											: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+									/>
+									<span class="text-xs text-[var(--color-ink-dim)]">seconds</span>
+									<button
+										type="submit"
+										disabled={!idleTimeoutValid || !idleTimeoutDirty || savingField !== null}
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
+									>
+										Save
+									</button>
+								</form>
+								{#if !idleTimeoutValid}
+									<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+										Enter a whole number of seconds (0 turns idling off).
+									</p>
+								{/if}
+							</fieldset>
+						</div>
+						<div class="p-5">
+							<fieldset class="flex flex-col gap-2 border-0 p-0">
+								<legend class="text-sm font-medium text-[var(--color-ink)]">Usage retention</legend>
+								<p class="max-w-prose text-xs leading-relaxed text-[var(--color-ink-dim)]">
+									How long to keep per-server and per-tool call counts, shown on each server's
+									Usage panel — counts and when each was last seen, never arguments or results.
+									<code class="font-mono text-[var(--color-ink-muted)]">0</code> keeps them forever;
+									a usage window never reaches further back than this, so lowering it shortens what
+									the charts can show.
+								</p>
+								<form class="flex items-center gap-2" onsubmit={saveUsageRetention}>
+									<input
+										type="text"
+										inputmode="numeric"
+										bind:value={usageRetentionText}
+										autocomplete="off"
+										spellcheck="false"
+										aria-label="Usage retention in days"
+										aria-invalid={!usageRetentionValid}
+										class="w-32 rounded-lg border bg-[var(--color-surface-2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-line-strong)]"
+										style={usageRetentionValid
+											? 'border-color: var(--color-line);'
+											: 'border-color: color-mix(in oklab, var(--color-state-failed) 55%, transparent);'}
+									/>
+									<span class="text-xs text-[var(--color-ink-dim)]">days</span>
+									<button
+										type="submit"
+										disabled={!usageRetentionValid || !usageRetentionDirty || savingField !== null}
+										class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-xs font-medium text-[var(--color-ink-muted)] transition hover:border-[var(--color-line-strong)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
+									>
+										Save
+									</button>
+								</form>
+								{#if !usageRetentionValid}
+									<p class="text-xs text-[var(--color-state-failed)]" role="alert">
+										Enter a whole number of days (0 keeps counters forever).
+									</p>
+								{/if}
+							</fieldset>
+						</div>
+					</div>
+				{:else if activeTab === 'help'}
+					<div class="flex flex-col gap-1">
+						<h2 class="text-lg font-semibold tracking-tight text-[var(--color-ink)]">Help</h2>
+						<p class="max-w-prose text-sm text-[var(--color-ink-muted)]">
+							Connecting a client, where common jobs live, and first steps when something breaks.
+						</p>
+					</div>
+					<SettingsHelp {baseUrl} {isAdmin} />
+				{:else if activeTab === 'about'}
+					<div class="flex flex-col gap-1">
+						<h2 class="text-lg font-semibold tracking-tight text-[var(--color-ink)]">About</h2>
+						<p class="max-w-prose text-sm text-[var(--color-ink-muted)]">
+							This build, this instance, and where the project lives.
+						</p>
+					</div>
+					<SettingsAbout user={authUser} {baseUrl} serverCount={servers.length} />
+				{/if}
 			</div>
 		</div>
-		{/if}
 	{/if}
 </section>
-

@@ -1362,7 +1362,7 @@
 					<span>
 						Requests need an access token from the OAuth authorization server configured in
 						<a
-							href="/settings"
+							href="/settings?tab=auth"
 							class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
 						>
 							Settings
@@ -1394,7 +1394,7 @@
 							>Edit</a
 						>, or change the default in
 						<a
-							href="/settings"
+							href="/settings?tab=auth"
 							class="text-[var(--color-ink-muted)] underline decoration-dotted underline-offset-2 transition hover:text-[var(--color-ink)]"
 							>Settings</a
 						>.
