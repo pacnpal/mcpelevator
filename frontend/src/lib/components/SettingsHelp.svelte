@@ -4,11 +4,15 @@
 	// `?tab=`, and admin-only destinations are left out for members.
 	let {
 		baseUrl,
-		isAdmin
+		isAdmin,
+		controlSlug
 	}: {
 		/** The instance's public base, e.g. https://mcp.example.com. */
 		baseUrl: string;
 		isAdmin: boolean;
+		/** The built-in mcpelevator server's slug (it isn't always `mcpelevator`: boot
+		 * picks another when that one is taken), or null when it isn't visible. */
+		controlSlug: string | null;
 	} = $props();
 
 	const REPO = 'https://github.com/pacnpal/mcpelevator';
@@ -17,7 +21,9 @@
 	const endpoints = $derived([
 		{ path: '/s/<slug>/mcp', what: 'One server, by the slug shown on its card.' },
 		{ path: '/g/<name>/mcp', what: "A group: its running members' tools in one bundle, prefixed by slug." },
-		{ path: '/s/mcpelevator/mcp', what: 'The built-in server: this control plane as MCP tools.' }
+		...(controlSlug
+			? [{ path: `/s/${controlSlug}/mcp`, what: 'The built-in server: this control plane as MCP tools.' }]
+			: [])
 	]);
 
 	const tasks = $derived(
@@ -40,11 +46,11 @@
 		},
 		{
 			q: 'A client gets 401 or 403',
-			a: "Check the server's auth (Edit → Auth). A bearer server takes a token scoped to all or to that server, and a group's URL one scoped to all or to that group. An OAuth server needs the authorization server set under Server auth."
+			a: "Check the server's auth (Edit → Auth). A bearer server takes a token scoped to all or to that server, and a group's URL one scoped to all or to that group. The built-in mcpelevator server is different: with control-plane auth on, it needs a login token or MCPE_ADMIN_TOKEN, since a data-plane token can't drive the control plane. An OAuth server needs the authorization server set under Server auth."
 		},
 		{
 			q: 'Locked out of the control plane',
-			a: 'Loopback always works: open the UI at http://localhost on the box itself, or over an SSH tunnel. On first boot with auth on, the admin token is printed once to the container logs.'
+			a: "Two different problems. If the page won't load from your address (the Host check), open it through loopback instead, on the box or over an SSH tunnel: http://localhost:8080 with the default port. Loopback doesn't skip sign-in, though. If you've lost the credential itself: a new install prints its admin token once to the container logs, MCPE_ADMIN_TOKEN is always accepted, and setting MCPE_MINT_ADMIN_TOKEN=true for one restart prints a fresh admin token (unset it afterwards)."
 		},
 		{
 			q: 'Need more detail in the logs',
@@ -98,7 +104,6 @@
 				<li>
 					<a
 						href={t.href}
-						data-sveltekit-noscroll={t.href.startsWith('/settings') ? '' : undefined}
 						class="flex h-full flex-col gap-0.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3 transition hover:border-[var(--color-line-strong)]"
 					>
 						<span class="text-sm font-medium text-[var(--color-ink)]">{t.label}</span>

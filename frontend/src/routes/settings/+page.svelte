@@ -169,13 +169,20 @@
 		return n > 0 ? n : null;
 	}
 
-	// On a phone the nav is a sideways-scrolling strip: keep the open section in view.
+	// The nav links keep focus and scroll (data-sveltekit-reset="false"), so a keyboard
+	// user stays on the nav. On a phone the nav is a sideways-scrolling strip: keep the
+	// open section's link in view, and bring the section's top back on screen when the
+	// switch came from further down a long section.
 	let sectionNav = $state<HTMLElement | null>(null);
+	let sectionContent = $state<HTMLElement | null>(null);
 	$effect(() => {
 		void activeTab;
 		sectionNav
 			?.querySelector('[aria-current="page"]')
 			?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+		const top = sectionContent?.getBoundingClientRect().top;
+		// 72px clears the sticky site header.
+		if (top !== undefined && top < 72) window.scrollTo({ top: window.scrollY + top - 72 });
 	});
 
 	// ---- Access tokens --------------------------------------------------------
@@ -952,6 +959,10 @@
 		void submitGroup();
 	}
 
+	// A group restart in flight, by group name. Kept here rather than in RestartButton so
+	// switching Settings sections (which unmounts the button) can't re-enable it mid-request.
+	let restartingGroups = $state<Record<string, boolean>>({});
+
 	// Delete needs an explicit confirm (it takes a live /g/<name>/mcp endpoint offline),
 	// mirroring the per-row token-revoke gate.
 	let confirmDeleteGroup = $state<string | null>(null);
@@ -1083,7 +1094,7 @@
 				>
 								<a
 									href={tabHref(t.id)}
-									data-sveltekit-noscroll
+									data-sveltekit-reset="false"
 									data-sveltekit-replacestate
 									aria-current={current ? 'page' : undefined}
 									class="flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm whitespace-nowrap transition"
@@ -1101,7 +1112,7 @@
 					</ul>
 				</nav>
 			{/if}
-			<div class="flex min-w-0 max-w-3xl flex-1 flex-col gap-5">
+			<div bind:this={sectionContent} class="flex min-w-0 max-w-3xl flex-1 flex-col gap-5">
 				{#if activeTab === 'tokens'}
 					<div class="flex flex-col gap-1">
 						<h2 class="text-lg font-semibold tracking-tight text-[var(--color-ink)]">Access tokens</h2>
@@ -1269,9 +1280,11 @@
 														class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap"
 														title={token.scope === 'all'
 															? 'Authorizes every bearer-protected server and group'
-															: token.scope.startsWith('group:')
-																? 'Authorizes only this group'
-																: 'Authorizes only this server'}
+															: token.scope === 'scim'
+																? 'Opens SCIM provisioning (/scim/v2) and nothing else'
+																: token.scope.startsWith('group:')
+																	? 'Authorizes only this group'
+																	: 'Authorizes only this server'}
 														style={token.scope === 'all'
 															? 'border: 1px solid var(--color-line); color: var(--color-ink-muted);'
 															: 'border: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent); color: var(--color-accent);'}
@@ -1584,7 +1597,7 @@
 							<code class="font-mono">all servers</code> (every registered server, including
 							future ones, except the built-in <code class="font-mono">mcpelevator</code> server,
 							which joins a group only when picked) or a picked list. A group uses the default auth
-							provider set under <a href="/settings?tab=auth" data-sveltekit-noscroll class="underline decoration-dotted underline-offset-2">Server auth</a>.
+							provider set under <a href="/settings?tab=auth" class="underline decoration-dotted underline-offset-2">Server auth</a>.
 							A protected member is included only when it uses that same provider; bearer and OAuth
 							credentials cannot stand in for one another. Name a group
 							<code class="font-mono">all</code> with <code class="font-mono">all servers</code>
@@ -1623,6 +1636,10 @@
 													     re-reads their tools. Same component as the server pages. -->
 													<RestartButton
 														target={{ kind: 'group', name: group.name }}
+														bind:busy={
+															() => restartingGroups[group.name] ?? false,
+															(v) => (restartingGroups[group.name] = v)
+														}
 														size="sm"
 														onrestarted={() => void refreshServers()}
 													/>
@@ -2083,7 +2100,7 @@
 									token; the SPA logs in with it.
 									{#if !hasUsableAdminCredential}
 										<span class="text-[var(--color-accent)]">
-											<a href="/settings" data-sveltekit-noscroll class="underline decoration-dotted underline-offset-2">Generate an admin token</a> under Access tokens to enable
+											<a href="/settings" class="underline decoration-dotted underline-offset-2">Generate an admin token</a> under Access tokens to enable
 											<code class="font-mono">expose</code> / <code class="font-mono">always</code>.
 										</span>
 									{/if}
@@ -2917,7 +2934,11 @@
 							Connecting a client, where common jobs live, and first steps when something breaks.
 						</p>
 					</div>
-					<SettingsHelp {baseUrl} {isAdmin} />
+					<SettingsHelp
+						{baseUrl}
+						{isAdmin}
+						controlSlug={servers.find((s) => s.runner === 'mcpelevator')?.slug ?? null}
+					/>
 				{:else if activeTab === 'about'}
 					<div class="flex flex-col gap-1">
 						<h2 class="text-lg font-semibold tracking-tight text-[var(--color-ink)]">About</h2>

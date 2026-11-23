@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, untrack, type Snippet } from 'svelte';
+	import { onMount, tick, untrack, type Snippet } from 'svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
 	import { getAuthStatus, getSettings, previewGraphql, previewOpenapi } from '#lib/api.js';
 	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '#lib/remote.js';
@@ -759,6 +759,18 @@
 	function shown(id: FormTab): boolean {
 		return !tabbed || tab === id;
 	}
+	// The ARIA tabs pattern's panel side, in edit mode only (create shows every section).
+	function panel(id: FormTab) {
+		return tabbed
+			? { role: 'tabpanel', id: `srv-panel-${id}`, 'aria-labelledby': `srv-tab-${id}` }
+			: {};
+	}
+	// Open a section from outside the tab bar (the Save hint's "Go to …"), and move focus
+	// to its tab: the button that was clicked disappears once that section is open.
+	function openTab(id: FormTab) {
+		tab = id;
+		void tick().then(() => document.getElementById(`srv-tab-${id}`)?.focus());
+	}
 
 	// The section holding the field that blocks Save, in the order submitBlocker checks.
 	const blockerTab = $derived.by((): FormTab | null => {
@@ -928,6 +940,7 @@
 						role="tab"
 						id={`srv-tab-${t.id}`}
 						aria-selected={tab === t.id}
+						aria-controls={`srv-panel-${t.id}`}
 						tabindex={tab === t.id ? 0 : -1}
 						onclick={() => (tab = t.id)}
 						class="relative flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-sm whitespace-nowrap transition"
@@ -949,7 +962,7 @@
 		</div>
 	{/if}
 
-	<div class="contents" hidden={!shown('general')}>
+	<div class="contents" hidden={!shown('general')} {...panel('general')}>
 	<!-- Name -->
 	<div class="flex flex-col gap-2">
 		<label for="srv-name" class="text-sm font-medium text-[var(--color-ink)]">
@@ -1018,11 +1031,7 @@
 			{/if}
 		</div>
 	{/if}
-	{@render generalExtra?.()}
-	</div>
-
 	{#if isBuiltin}
-		<div class="contents" hidden={!shown('general')}>
 		<p
 			class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3 text-xs leading-relaxed text-[var(--color-ink-muted)]"
 		>
@@ -1031,9 +1040,12 @@
 			permissions; turn it off for everyone, or per user, in
 			<a href="/settings?tab=runtime" class="underline decoration-dotted underline-offset-2">Settings</a>.
 		</p>
-		</div>
-	{:else}
-		<div class="contents" hidden={!shown('launch')}>
+	{/if}
+	{@render generalExtra?.()}
+	</div>
+
+	{#if !isBuiltin}
+		<div class="contents" hidden={!shown('launch')} {...panel('launch')}>
 		<!-- Runner -->
 		<fieldset class="flex flex-col gap-2 border-0 p-0">
 			<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Runner</legend>
@@ -2012,7 +2024,7 @@
 		</div>
 
 		<!-- Environment variables (upstream headers when remote/openapi/graphql) -->
-		<fieldset class="flex flex-col gap-2 border-0 p-0" hidden={!shown('env')}>
+		<fieldset class="flex flex-col gap-2 border-0 p-0" hidden={!shown('env')} {...panel('env')}>
 			<div class="flex items-center justify-between">
 				<legend class="text-sm font-medium text-[var(--color-ink)]">
 					{isHttpUpstream ? (isRemote && oauth ? 'Extra headers' : 'Headers') : 'Environment'}
@@ -2172,7 +2184,7 @@
 	     so values and validation survive closing it); edit mode shows them as sections. -->
 	{#snippet accessFields()}
 	<!-- Exposure toggles -->
-	<fieldset class="flex flex-col gap-3 border-0 p-0" hidden={!shown('exposure')}>
+	<fieldset class="flex flex-col gap-3 border-0 p-0" hidden={!shown('exposure')} {...panel('exposure')}>
 		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Exposure</legend>
 		<label
 			class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
@@ -2311,7 +2323,7 @@
 	</fieldset>
 
 	<!-- Lifecycle: when it stops, how long it may take to start, and how it proves it works. -->
-	<fieldset class="flex flex-col gap-3 border-0 p-0" hidden={!shown('lifecycle')}>
+	<fieldset class="flex flex-col gap-3 border-0 p-0" hidden={!shown('lifecycle')} {...panel('lifecycle')}>
 		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Lifecycle</legend>
 		<!-- Idle shutdown (wake-on-request) -->
 		<div class="flex flex-col gap-1.5">
@@ -2533,7 +2545,7 @@
 	</fieldset>
 
 	<!-- Auth -->
-	<fieldset class="flex flex-col gap-2 border-0 p-0" hidden={!shown('auth')}>
+	<fieldset class="flex flex-col gap-2 border-0 p-0" hidden={!shown('auth')} {...panel('auth')}>
 		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Auth</legend>
 		<div
 			class="grid grid-cols-2 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1 sm:grid-cols-4"
@@ -2687,7 +2699,7 @@
 				{#if tabbed && blockerTab && blockerTab !== tab}
 					<button
 						type="button"
-						onclick={() => blockerTab && (tab = blockerTab)}
+						onclick={() => blockerTab && openTab(blockerTab)}
 						class="ml-1 font-medium text-[var(--color-ink)] underline decoration-dotted underline-offset-2"
 					>
 						Go to {blockerLabel}

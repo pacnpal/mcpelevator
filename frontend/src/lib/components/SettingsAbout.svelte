@@ -1,8 +1,9 @@
 <script lang="ts">
 	// The Settings page's About section: what this is, which build is running, and where
-	// it lives. The version comes from /api/health, the same source as the footer, so it
-	// names the release tag the image was built from (never a hardcoded string).
-	import { errorMessage, getHealth } from '#lib/api.js';
+	// it lives. The version is the layout's health poll result (`build`), the same value the
+	// footer shows, so it names the release tag the image was built from and follows an
+	// upgrade on the next poll (never a hardcoded string).
+	import { build } from '#lib/build.svelte.js';
 	import type { AuthUser } from '#lib/types.js';
 	import CopyButton from '#lib/components/CopyButton.svelte';
 	import Logo from '#lib/components/Logo.svelte';
@@ -20,14 +21,7 @@
 
 	const REPO = 'https://github.com/pacnpal/mcpelevator';
 
-	let version = $state<string | null>(null);
-	let versionError = $state<string | null>(null);
-
-	$effect(() => {
-		getHealth()
-			.then((h) => (version = h.version))
-			.catch((err) => (versionError = errorMessage(err)));
-	});
+	const version = $derived(build.version);
 
 	const links = [
 		{ href: REPO, label: 'Source code', hint: 'The repository and README' },
@@ -58,8 +52,6 @@
 			<dd class="font-mono text-sm text-[var(--color-ink)]">
 				{#if version}
 					v{version}
-				{:else if versionError}
-					<span class="text-[var(--color-ink-dim)]" title={versionError}>unknown</span>
 				{:else}
 					<span class="text-[var(--color-ink-dim)]">…</span>
 				{/if}
