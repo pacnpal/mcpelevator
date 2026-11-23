@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, untrack } from 'svelte';
+	import { onMount, untrack, type Snippet } from 'svelte';
 	import RunnerBadge from './RunnerBadge.svelte';
 	import { getAuthStatus, getSettings, previewGraphql, previewOpenapi } from '#lib/api.js';
 	import { REMOTE_TRANSPORTS, canonicalRemoteTransport } from '#lib/remote.js';
@@ -47,7 +47,8 @@
 		error = null,
 		submitLabel,
 		onsubmit,
-		oncancel
+		oncancel,
+		generalExtra
 	}: {
 		mode?: Mode;
 		/** Prefill values (edit) or partial defaults (create). `slug` is only used
@@ -65,6 +66,8 @@
 		 * carries `slug` when the operator renamed it. */
 		onsubmit: (payload: ServerCreate & { slug?: string }) => void;
 		oncancel?: () => void;
+		/** Extra fields the page owns (e.g. the server's owner), shown at the end of General. */
+		generalExtra?: Snippet;
 	} = $props();
 
 	// The runners offered in the form. For `docker` the stored shape is the OCI image ref
@@ -723,17 +726,67 @@
 				? "The schema URL must be a full http(s) URL."
 				: 'Paste the GraphQL schema, or choose another schema source.';
 		if (!idleTimeoutValid) return 'Idle shutdown must be a whole number of seconds.';
-		if (!startupTimeoutsValid) return 'Fix the startup timeout under Exposure & access.';
+		if (!startupTimeoutsValid) return 'Fix the startup timeout under Lifecycle.';
 		if (!isBuiltin && !healthValid)
 			return healthCommandBlocked
 				? "This runner can't run a health-check command: call a tool instead."
-				: 'Finish the health check under Exposure & access.';
+				: 'Finish the health check under Lifecycle.';
 		if (dockerBlocked) return 'The Docker runner is off: turn off “Start after creating” to save it.';
 		if (setupBlocked) return "This runner can't run a setup script: clear it under Advanced.";
 		if (repoBlocked) return 'Fix the source repository settings above.';
 		return null;
 	});
 	const submitHintId = $props.id();
+
+	// ---- Sections (edit mode) ------------------------------------------------
+	// Editing an existing server shows the form as sections, one at a time; creating
+	// keeps the single guided page with exposure, lifecycle and auth folded away.
+	type FormTab = 'general' | 'launch' | 'env' | 'exposure' | 'lifecycle' | 'auth';
+	const tabbed = $derived(mode === 'edit');
+	let tab = $state<FormTab>('general');
+	const formTabs = $derived(
+		(
+			[
+				{ id: 'general', label: 'General' },
+				{ id: 'launch', label: 'Launch' },
+				{ id: 'env', label: isHttpUpstream ? 'Headers' : 'Environment' },
+				{ id: 'exposure', label: 'Exposure' },
+				{ id: 'lifecycle', label: 'Lifecycle' },
+				{ id: 'auth', label: 'Auth' }
+			] as { id: FormTab; label: string }[]
+		).filter((t) => !isBuiltin || (t.id !== 'launch' && t.id !== 'env'))
+	);
+	function shown(id: FormTab): boolean {
+		return !tabbed || tab === id;
+	}
+
+	// The section holding the field that blocks Save, in the order submitBlocker checks.
+	const blockerTab = $derived.by((): FormTab | null => {
+		if (busy) return null;
+		if (!nameValid) return 'general';
+		if (!commandValid || !remoteUrlValid || !baseUrlValid || !schemaValid) return 'launch';
+		if (!idleTimeoutValid || !startupTimeoutsValid) return 'lifecycle';
+		if (!isBuiltin && !healthValid) return 'lifecycle';
+		if (dockerBlocked || setupBlocked || repoBlocked) return 'launch';
+		return null;
+	});
+	const blockerLabel = $derived(formTabs.find((t) => t.id === blockerTab)?.label ?? null);
+
+	function onTabKey(e: KeyboardEvent) {
+		const keys: Record<string, number> = { ArrowRight: 1, ArrowLeft: -1 };
+		if (!(e.key in keys) && e.key !== 'Home' && e.key !== 'End') return;
+		e.preventDefault();
+		const ids = formTabs.map((t) => t.id);
+		const at = ids.indexOf(tab);
+		const next =
+			e.key === 'Home'
+				? 0
+				: e.key === 'End'
+					? ids.length - 1
+					: (at + keys[e.key] + ids.length) % ids.length;
+		tab = ids[next];
+		document.getElementById(`srv-tab-${tab}`)?.focus();
+	}
 
 	function buildEnv(): Record<string, string> {
 		const out: Record<string, string> = {};
@@ -856,6 +909,47 @@
 </script>
 
 <form class="flex flex-col gap-7" onsubmit={handleSubmit} novalidate>
+	{#if tabbed}
+		<!-- Sections of the edit form. Every field stays mounted (a hidden section is only
+		     display:none), so values and validation survive switching. -->
+		<div
+			class="sticky top-14 z-20 -mx-4 border-b border-[var(--color-line)] bg-[color-mix(in_oklab,var(--color-canvas)_92%,transparent)] px-4 backdrop-blur-md sm:mx-0 sm:px-0"
+		>
+			<div
+				role="tablist"
+				aria-label="Server settings sections"
+				tabindex="-1"
+				onkeydown={onTabKey}
+				class="-mb-px flex gap-1 overflow-x-auto"
+			>
+				{#each formTabs as t (t.id)}
+					<button
+						type="button"
+						role="tab"
+						id={`srv-tab-${t.id}`}
+						aria-selected={tab === t.id}
+						tabindex={tab === t.id ? 0 : -1}
+						onclick={() => (tab = t.id)}
+						class="relative flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-sm whitespace-nowrap transition"
+						style={tab === t.id
+							? 'border-color: var(--color-accent); color: var(--color-ink); font-weight: 600;'
+							: 'border-color: transparent; color: var(--color-ink-muted);'}
+					>
+						{t.label}
+						{#if blockerTab === t.id}
+							<span
+								class="size-1.5 rounded-full"
+								style="background-color: var(--color-state-failed);"
+								title="Needs a fix before you can save"
+							></span>
+						{/if}
+					</button>
+				{/each}
+			</div>
+		</div>
+	{/if}
+
+	<div class="contents" hidden={!shown('general')}>
 	<!-- Name -->
 	<div class="flex flex-col gap-2">
 		<label for="srv-name" class="text-sm font-medium text-[var(--color-ink)]">
@@ -924,8 +1018,11 @@
 			{/if}
 		</div>
 	{/if}
+	{@render generalExtra?.()}
+	</div>
 
 	{#if isBuiltin}
+		<div class="contents" hidden={!shown('general')}>
 		<p
 			class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3 text-xs leading-relaxed text-[var(--color-ink-muted)]"
 		>
@@ -934,7 +1031,9 @@
 			permissions; turn it off for everyone, or per user, in
 			<a href="/settings?tab=runtime" class="underline decoration-dotted underline-offset-2">Settings</a>.
 		</p>
+		</div>
 	{:else}
+		<div class="contents" hidden={!shown('launch')}>
 		<!-- Runner -->
 		<fieldset class="flex flex-col gap-2 border-0 p-0">
 			<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Runner</legend>
@@ -1910,9 +2009,10 @@
 				</div>
 			{/if}
 		</div>
+		</div>
 
 		<!-- Environment variables (upstream headers when remote/openapi/graphql) -->
-		<fieldset class="flex flex-col gap-2 border-0 p-0">
+		<fieldset class="flex flex-col gap-2 border-0 p-0" hidden={!shown('env')}>
 			<div class="flex items-center justify-between">
 				<legend class="text-sm font-medium text-[var(--color-ink)]">
 					{isHttpUpstream ? (isRemote && oauth ? 'Extra headers' : 'Headers') : 'Environment'}
@@ -2067,35 +2167,12 @@
 
 	{/if}
 
-	<!-- Exposure & access: everything a first server can leave at its defaults. A native
-	     <details> keeps the fields mounted, so values and validation survive closing it. -->
-	<details
-		bind:open={accessOpen}
-		class="group overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]"
-	>
-		<summary
-			class="flex cursor-pointer list-none items-center justify-between gap-3 px-3.5 py-3 transition hover:bg-[var(--color-surface-2)] [&::-webkit-details-marker]:hidden"
-		>
-			<span class="flex min-w-0 flex-col gap-0.5">
-				<span class="text-sm font-medium text-[var(--color-ink)]">Exposure &amp; access</span>
-				<span class="truncate font-mono text-xs text-[var(--color-ink-dim)]">{accessSummary}</span>
-			</span>
-			<svg
-				class="size-4 shrink-0 text-[var(--color-ink-muted)] transition-transform group-open:rotate-180"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="2"
-				stroke-linecap="round"
-				stroke-linejoin="round"
-				aria-hidden="true"
-			>
-				<path d="m6 9 6 6 6-6" />
-			</svg>
-		</summary>
-		<div class="flex flex-col gap-7 border-t border-[var(--color-line)] px-3.5 py-4">
+	<!-- Exposure, lifecycle and auth: everything a first server can leave at its defaults.
+	     Create mode folds them into one <details> (a native one keeps the fields mounted,
+	     so values and validation survive closing it); edit mode shows them as sections. -->
+	{#snippet accessFields()}
 	<!-- Exposure toggles -->
-	<fieldset class="flex flex-col gap-3 border-0 p-0">
+	<fieldset class="flex flex-col gap-3 border-0 p-0" hidden={!shown('exposure')}>
 		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Exposure</legend>
 		<label
 			class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-3"
@@ -2231,6 +2308,11 @@
 			{/if}
 		{/if}
 
+	</fieldset>
+
+	<!-- Lifecycle: when it stops, how long it may take to start, and how it proves it works. -->
+	<fieldset class="flex flex-col gap-3 border-0 p-0" hidden={!shown('lifecycle')}>
+		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Lifecycle</legend>
 		<!-- Idle shutdown (wake-on-request) -->
 		<div class="flex flex-col gap-1.5">
 			<label for="srv-idle-timeout" class="text-xs font-medium text-[var(--color-ink-muted)]">
@@ -2451,7 +2533,7 @@
 	</fieldset>
 
 	<!-- Auth -->
-	<fieldset class="flex flex-col gap-2 border-0 p-0">
+	<fieldset class="flex flex-col gap-2 border-0 p-0" hidden={!shown('auth')}>
 		<legend class="mb-1 text-sm font-medium text-[var(--color-ink)]">Auth</legend>
 		<div
 			class="grid grid-cols-2 gap-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1 sm:grid-cols-4"
@@ -2486,8 +2568,40 @@
 			</a> page.
 		</p>
 	</fieldset>
+	{/snippet}
+
+	{#if tabbed}
+		{@render accessFields()}
+	{:else}
+	<details
+		bind:open={accessOpen}
+		class="group overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]"
+	>
+		<summary
+			class="flex cursor-pointer list-none items-center justify-between gap-3 px-3.5 py-3 transition hover:bg-[var(--color-surface-2)] [&::-webkit-details-marker]:hidden"
+		>
+			<span class="flex min-w-0 flex-col gap-0.5">
+				<span class="text-sm font-medium text-[var(--color-ink)]">Exposure &amp; access</span>
+				<span class="truncate font-mono text-xs text-[var(--color-ink-dim)]">{accessSummary}</span>
+			</span>
+			<svg
+				class="size-4 shrink-0 text-[var(--color-ink-muted)] transition-transform group-open:rotate-180"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<path d="m6 9 6 6 6-6" />
+			</svg>
+		</summary>
+		<div class="flex flex-col gap-7 border-t border-[var(--color-line)] px-3.5 py-4">
+			{@render accessFields()}
 		</div>
 	</details>
+	{/if}
 
 	<!-- Say the auth posture before the server exists, not only after it's live. -->
 	{#if mode === 'create' && !isBuiltin && (authProvider === 'none' || (authProvider === 'inherit' && defaults?.auth === 'none'))}
@@ -2568,7 +2682,18 @@
 		class="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t border-[var(--color-line)] bg-[color-mix(in_oklab,var(--color-canvas)_92%,transparent)] px-4 py-3 backdrop-blur-sm sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:pt-1 sm:pb-0 sm:backdrop-blur-none"
 	>
 		{#if submitBlocker}
-			<p id={submitHintId} class="mr-auto text-xs text-[var(--color-ink-muted)]">{submitBlocker}</p>
+			<p id={submitHintId} class="mr-auto text-xs text-[var(--color-ink-muted)]">
+				{submitBlocker}
+				{#if tabbed && blockerTab && blockerTab !== tab}
+					<button
+						type="button"
+						onclick={() => blockerTab && (tab = blockerTab)}
+						class="ml-1 font-medium text-[var(--color-ink)] underline decoration-dotted underline-offset-2"
+					>
+						Go to {blockerLabel}
+					</button>
+				{/if}
+			</p>
 		{/if}
 		{#if oncancel}
 			<button

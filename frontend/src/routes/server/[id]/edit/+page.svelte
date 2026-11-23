@@ -173,32 +173,6 @@
 			</p>
 		</div>
 
-		{#if canReassign && (usersList.length > 0 || server.owner_id)}
-			<div
-				class="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface)] p-4"
-			>
-				<div class="flex min-w-0 flex-col gap-0.5">
-					<label for="server-owner" class="text-sm font-medium text-[var(--color-ink)]">
-						Owner
-					</label>
-					<p class="text-xs text-[var(--color-ink-dim)]">
-						Who sees and manages this server. Reassigning revokes the former owner's
-						tokens for it. Applied when you save.
-					</p>
-				</div>
-				<select
-					id="server-owner"
-					bind:value={ownerChoice}
-					class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)]"
-				>
-					<option value="">Admin-owned</option>
-					{#each usersList as u (u.id)}
-						<option value={u.id}>{u.name} ({u.role})</option>
-					{/each}
-				</select>
-			</div>
-		{/if}
-
 		<ServerForm
 			mode="edit"
 			{initial}
@@ -208,6 +182,31 @@
 			submitLabel="Save changes"
 			onsubmit={handleSave}
 			oncancel={() => goto(`/server/${sid}`)}
-		/>
+		>
+			{#snippet generalExtra()}
+				<!-- Owner: page-owned (admins only), shown with the identity fields. -->
+				{#if canReassign && (usersList.length > 0 || server?.owner_id)}
+					<div class="flex flex-col gap-2">
+						<label for="server-owner" class="text-sm font-medium text-[var(--color-ink)]">
+							Owner
+						</label>
+						<select
+							id="server-owner"
+							bind:value={ownerChoice}
+							class="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-ink)] outline-hidden transition focus:border-[var(--color-line-strong)] sm:self-start"
+						>
+							<option value="">Admin-owned</option>
+							{#each usersList as u (u.id)}
+								<option value={u.id}>{u.name} ({u.role})</option>
+							{/each}
+						</select>
+						<p class="text-xs text-[var(--color-ink-dim)]">
+							Who sees and manages this server. Reassigning revokes the former owner's tokens
+							for it. Applied when you save.
+						</p>
+					</div>
+				{/if}
+			{/snippet}
+		</ServerForm>
 	{/if}
 </section>
