@@ -336,7 +336,7 @@
 		<p class="text-xs text-[var(--color-ink-dim)]">
 			Call counts and when each was last seen — arguments and results are never recorded.
 			The window reaches back no further than the usage retention set in
-			<a href="/settings" class="underline underline-offset-2">Settings</a>. A server's
+			<a href="/settings?tab=runtime" class="underline underline-offset-2">Settings</a>. A server's
 			tools are listed while it is running.
 		</p>
 	{/if}

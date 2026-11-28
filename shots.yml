@@ -77,11 +77,25 @@
     !document.body.innerText.includes('Loading usage')
   wait: 600
 
-# Settings — access tokens and the network-security controls.
+# Settings — opens on Access tokens, with the section nav beside it.
 - output: docs/screenshots/settings.png
   url: http://localhost:8080/settings
   width: 1440
   wait_for: document.body.innerText.includes('Access tokens')
+  wait: 400
+
+# Settings → Help — client URLs, common tasks, troubleshooting, docs.
+- output: docs/screenshots/settings-help.png
+  url: http://localhost:8080/settings?tab=help
+  width: 1440
+  wait_for: document.body.innerText.includes('Connect a client')
+  wait: 400
+
+# Settings → About — version, signed-in user, instance URL, project links.
+- output: docs/screenshots/settings-about.png
+  url: http://localhost:8080/settings?tab=about
+  width: 1440
+  wait_for: /v\d+\.\d+/.test(document.body.innerText) && document.body.innerText.includes('Instance URL')
   wait: 400
 
 # Dashboard on a phone-width viewport (single-column responsive layout).

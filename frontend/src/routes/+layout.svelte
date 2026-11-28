@@ -7,6 +7,7 @@
 	import { completeOauthPopup } from '#lib/oauthPopup.js';
 	import favicon from '#lib/assets/favicon.svg';
 	import HealthDot from '#lib/components/HealthDot.svelte';
+	import { build } from '#lib/build.svelte.js';
 	import Logo from '#lib/components/Logo.svelte';
 	import Toast from '#lib/components/Toast.svelte';
 	import { toast, dismissToast, flashToast } from '#lib/toast.svelte.js';
@@ -28,7 +29,6 @@
 
 	// The health poller refreshes this after every successful request, including
 	// a control-plane restart that leaves this SPA tab open.
-	let version = $state<string | null>(null);
 
 	const onSettings = $derived(page.url.pathname.startsWith('/settings'));
 	const onCatalog = $derived(page.url.pathname.startsWith('/catalog'));
@@ -185,7 +185,9 @@
 							</svg>
 						</button>
 					{/if}
-					<HealthDot onhealth={(health) => (version = health.version)} />
+					<HealthDot
+						onhealth={(health) => (build.version = health.version)}
+					/>
 			</div>
 		</div>
 	</header>
@@ -210,9 +212,9 @@
 				</svg>
 				<span>GitHub</span>
 			</a>
-			{#if version}
+			{#if build.version}
 				<span class="text-sm text-[var(--color-ink-muted)]" aria-hidden="true">·</span>
-				<span class="text-sm text-[var(--color-ink-muted)]">v{version}</span>
+				<span class="text-sm text-[var(--color-ink-muted)]">v{build.version}</span>
 			{/if}
 		</div>
 	</footer>
